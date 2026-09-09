@@ -1,0 +1,110 @@
+// Test: Slice Patterns in when expressions
+// Tests the [a, b, ..rest] syntax for list pattern matching
+
+// A failing `check` must fail the run. It used to return 1, and the callers
+// summed the results and dropped them -- and `--emit eval` ignores main's
+// return value anyway (known-issues #53), so every check silently passed.
+def check(b: bool) -> i64 { assert(b); 0 }
+
+def test_exact_match() -> i64 {
+    val lst: list<i64> = list();
+    list_push(lst, 1);
+    list_push(lst, 2);
+    val result = when lst {
+        [1, 2] => 1,
+        _ => 0,
+    };
+    check(result == 1);
+    result
+}
+
+def test_rest_binding() -> i64 {
+    val lst: list<i64> = list();
+    list_push(lst, 1);
+    list_push(lst, 2);
+    list_push(lst, 3);
+    list_push(lst, 4);
+    val result = when lst {
+        [a, ..rest] => len(rest),
+        _ => 0,
+    };
+    check(result == 3);
+    result
+}
+
+def test_mixed_match() -> i64 {
+    val lst: list<i64> = list();
+    list_push(lst, 1);
+    list_push(lst, 2);
+    val result = when lst {
+        [1, 2, 3] => 1,
+        [1, 2] => 2,
+        _ => 0,
+    };
+    check(result == 2);
+    result
+}
+
+def test_wildcard_elements() -> i64 {
+    val lst: list<i64> = list();
+    list_push(lst, 1);
+    list_push(lst, 2);
+    list_push(lst, 3);
+    val result = when lst {
+        [_, _, _] => 3,
+        _ => 0,
+    };
+    check(result == 3);
+    result
+}
+
+def test_exact_no_match_longer() -> i64 {
+    val lst: list<i64> = list();
+    list_push(lst, 1);
+    list_push(lst, 2);
+    list_push(lst, 3);
+    val result = when lst {
+        [1, 2] => 1,
+        _ => 0,
+    };
+    check(result == 0);
+    result
+}
+
+def test_empty_list() -> i64 {
+    val lst: list<i64> = list();
+    val result = when lst {
+        [] => 0,
+        _ => 1,
+    };
+    check(result == 0);
+    result
+}
+
+def test_bind_prefix_elements() -> i64 {
+    val lst: list<i64> = list();
+    list_push(lst, 3);
+    list_push(lst, 4);
+    val result = when lst {
+        [a, b] => a + b,
+        _ => 0,
+    };
+    check(result == 7);
+    result
+}
+
+def main() -> i64 {
+    // Each helper returns the arm its list matched. main used to return the
+    // *sum* (16), which meant nothing and -- until #53 -- was discarded by
+    // `--emit eval`, so the file could not fail whatever the arms did.
+    assert(test_exact_match() == 1);
+    assert(test_rest_binding() == 3);
+    assert(test_mixed_match() == 2);
+    assert(test_wildcard_elements() == 3);
+    // A list longer than the exact pattern must NOT match it.
+    assert(test_exact_no_match_longer() == 0);
+    assert(test_empty_list() == 0);
+    assert(test_bind_prefix_elements() == 7);
+    println("slice patterns ok");
+    0
+}

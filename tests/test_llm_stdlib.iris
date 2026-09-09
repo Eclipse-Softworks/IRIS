@@ -1,0 +1,18 @@
+bring std.llm
+
+def main() -> i64 effect alloc, io, throw {
+    val messages: list<LlmMessage> = list()
+    list_push(messages, llm_message("system", "Return JSON safely"));
+    list_push(messages, llm_message("user", "Say \"hello\""));
+    val client = llm_client("http://127.0.0.1/chat", "http://127.0.0.1/embed", "iris-test", "", 5000)
+    val request = llm_request_json(client, messages, 0.25, 64, "")
+    assert(contains(request, "\"model\":\"iris-test\""));
+    assert(contains(request, "Say \\\"hello\\\""));
+
+    val raw = "{\"choices\":[{\"message\":{\"content\":\"hello from model\",\"tool_calls\":[{\"id\":\"1\"}]}}]}"
+    val parsed = llm_response_from_json(200, raw)
+    assert(is_ok(parsed));
+    assert(unwrap(parsed).content == "hello from model");
+    assert(contains(unwrap(parsed).tool_calls_json, "\"id\":\"1\""));
+    return 0
+}

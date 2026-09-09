@@ -1,0 +1,33 @@
+record Point {
+    x : i64, y : i64
+}
+
+choice Command {
+    Move(Point), Stop
+}
+
+def describe(command : Command) -> str {
+    return when command {
+        Command.Move(point) => if point.x == point.y {
+            "diagonal"
+        } else {
+            "move"
+        }
+       , Command.Stop => "stop",
+    }
+}
+def main() -> i64 {
+    val point = Point {
+        x : 3, y : 3
+    };
+
+    assert(describe(Command.Move(point)) == "diagonal");
+    assert(describe(Command.Stop) == "stop");
+    val label = when 7 {
+        0 => "zero", 1 ..= 9 => "single digit", _ => "large"
+    };
+
+    assert(label == "single digit");
+    println("records and patterns: ok");
+    return 0
+}

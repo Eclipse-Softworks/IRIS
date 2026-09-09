@@ -56,7 +56,7 @@ Engineering plan
 Next steps
 
 - Implement ONNX shim stubs in `src/runtime/onnx_shim.c` + header prototypes in `src/runtime/iris_runtime.h`.
-- Keep `examples/ml_full_pipeline.iris` as the end-to-end showcase: ingest rows, clean values, train/retrain, predict, and hand off tensors to ONNX/PyTorch/TensorFlow hooks when native SDKs are configured.
+- Start with `projects/learning_service/main.iris` for deterministic training and lifecycle checks. External ONNX/PyTorch/TensorFlow adapters require separately configured SDKs and compatible model artifacts; the default learning project does not load them.
 
 Platform note: building libtorch and TF can be heavy; recommend starting with ONNX Runtime for cross-framework inference, then add LibTorch and TF shims.
 

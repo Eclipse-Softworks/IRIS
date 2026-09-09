@@ -1,0 +1,18 @@
+// Effect handler with a `resume(v)` continuation: the call site must see the
+// value the handler resumed with.
+extern def echo(s: str) -> str
+
+def main() -> i64 {
+    val result = handle {
+        echo("hello")
+    } with {
+        echo(s) -> resume(v) => v("intercepted_via_resume")
+    };
+    println(result);
+    assert(result == "intercepted_via_resume");
+    // Not the extern's argument, and not an empty string -- the two ways a
+    // handler that did nothing would still look plausible.
+    assert(result != "hello");
+    assert(len(result) > 0);
+    0
+}

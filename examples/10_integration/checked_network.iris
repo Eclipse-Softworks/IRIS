@@ -1,0 +1,11 @@
+bring std.net /// Validate bad input without depending on a remote service.
+def main() -> i64 {
+    val invalid = TcpStream {
+        handle : - 1
+    };
+
+    assert(is_err(tcp_read_bounded(invalid, 0)));
+    assert(is_err(tcp_connect_checked("127.0.0.1", - 1, 100, 100)));
+    println("checked network: ok");
+    return 0
+}

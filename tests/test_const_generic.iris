@@ -1,0 +1,28 @@
+// Const generics: `record Array[T, const N: usize]` with a `[T; N]` field.
+//
+// This file previously returned `s + s10` from main -- 156 -- and checked
+// nothing. Under `--emit eval` that exits 0 anyway (known-issues #53), so it
+// passed no matter what the arrays contained.
+record Array[T, const N: usize] {
+    data: [T; N]
+}
+
+def test_array_sum() -> i64 {
+    val arr: Array<i64, 5> = Array { data: [1, 2, 3, 4, 5] }
+    arr.data[0] + arr.data[4]
+}
+
+def test_array_sum_10() -> i64 {
+    val arr: Array<i64, 5> = Array { data: [10, 20, 30, 40, 50] }
+    arr.data[0] + arr.data[1] + arr.data[2] + arr.data[3] + arr.data[4]
+}
+
+def main() -> i64 {
+    // 1 + 5: indexes the ends, so a field that only stored the first element
+    // could not pass.
+    assert(test_array_sum() == 6);
+    // 10 + 20 + 30 + 40 + 50: every slot read.
+    assert(test_array_sum_10() == 150);
+    println("const generics ok");
+    0
+}

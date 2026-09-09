@@ -1,0 +1,42 @@
+// Test linear/affine types: move keyword
+// All tests should compile and run successfully.
+
+def test_basic_move() -> i64 {
+    val a: list<i64> = list(1, 2, 3);
+    val b = move a;
+    val sum: i64 = list_len(b);
+    return sum
+}
+
+def test_move_and_use() -> str {
+    val msg: str = "hello";
+    val greeting = move msg;
+    return greeting
+}
+
+def test_move_in_block() -> i64 {
+    val x: i64 = 42;
+    val y = move x;
+    val z = move y;
+    return z
+}
+
+def test_move_chain() -> str {
+    val s: str = "world";
+    val a = move s;
+    val b = move a;
+    val c = move b;
+    return c
+}
+
+def main() -> i64 {
+    // `move` transfers ownership; the moved-to binding must hold the value.
+    // This file previously printed the four results and checked them only via
+    // a `process.exit(1)` that `--emit eval` discards anyway (#53).
+    assert(test_basic_move() == 3);
+    assert(test_move_and_use() == "hello");
+    assert(test_move_in_block() == 42);
+    assert(test_move_chain() == "world");
+    println("move ok");
+    return 0
+}

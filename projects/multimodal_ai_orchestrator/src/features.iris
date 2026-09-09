@@ -1,0 +1,5 @@
+bring std.tensor
+pub def fuse(vision : f64, audio : f64, sensor : f64) -> f64 {
+    val observation = tensor_from_data(list(vision, audio, sensor), list(3));
+    return tensor_mean(observation)
+}

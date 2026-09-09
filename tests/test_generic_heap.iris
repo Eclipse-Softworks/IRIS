@@ -1,0 +1,91 @@
+// Generic MinHeap[T] -- push, peek, pop, from_list, merge, is_empty, at two types.
+//
+// This file had not compiled since the heap API changed. It called
+// `heap_new(0)` to build a heap seeded with one element, but `heap_new[T]()`
+// now takes no arguments and `heap_of[T](v)` is the seeding constructor. The
+// comment "heap_new(0) seeds with 0" documents the old signature.
+//
+// The `if x != y { return N }` checks are kept as assertions -- returning a
+// code was a real check, but only if something inspected the exit status, and
+// nothing globs tests/*.iris to do so.
+
+bring std.heap
+
+def main() -> i64 {
+    // Test 1: MinHeap<i64> basic operations, seeded with 0.
+    var h = heap_of(0)
+    h = heap_push(h, 5);
+    h = heap_push(h, 3);
+    h = heap_push(h, 7);
+    h = heap_push(h, 1);
+    assert(heap_len(h) == 5);
+    // 0 is the smallest, so it is what peek must return -- not the first or
+    // last pushed, which a heap ignoring order would give.
+    assert(heap_peek(h) == 0);
+
+    val (popped1, h6) = heap_pop(h)
+    assert(popped1 == 0);
+    assert(heap_len(h6) == 4);
+    // After removing the minimum, the next smallest surfaces.
+    assert(heap_peek(h6) == 1);
+
+    // Test 2: from_list / to_list produce ascending order.
+    var lst: list<i64> = list()
+    push(lst, 10);
+    push(lst, 3);
+    push(lst, 7);
+    push(lst, 1);
+    push(lst, 5);
+    val h7 = heap_from_list(lst)
+    val sorted = heap_to_list(h7)
+    assert(list_len(sorted) == 5);
+    assert(list_get(sorted, 0) == 1);
+    assert(list_get(sorted, 1) == 3);
+    assert(list_get(sorted, 2) == 5);
+    assert(list_get(sorted, 3) == 7);
+    assert(list_get(sorted, 4) == 10);
+
+    // Test 3: merge keeps every element and the smaller minimum.
+    var lst2: list<i64> = list()
+    push(lst2, 2);
+    push(lst2, 8);
+    push(lst2, 4);
+    val h8 = heap_from_list(lst2)
+    val h9 = heap_merge(h7, h8)
+    assert(heap_len(h9) == 8);
+    assert(heap_peek(h9) == 1);
+
+    // Test 4: is_empty distinguishes a one-element heap from a drained one.
+    var single = heap_of(42)
+    assert(heap_is_empty(single) == false);
+    val (only, empty_h) = heap_pop(single)
+    assert(only == 42);
+    assert(heap_is_empty(empty_h) == true);
+    assert(heap_len(empty_h) == 0);
+
+    // Test 5: MinHeap<str> -- the same operations at a second type, popping in
+    // lexicographic order. A duplicate is included so equal elements are not
+    // silently collapsed.
+    var sh = heap_of("mango")
+    sh = heap_push(sh, "apple");
+    sh = heap_push(sh, "cherry");
+    sh = heap_push(sh, "banana");
+    sh = heap_push(sh, "mango")
+    assert(heap_len(sh) == 5);
+    assert(heap_peek(sh) == "apple");
+
+    val (spop1, sh2) = heap_pop(sh)
+    assert(spop1 == "apple");
+    val (spop2, sh3) = heap_pop(sh2)
+    assert(spop2 == "banana");
+    val (spop3, sh4) = heap_pop(sh3)
+    assert(spop3 == "cherry");
+    val (spop4, sh5) = heap_pop(sh4)
+    assert(spop4 == "mango");
+    // Both copies of "mango" survived to be popped separately.
+    assert(heap_len(sh5) == 1);
+    assert(heap_peek(sh5) == "mango");
+
+    println("test_generic_heap ok");
+    0
+}

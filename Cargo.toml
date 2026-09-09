@@ -24,7 +24,36 @@ rand = "0.8"
 serde = { version = "1.0", features = ["derive"] }
 toml = "0.8"
 rustyline = "12.0"
+clap = { version = "4", features = ["derive"] }
+libloading = "0.8"
+semver = "1.0"
+sha2 = "0.10"
+flate2 = "1.0"
+tar = "0.4"
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Security_Isolation",
+    "Win32_System_Com",
+    "Win32_System_JobObjects",
+    "Win32_System_Pipes",
+    "Win32_System_Threading",
+    "Win32_System_WindowsProgramming",
+] }
+
+[features]
+default = []
+# `native-llvm` (inkwell) removed in 1.0.0-rc1 — see src/codegen/mod.rs.
+# Clang-free object emission is provided by src/codegen/llvm_c_api.rs instead.
+text-backend = []
+onnx = []
+tensorflow = []
+pytorch = []
+blas = []
+ml-backends = ["onnx", "tensorflow", "pytorch", "blas"]
 
 [profile.release]
 opt-level = 3
@@ -34,7 +63,14 @@ panic = "abort"
 
 [profile.dev]
 opt-level = 0
-debug = true
+# Full debug info costs significant compile + link time and disk I/O.
+# Line tables are enough for backtraces and panic locations; set
+# `debug = true` temporarily if stepping in a debugger.
+debug = "line-tables-only"
+# Dependencies are compiled once and rarely change — no debug info needed.
+[profile.dev.package."*"]
+debug = false
+opt-level = 1
 
 [build-dependencies]
 cc = "1.0"

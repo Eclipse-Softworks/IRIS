@@ -1,0 +1,16 @@
+bring std.llm /// Offline protocol example: no network, credentials, or model required.
+def main() -> i64 {
+    val messages : list<LlmMessage> = list(llm_message("user", "Say \"hello\""));
+    val client = llm_client("http://127.0.0.1:8080/v1/chat/completions",
+    "http://127.0.0.1:8080/v1/embeddings", "local-model", "", 5000);
+    val request = llm_request_json(client, messages, 0.0, 64, "");
+    assert(contains(request, "\"model\":\"local-model\""));
+    assert(contains(request, "Say \\\"hello\\\""));
+    val response = llm_response_from_json(200,
+    "{\"choices\":[{\"message\":{\"content\":\"hello\"}}]}");
+    assert(is_ok(response));
+    assert(unwrap(response).content == "hello");
+    assert(is_err(llm_response_from_json(503, "unavailable")));
+    println("llm protocol: ok");
+    return 0
+}

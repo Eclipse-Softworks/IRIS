@@ -1,0 +1,36 @@
+trait Show {
+    def show(self : Self) -> str
+}
+
+trait Describe {
+    def describe(self : Self) -> str
+}
+
+record Sensor {
+    id : i64
+}
+
+impl Show for Sensor {
+    def show(self : Self) -> str {
+        return "sensor"
+    }
+
+}
+
+impl[T where T : Show]Describe for T {
+    def describe(self : Self) -> str {
+        return "device: " + self.show()
+    }
+
+}
+def main() -> i64 {
+    val sensor = Sensor {
+        id : 7
+    };
+
+    assert(sensor.describe() == "device: sensor");
+    val device : dyn Show = sensor;
+    assert(device.show() == "sensor");
+    println("traits: ok");
+    return 0
+}

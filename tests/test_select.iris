@@ -1,0 +1,40 @@
+// `select!` with a `default` arm must take the default when no channel is
+// ready, and take the message arm when one is.
+def test_select_default() -> i64 {
+    val ch: chan<i64> = channel();
+    var received = 0;
+    select! {
+        msg = ch => {
+            received = msg
+        },
+        default => {
+            received = -1
+        }
+    };
+    received
+}
+
+def test_select_ready() -> i64 {
+    val ch: chan<i64> = channel();
+    send(ch, 99);
+    var received = 0;
+    select! {
+        msg = ch => {
+            received = msg
+        },
+        default => {
+            received = -1
+        }
+    };
+    received
+}
+
+def main() -> i64 {
+    // Nothing sent, so the default arm runs.
+    assert(test_select_default() == -1);
+    // A value is waiting, so the message arm runs and carries the payload --
+    // a select that always took `default` would fail here.
+    assert(test_select_ready() == 99);
+    println("select ok");
+    0
+}

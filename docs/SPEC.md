@@ -1,7 +1,7 @@
 # IRIS Language Specification
 
 **Version 1.0.0-rc1**
-**Last updated: 2026-05-26**
+**Last updated: 2026-09-01**
 
 > This document defines the syntax, semantics, and type system of the IRIS
 > programming language. It serves as the authoritative reference for compiler
@@ -70,7 +70,7 @@ Line comments begin with `//` and extend to the end of the line:
 def main() -> i64 { 0 }  // inline comment
 ```
 
-Block comments are not supported in version 0.2.0.
+Block comments `/* ... */` are supported and may be nested.
 
 ### 2.3 Keywords
 
@@ -86,7 +86,7 @@ pub    extern  model  layer  input  output  to
 ### 2.4 Type Keywords
 
 ```
-f32  f64  i32  i64  bool  tensor  str
+f32  f64  i32  i64  i8  u8  u32  u64  usize  bool  tensor  str
 ```
 
 ### 2.5 Literals
@@ -885,11 +885,12 @@ Launches a concurrent task (see §11).
 ### 6.11 Return
 
 ```
-return [EXPR];
+return [EXPR] [;]
 ```
 
-Early return from a function. If `EXPR` is omitted, returns the zero value
-of the return type.
+Early return from a function. The trailing semicolon is optional. Public
+entrypoints conventionally use `return 0` to make successful process exit
+explicit. If `EXPR` is omitted, the compiler emits the function's empty return.
 
 ### 6.12 Break and Continue
 
@@ -1011,7 +1012,8 @@ async def fetch_data(url: str) -> str {
 }
 ```
 
-Async functions return a future that must be `await`-ed by the caller.
+Async functions return an awaitable single-result `chan<T>` in RC1. Native
+execution schedules the work on the bounded executor described in §11.7.
 
 ### 8.6 Attributes
 
@@ -1132,7 +1134,32 @@ spawn {
 ```
 
 `spawn` launches a concurrent task. Communication between tasks is done
-through channels.
+through channels. `spawn(group) { ... }` launches the task under a structured
+`task_group`.
+
+Task groups are structured concurrency scopes:
+
+```iris
+bring std.async
+
+val group = new_task_group()
+spawn(group) {
+    if !cancellation_requested() {
+        send(ch, compute_result())
+    }
+}
+task_group_cancel(group);
+task_group_join(group);
+```
+
+Native task-group children use the same bounded executor as ungrouped `spawn`
+and `async def`. `task_group_join` closes the group and waits until all active
+children finish; while waiting it may execute queued work itself so nested
+scheduling can make progress. `task_group_cancel` requests cooperative
+cancellation. Tasks queued after cancellation skip their body at entry; already
+running tasks should poll `cancellation_requested()` at bounded intervals. The
+runtime deterministically releases boxed spawn captures on both the normal and
+cancelled paths.
 
 ### 11.3 Parallel For
 
@@ -1177,9 +1204,18 @@ async def slow_op() -> i64 {
 def main() -> i64 {
     val future = slow_op();
     val result = await future;
-    result
+    return result
 }
 ```
+
+For RC1 compatibility an async call has type `chan<T>` and is a
+single-result awaitable. Native async and `spawn` jobs are queued on a fixed
+executor capped at 32 workers rather than creating an OS thread per call. If a
+worker awaits an empty result channel, it first executes other queued work; this
+allows nested async pipelines to make progress without exhausting the executor.
+`async_worker_count()` and `async_queued_tasks()` expose scheduler telemetry.
+The reference interpreter preserves the same result semantics, while native/JIT
+execution is the authoritative bounded parallel scheduler.
 
 ---
 
@@ -1349,9 +1385,14 @@ IRIS ships with 34 standard library modules, imported via `bring std.NAME`:
 | `std.string` | `pad_left`, `pad_right`, `words`, `lines`, `title_case`, `snake_case` |
 | `std.fmt` | `sprintf`, `pad_int`, `zero_pad_int`, `format_table` |
 | `std.fs` | `read_text`, `write_text`, `path_exists`, `file_lines` |
-| `std.json` | `json_stringify`, `json_parse` |
+| `std.json` | `json_stringify`, `json_parse`, `json_query` |
 | `std.csv` | `csv_parse_row`, `csv_emit_row` |
-| `std.http` | `http_get`, `http_post` |
+| `std.net` | Typed TCP/UDP handles, timeout, bounded read, exact write, shutdown and close |
+| `std.http` | Typed requests/responses, custom headers, status, timeout, HTTP and feature-detected HTTPS |
+| `std.llm` | Remote chat/tools/embeddings plus local model wrappers |
+| `std.meta` | Compiler-hosted typed analysis, IR emission and checked source edits |
+| `std.ml` | Classical ML plus model sessions, registry, health, inference and training lifecycle |
+| `std.ais` | Homeostasis, active inference, agent lifecycle, degradation and emergency control |
 | `std.time` | `now`, `sleep`, `elapsed` |
 | `std.stochastic` | `normal`, `brownian_path`, `gbm_path` |
 | `std.crypto` | `sha256`, `uuid`, `hex_encode`, `hex_decode` |
@@ -1460,10 +1501,11 @@ Source (.iris)
     |
     v
   Code Generator — one of:
-    ├── Interpreter    (--emit eval)
+    ├── Evaluation     (--emit eval; native with interpreter fallback)
     ├── IR Printer     (--emit ir)
     ├── LLVM IR        (--emit llvm)
-    ├── Native Binary  (--emit binary, via clang)
+    ├── ORC JIT        (--emit jit; in-process LLVM ORC)
+    ├── Native Binary  (--emit binary, LLVM-C object + linker)
     ├── ONNX           (--emit onnx)
     ├── CUDA           (--emit cuda)
     └── SIMD           (--emit simd)
@@ -1499,8 +1541,11 @@ Applied in order:
 
 ### 18.4 Native Compilation
 
-`iris build` emits LLVM IR and invokes `clang` to produce a native binary.
-The C runtime ([iris_runtime.c](src/runtime/iris_runtime.c)) provides:
+`iris build` emits LLVM IR, compiles it to an object through the dynamically
+loaded LLVM-C API, and links it with the target runtime. The validated Windows
+MinGW path invokes `ld.lld` directly; other targets may use a documented Clang
+compatibility fallback when direct linking is unavailable.
+The C runtime ([iris_runtime.c](../src/runtime/iris_runtime.c)) provides:
 
 - Heap-allocated values (tagged union `IrisVal`)
 - Reference counting
@@ -1620,8 +1665,8 @@ loop_stmt   ::= "loop" block
 for_stmt    ::= "for" IDENT "in" expr ".." expr block
               | "for" IDENT "in" expr block
 par_for_stmt ::= "par" "for" IDENT "in" expr ".." expr block
-spawn_stmt  ::= "spawn" block
-return_stmt ::= "return" [ expr ] ";"
+spawn_stmt  ::= "spawn" [ "(" expr ")" ] block
+return_stmt ::= "return" [ expr ] [ ";" ]
 break_stmt  ::= "break" ";"
 continue_stmt ::= "continue" ";"
 
@@ -1702,8 +1747,8 @@ identifiers.
 Additionally, the following words are reserved for future use:
 
 ```
-match   enum   struct   fn   let   mut   use   mod   self   Self
-super   crate  where    as   ref   move  dyn   box   yield  macro
+match   enum   struct   fn   let   mut   use   self   Self
+super   crate  where    as   ref   box   macro
 ```
 
 ---

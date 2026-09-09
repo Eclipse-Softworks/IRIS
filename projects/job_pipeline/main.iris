@@ -1,0 +1,35 @@
+bring std.async bring "jobs.iris" /// Fan out independent jobs and join all work before reading the final counter.
+def main() -> i64 {
+    val results : chan<i64> = channel();
+    val completed = atomic(0);
+    val group = new_task_group();
+    for index in 1 .. 9 {
+        val job = Job {
+            id : index, value : index
+        }
+        ;
+        spawn(group) {
+            if !cancellation_requested() {
+                send(results, compute(job));
+                atomic_add(completed, 1);
+
+            }
+            ;
+
+        }
+        ;
+
+    }
+    ;
+    task_group_join(group);
+    var checksum = 0;
+    for index in 0 .. 8 {
+        checksum = checksum + recv(results);
+
+    }
+    ;
+    assert(checksum == 204);
+    assert(atomic_load(completed) == 8);
+    println("job pipeline: 8 jobs, checksum=204");
+    return 0
+}

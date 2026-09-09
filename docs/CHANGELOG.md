@@ -6,6 +6,115 @@ This project follows [Keep a Changelog](https://keepachangelog.com/) conventions
 
 ---
 
+## [Unreleased]
+
+### Added
+
+- Rebuilt progressive examples and seven complete projects with explicit
+  returns, assertions, per-entry execution modes, and native/interpreter
+  catalog checks. Added real localhost LLM verification and Rust ORC embedding
+  examples alongside separately classified SDK/board integrations.
+
+- VS Code Test Explorer discovery plus run/debug profiles for zero-argument
+  `test_*` functions, backed by a DAP named-function launch entry.
+- Rich LSP hovers for functions, traits, and algebraic effects, including
+  documentation, generic signatures, declared/inferred effects, and explicit
+  unsafe-region status.
+- Exact-range dead/unused, unreachable, unsafe, and possible-infinite-loop
+  diagnostics with semantic-token modifiers and LSP unnecessary tags.
+- A compiler-sourced standard-library completion registry covering the current
+  AIS, ML/NN/tensor, ROS 2, LLM, reflection, metaprogramming, and networking
+  modules.
+- In-process LLVM ORC JIT loading and ABI-verified, lease-safe hot swapping.
+- Generation-conditional rollback with deterministic SHA-256 ABI fingerprints.
+- Transactional speculative state and staged filesystem rollback.
+- `iris evolve`, a bounded seven-gate promotion workflow with pinned
+  constitutions, shadow canaries, automatic rollback API, and a tamper-evident
+  JSONL audit chain.
+- Allocation-free embedded bundles and physical Arduino Uno validation.
+- Differentiable tensor/NN control-flow coverage and AIS/ROS 2 v2 examples.
+- V2 whole-program evolution manifests with reviewed JSON, command, and scalar
+  gateways; explicit JSON state handoff; atomic multi-gateway leases; and an
+  immutable content-addressed candidate artifact store.
+- Bounded eight-generation hot-swap history with exact-generation rollback.
+- Mandatory persisted `--audit-head` verification for `iris evolve`.
+- Enforced Windows native-worker sandbox: ephemeral zero-capability LPAC,
+  opt-out from broad application-package access, suspended startup before Job
+  assignment, memory/CPU/process limits, bounded stdout/stderr, wall-time
+  termination, token attestation, and fail-closed unsupported platforms.
+- Explicitly acknowledged unrestricted whole-program activation with isolated
+  authority, v2 manifest/ABI validation, ORC materialization, atomic leases,
+  generation history, and exact rollback.
+- Compiler-hosted typed metaprogramming via `iris meta` and `std.meta`, including
+  typed/effect/ABI/CFG metadata, IR emission, and fully recompiled UTF-8 edits.
+- Typed TCP stream/listener APIs with timeouts, exact writes, bounded reads,
+  shutdown/close, and result-based transport errors.
+- Status-bearing HTTP requests with custom headers, bodies, timeouts, bounded
+  responses, Windows WinHTTP TLS/certificate validation, and JSON path queries.
+- `std.llm` provider-neutral chat, tool-call, embedding and local-model APIs.
+- Production `std.ml` model session/registry/health lifecycle and `std.ais`
+  degraded/emergency agent lifecycle.
+- Fixed-size native async executor (maximum 32 workers) shared by `spawn` and
+  lowered `async def`, cooperative queue helping during nested `await`, and
+  scheduler telemetry through `std.async`.
+- Structured task-group cancellation queries in `std.async`:
+  `cancellation_requested()` for the current task and
+  `task_group_cancelled(group)` for explicit group state.
+
+### Changed
+
+- `iris fmt` is now comment- and literal-preserving, parse-safe, idempotence
+  tested, line-width aware, and configurable by the VS Code extension.
+- Supported Windows MinGW native builds emit objects through LLVM-C and link
+  directly with `ld.lld`; Clang is no longer the normal fallback for that path.
+- Public examples use the locked `def`/`val`/`record`/`choice`/`bring` syntax and
+  the earlier 116-entrypoint collection passed an IR compilation audit. The
+  replacement learning catalog now checks native execution and interpreted
+  results separately; see `examples/catalog.json` for current coverage.
+- Extern functions accept explicit effect contracts; the AIS/tensor/NN/ML graph
+  passes strict effect checking with deterministic deduplicated diagnostics.
+- The complete Rust workspace passes `cargo clippy --all-targets -- -D warnings`
+  while retaining the declared Rust 1.75 MSRV.
+- Collection/string `join` is inferred as allocation rather than task joining;
+  concurrency primitives use the spellable `thread` effect instead of the
+  reserved `spawn` keyword.
+- Native task groups now share the bounded executor with `spawn`/`async def`.
+  `task_group_join` closes the group, helps queued work while waiting, and
+  avoids one OS thread per grouped task.
+
+### Fixed
+
+- Parser recovery now guarantees forward progress at every module nesting
+  level, so an unexpected declaration separator or closing brace reports a
+  diagnostic instead of hanging the compiler or language server.
+- Native builds now discover a bundled `sqlite3.dll` beside the IRIS compiler
+  before searching `PATH`, allowing database programs to compile and run from
+  isolated build directories and release installations.
+- Native scalar-array field aliases now preserve their element representation
+  and recover their bound from the actual initializer instead of using the
+  boxed-array runtime ABI.
+- Named source functions used as callbacks now lower through a closure adapter,
+  preserving the native calling convention across parameters and record fields.
+- `std.fs.append_text` preserves line-feed bytes on Windows by opening its
+  stream in binary append mode, matching `read_text` and `write_text`.
+
+- Tape-helper inlining now permits `return` only as the callee's outer terminal
+  statement; returns nested in branches stay isolated and cannot escape into a
+  caller during differentiable lowering.
+- Native closures correctly unbox captured records before field access instead
+  of interpreting the tagged runtime wrapper as the record allocation.
+- Reverse-mode tape identity now crosses loop back-edges and safe helper
+  boundaries ending in `return expr`, so loop-accumulated gradients remain
+  differentiable on native and interpreter backends.
+- Native task-group lowering now defines every emitted SSA value, including
+  programs that import `std.async` without directly using task groups.
+- Native spawn trampolines now release boxed capture environments on both normal
+  completion and cancelled-entry paths.
+- Runtime RC cleanup now releases mutex payloads and task-group payloads,
+  including cancellation/join before a task-group allocation is freed.
+
+---
+
 ## [1.0.0-rc1] — Tooling & Editor Support
 
 ### Added
@@ -17,8 +126,8 @@ This project follows [Keep a Changelog](https://keepachangelog.com/) conventions
 
 ### Tests
 
-- Target integration tests in [lsp_features_v061.rs](file:///c:/Users/Moon/Desktop/Projects/IRIS/tests/lsp_features_v061.rs) verifying semantic token delta-encoding, call hierarchy preparation, and document highlight reference resolution.
-- Target integration tests in [debugger_conditional_breakpoints.rs](file:///c:/Users/Moon/Desktop/Projects/IRIS/tests/debugger_conditional_breakpoints.rs) asserting conditional breakpoint pauses with loop variable snapshots.
+- Target integration tests in [lsp_features_v061.rs](../tests/lsp_features_v061.rs) verifying semantic token delta-encoding, call hierarchy preparation, and document highlight reference resolution.
+- Target integration tests in [debugger_conditional_breakpoints.rs](../tests/debugger_conditional_breakpoints.rs) asserting conditional breakpoint pauses with loop variable snapshots.
 
 ---
 
@@ -380,8 +489,6 @@ This project follows [Keep a Changelog](https://keepachangelog.com/) conventions
 ---
 
 [Unreleased]: https://github.com/Moon9t/IRIS/compare/v1.0.0-rc1...HEAD
-[1.0.0-rc1]: https://github.com/Moon9t/IRIS/compare/v1.0.0-rc1...v1.0.0-rc1
-[1.0.0-rc1]: https://github.com/Moon9t/IRIS/compare/v1.0.0-rc1...v1.0.0-rc1
 [1.0.0-rc1]: https://github.com/Moon9t/IRIS/compare/v0.2.0...v1.0.0-rc1
 [0.2.0]: https://github.com/Moon9t/IRIS/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/Moon9t/IRIS/releases/tag/v0.1.0

@@ -389,7 +389,7 @@ fn eval_binop(
 
         // Integer arithmetic
         (BinOp::Add, KnownVal::Int(a), KnownVal::Int(b)) => {
-            let v = a.wrapping_add(*b);
+            let v = a.checked_add(*b)?;
             Some((
                 IrInstr::ConstInt {
                     result,
@@ -400,7 +400,7 @@ fn eval_binop(
             ))
         }
         (BinOp::Sub, KnownVal::Int(a), KnownVal::Int(b)) => {
-            let v = a.wrapping_sub(*b);
+            let v = a.checked_sub(*b)?;
             Some((
                 IrInstr::ConstInt {
                     result,
@@ -411,7 +411,7 @@ fn eval_binop(
             ))
         }
         (BinOp::Mul, KnownVal::Int(a), KnownVal::Int(b)) => {
-            let v = a.wrapping_mul(*b);
+            let v = a.checked_mul(*b)?;
             Some((
                 IrInstr::ConstInt {
                     result,
@@ -697,6 +697,15 @@ fn apply_reps(instr: &mut IrInstr, reps: &HashMap<ValueId, ValueId>) {
         IrInstr::GetField { base, .. } => {
             replace(base);
         }
+        IrInstr::MakeTraitObject { value, .. } => {
+            replace(value);
+        }
+        IrInstr::DynCall { obj, args, .. } => {
+            replace(obj);
+            for v in args {
+                replace(v);
+            }
+        }
         IrInstr::MakeVariant { fields, .. } => {
             for v in fields {
                 replace(v);
@@ -765,7 +774,9 @@ fn apply_reps(instr: &mut IrInstr, reps: &HashMap<ValueId, ValueId>) {
                 replace(v);
             }
         }
-        IrInstr::ChanNew { .. } => {}
+        IrInstr::ChanNew { capacity, .. } => {
+            replace(capacity);
+        }
         IrInstr::ChanSend { chan, value } => {
             replace(chan);
             replace(value);
@@ -777,6 +788,19 @@ fn apply_reps(instr: &mut IrInstr, reps: &HashMap<ValueId, ValueId>) {
             for v in args {
                 replace(v);
             }
+        }
+        IrInstr::TaskGroupNew { .. } => {}
+        IrInstr::TaskGroupSpawn { group, args, .. } => {
+            replace(group);
+            for v in args {
+                replace(v);
+            }
+        }
+        IrInstr::TaskGroupJoin { group, .. } => {
+            replace(group);
+        }
+        IrInstr::TaskGroupCancel { group, .. } => {
+            replace(group);
         }
         IrInstr::AtomicNew { value, .. } => {
             replace(value);
@@ -833,6 +857,9 @@ fn apply_reps(instr: &mut IrInstr, reps: &HashMap<ValueId, ValueId>) {
         IrInstr::Densify { operand, .. } => {
             replace(operand);
         }
+        IrInstr::SparseNnz { operand, .. } => {
+            replace(operand);
+        }
         IrInstr::MakeGrad { value, tangent, .. } => {
             replace(value);
             replace(tangent);
@@ -886,7 +913,7 @@ fn apply_reps(instr: &mut IrInstr, reps: &HashMap<ValueId, ValueId>) {
             replace(operand);
             replace(count);
         }
-        IrInstr::Panic { msg } => {
+        IrInstr::Panic { msg, .. } => {
             replace(msg);
         }
         IrInstr::ValueToStr { operand, .. } => {
@@ -1100,6 +1127,12 @@ fn apply_reps(instr: &mut IrInstr, reps: &HashMap<ValueId, ValueId>) {
             for a in args {
                 replace(a);
             }
+        }
+        IrInstr::PushHandler { .. } => {}
+        IrInstr::PopHandler => {}
+        IrInstr::ResumeCont { cont, value, .. } => {
+            replace(cont);
+            replace(value);
         }
     }
 }

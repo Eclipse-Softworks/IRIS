@@ -1,0 +1,28 @@
+// `map_entries` must return one entry per key, and the map must still answer
+// for each key afterwards.
+def main() -> i64 {
+    val m = map();
+    map_set(m, "a", 1);
+    map_set(m, "b", 2);
+    map_set(m, "c", 3);
+
+    val entries = map_entries(m);
+    val count = list_len(entries);
+    println("entries count: " + to_str(count));
+    assert(count == 3);
+
+    // The map itself must still hold every value. Checked by key rather than by
+    // entry order, which is not specified.
+    assert(map_get(m, "a").unwrap_or(0) == 1);
+    assert(map_get(m, "b").unwrap_or(0) == 2);
+    assert(map_get(m, "c").unwrap_or(0) == 3);
+
+    // Overwriting a key must replace rather than append.
+    map_set(m, "a", 10);
+    assert(map_len(m) == 3);
+    assert(map_get(m, "a").unwrap_or(0) == 10);
+    assert(list_len(map_entries(m)) == 3);
+
+    println("map entries ok");
+    0
+}

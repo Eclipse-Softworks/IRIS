@@ -1,0 +1,21 @@
+// A `when` with an explicit arm plus a wildcard is exhaustive.
+choice Color { Red, Green, Blue }
+
+def classify(c: Color) -> i64 {
+    when c {
+        Color.Red => 1,
+        _ => 0,
+    }
+}
+
+def main() -> i64 {
+    // The named arm wins for the value it names.
+    assert(classify(Color.Red) == 1);
+    // Everything else reaches the wildcard -- asserting only Red would leave
+    // the wildcard arm untested, which is the half more likely to be wrong.
+    assert(classify(Color.Green) == 0);
+    assert(classify(Color.Blue) == 0);
+
+    println("test_exhaustive_wildcard ok");
+    0
+}

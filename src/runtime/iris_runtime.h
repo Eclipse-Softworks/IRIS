@@ -11,51 +11,98 @@
 #include <stdint.h>
 #include <stddef.h>
 
-#ifdef _WIN32
-typedef struct { long state; } pthread_mutex_t;
-typedef struct { long state; } pthread_cond_t;
-typedef void* pthread_t;
-
+#ifdef __wasm__
+/* WASM/WASI preview 1: no threading support.
+   wasi-libc provides pthread type definitions via sys/types.h (transitively
+   through bits/alltypes.h) but libpthread.a is an empty stub archive (8 bytes).
+   Include types early for struct definitions below, then provide no-op macros
+   so channel, task_group, and spawn code compiles single-threaded.
+   pthread_create is special — it MUST execute fn(arg) synchronously. */
+#include <sys/types.h>
 #ifndef PTHREAD_MUTEX_INITIALIZER
 #define PTHREAD_MUTEX_INITIALIZER {0}
 #endif
 #ifndef PTHREAD_COND_INITIALIZER
 #define PTHREAD_COND_INITIALIZER {0}
 #endif
+#define pthread_mutex_init(mu, a)      ((void)(mu),(void)(a),0)
+#define pthread_mutex_destroy(mu)      ((void)(mu),0)
+#define pthread_mutex_lock(mu)         ((void)(mu),0)
+#define pthread_mutex_unlock(mu)       ((void)(mu),0)
+#define pthread_cond_init(c, a)        ((void)(c),(void)(a),0)
+#define pthread_cond_destroy(c)        ((void)(c),0)
+#define pthread_cond_wait(c, m)        ((void)(c),(void)(m),0)
+#define pthread_cond_signal(c)         ((void)(c),0)
+#define pthread_detach(t)              ((void)(t),0)
+#define pthread_join(t, r)             ((void)(t),(void)(r),0)
+/* pthread_create uses void* to avoid depending on pthread_t definition
+   (which comes from wasi-libc headers included later). The macro casts
+   &t (pthread_t*) to void* — valid since pthread_t is a pointer type. */
+int iris_wasm_pthread_create(void* t, const void* a, void*(*fn)(void*), void* arg);
+#define pthread_create(t, a, fn, arg)  iris_wasm_pthread_create((void*)(t), a, fn, arg)
+#elif defined(_WIN32)
+#if defined(__MINGW32__) || defined(__MINGW64__) || defined(_PTHREAD_H)
+#include <pthread.h>
+#else
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+typedef SRWLOCK pthread_mutex_t;
+typedef CONDITION_VARIABLE pthread_cond_t;
+typedef HANDLE pthread_t;
+
+#ifndef PTHREAD_MUTEX_INITIALIZER
+#define PTHREAD_MUTEX_INITIALIZER SRWLOCK_INIT
+#endif
+#ifndef PTHREAD_COND_INITIALIZER
+#define PTHREAD_COND_INITIALIZER CONDITION_VARIABLE_INIT
+#endif
 
 static inline int pthread_mutex_init(pthread_mutex_t* mu, const void* attr) {
-    (void)mu; (void)attr; return 0;
+    (void)attr; InitializeSRWLock(mu); return 0;
 }
 static inline int pthread_mutex_destroy(pthread_mutex_t* mu) {
     (void)mu; return 0;
 }
 static inline int pthread_mutex_lock(pthread_mutex_t* mu) {
-    (void)mu; return 0;
+    AcquireSRWLockExclusive(mu); return 0;
 }
 static inline int pthread_mutex_unlock(pthread_mutex_t* mu) {
-    (void)mu; return 0;
+    ReleaseSRWLockExclusive(mu); return 0;
 }
 static inline int pthread_cond_init(pthread_cond_t* cond, const void* attr) {
-    (void)cond; (void)attr; return 0;
+    (void)attr; InitializeConditionVariable(cond); return 0;
 }
 static inline int pthread_cond_destroy(pthread_cond_t* cond) {
     (void)cond; return 0;
 }
 static inline int pthread_cond_wait(pthread_cond_t* cond, pthread_mutex_t* mu) {
-    (void)cond; (void)mu; return 0;
+    return SleepConditionVariableSRW(cond, mu, INFINITE, 0) ? 0 : -1;
 }
 static inline int pthread_cond_signal(pthread_cond_t* cond) {
-    (void)cond; return 0;
+    WakeConditionVariable(cond); return 0;
+}
+static inline int pthread_cond_timedwait(pthread_cond_t* cond, pthread_mutex_t* mu, const struct timespec* ts) {
+    (void)cond; (void)mu; (void)ts; return 0;
 }
 static inline int pthread_create(pthread_t* t, const void* attr, void* (*fn)(void*), void* arg) {
-    (void)attr; if (t) *t = NULL; if (fn) fn(arg); return 0;
+    (void)attr;
+    HANDLE handle = CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)fn, arg, 0, NULL);
+    if (t) *t = handle;
+    return handle ? 0 : -1;
 }
 static inline int pthread_detach(pthread_t t) {
-    (void)t; return 0;
+    return t && CloseHandle(t) ? 0 : -1;
 }
 static inline int pthread_join(pthread_t t, void** ret) {
-    (void)t; if (ret) *ret = NULL; return 0;
+    if (ret) *ret = NULL;
+    if (!t) return -1;
+    DWORD status = WaitForSingleObject(t, INFINITE);
+    CloseHandle(t);
+    return status == WAIT_OBJECT_0 ? 0 : -1;
 }
+#endif
 #else
 #include <pthread.h>
 #endif
@@ -63,6 +110,23 @@ static inline int pthread_join(pthread_t t, void** ret) {
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+// ---------------------------------------------------------------------------
+// Integer arithmetic with overflow checking
+// ---------------------------------------------------------------------------
+#include <stdint.h>
+
+int64_t iris_add_checked(int64_t a, int64_t b);
+int64_t iris_sub_checked(int64_t a, int64_t b);
+int64_t iris_mul_checked(int64_t a, int64_t b);
+
+/* Allocation boundary used by generated native/JIT code. Keeping both sides
+ * in the runtime prevents cross-CRT malloc/free pairs on Windows ORC. */
+void* iris_alloc_bytes(uint64_t bytes);
+void  iris_free_bytes(void* ptr);
+void  iris_chkstk_ms(void);
+/* ORC supplies this no-op for MinGW's synthetic `main` initializer. */
+void  iris_mingw_main(void);
 
 // ---------------------------------------------------------------------------
 // Tagged value type — used for boxed heap values (lists, maps, closures, etc.)
@@ -88,6 +152,10 @@ typedef enum {
     IRIS_TAG_UNIT    = 17,
     IRIS_TAG_ENUM    = 18,
     IRIS_TAG_MUTEX   = 19,
+    IRIS_TAG_TASK_GROUP = 20,
+    IRIS_TAG_WEAK_REF = 21,
+    /* Flat LLVM record pointer stored in a type-erased collection. */
+    IRIS_TAG_NATIVE_OBJECT = 22,
 } IrisTag;
 
 typedef struct IrisVal {
@@ -157,6 +225,7 @@ typedef struct {
 typedef struct {
     IrisVal**       buf;
     size_t          cap;
+    int64_t         max_cap;
     size_t          head;
     size_t          tail;
     size_t          count;
@@ -172,7 +241,22 @@ typedef struct {
 
 typedef struct {
     pthread_mutex_t mu;
+    IrisVal*        val;
 } IrisMutex;
+
+// TaskGroup: structured concurrency scope scheduled by the shared executor.
+typedef struct {
+    size_t          active;
+    int             cancelled;
+    int             closed;
+    pthread_mutex_t mu;
+    pthread_cond_t  done;
+} IrisTaskGroup;
+
+typedef struct IrisWeakRef {
+    void*               target;
+    struct IrisWeakRef* next_weak;
+} IrisWeakRef;
 
 typedef enum {
     IRIS_RC_BOXED  = 0,
@@ -186,6 +270,9 @@ typedef enum {
     IRIS_RC_MUTEX  = 8,
     IRIS_RC_GRAD   = 9,
     IRIS_RC_SPARSE = 10,
+    IRIS_RC_TASK_GROUP = 11,
+    IRIS_RC_WEAK_REF   = 12,
+    IRIS_RC_NATIVE_OBJECT = 13,
 } IrisRcKind;
 
 // ---------------------------------------------------------------------------
@@ -198,10 +285,14 @@ IrisVal* iris_box_f32(float v);
 IrisVal* iris_box_bool(int v);
 IrisVal* iris_box_str(const char* s);
 IrisVal* iris_box_list(IrisList* list);
+IrisVal* iris_box_struct(IrisList* fields);
+IrisVal* iris_box_native_object(void* object);
 IrisVal* iris_box_map(IrisMap* map);
 IrisVal* iris_box_option(IrisOption* opt);
 IrisVal* iris_box_result(IrisResult* res);
 IrisVal* iris_box_chan(IrisChannel* chan);
+IrisVal* iris_box_task_group(IrisTaskGroup* tg);
+IrisVal* iris_box_weak_ref(IrisWeakRef* w);
 IrisVal* iris_box_atomic(IrisAtomic* atomic);
 IrisVal* iris_box_mutex(IrisMutex* mutex);
 IrisVal* iris_box_grad(IrisGrad* grad);
@@ -214,11 +305,14 @@ IrisList* iris_unbox_list(IrisVal* v);
 IrisMap*  iris_unbox_map(IrisVal* v);
 IrisOption* iris_unbox_option(IrisVal* v);
 IrisResult* iris_unbox_result(IrisVal* v);
-IrisChannel* iris_unbox_chan(IrisVal* v);
-IrisAtomic*  iris_unbox_atomic(IrisVal* v);
-IrisMutex*   iris_unbox_mutex(IrisVal* v);
-IrisGrad*    iris_unbox_grad(IrisVal* v);
-IrisSparse*  iris_unbox_sparse(IrisVal* v);
+IrisChannel*  iris_unbox_chan(IrisVal* v);
+IrisTaskGroup* iris_unbox_task_group(IrisVal* v);
+IrisWeakRef*   iris_unbox_weak_ref(IrisVal* v);
+IrisAtomic*   iris_unbox_atomic(IrisVal* v);
+IrisMutex*    iris_unbox_mutex(IrisVal* v);
+IrisGrad*     iris_unbox_grad(IrisVal* v);
+IrisSparse*   iris_unbox_sparse(IrisVal* v);
+void*         iris_unbox_native_object(IrisVal* v);
 
 // ---------------------------------------------------------------------------
 // Print
@@ -232,6 +326,7 @@ void iris_print_bool(int v);
 void iris_print_str(const char* s);
 void iris_panic(const char* msg);
 void iris_panic_at(const char* msg, const char* location);
+void iris_bounds_check_abort(int64_t index, int64_t size);
 
 // ---------------------------------------------------------------------------
 // I/O
@@ -246,6 +341,7 @@ double  iris_read_f64(void);
 int64_t  iris_str_len(const char* s);
 char*    iris_str_concat(const char* a, const char* b);
 int      iris_str_eq(const char* a, const char* b);
+int64_t  iris_str_cmp(const char* a, const char* b);
 int      iris_str_contains(const char* s, const char* sub);
 int      iris_str_starts_with(const char* s, const char* prefix);
 int      iris_str_ends_with(const char* s, const char* suffix);
@@ -326,6 +422,14 @@ void     iris_map_remove(IrisMap* map, IrisVal* key);
 int64_t  iris_map_len(IrisMap* map);
 
 // ---------------------------------------------------------------------------
+// Transactional speculation (thread-local, nestable)
+// ---------------------------------------------------------------------------
+int64_t iris_transaction_begin(void);
+int64_t iris_transaction_commit(void);
+int64_t iris_transaction_rollback(void);
+int64_t iris_transaction_depth(void);
+
+// ---------------------------------------------------------------------------
 // Extended list operations
 // ---------------------------------------------------------------------------
 int      iris_list_contains(IrisList* list, IrisVal* val);
@@ -342,10 +446,15 @@ IrisList* iris_map_values(IrisMap* map);
 // ---------------------------------------------------------------------------
 // File I/O
 // ---------------------------------------------------------------------------
-char*    iris_file_read_all(const char* path);
-char*    iris_file_write_all(const char* path, const char* contents);
+IrisResult* iris_file_read_all(const char* path);
+IrisResult* iris_file_write_all(const char* path, const char* contents);
 int      iris_file_exists(const char* path);
 IrisList* iris_file_lines(const char* path);
+/* Streaming File I/O */
+int64_t  iris_file_open(const char* path, const char* mode);
+int      iris_file_close(int64_t handle);
+char*    iris_file_read(int64_t handle, int64_t bytes);
+int      iris_file_write(int64_t handle, const char* data);
 
 // ---------------------------------------------------------------------------
 // Database operations (SQLite via embedded sqlite3)
@@ -368,12 +477,92 @@ IrisOption* iris_env_var(const char* key);
 // ---------------------------------------------------------------------------
 // Channels and concurrency
 // ---------------------------------------------------------------------------
-IrisChannel* iris_chan_new(void);
-void         iris_chan_send(IrisChannel* chan, IrisVal* val);
+IrisChannel* iris_chan_new(int64_t capacity);
+void         iris_chan_send(IrisChannel* c, IrisVal* val);
 IrisVal*     iris_chan_recv(IrisChannel* chan);
+int64_t      iris_chan_len(IrisChannel* c);
+IrisOption*  iris_chan_try_recv(IrisChannel* c);
+int64_t      iris_select(int64_t n, ...);
+int          iris_timeout(int64_t ms);
 void         iris_spawn_fn(void* fn, void* arg);
+int64_t      iris_async_worker_count(void);
+int64_t      iris_async_queued_tasks(void);
 void         iris_par_for(void (*fn)(int64_t, void*), int64_t start, int64_t end, void* arg);
+IrisList*    iris_par_map(IrisList* list, void* (*fn)(IrisVal*));
 void         iris_barrier(void);
+IrisTaskGroup* iris_task_group_new(void);
+void         iris_task_group_spawn(IrisTaskGroup* tg, void* fn, void* arg);
+void         iris_task_group_join(IrisTaskGroup* tg);
+void         iris_task_group_cancel(IrisTaskGroup* tg);
+int32_t      iris_task_group_is_cancelled(IrisTaskGroup* tg);
+int32_t      iris_current_task_cancelled(void);
+int64_t      iris_task_group_is_cancelled_i64(IrisTaskGroup* tg);
+int64_t      iris_current_task_cancelled_i64(void);
+int32_t      iris_task_group_join_timeout(IrisTaskGroup* tg, int64_t timeout_ms);
+IrisOption*  iris_chan_recv_timeout(IrisChannel* c, int64_t timeout_ms);
+
+IrisWeakRef* iris_weak_ref_new(void* target);
+IrisOption*  iris_weak_ref_upgrade(IrisWeakRef* w);
+int32_t      iris_weak_ref_alive(IrisWeakRef* w);
+void         iris_gc_stats(int64_t* out_alloc, int64_t* out_freed, int64_t* out_cycles, int64_t* out_weak_inval);
+
+// ---- New builtins (called via generic BuiltinCall codegen path) ----
+int64_t      iris_list_remove(IrisList* list, int64_t idx);
+int64_t      iris_list_insert(IrisList* list, int64_t idx, IrisVal* val);
+IrisVal*     iris_map_entries(IrisVal* map);
+IrisVal*     iris_recv_timeout(IrisVal* chan, int64_t timeout_ms);
+void         iris_chan_send_b(IrisVal* chan, IrisVal* val);
+IrisWeakRef* iris_weak_ref(IrisVal* val);
+int32_t      iris_weak_alive(IrisWeakRef* w);
+IrisVal*     iris_weak_upgrade(IrisWeakRef* w);
+IrisVal*     iris_gc_stats_map(void);
+int32_t      iris_gc_collect_call(void);
+
+// ---------------------------------------------------------------------------
+// Effect handlers — thread-local handler stack with real dispatch
+// ---------------------------------------------------------------------------
+
+/// Continuation struct used for effect handler resume.
+/// 16 bytes: i32 filled + padding + i64 value. Must match LLVM's %Continuation.
+typedef struct {
+    int32_t filled;     ///< 0 = not resumed; 1 = resumed
+    int64_t value;      ///< The resumed value (boxed to 64 bits)
+} Continuation;
+
+/// Push a handler arm onto the thread-local handler stack.
+/// fn_name is the handler function name (for interpreter dispatch).
+void         iris_push_handler_arm(const char* effect_name, const char* fn_name, int64_t num_args, int32_t has_resume);
+/// Store a native function pointer for the most recently pushed handler arm.
+void         iris_push_handler_fn(void* fn);
+void         iris_push_handler_frame(void);
+void         iris_pop_handler(void);
+
+/// Check if any handler on the stack can handle the named effect.
+int32_t      iris_can_handle(const char* name);
+
+/// Check if the matching handler for `name` has resume capability.
+int32_t      iris_handler_has_resume(const char* name);
+
+/// Resume a continuation: fills the Continuation struct with the value.
+void         iris_resume_cont(Continuation* cont, int64_t value);
+
+/// Return the current handler stack depth (0 = no handlers active).
+int32_t      iris_handler_depth(void);
+
+/// Find the native function pointer for a handler arm matching `name`.
+/// Returns NULL if no handler matches.
+void*        iris_find_handler_fn(const char* name);
+
+/// Dispatch an effect call: if a handler is registered, call it; otherwise
+/// call the real extern function. All args are packed as int64_t (works for
+/// i64 and ptr on x86-64). cont is the Continuation* (NULL for non-resume).
+/// Returns the effective result as int64_t (caller casts to expected type).
+int64_t      iris_effect_dispatch_or_call(
+                 const char* effect_name,
+                 void* real_fn,
+                 void* cont,
+                 int nargs,
+                 const int64_t* args);
 
 // ---------------------------------------------------------------------------
 // Atomics and mutexes
@@ -382,7 +571,7 @@ IrisAtomic* iris_atomic_new(IrisVal* initial);
 IrisVal*    iris_atomic_load(IrisAtomic* a);
 void        iris_atomic_store(IrisAtomic* a, IrisVal* val);
 IrisVal*    iris_atomic_add(IrisAtomic* a, IrisVal* val);
-IrisMutex*  iris_mutex_new(void);
+IrisMutex*  iris_mutex_new(IrisVal* initial);
 IrisVal*    iris_mutex_lock(IrisMutex* mu);
 void        iris_mutex_unlock(IrisMutex* mu);
 
@@ -436,6 +625,11 @@ struct IrisTensor {
     int64_t* shape;   // shape array (heap-allocated)
     int32_t  ndim;    // number of dimensions
     int64_t  numel;   // total number of elements (product of shape)
+    float*   grad;    // lazily allocated reverse-mode gradient
+    uint8_t  requires_grad;
+    int32_t  ad_op;
+    struct IrisTensor* ad_parent0;
+    struct IrisTensor* ad_parent1;
 };
 
 IrisTensor* iris_tensor_alloc(int32_t ndim, const int64_t* shape);
@@ -464,6 +658,13 @@ IrisTensor* iris_tensor_transpose(IrisTensor* t, const int32_t* axes);
 IrisTensor* iris_tensor_reduce_sum(IrisTensor* t, int32_t axis, int keepdims);
 IrisTensor* iris_tensor_reduce_max(IrisTensor* t, int32_t axis, int keepdims);
 IrisTensor* iris_tensor_reduce_mean(IrisTensor* t, int32_t axis, int keepdims);
+IrisTensor* iris_tensor_from_lists(IrisList* data, IrisList* shape);
+IrisList*   iris_tensor_to_list(IrisTensor* t);
+IrisTensor* iris_tensor_tape(IrisTensor* t);
+IrisTensor* iris_tensor_sum_all(IrisTensor* t);
+int64_t     iris_tensor_backward(IrisTensor* loss);
+IrisTensor* iris_tensor_grad(IrisTensor* t);
+double      iris_tensor_item(IrisTensor* t);
 
 // Legacy stubs (kept for backward compat, deprecated)
 void* iris_tensor_op(void);
@@ -492,15 +693,34 @@ void  iris_tf_free(void* model);
 
 // IRIS language-facing ML runtime wrappers.
 // Tensor values are represented as (list<f64>, list<i64>) tuple values.
-int64_t  iris_mlrt_onnx_load(const char* model_path);
-int64_t  iris_mlrt_onnx_free(int64_t session);
-IrisVal* iris_mlrt_onnx_run(int64_t session, IrisVal* input);
-int64_t  iris_mlrt_pytorch_load(const char* model_path);
-int64_t  iris_mlrt_pytorch_free(int64_t model);
-IrisVal* iris_mlrt_pytorch_run(int64_t model, IrisVal* input);
-int64_t  iris_mlrt_tf_load(const char* model_path);
-int64_t  iris_mlrt_tf_free(int64_t model);
-IrisVal* iris_mlrt_tf_run(int64_t model, IrisVal* input);
+#ifndef IRIS_EXPORT
+#ifdef _WIN32
+#define IRIS_EXPORT __declspec(dllexport)
+#else
+#define IRIS_EXPORT __attribute__((visibility("default")))
+#endif
+#endif
+
+IRIS_EXPORT int64_t  iris_mlrt_onnx_load(const char* model_path);
+IRIS_EXPORT int64_t  iris_mlrt_onnx_free(int64_t session);
+IRIS_EXPORT IrisVal*  iris_mlrt_onnx_run(int64_t session, IrisVal* input);
+IRIS_EXPORT IrisList* iris_mlrt_onnx_run_multi(int64_t session, IrisList* inputs_list);
+IRIS_EXPORT int64_t  iris_mlrt_pytorch_load(const char* model_path);
+IRIS_EXPORT int64_t  iris_mlrt_pytorch_free(int64_t model);
+IRIS_EXPORT IrisVal*  iris_mlrt_pytorch_run(int64_t model, IrisVal* input);
+IRIS_EXPORT IrisList* iris_mlrt_pytorch_run_multi(int64_t model, IrisList* inputs_list);
+IRIS_EXPORT double   iris_mlrt_pytorch_train_step(int64_t model, IrisList* inputs_list, IrisList* targets_list, double lr);
+IRIS_EXPORT int64_t  iris_mlrt_tf_load(const char* model_path);
+IRIS_EXPORT int64_t  iris_mlrt_tf_free(int64_t model);
+IRIS_EXPORT IrisVal*  iris_mlrt_tf_run(int64_t model, IrisVal* input);
+IRIS_EXPORT IrisList* iris_mlrt_tf_run_multi(int64_t model, IrisList* inputs_list);
+
+// Metadata / Reflection APIs
+IRIS_EXPORT int64_t     iris_onnx_get_input_count(int64_t session);
+IRIS_EXPORT int64_t     iris_onnx_get_output_count(int64_t session);
+IRIS_EXPORT const char* iris_onnx_get_input_name(int64_t session, int64_t idx);
+IRIS_EXPORT const char* iris_onnx_get_output_name(int64_t session, int64_t idx);
+IRIS_EXPORT double      iris_pytorch_train_step(void* model, IrisTensor** inputs, size_t n_inputs, IrisTensor** targets, size_t n_targets, double lr);
 // ---------------------------------------------------------------------------
 // Time / OS
 // ---------------------------------------------------------------------------
@@ -517,6 +737,21 @@ IrisVal* iris_get_element(IrisVal* t, int32_t idx);
 IrisVal* iris_make_closure(void* fn, int ncaptures, ...);
 IrisVal* iris_call_closure(IrisVal* closure, ...);
 void     iris_call_closure_void(IrisVal* closure, ...);
+void*    iris_closure_fn(IrisVal* closure);
+int      iris_closure_ncaptures(IrisVal* closure);
+IrisVal* iris_closure_get_capture(IrisVal* closure, int idx);
+
+// ---------------------------------------------------------------------------
+// Trait Object Helpers (Phase 91)
+// ---------------------------------------------------------------------------
+// A `dyn Trait` value is a fat pointer: { data_ptr, vtable_id }.
+// The vtable is keyed at runtime by an i64 id; the runtime provides a
+// forwarder by method-name lookup using a string-encoded `method_name`.
+IrisVal* iris_make_trait_object(void* data, void* vtable_id);
+// `iris_dyn_call(obj, method_name_ptr, args_count, ...)` performs the
+// indirect dispatch by reading `obj`'s vtable_id and matching
+// method_name against registered (vtable_id, method_name) pairs.
+IrisVal* iris_dyn_call(IrisVal* obj, const char* method_name, int32_t nargs, ...);
 
 // ---------------------------------------------------------------------------
 // Enum Variant Helpers
@@ -549,8 +784,10 @@ void    iris_udp_close(int64_t fd);
 // ---------------------------------------------------------------------------
 // HTTP (extended)
 // ---------------------------------------------------------------------------
-char*   iris_http_request(const char* method, const char* url,
-                          const char* body, const char* content_type);
+char*     iris_http_request(const char* method, const char* url, const char* body);
+char*     iris_http_request_headers(const char* method, const char* url, const char* body, const char* headers, int64_t timeout_ms);
+int64_t   iris_http_last_status(void);
+int64_t   iris_http_tls_available(void);
 
 // ---------------------------------------------------------------------------
 // TCP Networking
@@ -561,6 +798,10 @@ int64_t iris_tcp_accept(int64_t listener);
 char*   iris_tcp_read(int64_t conn);
 void    iris_tcp_write(int64_t conn, const char* data);
 void    iris_tcp_close(int64_t conn);
+int64_t iris_tcp_set_timeout(int64_t conn, int64_t read_timeout_ms, int64_t write_timeout_ms);
+int64_t iris_tcp_write_all(int64_t conn, const char* data);
+char*   iris_tcp_read_max(int64_t conn, int64_t max_bytes);
+int64_t iris_tcp_shutdown(int64_t conn);
 
 // ---------------------------------------------------------------------------
 // HTTP
@@ -574,6 +815,7 @@ char*   iris_http_post_json(const char* url, const char* json_body);
 // ---------------------------------------------------------------------------
 IrisVal* iris_json_parse(const char* str);
 char*    iris_json_stringify(IrisVal* val);
+char*    iris_json_query(const char* json, const char* path);
 
 // ---------------------------------------------------------------------------
 // Set collection (backed by a sorted list)
@@ -591,6 +833,7 @@ IrisList* iris_set_to_list(IrisList* set);
 int       iris_regex_match(const char* pattern, const char* str);
 IrisList* iris_regex_find_all(const char* pattern, const char* str);
 char*     iris_regex_replace(const char* pattern, const char* str, const char* replacement);
+char*     iris_regex_replace_all(const char* pattern, const char* str, const char* replacement);
 
 // ---------------------------------------------------------------------------
 // DateTime
@@ -617,6 +860,8 @@ char*     iris_type_of(IrisVal* val);
 // ---------------------------------------------------------------------------
 // Random
 // ---------------------------------------------------------------------------
+int64_t   iris_seed(int64_t seed);
+int64_t   iris_random_seed(void);
 double    iris_random(void);
 int64_t   iris_random_range(int64_t lo, int64_t hi);
 
@@ -690,6 +935,20 @@ int64_t   iris_ffi_call_i64(void* handle, const char* func_name, int64_t* args, 
 double    iris_ffi_call_f64(void* handle, const char* func_name, int64_t* args, int nargs);
 const char* iris_ffi_call_str(void* handle, const char* func_name, int64_t* args, int nargs);
 void      iris_ffi_call_void(void* handle, const char* func_name, int64_t* args, int nargs);
+
+/* FFI out-parameter cells — let IRIS own memory and pass its address, so C
+ * functions that return through a pointer become callable. See the block
+ * comment in iris_runtime.c. */
+int64_t      iris_ffi_out_new(int64_t nbytes);
+void         iris_ffi_out_free(int64_t cell);
+int64_t      iris_ffi_out_sizeof_f64(void);
+int64_t      iris_ffi_out_sizeof_i64(void);
+double       iris_ffi_out_get_f64(int64_t cell, int64_t index);
+int64_t      iris_ffi_out_get_i64(int64_t cell, int64_t index);
+int32_t      iris_ffi_out_get_i32(int64_t cell, int64_t index);
+char*        iris_ffi_out_get_str(int64_t cell);
+void         iris_ffi_out_set_f64(int64_t cell, int64_t index, double v);
+void         iris_ffi_out_set_i64(int64_t cell, int64_t index, int64_t v);
 // Python FFI
 const char* iris_python_eval(const char* code);
 int64_t   iris_python_exec(const char* code_or_path);
@@ -722,6 +981,7 @@ void      iris_retain(void* ptr);
 void      iris_release(void* ptr);
 void      iris_retain_kind(void* ptr, int32_t kind);
 void      iris_release_kind(void* ptr, int32_t kind);
+void      iris_drop_box(IrisVal* value);
 int64_t   iris_refcount(void* ptr);
 void      iris_gc_collect(void);   // Force collection of zero-refcount objects.
 int64_t   iris_gc_stats_allocated(void);  // Total live allocations.
@@ -735,6 +995,102 @@ int       iris_sandbox_check_fs_write(const char* path);
 int       iris_sandbox_check_network(const char* host);
 int       iris_sandbox_check_ffi(const char* lib_path);
 void      iris_sandbox_set_policy(int allow_fs, int allow_net, int allow_ffi);
+
+// ── Adaptive AI runtime (std.adaptive) ────────────────────────────────────
+typedef struct IrisAdaptiveState IrisAdaptiveState;
+
+typedef struct {
+    double  mean_error;
+    double  max_error;
+    int64_t observations;
+    int64_t errors;
+    double  last_risk;
+    double  confidence;
+} IrisRiskMetrics;
+
+typedef struct {
+    double  mean;
+    double  variance;
+    double  lower_95;
+    double  upper_95;
+    double  confidence;
+} IrisUncertainty;
+
+// Internal implementations (IrisAdaptiveState*)
+IrisAdaptiveState* iris_adaptive_new_impl(const char* name, int64_t n_params,
+                                          double learning_rate, double risk_threshold);
+void               iris_adaptive_free_impl(IrisAdaptiveState* state);
+const char*        iris_adaptive_name_impl(IrisAdaptiveState* state);
+double             iris_adaptive_get_param_impl(IrisAdaptiveState* state, int64_t idx);
+void               iris_adaptive_set_param_impl(IrisAdaptiveState* state, int64_t idx, double value);
+int64_t            iris_adaptive_n_params_impl(IrisAdaptiveState* state);
+double             iris_adaptive_learning_rate_impl(IrisAdaptiveState* state);
+void               iris_adaptive_set_learning_rate_impl(IrisAdaptiveState* state, double lr);
+void               iris_adaptive_observe_impl(IrisAdaptiveState* state,
+                                              const double* inputs, int64_t n_inputs, double target);
+double             iris_adaptive_predict_impl(IrisAdaptiveState* state,
+                                              const double* inputs, int64_t n_inputs);
+double             iris_adaptive_train_batch_impl(IrisAdaptiveState* state,
+                                                  const double* inputs, int64_t n_samples,
+                                                  int64_t n_features, const double* targets);
+void               iris_adaptive_record_error_impl(IrisAdaptiveState* state, double error);
+IrisRiskMetrics    iris_adaptive_get_risk_impl(IrisAdaptiveState* state);
+int                iris_adaptive_is_unsafe_impl(IrisAdaptiveState* state);
+void               iris_adaptive_set_risk_threshold_impl(IrisAdaptiveState* state, double threshold);
+IrisUncertainty    iris_adaptive_predict_with_uncertainty_impl(IrisAdaptiveState* state,
+                                                               const double* inputs, int64_t n_inputs);
+double             iris_adaptive_uncertainty_bayes_update_impl(IrisAdaptiveState* state,
+                                                                double prior_mean, double prior_var,
+                                                                double observation, double obs_var);
+int                iris_adaptive_should_retrain_impl(IrisAdaptiveState* state);
+double             iris_adaptive_auto_retrain_impl(IrisAdaptiveState* state,
+                                                   const double* inputs, int64_t n_samples,
+                                                   int64_t n_features, const double* targets);
+void               iris_adaptive_set_retrain_threshold_impl(IrisAdaptiveState* state, double threshold);
+void               iris_adaptive_set_min_observations_for_retrain_impl(IrisAdaptiveState* state, int64_t n);
+void               iris_adaptive_adapt_threshold_impl(IrisAdaptiveState* state, double observed_error);
+double             iris_adaptive_current_threshold_impl(IrisAdaptiveState* state);
+int64_t            iris_adaptive_observation_count_impl(IrisAdaptiveState* state);
+double             iris_adaptive_mean_error_impl(IrisAdaptiveState* state);
+void               iris_adaptive_reset_stats_impl(IrisAdaptiveState* state);
+
+// Extern-compatible wrappers (int64_t handle, matching adaptive.iris extern def)
+int64_t      iris_adaptive_new(const char* name, int64_t n_params,
+                                double learning_rate, double risk_threshold);
+int64_t      iris_adaptive_free(int64_t handle);
+const char*  iris_adaptive_name(int64_t handle);
+double       iris_adaptive_get_param(int64_t handle, int64_t idx);
+int64_t      iris_adaptive_set_param(int64_t handle, int64_t idx, double value);
+int64_t      iris_adaptive_n_params(int64_t handle);
+double       iris_adaptive_learning_rate(int64_t handle);
+int64_t      iris_adaptive_set_learning_rate(int64_t handle, double lr);
+int64_t      iris_adaptive_record_error(int64_t handle, double error);
+int          iris_adaptive_is_unsafe(int64_t handle);
+int64_t      iris_adaptive_set_risk_threshold(int64_t handle, double threshold);
+int          iris_adaptive_should_retrain(int64_t handle);
+int64_t      iris_adaptive_set_retrain_threshold(int64_t handle, double threshold);
+int64_t      iris_adaptive_set_min_observations_for_retrain(int64_t handle, int64_t n);
+int64_t      iris_adaptive_adapt_threshold(int64_t handle, double observed_error);
+double       iris_adaptive_current_threshold(int64_t handle);
+int64_t      iris_adaptive_observation_count(int64_t handle);
+double       iris_adaptive_mean_error(int64_t handle);
+double       iris_adaptive_max_error(int64_t handle);
+int64_t      iris_adaptive_error_count(int64_t handle);
+double       iris_adaptive_last_risk(int64_t handle);
+double       iris_adaptive_confidence(int64_t handle);
+int64_t      iris_adaptive_reset_stats(int64_t handle);
+double       iris_adaptive_uncertainty_bayes_update(int64_t handle,
+                                                     double prior_mean, double prior_var,
+                                                     double observation, double obs_var);
+
+// Dynamic Reflection & Evaluation
+int32_t      iris_reflection_available(void);
+int32_t      iris_validate(const char* source);
+IrisResult*  iris_eval(const char* source);
+IrisResult*  iris_eval_i64(const char* source);
+IrisResult*  iris_meta_analyze(const char* source);
+IrisResult*  iris_meta_emit_ir(const char* source);
+IrisResult*  iris_meta_apply_edit(const char* source, int64_t start_byte, int64_t end_byte, const char* replacement);
 
 #ifdef __cplusplus
 }

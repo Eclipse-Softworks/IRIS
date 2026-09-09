@@ -1,0 +1,17 @@
+// Allocation-free embedded example. Build with:
+// iris embedded examples/embedded/control_loop.iris --target cortex-m4f
+// iris embedded examples/embedded/control_loop.iris --target esp32-c3
+// iris embedded examples/embedded/control_loop.iris --target arduino-uno
+
+def control_step(sensor: i64, target: i64) -> i64 {
+    if sensor < target { target - sensor } else { return 0 }
+}
+
+def main() -> i64 {
+    var samples = [2, 4, 6, 8]
+    var total = 0
+    for i in 0..4 {
+        total = total + samples[i]
+    };
+    if control_step(total, 20) == 0 { return 0 } else { return 1 }
+}

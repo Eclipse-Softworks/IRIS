@@ -1,0 +1,27 @@
+/// Standard Library: Reflection and Dynamic In-Process Code Evaluation
+///
+/// The IR interpreter supports full in-process parsing, checking, and bounded
+/// evaluation. Standalone native binaries do not embed the compiler yet; use
+/// `reflect_available()` to feature-detect that backend.
+
+/// True when this runtime embeds the IRIS compiler and interpreter.
+pub def reflect_available() -> bool {
+    iris_reflection_available()
+}
+
+/// Evaluate an IRIS source code string in-process and return the stringified result.
+/// Returns ok(output) on success or err(message) on compile/runtime failure.
+pub def reflect_eval(source: str) -> result<str, str> effect reflect, alloc {
+    iris_eval(source)
+}
+
+/// Evaluate an IRIS source code string in-process expecting an integer result.
+/// Returns ok(integer_value) on success or err(message) on failure.
+pub def reflect_eval_i64(source: str) -> result<i64, str> effect reflect, alloc {
+    iris_eval_i64(source)
+}
+
+/// Compile and verify a source fragment without executing its `main` function.
+pub def reflect_validate(source: str) -> bool effect reflect, alloc {
+    iris_validate(source)
+}

@@ -10,10 +10,21 @@ use crate::ir::module::IrModule;
 use crate::ir::types::{DType, IrType};
 use crate::pass::Pass;
 
+fn same_nominal_type(a: &IrType, b: &IrType) -> bool {
+    match (a, b) {
+        (IrType::Struct { name: na, .. }, IrType::Struct { name: nb, .. }) => na == nb,
+        (IrType::Enum { name: na, .. }, IrType::Enum { name: nb, .. }) => na == nb,
+        (IrType::TraitObject { name: na, .. }, IrType::TraitObject { name: nb, .. }) => na == nb,
+        _ => false,
+    }
+}
+
 /// Returns true if `ty` contains `IrType::Infer` anywhere in its structure.
 fn contains_infer(ty: &IrType) -> bool {
     match ty {
         IrType::Infer => true,
+        // Opaque tape handle: no inner type to be unresolved.
+        IrType::TapeRef => false,
         IrType::Option(inner)
         | IrType::Chan(inner)
         | IrType::Atomic(inner)
@@ -28,7 +39,15 @@ fn contains_infer(ty: &IrType) -> bool {
         IrType::Tuple(fields) => fields.iter().any(contains_infer),
         IrType::Struct { fields, .. } => fields.iter().any(|(_, t)| contains_infer(t)),
         IrType::Fn { params, ret } => params.iter().any(contains_infer) || contains_infer(ret),
-        IrType::Scalar(_) | IrType::Tensor { .. } | IrType::Str | IrType::Enum { .. } => false,
+        IrType::TraitObject { methods, .. } => methods
+            .iter()
+            .any(|m| m.params.iter().any(contains_infer) || contains_infer(&m.ret)),
+        IrType::Scalar(_)
+        | IrType::Tensor { .. }
+        | IrType::Str
+        | IrType::Enum { .. }
+        | IrType::TaskGroup
+        | IrType::WeakRef(_) => false,
     }
 }
 
@@ -291,6 +310,7 @@ impl Pass for TypeInferPass {
                                     (func.value_type(values[0]), &func.return_ty)
                                 {
                                     if val_ty != ret_ty
+                                        && !same_nominal_type(val_ty, ret_ty)
                                         && !contains_infer(val_ty)
                                         && !contains_infer(ret_ty)
                                     {

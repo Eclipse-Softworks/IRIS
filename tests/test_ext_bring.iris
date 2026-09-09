@@ -1,0 +1,19 @@
+// Extension methods alongside a brought module.
+bring std.math
+
+def double(x: i64) -> i64 {
+    x * 2
+}
+
+def main() -> i64 {
+    val d = 21.double();
+    println("21.double() = " + to_str(d));
+    assert(d == 42);
+
+    // Chained, and on a second value, so a constant result cannot pass.
+    assert(5.double() == 10);
+    assert(3.double().double() == 12);
+    assert(0.double() == 0);
+    println("extension methods ok");
+    0
+}

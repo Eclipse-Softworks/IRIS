@@ -128,6 +128,33 @@ fn licm_func(func: &mut IrFunction) {
         }
     }
 
+    // Back edges that share a header belong to the *same* natural loop, and its
+    // body is the union of theirs. Treating them as separate loops was wrong in
+    // a way that only showed up with a labelled `continue`:
+    //
+    //     for outer i in 0..4 { for j in 0..4 { if j > i { continue outer; } } }
+    //
+    // gives the outer header two back edges — one from the inner loop's exit,
+    // one from the `continue outer` block. Considered separately, each body
+    // excludes the other's latch, so that latch looks like a block *outside*
+    // the loop and became a candidate preheader. Hoisting into it placed a
+    // definition where it could not reach its use. See known-issues #17.
+    {
+        let mut merged: HashMap<usize, HashSet<usize>> = HashMap::new();
+        for (header, body) in loops.drain(..) {
+            merged.entry(header).or_default().extend(body);
+        }
+        let mut headers: Vec<usize> = merged.keys().copied().collect();
+        headers.sort_unstable();
+        loops = headers
+            .into_iter()
+            .map(|h| {
+                let body = merged.remove(&h).unwrap_or_default();
+                (h, body)
+            })
+            .collect();
+    }
+
     if loops.is_empty() {
         return;
     }
@@ -147,14 +174,29 @@ fn licm_func(func: &mut IrFunction) {
     }
 
     for (header, body) in &loops {
-        // Find preheader: a predecessor of header that's not in the loop body.
-        let preheader = predecessors[*header]
+        // Find preheader: a predecessor of the header, outside the loop, that
+        // *dominates* the header.
+        //
+        // The dominance requirement is what makes the hoist sound. A block that
+        // merely sits outside the loop body can still fail to reach parts of it,
+        // and hoisting a definition into such a block strands its uses. Since
+        // the preheader dominates the header, and the header dominates every
+        // block in a natural loop, it dominates every use we are hoisting past.
+        //
+        // Selection is also made deterministic by taking the lowest index rather
+        // than an arbitrary `HashSet` element. Without that, the same source
+        // compiled to different IR on different runs — three distinct outputs in
+        // six runs of the same file, three of which were invalid — because the
+        // hash seed changes per process.
+        let mut cands: Vec<usize> = predecessors[*header]
             .iter()
-            .find(|p| !body.contains(p))
-            .copied();
-        let preheader = match preheader {
-            Some(p) => p,
-            None => continue, // No preheader available — skip.
+            .copied()
+            .filter(|p| !body.contains(p) && dom[*header].contains(p))
+            .collect();
+        cands.sort_unstable();
+        let preheader = match cands.first() {
+            Some(&p) => p,
+            None => continue, // No sound preheader available — skip this loop.
         };
 
         // Identify loop-invariant instructions.
@@ -234,50 +276,55 @@ fn block_index(func: &IrFunction, bid: BlockId) -> Option<usize> {
 }
 
 fn is_side_effecting_for_licm(instr: &IrInstr) -> bool {
-    matches!(
+    !matches!(
         instr,
-        IrInstr::Store { .. }
-            | IrInstr::Br { .. }
-            | IrInstr::CondBr { .. }
-            | IrInstr::Return { .. }
-            | IrInstr::Call { .. }
-            | IrInstr::SwitchVariant { .. }
-            | IrInstr::Print { .. }
-            | IrInstr::Panic { .. }
-            | IrInstr::ArrayStore { .. }
-            | IrInstr::ArrayLoad { .. }
-            // Fresh allocations/resources must remain inside the loop so each
-            // iteration gets a distinct object identity.
-            | IrInstr::ListNew { .. }
-            | IrInstr::MapNew { .. }
-            | IrInstr::ChanNew { .. }
-            | IrInstr::AtomicNew { .. }
-            | IrInstr::MakeClosure { .. }
-            | IrInstr::ChanSend { .. }
-            | IrInstr::ChanRecv { .. }
-            | IrInstr::Spawn { .. }
-            | IrInstr::ParFor { .. }
-            | IrInstr::AtomicStore { .. }
-            | IrInstr::AtomicAdd { .. }
-            | IrInstr::AtomicLoad { .. }
-            | IrInstr::Load { .. }
-            | IrInstr::Retain { .. }
-            | IrInstr::Release { .. }
-            | IrInstr::TapeRecord { .. }
-            | IrInstr::Backward { .. }
-            // Mutable collection reads — must not be hoisted past writes.
-            | IrInstr::ListGet { .. }
-            | IrInstr::ListPop { .. }
-            | IrInstr::ListLen { .. }
-            | IrInstr::ListPush { .. }
-            | IrInstr::ListSet { .. }
-            | IrInstr::MapGet { .. }
-            | IrInstr::MapContains { .. }
-            | IrInstr::MapSet { .. }
-            | IrInstr::MapKeys { .. }
-            | IrInstr::MapValues { .. }
-            | IrInstr::MapLen { .. }
-            | IrInstr::MapRemove { .. }
+        IrInstr::BinOp { .. }
+            | IrInstr::ConstFloat { .. }
+            | IrInstr::ConstInt { .. }
+            | IrInstr::ConstBool { .. }
+            | IrInstr::ConstStr { .. }
+            | IrInstr::UnaryOp { .. }
+            | IrInstr::TensorOp { .. }
+            | IrInstr::Cast { .. }
+            | IrInstr::MakeStruct { .. }
+            | IrInstr::GetField { .. }
+            | IrInstr::MakeTraitObject { .. }
+            | IrInstr::DynCall { .. }
+            | IrInstr::MakeVariant { .. }
+            | IrInstr::ExtractVariantField { .. }
+            | IrInstr::MakeTuple { .. }
+            | IrInstr::GetElement { .. }
+            | IrInstr::MakeSome { .. }
+            | IrInstr::MakeNone { .. }
+            | IrInstr::IsSome { .. }
+            | IrInstr::MakeOk { .. }
+            | IrInstr::MakeErr { .. }
+            | IrInstr::IsOk { .. }
+            | IrInstr::StrLen { .. }
+            | IrInstr::StrConcat { .. }
+            | IrInstr::StrContains { .. }
+            | IrInstr::StrStartsWith { .. }
+            | IrInstr::StrEndsWith { .. }
+            | IrInstr::StrToUpper { .. }
+            | IrInstr::StrToLower { .. }
+            | IrInstr::StrTrim { .. }
+            | IrInstr::StrRepeat { .. }
+            | IrInstr::ValueToStr { .. }
+            | IrInstr::ParseI64 { .. }
+            | IrInstr::ParseF64 { .. }
+            | IrInstr::StrIndex { .. }
+            | IrInstr::StrSlice { .. }
+            | IrInstr::StrFind { .. }
+            | IrInstr::StrReplace { .. }
+            | IrInstr::StrSplit { .. }
+            | IrInstr::StrJoin { .. }
+            | IrInstr::GetVariantTag { .. }
+            | IrInstr::GradValue { .. }
+            | IrInstr::GradTangent { .. }
+            | IrInstr::TapeGrad { .. }
+            | IrInstr::Sparsify { .. }
+            | IrInstr::Densify { .. }
+            | IrInstr::MakeGrad { .. }
     )
 }
 

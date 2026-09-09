@@ -84,7 +84,7 @@ cargo build --release
 cargo run -- repl
 
 # Run a file
-cargo run -- run examples/hello.iris
+cargo run -- run examples/01_basics/hello.iris
 ```
 
 ### Running Tests

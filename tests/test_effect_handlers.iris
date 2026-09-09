@@ -1,0 +1,16 @@
+// Effect handlers intercepting an extern call.
+extern def echo(s: str) -> str
+
+def main() -> i64 {
+    val result = handle {
+        echo("hello")
+    } with {
+        echo(s) => "intercepted"
+    };
+    println(result);
+    // The handler must replace the extern's result, not merely run alongside it.
+    assert(result == "intercepted");
+    // And it must not pass the original argument through.
+    assert(result != "hello");
+    0
+}

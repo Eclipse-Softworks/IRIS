@@ -1,79 +1,51 @@
-//! JIT compilation backend for IRIS.
+//! Supported in-process JIT compilation for IRIS.
 //!
-//! Phase 52: Compiles IRIS IR to native machine code at runtime.
-//!
-//! Architecture
-//! ─────────────
-//! The JIT is native-only:
-//!
-//! 1. **Native tier**: emits LLVM IR text, compiles it with `clang`, and
-//!    executes the resulting native binary.
-//!
-//! 2. **Cached tier**: once a function has been JIT-compiled natively, results
-//!    are cached in a `JitCache` for reuse within the same process.
-//!
-//! Usage
-//! ──────
-//! ```text
-//! iris --emit jit program.iris
-//! ```
-//! This evaluates the first zero-argument function and prints the result,
-//! using the LLVM/native pipeline.
-//!
-//! JIT cache key: (module_name, function_name, ir_hash)
+//! IRIS IR is emitted as LLVM IR, compiled to object bytes through LLVM-C, and
+//! installed directly into LLVM ORC/LLJIT. No compiler subprocess, temporary
+//! executable, or child process participates in JIT execution.
 
 use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
+use std::sync::Arc;
 
+use crate::codegen::llvm_orc::{is_orc_jit_available, OrcJitEngine, OrcJitModule};
 use crate::error::CodegenError;
 use crate::ir::module::IrModule;
 
-use crate::codegen::build::find_clang;
-#[cfg(target_os = "windows")]
-use crate::codegen::build::{msys2_gcc_lib, msys2_ucrt64_include, msys2_ucrt64_lib};
-
-// ---------------------------------------------------------------------------
-// JIT cache
-// ---------------------------------------------------------------------------
-
-/// Identifier for a JIT-compiled function.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct JitKey {
     pub module_name: String,
     pub function_name: String,
-    /// Hash of the serialised IR for cache invalidation.
     pub ir_hash: u64,
 }
 
-/// Result of a JIT evaluation: the output text and the tier used.
 #[derive(Debug, Clone)]
 pub struct JitResult {
     pub output: String,
     pub tier: JitTier,
 }
 
-/// Which execution tier was used.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JitTier {
-    /// Native code via clang subprocess.
-    Native,
+    Orc,
 }
 
 impl std::fmt::Display for JitTier {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            JitTier::Native => f.write_str("native"),
+            Self::Orc => formatter.write_str("native ORC (in-process)"),
         }
     }
 }
 
-// ---------------------------------------------------------------------------
-// JIT compiler
-// ---------------------------------------------------------------------------
+struct CachedJit {
+    result: JitResult,
+    _generation: Arc<OrcJitModule>,
+}
 
-/// The JIT compiler — manages compilation and caching.
+/// Long-lived in-process compiler and resident-code cache.
 pub struct JitCompiler {
-    cache: HashMap<JitKey, JitResult>,
+    cache: HashMap<JitKey, CachedJit>,
 }
 
 impl JitCompiler {
@@ -83,53 +55,58 @@ impl JitCompiler {
         }
     }
 
-    /// Compile and execute the first zero-argument function in `module`.
-    ///
-    /// Returns the output as a string (same format as `EmitKind::Eval`).
+    /// Compile and execute `main`, or the first zero-argument function.
     pub fn compile_and_run(&mut self, module: &IrModule) -> Result<JitResult, CodegenError> {
-        // Find the first zero-argument function.
-        let func = module
+        let function = module
             .functions()
             .iter()
-            .find(|f| f.params.is_empty())
+            .find(|function| function.name == "main" && function.params.is_empty())
+            .or_else(|| {
+                module
+                    .functions()
+                    .iter()
+                    .find(|function| function.params.is_empty())
+            })
             .ok_or_else(|| CodegenError::Unsupported {
                 backend: "jit".into(),
                 detail: "no zero-argument function found to JIT-compile".into(),
             })?;
-
         let key = JitKey {
             module_name: module.name.clone(),
-            function_name: func.name.clone(),
+            function_name: function.name.clone(),
             ir_hash: hash_module(module),
         };
-
-        // Cache hit.
         if let Some(cached) = self.cache.get(&key) {
-            return Ok(cached.clone());
+            return Ok(cached.result.clone());
         }
 
-        if !is_native_jit_available() {
-            return Err(CodegenError::Unsupported {
-                backend: "jit".into(),
-                detail: "native JIT requires a working clang/LLVM toolchain; install clang or set IRIS_CLANG"
-                    .into(),
-            });
-        }
-
-        let result = self.compile_native(module)?;
-
-        self.cache.insert(key, result.clone());
+        // Each cached source module owns an ORC session. This gives modules a
+        // real namespace even when they export the same IRIS function names.
+        // Hot swapping uses a separate shared-session manager with generation
+        // mangling and stable dispatch slots.
+        let engine = OrcJitEngine::new()?;
+        let generation = Arc::new(engine.load_module(module)?);
+        let value = generation.call_zero_arg(&function.name)?;
+        let result = JitResult {
+            output: format!("{}\n", value),
+            tier: JitTier::Orc,
+        };
+        self.cache.insert(
+            key,
+            CachedJit {
+                result: result.clone(),
+                _generation: generation,
+            },
+        );
         Ok(result)
     }
 
-    /// Native tier: compile and execute using the same LLVM pipeline as
-    /// `EmitKind::Eval`, capturing stdout.
-    fn compile_native(&self, module: &IrModule) -> Result<JitResult, CodegenError> {
-        let stdout = crate::codegen::execute_binary_for_eval(module)?;
-        Ok(JitResult {
-            output: stdout,
-            tier: JitTier::Native,
-        })
+    pub fn cached_generation_count(&self) -> usize {
+        self.cache.len()
+    }
+
+    pub fn clear(&mut self) {
+        self.cache.clear();
     }
 }
 
@@ -139,158 +116,85 @@ impl Default for JitCompiler {
     }
 }
 
-// ---------------------------------------------------------------------------
-// JIT module report
-// ---------------------------------------------------------------------------
-
-/// Generate a JIT compilation report for the module.
-///
-/// This is emitted when `--emit jit` is used. It shows:
-/// - The IR hash (cache key).
-/// - Which tier would be used.
-/// - The function signatures available.
-/// - The JIT execution result.
 pub fn emit_jit(module: &IrModule) -> Result<String, CodegenError> {
     let mut compiler = JitCompiler::new();
     let result = compiler.compile_and_run(module)?;
-
-    let mut out = String::new();
+    let mut output = String::new();
     use std::fmt::Write;
-    writeln!(out, "; IRIS JIT — phase 52")?;
-    writeln!(out, "; Module: {}", module.name)?;
-    writeln!(out, "; IR hash: {:016x}", hash_module(module))?;
-    writeln!(out, "; Execution tier: {}", result.tier)?;
-    writeln!(
-        out,
-        "; native toolchain available: {}",
-        is_native_jit_available()
-    )?;
-    writeln!(out, ";")?;
-    writeln!(out, "; Functions available for JIT:")?;
-    for func in module.functions() {
-        let params: Vec<String> = func
+    writeln!(output, "; IRIS in-process JIT")?;
+    writeln!(output, "; Module: {}", module.name)?;
+    writeln!(output, "; IR hash: {:016x}", hash_module(module))?;
+    writeln!(output, "; Execution tier: {}", result.tier)?;
+    writeln!(output, "; ORC available: {}", is_orc_jit_available())?;
+    writeln!(output, ";")?;
+    writeln!(output, "; Resident functions:")?;
+    for function in module.functions() {
+        let params = function
             .params
             .iter()
-            .map(|p| format!("{}: {}", p.name, p.ty))
-            .collect();
+            .map(|param| format!("{}: {}", param.name, param.ty))
+            .collect::<Vec<_>>()
+            .join(", ");
         writeln!(
-            out,
+            output,
             ";   {} ({}) -> {}",
-            func.name,
-            params.join(", "),
-            func.return_ty
+            function.name, params, function.return_ty
         )?;
     }
-    writeln!(out, ";")?;
-    writeln!(out, "; Execution output:")?;
+    writeln!(output, ";")?;
+    writeln!(output, "; Execution result:")?;
     for line in result.output.lines() {
-        writeln!(out, ";   {}", line)?;
+        writeln!(output, ";   {}", line)?;
     }
-    writeln!(out)?;
-    out.push_str(&result.output);
-    Ok(out)
+    writeln!(output)?;
+    output.push_str(&result.output);
+    Ok(output)
 }
 
-// ---------------------------------------------------------------------------
-// JIT IR description (for documentation/testing)
-// ---------------------------------------------------------------------------
-
-/// Emit a description of what the JIT would produce, for use in tests.
-///
-/// Unlike `emit_jit`, this does not actually execute code — it describes
-/// the compilation plan.
 pub fn emit_jit_plan(module: &IrModule) -> Result<String, CodegenError> {
-    let mut out = String::new();
+    let mut output = String::new();
     use std::fmt::Write;
-
-    writeln!(out, "; IRIS JIT compilation plan — phase 52")?;
-    writeln!(out, "; Module: {}", module.name)?;
-    writeln!(out, "; IR hash: {:016x}", hash_module(module))?;
-    writeln!(out)?;
-
-    let tier_str = if is_native_jit_available() {
-        "native (clang subprocess)"
-    } else {
-        "native unavailable"
-    };
-    writeln!(out, "; Preferred tier: {}", tier_str)?;
-    writeln!(out)?;
-
-    writeln!(out, "; JIT pipeline:")?;
-    writeln!(out, ";   1. IRIS IR → LLVM IR (eval wrapper)")?;
-    writeln!(out, ";   2. LLVM IR → native binary (clang)")?;
-    writeln!(out, ";   3. Execute native binary")?;
-    writeln!(out, ";   4. Capture stdout → return as string")?;
-    writeln!(out)?;
-
-    writeln!(out, "; Cache key:")?;
-    writeln!(out, ";   module_name = {}", module.name)?;
-    writeln!(out, ";   ir_hash     = {:016x}", hash_module(module))?;
-    writeln!(out)?;
-
-    writeln!(out, "; Functions compiled:")?;
-    for func in module.functions() {
-        if func.params.is_empty() {
-            writeln!(out, ";   [ENTRY] {} () -> {}", func.name, func.return_ty)?;
+    writeln!(output, "; IRIS in-process JIT compilation plan")?;
+    writeln!(output, "; Module: {}", module.name)?;
+    writeln!(output, "; IR hash: {:016x}", hash_module(module))?;
+    writeln!(output, "; ORC available: {}", is_orc_jit_available())?;
+    writeln!(output)?;
+    writeln!(output, "; Pipeline:")?;
+    writeln!(output, ";   1. IRIS IR -> LLVM IR")?;
+    writeln!(output, ";   2. LLVM-C -> in-memory native object")?;
+    writeln!(output, ";   3. ORC resource-tracked installation")?;
+    writeln!(output, ";   4. Typed in-process function invocation")?;
+    writeln!(output)?;
+    writeln!(output, "; Functions compiled:")?;
+    for function in module.functions() {
+        let entry = if function.params.is_empty() {
+            "[ENTRY] "
         } else {
-            let params: Vec<String> = func
-                .params
-                .iter()
-                .map(|p| format!("{}: {}", p.name, p.ty))
-                .collect();
-            writeln!(
-                out,
-                ";   {} ({}) -> {}",
-                func.name,
-                params.join(", "),
-                func.return_ty
-            )?;
-        }
+            ""
+        };
+        let params = function
+            .params
+            .iter()
+            .map(|param| format!("{}: {}", param.name, param.ty))
+            .collect::<Vec<_>>()
+            .join(", ");
+        writeln!(
+            output,
+            ";   {}{} ({}) -> {}",
+            entry, function.name, params, function.return_ty
+        )?;
     }
-
-    Ok(out)
+    Ok(output)
 }
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-/// Returns true if `clang` is available in PATH.
-fn is_native_jit_available() -> bool {
-    // clang must be present.
-    let clang_ok = std::process::Command::new(find_clang())
-        .arg("--version")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
-    if !clang_ok {
-        return false;
-    }
-    // On Windows the JIT targets x86_64-w64-windows-gnu and therefore needs
-    // the MSYS2/MinGW ucrt64 toolchain (headers + libraries + GCC CRT). If
-    // any of those paths are missing the native tier cannot link a runnable
-    // binary.
-    #[cfg(target_os = "windows")]
-    {
-        if msys2_ucrt64_include().is_none()
-            || msys2_ucrt64_lib().is_none()
-            || msys2_gcc_lib().is_none()
-        {
-            return false;
-        }
-    }
-    true
-}
-
-/// Compute a stable hash of the module's IR text for cache invalidation.
 fn hash_module(module: &IrModule) -> u64 {
     use crate::codegen::printer::emit_ir_text;
     let ir = emit_ir_text(module).unwrap_or_default();
     hash_str(&ir)
 }
 
-fn hash_str(s: &str) -> u64 {
-    let mut h = DefaultHasher::new();
-    s.hash(&mut h);
-    h.finish()
+fn hash_str(source: &str) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    source.hash(&mut hasher);
+    hasher.finish()
 }

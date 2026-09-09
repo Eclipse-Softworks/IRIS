@@ -262,6 +262,41 @@ fn emit_instr(out: &mut String, instr: &IrInstr) -> Result<(), CodegenError> {
             )?;
         }
 
+        IrInstr::MakeTraitObject {
+            result,
+            value,
+            target_trait,
+            concrete_ty,
+            result_ty,
+        } => {
+            write!(
+                out,
+                "{} = make_trait_object value={} trait={} concrete={} : {}",
+                result, value, target_trait, concrete_ty, result_ty
+            )?;
+        }
+
+        IrInstr::DynCall {
+            result,
+            obj,
+            method_name,
+            args,
+            result_ty,
+        } => {
+            write!(
+                out,
+                "{} = dyn_call obj={} method={} args=[{}] : {}",
+                result,
+                obj,
+                method_name,
+                args.iter()
+                    .map(|a| format!("{}", a))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                result_ty
+            )?;
+        }
+
         IrInstr::MakeVariant {
             result,
             variant_idx,
@@ -383,6 +418,7 @@ fn emit_instr(out: &mut String, instr: &IrInstr) -> Result<(), CodegenError> {
             var: _,
             start,
             end,
+            inclusive: _,
             body_fn,
             args,
         } => {
@@ -399,8 +435,16 @@ fn emit_instr(out: &mut String, instr: &IrInstr) -> Result<(), CodegenError> {
             }
         }
 
-        IrInstr::ChanNew { result, elem_ty } => {
-            write!(out, "{} = chan_new : chan<{}>", result, elem_ty)?;
+        IrInstr::ChanNew {
+            result,
+            elem_ty,
+            capacity,
+        } => {
+            write!(
+                out,
+                "{} = chan_new(cap: {}) : chan<{}>",
+                result, capacity, elem_ty
+            )?;
         }
 
         IrInstr::ChanSend { chan, value } => {
@@ -418,6 +462,30 @@ fn emit_instr(out: &mut String, instr: &IrInstr) -> Result<(), CodegenError> {
         IrInstr::Spawn { body_fn, args } => {
             let arg_strs: Vec<String> = args.iter().map(|v| format!("{}", v)).collect();
             write!(out, "spawn @{}({})", body_fn, arg_strs.join(", "))?;
+        }
+
+        IrInstr::TaskGroupNew { result } => {
+            write!(out, "{} = task_group_new", result)?;
+        }
+        IrInstr::TaskGroupSpawn {
+            group,
+            body_fn,
+            args,
+        } => {
+            let arg_strs: Vec<String> = args.iter().map(|v| format!("{}", v)).collect();
+            write!(
+                out,
+                "task_group_spawn {} @{}({})",
+                group,
+                body_fn,
+                arg_strs.join(", ")
+            )?;
+        }
+        IrInstr::TaskGroupJoin { group } => {
+            write!(out, "task_group_join {}", group)?;
+        }
+        IrInstr::TaskGroupCancel { group } => {
+            write!(out, "task_group_cancel {}", group)?;
         }
 
         IrInstr::AtomicNew {
@@ -615,6 +683,10 @@ fn emit_instr(out: &mut String, instr: &IrInstr) -> Result<(), CodegenError> {
             write!(out, "{} = densify {}", result, operand)?;
         }
 
+        IrInstr::SparseNnz { result, operand } => {
+            write!(out, "{} = sparse_nnz {}", result, operand)?;
+        }
+
         IrInstr::Barrier => {
             write!(out, "barrier")?;
         }
@@ -661,7 +733,7 @@ fn emit_instr(out: &mut String, instr: &IrInstr) -> Result<(), CodegenError> {
             write!(out, "{} = str_repeat {}, {}", result, operand, count)?;
         }
 
-        IrInstr::Panic { msg } => {
+        IrInstr::Panic { msg, .. } => {
             write!(out, "panic {}", msg)?;
         }
 
@@ -986,6 +1058,30 @@ fn emit_instr(out: &mut String, instr: &IrInstr) -> Result<(), CodegenError> {
                 name,
                 arg_str.join(", "),
                 result_ty
+            )?;
+        }
+        IrInstr::PushHandler { arms } => {
+            write!(out, "push_handler arms=[")?;
+            for (i, arm) in arms.iter().enumerate() {
+                if i > 0 {
+                    write!(out, ", ")?;
+                }
+                write!(out, "{} -> {}", arm.effect_name, arm.func_name)?;
+            }
+            writeln!(out, "]")?;
+        }
+        IrInstr::PopHandler => {
+            writeln!(out, "pop_handler")?;
+        }
+        IrInstr::ResumeCont {
+            cont,
+            value,
+            result,
+        } => {
+            writeln!(
+                out,
+                "resume_cont cont=v{} value=v{} result=v{}",
+                cont.0, value.0, result.0
             )?;
         }
     }

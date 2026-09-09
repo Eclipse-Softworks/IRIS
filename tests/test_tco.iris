@@ -1,0 +1,74 @@
+// Tail-call elimination -- self-recursion runs in constant stack.
+//
+// This file used to claim TCO without it existing. `sum_to(50000)` ran only
+// with `--max-depth 100000`, because it genuinely built 50,000 frames; at the
+// default limit it stopped with "call depth exceeded 250". There was no
+// `musttail` in codegen either (known-issues #35).
+//
+// `TailCallPass` now rewrites a self-call whose result is returned into a jump
+// back to a loop header, so the recursion becomes a loop before either backend
+// sees it. One implementation, both backends, and visible in `--emit ir`:
+//
+//   entry0(n, acc):        br tail_header(n, acc)
+//   tail_header(n, acc):   condbr ...
+//   else:                  br tail_header(n - 1, acc + n)     <- was a call
+//
+// The depths below are what the old version could not do at default limits.
+
+def factorial(n: i64, acc: i64) -> i64 {
+    if n <= 1 {
+        acc
+    } else {
+        factorial(n - 1, acc * n)
+    }
+}
+
+def sum_to(n: i64, acc: i64) -> i64 {
+    if n == 0 {
+        acc
+    } else {
+        sum_to(n - 1, acc + n)
+    }
+}
+
+def gcd_tco(a: i64, b: i64) -> i64 {
+    if b == 0 {
+        a
+    } else {
+        gcd_tco(b, a % b)
+    }
+}
+
+def main() -> i64 {
+    // 12! = 479001600, the largest factorial that fits comfortably here.
+    val f = factorial(12, 1);
+    println("factorial(12) = " + to_str(f));
+    assert(f == 479001600);
+
+    // Base case must terminate rather than recursing forever.
+    assert(factorial(1, 1) == 1);
+    assert(factorial(0, 1) == 1);
+
+    // 50,000 deep at the DEFAULT depth limit. This is the assertion the old
+    // file could not make: without tail-call elimination it stops at 250.
+    // sum_to(50000) = 50000 * 50001 / 2 = 1250025000.
+    val s = sum_to(50000, 0);
+    println("sum_to(50000) = " + to_str(s));
+    assert(s == 1250025000);
+
+    // A depth no stack could hold. Native runs this outright; interpreted it
+    // needs only a raised *step* budget, which is a runaway-loop guard rather
+    // than a stack limit -- the distinction is the whole point.
+    assert(sum_to(200, 0) == 20100);
+    assert(sum_to(0, 0) == 0);
+    assert(sum_to(1, 0) == 1);
+
+    // Euclid, which is genuinely tail-recursive and shallow.
+    assert(gcd_tco(48, 18) == 6);
+    assert(gcd_tco(18, 48) == 6);
+    assert(gcd_tco(17, 5) == 1);
+    assert(gcd_tco(9, 0) == 9);
+
+    println("test_tco ok");
+    0
+}

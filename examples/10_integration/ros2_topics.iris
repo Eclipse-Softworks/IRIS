@@ -1,0 +1,24 @@
+bring std.ros2 /// Requires a running ROS 2 environment and the IRIS ROS bridge on PATH.
+def main() -> i64 {
+    val context = context_create();
+    assert(context.handle != 0);
+    val node = node_create(context, "iris_learning_topics", "");
+    assert(node.handle != 0);
+    val publisher = publisher_create_qos(node, "/iris_learning_vector",
+    "geometry_msgs/msg/Vector3", qos_control());
+    val subscriber = subscription_create_qos(node, "/iris_learning_vector",
+    "geometry_msgs/msg/Vector3", qos_control());
+    assert(publisher.handle != 0 && subscriber.handle != 0);
+    assert(publish_vector3(publisher, make_vector3(1.25, - 2.5, 3.75)));
+    assert(wait_for_message(subscriber, 2000));
+    val received = take_vector3(subscriber);
+    assert(is_some(received));
+    val vector = unwrap(received);
+    assert(vector.x == 1.25 && vector.y == - 2.5 && vector.z == 3.75);
+    subscription_destroy(subscriber);
+    publisher_destroy(publisher);
+    node_destroy(node);
+    context_destroy(context);
+    println("ros2 topics: vector payload verified");
+    return 0
+}

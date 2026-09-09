@@ -1,0 +1,58 @@
+// test_heap_use.iris
+record MinHeap[T] { data: list<T> }
+
+pub def heap_new[T](v: T) -> MinHeap<T> {
+    val d: list<T> = list()
+    push(d, v);
+    MinHeap { data: d }
+}
+
+pub def heap_push[T](h: MinHeap<T>, v: T) -> MinHeap<T> {
+    var new_data: list<T> = list()
+    var inserted = 0
+    var i = 0
+    val n = list_len(h.data)
+    while i < n {
+        val cur = list_get(h.data, i)
+        val should_insert = if cur > v { if inserted == 0 { 1 } else { 0 } } else { 0 }
+        inserted = if should_insert == 1 { 1 } else { inserted }
+        val _ = if should_insert == 1 { push(new_data, v); 0 } else { 0 }
+        push(new_data, cur);
+        i = i + 1
+    }
+    val _ = if inserted == 0 { push(new_data, v); 0 } else { 0 }
+    MinHeap { data: new_data }
+}
+
+pub def heap_len[T](h: MinHeap<T>) -> i64 {
+    list_len(h.data)
+}
+
+pub def heap_peek[T](h: MinHeap<T>) -> T {
+    list_get(h.data, 0)
+}
+
+def main() -> i64 {
+    // `heap_new(v)` seeds the heap with v, so this heap holds 5, 3, 7, 9.
+    var h = heap_new(5)
+    var h2 = heap_push(h, 3)
+    var h3 = heap_push(h2, 7)
+    var h4 = heap_push(h3, 9)
+
+    assert(heap_len(h4) == 4);
+    // The smallest element must surface regardless of insertion order -- it was
+    // neither the first nor the last pushed.
+    assert(heap_peek(h4) == 3);
+
+    // A single-element heap peeks its only element.
+    val one = heap_new(42)
+    assert(heap_len(one) == 1);
+    assert(heap_peek(one) == 42);
+
+    // Pushing a new minimum must change the peek.
+    val lower = heap_push(h4, 1)
+    assert(heap_len(lower) == 5);
+    assert(heap_peek(lower) == 1);
+    println("heap ok");
+    0
+}

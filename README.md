@@ -1,353 +1,113 @@
-# IRIS — Intermediate Representation for Intelligent Systems
+# IRIS
 
-<p align="center">
-  <img src="logo/iris-logo.png" alt="IRIS Logo" width="180">
-</p>
+<p align="center"><img src="logo/iris-logo.png" alt="IRIS" width="160"></p>
 
-**A compiled, statically-typed systems programming language engineered for Autonomous Intelligent Systems (AIS).**
+IRIS is a compiled, statically typed language for software, learning systems,
+and embedded control. This release remains **1.0.0-rc1**.
 
-IRIS bridges low-level hardware control and execution efficiency with high-level machine learning and cognitive ergonomics. It compiles directly to native binaries via an LLVM pipeline, utilizes a deterministic reference-counting garbage collector, and features built-in multi-dimensional tensors, tape-based automatic differentiation, and a multi-level capability-based security sandbox.
+Write ordinary programs with `def`, `val`, `var`, `record`, `choice`, and
+explicit `return`. Use the same language for tensor differentiation, structured
+concurrency, model integration, and checked evolution workflows.
 
-[![CI](https://github.com/moon9t/iris/actions/workflows/ci.yml/badge.svg)](https://github.com/moon9t/iris/actions)
-[![Release](https://img.shields.io/github/v/release/moon9t/iris?label=release)](https://github.com/moon9t/iris/releases)
-[![License](https://img.shields.io/badge/license-GPL--2.0--or--later-blue.svg)](LICENSE)
+```iris
+def main() -> i64 {
+    val answer = 6 * 7;
+    assert(answer == 42);
+    println(f"Hello, IRIS! answer = {answer}");
+    return 0
+}
+```
 
----
+## Start here
 
-## Technical Architecture Overview
+```powershell
+cargo build --release --locked
+.\target\release\iris.exe run examples/01_basics/hello.iris
+.\target\release\iris.exe test projects/ledger/main.iris
+```
 
-IRIS is designed to be the foundational substrate for next-generation intelligent agents, robocar controllers, and high-throughput decision-making systems.
+On Linux/macOS use `./target/release/iris`. Native execution needs LLVM, a
+linker, and the target system libraries. Windows uses LLVM-C and a MinGW
+UCRT64 sysroot; the compiler binary does not bundle that toolchain.
+See [installation](docs/getting-started.md) and
+[dependencies](docs/REQUIREMENTS.md).
+
+## Learn by running
+
+The [example catalog](examples/README.md) progresses from bindings and functions
+through types, ownership, effects, concurrency, data, ML, AIS, and integration.
+Every runnable example checks its results. Examples requiring the compiler host,
+a service, or a board are identified beside their commands.
+
+The [projects](projects/README.md) combine these features into complete programs:
+
+| Project | What you build |
+| --- | --- |
+| [Ledger](projects/ledger/) | Multi-file integer-money ledger with checked errors |
+| [Job pipeline](projects/job_pipeline/) | Structured workers, channels, and atomic completion |
+| [Learning service](projects/learning_service/) | Deterministic neural training, evaluation, registry, and health |
+| [Model gateway](projects/model_gateway/) | Offline protocol checks and a configurable live LLM client |
+| [Robot controller](projects/robotic_actuator_control/) | Bounded actuator control in a deterministic simulation |
+| [Multimodal orchestrator](projects/multimodal_ai_orchestrator/) | Concurrent simulated modalities, tensor fusion, and AIS selection |
+| [Evolution lab](projects/autonomous_evolution_lab/) | Candidate tests, transaction rollback, and audited ORC promotion |
+
+The runnable catalog is the source of truth: [catalog.json](examples/catalog.json).
+Run both execution paths with:
+
+```powershell
+python tools/verify_learning.py --iris target/release/iris.exe
+```
+
+## Current language and runtime
+
+| Area | Current surface and scope |
+| --- | --- |
+| Types | Records, choices, patterns, generics, const parameters, container constructors, traits, blanket implementations, and dynamic trait dispatch |
+| Errors and effects | Options, results, `?`, `try/catch`, declared effect rows, callback effect contracts, and handler replacement |
+| Memory | Reference-counted runtime objects, weak references, checked integer arithmetic and indexing; source borrowing/move checks are lexical annotations |
+| Concurrency | Channels, atomics, mutexes, parallel ranges, async result channels, and a bounded worker executor with cooperative task-group cancellation |
+| Learning | Scalar tape AD, differentiable tensors through closures/branches/loops/traits, `std.nn` training, and external model adapters |
+| AIS | Viability bounds, active inference, agent/model lifecycle, health, degradation, and decision policies; application behavior still needs application-specific validation |
+| Networking and LLMs | Bounded typed TCP, HTTP status/headers/timeouts, chat/tools/embeddings; native HTTPS currently uses Windows WinHTTP |
+| Metaprogramming | Typed analysis and checked source edits under the compiler host; standalone native programs must check availability |
+| Evolution | ORC JIT, ABI-checked generation leases/rollback, and seven-gate `iris evolve`; unrestricted activation is an explicit host API with separate authority |
+| Embedded | Allocation-free scalar component bundles for supported Cortex-M/ESP32 profiles and a restricted Uno profile; board integration and device verification are separate steps |
+| Editor | Extension 1.0.5: completion, hover/effects, navigation, diagnostics, formatting, Test Explorer, and trace-based DAP debugging |
+
+See [language guide](docs/BOOK.md), [language reference](docs/SPEC.md),
+[stdlib reference](docs/stdlib-reference.md), and
+[current boundaries](docs/known-issues.md).
+LLVM/native is the primary execution path. Other export backends have
+operation-specific coverage; exporting a graph does not train a model.
+
+## Build, format, and debug
 
 ```text
-.iris source
-     │
-     ▼
-Lexer → Parser → AST → Lowerer
-                         │
-                         ▼
-                    Block-Parameter SSA IR
-                         │
-                         ▼
-                    Pass Pipeline (15 Optimizer Passes)
-                         │
-                         ▼
-           ┌─────────────┼──────────────┐
-           ▼             ▼              ▼
-     LLVM Codegen  CUDA Backend    ONNX Protobuf
-           │             │              │
-           ▼             ▼              ▼
-        Clang          NVPTX       ONNX Binary
-           │
-           ▼
-     Native Binary
+iris run file.iris
+iris build file.iris -o app
+iris --emit jit file.iris
+iris --strict-effects --emit ir examples/04_safety/effects.iris
+iris fmt file.iris
+iris fmt file.iris --check
+iris test file.iris --no-color
+iris docs file.iris --output api.html
 ```
 
-### Key Architectural Pillars
+Install the [VS Code extension](vscode-iris/README.md) and point
+`iris.executablePath` at an installed compiler copy. The debugger uses interpreter
+traces; native process attachment and register inspection are not provided.
 
-1. **Native Performance & Optimization:** Compiles to highly optimized native machine code using LLVM. The compiler pipeline includes 15 distinct passes (such as LICM, CSE, DCE, and Strength Reduction) and supports SIMD auto-vectorization and a CUDA/NVPTX backend for GPU kernel execution.
-2. **First-Class Compute Engine:** Tensors are native types (`tensor<f32, [M, K]>`) with compile-time symbolic shape-checking. Includes a general Einstein Summation (`einsum`) contraction engine, dense/sparse tensor conversions, and tape-based reverse-mode automatic differentiation.
-3. **Deterministic Memory Management:** Employs a zero-pause reference-counting garbage collector embedded in the C runtime, utilizing an efficient side-table tracing mechanism (`iris_retain`, `iris_release`) with deep-free semantics to prevent latency spikes common in tracing GCs.
-4. **Capability-Based Security Sandbox:** A robust security audit layer allows fine-grained, run-time restriction of system capabilities (filesystem reads/writes, outbound connections, process spawning, and FFI). Includes path traversal sanitization and audit log exports.
-5. **Actor-Model & Async Concurrency:** First-class async tasks, awaitable futures, light-weight thread spawning, atomic variables, and native thread-safe channels (`channel<T>`) for secure concurrent message passing.
-6. **Multi-Platform FFI:** Zero-cost dynamic linking with C libraries, a Python runtime wrapper for embedded scripting, and native Rust cdylib integrations.
+## Contribute
 
----
-
-## Quick Start
-
-### Installation
-
-For development, compile IRIS directly from source using Cargo (requires Rust 1.75+ and Clang 17+ on PATH):
-
-```sh
-# Clone and compile in release mode
-git clone https://github.com/moon9t/IRIS.git
-cd IRIS
-cargo install --path .
-
-# Verify the compiler installation
-iris --version
+```text
+cargo fmt --all -- --check
+cargo clippy --all-targets -- -D warnings
+cargo test --no-fail-fast
 ```
 
-### Running Your First Program
-
-Write a simple program to `hello.iris`:
-
-```iris
-def main() -> i64 {
-    print("Hello, IRIS!");
-    0
-}
-```
-
-Execute it instantly using the LLVM JIT engine, or build a native binary:
-
-```sh
-# Run via JIT
-iris run hello.iris
-
-# Compile to a native executable
-iris build hello.iris
-./hello
-```
-
----
-
-## Progressive Examples & Sample Projects
-
-The IRIS repository includes a complete suite of progressive example programs and complex showcases to help developers get started:
-
-### Progressive Examples (`examples/`)
-Progress through the language from core basics to advanced ML and actor-model systems:
-* **[01_basics/](examples/01_basics/)** — Variables, strings, f-strings, control flow, arrays.
-* **[02_functions/](examples/02_functions/)** — Closures, recursion, lambdas.
-* **[03_data_structures_algorithms/](examples/03_data_structures_algorithms/)** — Maps, sorting, math utilities.
-* **[04_types_and_traits/](examples/04_types_and_traits/)** — Structs, enums, traits, pattern matching, generics.
-* **[05_systems/](examples/05_systems/)** — Concurrency, networking, FFI, databases.
-* **[06_machine_learning/](examples/06_machine_learning/)** — Autodiff, tensor operations, neural network layers, dataset preprocessing.
-* **[07_applications/](examples/07_applications/)** — End-to-end applications (e.g., `ais_agent.iris`, `game_of_life.iris`).
-
-For details on how to run them, see the [Examples README](examples/README.md).
-
-### Sample Projects (`projects/`)
-Explore real-world architecture examples using IRIS:
-* **[ML Backends Demo](projects/ml_backends_demo/)** — Demonstrates native neural network training (`std.nn`), tensor contractions (`einsum`), loss metrics, and external runtime shims for **ONNX Runtime**, **PyTorch/LibTorch**, and **TensorFlow**.
-* **[Robotic Actuator Control](projects/robotic_actuator_control/)** — Visualizes hardware control loops and capability-based filesystem boundaries.
-* **[Multimodal AI Orchestrator](projects/multimodal_ai_orchestrator/)** — Showcases actor-model messaging channels (`channel<T>`) for sensory input routing.
-
----
-
-## Feature Matrix
-
-| Category | Supported Capabilities |
-| :--- | :--- |
-| **Type System** | `i32`, `i64`, `f32`, `f64`, `bool`, `str`, fixed arrays, lists, maps, tuples, records, enums, generics, and traits |
-| **Numeric & Math** | Extended integer types (`u8`, `i8`, `u32`, `u64`, `usize`), IEEE-754 float precision, math constants, and stochastic paths |
-| **ML & Tensors** | First-class `tensor<DType, Shape>` with symbolic dims, dense/sparse representations, tape-based reverse-mode autodiff, and einsum |
-| **AIS Framework** | Agent execution loop, multi-channel perception pipelines, decision policies, and reinforcement learning primitives |
-| **Concurrency** | Actor-style `spawn`, parallel `par for` range loops, `async/await`, atomic scalar primitives, mutexes, and channels |
-| **Error Handling** | Monadic `option<T>` and `result<T, E>` types, propagating `?` operator, and exhaustive match pattern checking |
-| **Sandboxing** | Fine-grained global security policies, path traversal defense, FFI capability checks, and real-time audit logging |
-| **FFI Integrations** | Dynamic C FFI (`dlopen`/`dlsym`), embedded Python evaluation engine, and native Rust cdylib adapters |
-| **Tooling & IDE** | Fully-featured LSP server, DAP debugger protocol, verbose execution profiler, package manager, and a REPL |
-
----
-
-## Language Specifications
-
-### Type Declarations & Control Flow
-
-IRIS supports strong, static type inference with options for explicit annotations.
-
-```iris
-record Point {
-    x: f64,
-    y: f64
-}
-
-choice Shape {
-    Circle(f64),
-    Rect(Point, Point),
-    Unknown
-}
-
-def describe_shape(s: Shape) -> i64 {
-    when s {
-        Shape.Circle(r) => {
-            print("Circle radius");
-            0
-        }
-        Shape.Rect(p1, p2) => {
-            print("Rectangle boundary");
-            1
-        }
-        Shape.Unknown => -1,
-    }
-}
-```
-
-### Machine Learning, Tensors, & Autodiff
-
-Create, manipulate, and differentiate mathematical models natively.
-
-```iris
-bring std.ml
-bring std.tensor
-
-def train_step(x: tensor<f32, [1, 4]>, y: f32, weights: tensor<f32, [4, 1]>) -> tensor<f32, [4, 1]> {
-    // Autodiff dual numbers can track gradients through operations
-    val target = grad(y);
-    
-    // Convert arrays or tensors to sparse matrices for memory efficiency
-    val sparse_data = sparsify([0.0, 1.5, 0.0, 4.2]);
-    val dense_back = densify(sparse_data);
-    
-    // Matrix contractions via Einstein Summation
-    val pred = einsum("ik,kj->ij", x, weights);
-    
-    weights
-}
-```
-
-### Parallel & Concurrent Programming
-
-IRIS supports native channels, atomic operations, and parallel execution.
-
-```iris
-def parallel_computation(n: i64) -> [f64; 1000] {
-    var output = [0.0; 1000];
-    
-    // Run loop iterations concurrently across available processor cores
-    par for i in 0..1000 {
-        output[i] = random() * 100.0;
-    }
-    
-    output
-}
-
-def main() -> i64 {
-    val ch = channel();
-    
-    spawn {
-        val calculated = 42;
-        send(ch, calculated);
-    }
-    
-    val result = recv(ch);
-    print("Received concurrent token");
-    0
-}
-```
-
-### capability-Based Sandboxing
-
-Enforce strict operational constraints at runtime.
-
-```iris
-bring std.os
-bring std.fs
-
-def main() -> i64 {
-    // Program can be run with `--sandbox` flag to restrict capabilities.
-    // Filesystem traversal like "../../../etc/passwd" is caught by the compiler
-    // and C-runtime path verification before any disk access.
-    
-    val file_content = fs.read_text("safe_local_data.txt");
-    0
-}
-```
-
----
-
-## Compiler Pass Pipeline
-
-The IRIS compiler utilizes a block-parameter SSA (Static Single Assignment) intermediate representation resembling MLIR, completely eliminating phi nodes by passing arguments directly across CFG branches.
-
-Before codegen, the `PassManager` drives **15 structural and optimization passes** to ensure correctness and maximize runtime efficiency:
-
-1. **`HmTypeInferPass`** — Resolves type variables and implicit placeholders using Hindley-Milner union-find unification.
-2. **`ValidatePass`** — Verifies SSA invariants, dominance criteria, and CFG structural integrity.
-3. **`TypeInferPass`** — Confirms global type consistency and enforces static constraints.
-4. **`ConstFoldPass`** — Performs aggressive constant folding (evaluating static math expressions at compile time) and algebraic simplifications.
-5. **`StrengthReducePass`** — Replaces costly operations with cheaper equivalents (e.g., converting powers to multiplications, or division by constants to multiplications).
-6. **`CopyPropPass`** — Dedupes redundant constants and propagates values transitively across registers to reduce stack pressure.
-7. **`OpExpandPass`** — Expands high-level element-wise tensor operations into optimized execution loops.
-8. **`LicmPass`** — Performs Loop-Invariant Code Motion, hoisting invariant expressions out of loop bodies into preheaders.
-9. **`InlinePass`** — Inlines small, non-recursive functions to eliminate call frame overhead.
-10. **`LoopUnrollPass`** — Unrolls small loops with constant limits (up to 8 iterations) to eliminate branch penalties.
-11. **`ExhaustivePass`** — Validates pattern matching `when` expressions, ensuring enums and choices are handled exhaustively.
-12. **`DcePass`** — Eliminates dead code, dead parameters, and unreachable execution blocks.
-13. **`CsePass`** — Resolves and merges common subexpressions within the same dominance hierarchy.
-14. **`ShapeCheckPass`** — Statically verifies that tensor shapes align across contractions and matrix operations.
-15. **`GcAnnotatePass`** — Analyzes reference lifespans and inserts optimal `Retain`/`Release` calls to drive the reference-counting GC.
-
----
-
-## Standard Library (35 Modules)
-
-IRIS provides a production-ready standard library embedded directly into the compiler executable:
-
-* **Computation:** `std.math` (GCD, LCM, trig, constants), `std.tensor` (matmul, contractions, slicing), `std.stochastic` (normal/Brownian distribution generators), `std.ml` (regression, normalizers, loss), `std.nn` (neural network layers, conv2d, LSTM), `std.rl` (Q-learning, SARSA, replay buffers).
-* **Data Structures:** `std.iter` (HOF transformers), `std.set` (hash-sets), `std.queue` (FIFO), `std.heap` (min-heap/priority), `std.deque` (double-ended queue), `std.bitset` (compact bit arrays), `std.table` (in-memory relational operations), `std.dataframe` (structured analysis), `std.dataset` (batch loaders).
-* **Systems & I/O:** `std.fs` (file read/write), `std.path` (filepath manipulation), `std.os` (environment, command execution), `std.time` (timestamps, performance gauges), `std.log` (structured runtime logging).
-* **Serialization & Networking:** `std.json` (stringify, parse), `std.csv` (row emission, parsing), `std.http` (client engine), `std.http_server` (threaded HTTP server framework), `std.sql` (SQLite driver), `std.kv` (embedded SQLite key-value store).
-* **Security & FFI:** `std.crypto` (SHA256, UUID, encoding), `std.ffi` (C dynamic linking, Python wrappers, Rust cdylib), `std.async` (asynchronous schedulers).
-* **Graphics & Testing:** `std.svg` (vector graphics), `std.termplot` (terminal terminal graphing), `std.testing` (assertion suites).
-
----
-
-## Compiler Tooling Ecosystem
-
-IRIS includes modern development tools out of the box:
-
-### Language Server Protocol (LSP)
-
-The embedded LSP server powers syntax coloring, diagnostics, type tooltips on hover, and code actions (quick-fixes and best-practice tips):
-```sh
-iris lsp
-```
-
-### Debug Adapter Protocol (DAP)
-
-A native DAP server allows standard debugger integration to set breakpoints, step through code, inspect variables, and watch active memory states:
-```sh
-iris dap
-```
-
-### Performance Profiler
-
-Run any program with the verbose profiler to record function call counts, runtime allocations, execution durations, and generate interactive SVG flame graphs:
-```sh
-# Generate a folded stack file for speedscope or flamegraph.pl
-iris profile --folded program.iris
-
-# Emit a completed SVG Flame Graph directly
-iris profile --svg output.svg program.iris
-```
-
-### Package Manager
-
-Create new projects, handle remote dependencies, and compile libraries:
-```sh
-# Initialize a new workspace
-iris pkg init my_agent
-
-# Add a dependency
-iris pkg add serde
-
-# Build the project dependencies and code
-iris pkg build
-```
-
-### Interactive REPL
-
-Experiment with expressions and inspect types interactively with balanced multiline evaluation:
-```sh
-iris repl
-```
-
-*REPL Meta-commands:* Use `:help` to list commands, `:env` to dump active bindings, `:type <expr>` to see type signatures, and `:ir <expr>` to inspect generated SSA IR.
-
-### Visual Studio Code Extension
-
-To get full syntax highlighting, hover documentation, real-time diagnostics, auto-formatting, debugging integration (DAP), and a status bar showing the active compiler version, install the official **IRIS VS Code Extension** located in the [vscode-iris/](vscode-iris/) directory.
-
-Refer to the [VS Code Extension README](vscode-iris/README.md) for installation and configuration instructions.
-
----
-
-## Verification Pipeline
-
-IRIS maintains a rigorous testing harness to ensure compiler correctness and prevent performance regressions:
-
-* **Regression Tests:** 149 integration test suites (~1,100 specific assertions) in the `tests/` directory verifying everything from type unification to FFI boundaries.
-* **Continuous Fuzzing:** Embedded fuzzing targets in `fuzz/` test the robustness of the lexer, parser, and IR lowerer under anomalous inputs.
-* **Performance Regressions:** Benchmarks in `benches/` continuously profile tree traversals, matrix multiplications, database indexing, and mathematical integration algorithms.
-
----
-
-## License
-
-This project is licensed under the **GNU General Public License v2.0 (or later)**. See the [LICENSE](LICENSE) file for the complete text.
-
-Copyright (C) 2024-2026 Moon & IRIS Project Contributors.
+The learning catalog is also checked by `cargo test --test examples_showcase`.
+Tests that depend on external toolchains report their capability requirements.
+Use asserting reproductions when reporting defects.
+
+Source: [Eclipse-Softworks/IRIS](https://github.com/Eclipse-Softworks/IRIS).
+Licensed under [GPL-2.0-or-later](LICENSE).

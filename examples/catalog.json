@@ -1,0 +1,295 @@
+{
+  "version": "1.0.0-rc1",
+  "entries": [
+    {
+      "path": "examples/01_basics/hello.iris",
+      "mode": "dual",
+      "expected": "Hello, IRIS! answer = 42"
+    },
+    {
+      "path": "examples/01_basics/bindings.iris",
+      "mode": "dual",
+      "expected": "bindings: ok"
+    },
+    {
+      "path": "examples/01_basics/control_flow.iris",
+      "mode": "dual",
+      "expected": "control flow: ok"
+    },
+    {
+      "path": "examples/01_basics/collections.iris",
+      "mode": "dual",
+      "expected": "collections: ok"
+    },
+    {
+      "path": "examples/01_basics/strings.iris",
+      "mode": "dual",
+      "expected": "strings: ok"
+    },
+    {
+      "path": "examples/02_functions/functions.iris",
+      "mode": "dual",
+      "expected": "functions: ok"
+    },
+    {
+      "path": "examples/02_functions/closures.iris",
+      "mode": "dual",
+      "expected": "closures: ok"
+    },
+    {
+      "path": "examples/02_functions/modules.iris",
+      "mode": "dual",
+      "expected": "modules: ok"
+    },
+    {
+      "path": "examples/03_types/records_patterns.iris",
+      "mode": "dual",
+      "expected": "records and patterns: ok"
+    },
+    {
+      "path": "examples/03_types/generics.iris",
+      "mode": "dual",
+      "expected": "generics: ok"
+    },
+    {
+      "path": "examples/03_types/traits.iris",
+      "mode": "dual",
+      "expected": "traits: ok"
+    },
+    {
+      "path": "examples/03_types/errors.iris",
+      "mode": "dual",
+      "expected": "errors: ok"
+    },
+    {
+      "path": "examples/04_safety/ownership.iris",
+      "mode": "dual",
+      "expected": "ownership: ok"
+    },
+    {
+      "path": "examples/04_safety/effects.iris",
+      "mode": "dual",
+      "expected": "effects: ok"
+    },
+    {
+      "path": "examples/04_safety/handlers.iris",
+      "mode": "dual",
+      "expected": "handlers: ok"
+    },
+    {
+      "path": "examples/05_concurrency/channels.iris",
+      "mode": "dual",
+      "expected": "channels: ok"
+    },
+    {
+      "path": "examples/05_concurrency/async.iris",
+      "mode": "dual",
+      "expected": "async: ok"
+    },
+    {
+      "path": "examples/05_concurrency/task_groups.iris",
+      "mode": "dual",
+      "expected": "task groups: ok"
+    },
+    {
+      "path": "examples/06_data/json_csv.iris",
+      "mode": "dual",
+      "expected": "json and csv: ok"
+    },
+    {
+      "path": "examples/07_ml/scalar_autodiff.iris",
+      "mode": "dual",
+      "expected": "scalar autodiff: ok"
+    },
+    {
+      "path": "examples/07_ml/tensor_autodiff.iris",
+      "mode": "dual",
+      "expected": "tensor autodiff: ok"
+    },
+    {
+      "path": "examples/07_ml/neural_layer.iris",
+      "mode": "dual",
+      "expected": "neural layer: ok"
+    },
+    {
+      "path": "examples/08_ais/viability.iris",
+      "mode": "dual",
+      "expected": "viability: ok"
+    },
+    {
+      "path": "examples/08_ais/lifecycle.iris",
+      "mode": "dual",
+      "expected": "lifecycle: ok"
+    },
+    {
+      "path": "examples/09_evolution/transactions.iris",
+      "mode": "dual",
+      "expected": "transactions: ok"
+    },
+    {
+      "path": "examples/09_evolution/speculation.iris",
+      "mode": "dual",
+      "expected": "speculation: ok"
+    },
+    {
+      "path": "examples/09_evolution/typed_edit.iris",
+      "mode": "host",
+      "expected": "typed edit: ok"
+    },
+    {
+      "path": "examples/10_integration/llm_protocol.iris",
+      "mode": "dual",
+      "expected": "llm protocol: ok"
+    },
+    {
+      "path": "examples/10_integration/checked_network.iris",
+      "mode": "dual",
+      "expected": "checked network: ok"
+    },
+    {
+      "path": "examples/10_integration/ros2_geometry.iris",
+      "mode": "dual",
+      "expected": "ros2 geometry: ok"
+    },
+    {
+      "path": "examples/embedded/uno_button_led.iris",
+      "mode": "embedded",
+      "expected": ""
+    },
+    {
+      "path": "examples/embedded/control_loop.iris",
+      "mode": "embedded",
+      "expected": ""
+    },
+    {
+      "path": "projects/ledger/main.iris",
+      "mode": "dual",
+      "expected": "ledger: opening=10000, spent=2500, balance=7500; overdraft rejected"
+    },
+    {
+      "path": "projects/ledger/domain.iris",
+      "mode": "module",
+      "expected": ""
+    },
+    {
+      "path": "projects/job_pipeline/main.iris",
+      "mode": "dual",
+      "expected": "job pipeline: 8 jobs, checksum=204"
+    },
+    {
+      "path": "projects/job_pipeline/jobs.iris",
+      "mode": "module",
+      "expected": ""
+    },
+    {
+      "path": "projects/learning_service/main.iris",
+      "mode": "dual",
+      "expected": "learning service: trained, evaluated, registered; degradation checked"
+    },
+    {
+      "path": "projects/learning_service/model.iris",
+      "mode": "module",
+      "expected": ""
+    },
+    {
+      "path": "projects/model_gateway/main.iris",
+      "mode": "dual",
+      "expected": "model gateway: offline protocol, action validation, provider errors checked"
+    },
+    {
+      "path": "projects/model_gateway/policy.iris",
+      "mode": "module",
+      "expected": ""
+    },
+    {
+      "path": "projects/model_gateway/live.iris",
+      "mode": "manual",
+      "expected": ""
+    },
+    {
+      "path": "projects/robotic_actuator_control/src/main.iris",
+      "mode": "dual",
+      "expected": "robot controller: simulated target reached within actuator bounds"
+    },
+    {
+      "path": "projects/robotic_actuator_control/src/policy.iris",
+      "mode": "module",
+      "expected": ""
+    },
+    {
+      "path": "projects/multimodal_ai_orchestrator/src/main.iris",
+      "mode": "dual",
+      "expected": "multimodal orchestrator: 3 producers, tensor fusion, AIS action=1"
+    },
+    {
+      "path": "projects/multimodal_ai_orchestrator/src/features.iris",
+      "mode": "module",
+      "expected": ""
+    },
+    {
+      "path": "projects/autonomous_evolution_lab/main.iris",
+      "mode": "dual",
+      "expected": "evolution lab: candidate selection checked; run iris evolve for promotion"
+    },
+    {
+      "path": "projects/autonomous_evolution_lab/baseline.iris",
+      "mode": "module",
+      "expected": ""
+    },
+    {
+      "path": "projects/autonomous_evolution_lab/candidate.iris",
+      "mode": "module",
+      "expected": ""
+    },
+    {
+      "path": "examples/03_types/macros.iris",
+      "mode": "dual",
+      "expected": "macros: ok"
+    },
+    {
+      "path": "examples/04_safety/weak_references.iris",
+      "mode": "dual",
+      "expected": "weak references: ok"
+    },
+    {
+      "path": "examples/05_concurrency/parallel.iris",
+      "mode": "dual",
+      "expected": "parallel: ok"
+    },
+    {
+      "path": "examples/05_concurrency/runtime_soak.iris",
+      "mode": "native",
+      "expected": "runtime soak: ok"
+    },
+    {
+      "path": "examples/06_data/files.iris",
+      "mode": "dual",
+      "expected": "files: ok"
+    },
+    {
+      "path": "examples/06_data/database.iris",
+      "mode": "dual",
+      "expected": "database: ok"
+    },
+    {
+      "path": "examples/10_integration/ffi_cells.iris",
+      "mode": "dual",
+      "expected": "ffi cells: ok"
+    },
+    {
+      "path": "examples/07_ml/model_graph.iris",
+      "mode": "graph",
+      "expected": "layer activated = ReLU(hidden)"
+    },
+    {
+      "path": "examples/10_integration/local_model.iris",
+      "mode": "manual",
+      "expected": "local model: loaded and closed"
+    },
+    {
+      "path": "examples/10_integration/ros2_topics.iris",
+      "mode": "manual",
+      "expected": "ros2 topics: vector payload verified"
+    }
+  ]
+}

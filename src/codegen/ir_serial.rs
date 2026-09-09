@@ -19,7 +19,7 @@ use crate::ir::block::{BlockId, IrBlock};
 use crate::ir::function::{FunctionId, IrFunction, Param, SpanTable};
 use crate::ir::instr::{BinOp, InstrId, IrInstr, ScalarUnaryOp, TensorOp};
 use crate::ir::module::IrModule;
-use crate::ir::types::{DType, Dim, IrType, Shape};
+use crate::ir::types::{DType, Dim, IrType, Shape, TraitMethodSig};
 use crate::ir::value::{BlockParam, ValueDef, ValueId};
 
 // ── opcodes ─────────────────────────────────────────────────────────────────
@@ -76,6 +76,10 @@ const OP_GRAD_VALUE: u8 = 0x32;
 const OP_GRAD_TANGENT: u8 = 0x33;
 const OP_SPARSIFY: u8 = 0x34;
 const OP_DENSIFY: u8 = 0x35;
+/// Appended rather than slotted next to OP_DENSIFY: these values are a
+/// serialisation format, so renumbering existing ones would invalidate any
+/// previously written IR.
+const OP_SPARSE_NNZ: u8 = 0x7E;
 const OP_STR_LEN: u8 = 0x36;
 const OP_STR_CONCAT: u8 = 0x37;
 const OP_PRINT: u8 = 0x38;
@@ -142,6 +146,16 @@ const OP_DB_QUERY: u8 = 0x71;
 const OP_DB_CLOSE: u8 = 0x72;
 const OP_DB_EXEC_PARAMS: u8 = 0x73;
 const OP_DB_QUERY_PARAMS: u8 = 0x74;
+const OP_TASK_GROUP_NEW: u8 = 0x75;
+const OP_TASK_GROUP_SPAWN: u8 = 0x76;
+const OP_TASK_GROUP_JOIN: u8 = 0x77;
+const OP_TASK_GROUP_CANCEL: u8 = 0x78;
+// Phase 91: Dynamic dispatch (trait objects)
+const OP_MAKE_TRAIT_OBJECT: u8 = 0x79;
+const OP_DYN_CALL: u8 = 0x7A;
+const OP_RESUME_CONT: u8 = 0x7B;
+const OP_PUSH_HANDLER: u8 = 0x7C;
+const OP_POP_HANDLER: u8 = 0x7D;
 
 const MAGIC: &[u8; 4] = b"IRIS";
 const VERSION: u8 = 1;
@@ -227,6 +241,8 @@ impl Writer {
 
     fn ty(&mut self, t: &IrType) {
         match t {
+            // Opaque tape handle: a tag and nothing else to encode.
+            IrType::TapeRef => self.u8(0x16),
             IrType::Scalar(d) => {
                 self.u8(0x01);
                 self.dtype(*d);
@@ -328,6 +344,26 @@ impl Writer {
                 self.u8(0x12);
                 self.ty(k);
                 self.ty(v);
+            }
+            IrType::TaskGroup => {
+                self.u8(0x13);
+            }
+            IrType::WeakRef(inner) => {
+                self.u8(0x14);
+                self.ty(inner);
+            }
+            IrType::TraitObject { name, methods } => {
+                self.u8(0x15);
+                self.str(name);
+                self.u32(methods.len() as u32);
+                for m in methods {
+                    self.str(&m.name);
+                    self.u32(m.params.len() as u32);
+                    for p in &m.params {
+                        self.ty(p);
+                    }
+                    self.ty(&m.ret);
+                }
             }
         }
     }
@@ -564,6 +600,37 @@ impl Writer {
                 self.u32(*field_index as u32);
                 self.ty(result_ty);
             }
+            IrInstr::MakeTraitObject {
+                result,
+                value,
+                target_trait,
+                concrete_ty,
+                result_ty,
+            } => {
+                self.u8(OP_MAKE_TRAIT_OBJECT);
+                self.vid(*result);
+                self.vid(*value);
+                self.str(target_trait);
+                self.str(concrete_ty);
+                self.ty(result_ty);
+            }
+            IrInstr::DynCall {
+                result,
+                obj,
+                method_name,
+                args,
+                result_ty,
+            } => {
+                self.u8(OP_DYN_CALL);
+                self.vid(*result);
+                self.vid(*obj);
+                self.str(method_name);
+                self.u32(args.len() as u32);
+                for a in args {
+                    self.vid(*a);
+                }
+                self.ty(result_ty);
+            }
             IrInstr::MakeVariant {
                 result,
                 variant_idx,
@@ -643,12 +710,14 @@ impl Writer {
                 closure,
                 args,
                 result_ty,
+                pass_env,
             } => {
                 self.u8(OP_CALL_CLOSURE);
                 self.opt_vid(*result);
                 self.vid(*closure);
                 self.vids(args);
                 self.ty(result_ty);
+                self.bool(*pass_env);
             }
             IrInstr::AllocArray {
                 result,
@@ -759,10 +828,15 @@ impl Writer {
                 self.vid(*operand);
                 self.ty(result_ty);
             }
-            IrInstr::ChanNew { result, elem_ty } => {
+            IrInstr::ChanNew {
+                result,
+                elem_ty,
+                capacity,
+            } => {
                 self.u8(OP_CHAN_NEW);
                 self.vid(*result);
                 self.ty(elem_ty);
+                self.vid(*capacity);
             }
             IrInstr::ChanSend { chan, value } => {
                 self.u8(OP_CHAN_SEND);
@@ -784,10 +858,33 @@ impl Writer {
                 self.str(body_fn);
                 self.vids(args);
             }
+            IrInstr::TaskGroupNew { result } => {
+                self.u8(OP_TASK_GROUP_NEW);
+                self.vid(*result);
+            }
+            IrInstr::TaskGroupSpawn {
+                group,
+                body_fn,
+                args,
+            } => {
+                self.u8(OP_TASK_GROUP_SPAWN);
+                self.vid(*group);
+                self.str(body_fn);
+                self.vids(args);
+            }
+            IrInstr::TaskGroupJoin { group } => {
+                self.u8(OP_TASK_GROUP_JOIN);
+                self.vid(*group);
+            }
+            IrInstr::TaskGroupCancel { group } => {
+                self.u8(OP_TASK_GROUP_CANCEL);
+                self.vid(*group);
+            }
             IrInstr::ParFor {
                 var,
                 start,
                 end,
+                inclusive,
                 body_fn,
                 args,
             } => {
@@ -795,6 +892,7 @@ impl Writer {
                 self.vid(*var);
                 self.vid(*start);
                 self.vid(*end);
+                self.bool(*inclusive);
                 self.str(body_fn);
                 self.vids(args);
             }
@@ -939,6 +1037,11 @@ impl Writer {
                 self.vid(*operand);
                 self.ty(ty);
             }
+            IrInstr::SparseNnz { result, operand } => {
+                self.u8(OP_SPARSE_NNZ);
+                self.vid(*result);
+                self.vid(*operand);
+            }
             IrInstr::StrLen { result, operand } => {
                 self.u8(OP_STR_LEN);
                 self.vid(*result);
@@ -1009,7 +1112,7 @@ impl Writer {
                 self.vid(*operand);
                 self.vid(*count);
             }
-            IrInstr::Panic { msg } => {
+            IrInstr::Panic { msg, .. } => {
                 self.u8(OP_PANIC);
                 self.vid(*msg);
             }
@@ -1404,6 +1507,29 @@ impl Writer {
                 }
                 self.ty(result_ty);
             }
+            IrInstr::PushHandler { arms } => {
+                self.u8(OP_PUSH_HANDLER);
+                self.u8(arms.len() as u8);
+                for arm in arms {
+                    self.str(&arm.effect_name);
+                    self.str(&arm.func_name);
+                    self.u32(arm.num_args as u32);
+                    self.bool(arm.has_resume);
+                }
+            }
+            IrInstr::PopHandler => {
+                self.u8(OP_POP_HANDLER);
+            }
+            IrInstr::ResumeCont {
+                cont,
+                value,
+                result,
+            } => {
+                self.u8(OP_RESUME_CONT);
+                self.vid(*cont);
+                self.vid(*value);
+                self.vid(*result);
+            }
         }
     }
 }
@@ -1615,6 +1741,28 @@ impl<'a> Reader<'a> {
                 let k = self.ty()?;
                 let v = self.ty()?;
                 IrType::Map(Box::new(k), Box::new(v))
+            }
+            0x13 => IrType::TaskGroup,
+            0x14 => IrType::WeakRef(Box::new(self.ty()?)),
+            0x15 => {
+                let name = self.str()?;
+                let n = self.u32()? as usize;
+                let mut methods = Vec::with_capacity(n);
+                for _ in 0..n {
+                    let mname = self.str()?;
+                    let pn = self.u32()? as usize;
+                    let mut params = Vec::with_capacity(pn);
+                    for _ in 0..pn {
+                        params.push(self.ty()?);
+                    }
+                    let ret = self.ty()?;
+                    methods.push(TraitMethodSig {
+                        name: mname,
+                        params,
+                        ret: Box::new(ret),
+                    });
+                }
+                IrType::TraitObject { name, methods }
             }
             t => return Err(format!("unknown type tag 0x{:02x}", t)),
         })
@@ -1928,11 +2076,13 @@ impl<'a> Reader<'a> {
                 let closure = self.vid()?;
                 let args = self.vids()?;
                 let result_ty = self.ty()?;
+                let pass_env = self.bool()?;
                 IrInstr::CallClosure {
                     result,
                     closure,
                     args,
                     result_ty,
+                    pass_env,
                 }
             }
             OP_ALLOC_ARRAY => {
@@ -2047,7 +2197,12 @@ impl<'a> Reader<'a> {
             OP_CHAN_NEW => {
                 let result = self.vid()?;
                 let elem_ty = self.ty()?;
-                IrInstr::ChanNew { result, elem_ty }
+                let capacity = self.vid()?;
+                IrInstr::ChanNew {
+                    result,
+                    elem_ty,
+                    capacity,
+                }
             }
             OP_CHAN_SEND => {
                 let chan = self.vid()?;
@@ -2069,16 +2224,100 @@ impl<'a> Reader<'a> {
                 let args = self.vids()?;
                 IrInstr::Spawn { body_fn, args }
             }
+            OP_TASK_GROUP_NEW => {
+                let result = self.vid()?;
+                IrInstr::TaskGroupNew { result }
+            }
+            OP_TASK_GROUP_SPAWN => {
+                let group = self.vid()?;
+                let body_fn = self.str()?;
+                let args = self.vids()?;
+                IrInstr::TaskGroupSpawn {
+                    group,
+                    body_fn,
+                    args,
+                }
+            }
+            OP_TASK_GROUP_JOIN => {
+                let group = self.vid()?;
+                IrInstr::TaskGroupJoin { group }
+            }
+            OP_TASK_GROUP_CANCEL => {
+                let group = self.vid()?;
+                IrInstr::TaskGroupCancel { group }
+            }
+            OP_MAKE_TRAIT_OBJECT => {
+                let result = self.vid()?;
+                let value = self.vid()?;
+                let target_trait = self.str()?;
+                let concrete_ty = self.str()?;
+                let result_ty = self.ty()?;
+                IrInstr::MakeTraitObject {
+                    result,
+                    value,
+                    target_trait,
+                    concrete_ty,
+                    result_ty,
+                }
+            }
+            OP_DYN_CALL => {
+                let result = self.vid()?;
+                let obj = self.vid()?;
+                let method_name = self.str()?;
+                let n = self.u32()? as usize;
+                let mut args = Vec::with_capacity(n);
+                for _ in 0..n {
+                    args.push(self.vid()?);
+                }
+                let result_ty = self.ty()?;
+                IrInstr::DynCall {
+                    result,
+                    obj,
+                    method_name,
+                    args,
+                    result_ty,
+                }
+            }
+            OP_RESUME_CONT => {
+                let cont = self.vid()?;
+                let value = self.vid()?;
+                let result = self.vid()?;
+                IrInstr::ResumeCont {
+                    cont,
+                    value,
+                    result,
+                }
+            }
+            OP_PUSH_HANDLER => {
+                let narms = self.u8()? as usize;
+                let mut arms = Vec::with_capacity(narms);
+                for _ in 0..narms {
+                    let effect_name = self.str()?;
+                    let func_name = self.str()?;
+                    let num_args = self.u32()? as usize;
+                    let has_resume = self.bool()?;
+                    arms.push(crate::ir::instr::HandlerArm {
+                        effect_name,
+                        func_name,
+                        num_args,
+                        has_resume,
+                    });
+                }
+                IrInstr::PushHandler { arms }
+            }
+            OP_POP_HANDLER => IrInstr::PopHandler,
             OP_PAR_FOR => {
                 let var = self.vid()?;
                 let start = self.vid()?;
                 let end = self.vid()?;
+                let inclusive = self.bool()?;
                 let body_fn = self.str()?;
                 let args = self.vids()?;
                 IrInstr::ParFor {
                     var,
                     start,
                     end,
+                    inclusive,
                     body_fn,
                     args,
                 }
@@ -2197,6 +2436,11 @@ impl<'a> Reader<'a> {
                     ty,
                 }
             }
+            OP_SPARSE_NNZ => {
+                let result = self.vid()?;
+                let operand = self.vid()?;
+                IrInstr::SparseNnz { result, operand }
+            }
             OP_STR_LEN => {
                 let result = self.vid()?;
                 let operand = self.vid()?;
@@ -2269,7 +2513,12 @@ impl<'a> Reader<'a> {
             }
             OP_PANIC => {
                 let msg = self.vid()?;
-                IrInstr::Panic { msg }
+                // The serial format carries no source position; a deserialised
+                // panic falls back to the span table.
+                IrInstr::Panic {
+                    msg,
+                    span_byte: None,
+                }
             }
             OP_VALUE_TO_STR => {
                 let result = self.vid()?;
@@ -2858,5 +3107,6 @@ fn deserialize_function(r: &mut Reader) -> Result<IrFunction, String> {
         attrs: Vec::new(),
         span_table: SpanTable::default(),
         capture_count: 0,
+        is_const: false,
     })
 }

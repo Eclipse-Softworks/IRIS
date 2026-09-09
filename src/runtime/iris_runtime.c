@@ -23,7 +23,35 @@
 
 #include <sys/types.h>
 
-#ifdef _WIN32
+#if defined(_MSC_VER)
+  #define IRIS_THREAD_LOCAL __declspec(thread)
+#elif defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
+  #define IRIS_THREAD_LOCAL _Thread_local
+#else
+  #define IRIS_THREAD_LOCAL __thread
+#endif
+
+/* WASM/WASI: wasi-libc provides standard C + POSIX headers below.
+   Socket/terminal headers exist in wasi-libc but the function
+   declarations are absent in WASI preview 1 (no networking/termios).
+   WASI preview 2 (__wasip2__) has wasi-sockets for networking. */
+/* Stub flag: 1 on WASM P1 (no networking), 0 on native/P2 */
+#if defined(__wasm__)
+  #if !defined(__wasip2__)
+    #define __IRIS_WASM_STUB 1
+  #endif
+  #include <unistd.h>
+  #include <dirent.h>
+  #include <sys/stat.h>
+  #include <dlfcn.h>
+  #include <poll.h>
+  #ifdef __wasip2__
+    #include <sys/socket.h>
+    #include <netinet/in.h>
+    #include <arpa/inet.h>
+    #include <netdb.h>
+  #endif
+#elif defined(_WIN32)
   #include <winsock2.h>
   #include <ws2tcpip.h>
   #include <windows.h>
@@ -42,6 +70,7 @@
   #include <dirent.h>
   #include <sys/stat.h>
   #include <sys/ioctl.h>    /* TIOCGWINSZ for term_rows/cols */
+  #include <sys/time.h>
   #include <termios.h>      /* tcgetattr/tcsetattr for read_key */
   #include <dlfcn.h>
 #endif
@@ -121,6 +150,53 @@ static char* xstrdup(const char* s) {
     return d;
 }
 
+void* iris_alloc_bytes(uint64_t bytes) {
+    return xmalloc((size_t)(bytes == 0 ? 1 : bytes));
+}
+
+void iris_free_bytes(void* ptr) {
+    free(ptr);
+}
+
+/* Derived from LLVM compiler-rt's x86_64/chkstk.S (Apache-2.0 WITH
+ * LLVM-exception): https://github.com/llvm/llvm-project/blob/main/compiler-rt/lib/builtins/x86_64/chkstk.S
+ *
+ * Canonical compiler-rt stack probe for the Windows x86-64 ABI. LLVM's MinGW
+ * object writer calls `___chkstk_ms` before reserving a frame larger than one
+ * page. ORC has no archive-link step from which to obtain libgcc's copy, so the
+ * JIT registers this routine under that external name. It probes without
+ * changing RSP and preserves RAX/RCX, as required by the ABI. */
+#if defined(_WIN64) && defined(__x86_64__) && (defined(__GNUC__) || defined(__clang__))
+__attribute__((naked)) void iris_chkstk_ms(void) {
+    __asm__(
+        "pushq %rcx\n\t"
+        "pushq %rax\n\t"
+        "cmpq $0x1000, %rax\n\t"
+        "leaq 24(%rsp), %rcx\n\t"
+        "jb 2f\n\t"
+        "1:\n\t"
+        "subq $0x1000, %rcx\n\t"
+        "testq %rcx, (%rcx)\n\t"
+        "subq $0x1000, %rax\n\t"
+        "cmpq $0x1000, %rax\n\t"
+        "ja 1b\n\t"
+        "2:\n\t"
+        "subq %rax, %rcx\n\t"
+        "testq %rcx, (%rcx)\n\t"
+        "popq %rax\n\t"
+        "popq %rcx\n\t"
+        "retq\n\t"
+    );
+}
+#else
+void iris_chkstk_ms(void) {}
+#endif
+
+/* GCC/MinGW may inject a call to `__main` at the beginning of a function named
+ * `main`.  A normal executable obtains it from libgcc; an ORC object has no
+ * archive-link step, so the JIT maps `__main` to this equivalent no-op. */
+void iris_mingw_main(void) {}
+
 // ---------------------------------------------------------------------------
 // Boxing / Unboxing
 // ---------------------------------------------------------------------------
@@ -174,6 +250,14 @@ IrisVal* iris_box_str(const char* s) {
 IrisVal* iris_box_list(IrisList* list) {
     return box_heap_ref(IRIS_TAG_LIST, list, IRIS_RC_LIST);
 }
+/* A struct is stored as an IrisList of boxed field values -- the shape every
+ * generic value walker in this file already expects. See known-issues #61. */
+IrisVal* iris_box_struct(IrisList* fields) {
+    return box_heap_ref(IRIS_TAG_STRUCT, fields, IRIS_RC_LIST);
+}
+IrisVal* iris_box_native_object(void* object) {
+    return box_heap_ref(IRIS_TAG_NATIVE_OBJECT, object, IRIS_RC_NATIVE_OBJECT);
+}
 IrisVal* iris_box_map(IrisMap* map) {
     return box_heap_ref(IRIS_TAG_MAP, map, IRIS_RC_MAP);
 }
@@ -185,6 +269,12 @@ IrisVal* iris_box_result(IrisResult* res) {
 }
 IrisVal* iris_box_chan(IrisChannel* chan) {
     return box_heap_ref(IRIS_TAG_CHAN, chan, IRIS_RC_CHAN);
+}
+IrisVal* iris_box_task_group(IrisTaskGroup* tg) {
+    return box_heap_ref(IRIS_TAG_TASK_GROUP, tg, IRIS_RC_TASK_GROUP);
+}
+IrisVal* iris_box_weak_ref(IrisWeakRef* w) {
+    return box_heap_ref(IRIS_TAG_WEAK_REF, w, IRIS_RC_WEAK_REF);
 }
 IrisVal* iris_box_atomic(IrisAtomic* atomic) {
     return box_heap_ref(IRIS_TAG_ATOMIC, atomic, IRIS_RC_ATOMIC);
@@ -244,6 +334,12 @@ IrisResult* iris_unbox_result(IrisVal* v) {
 IrisChannel* iris_unbox_chan(IrisVal* v) {
     return (IrisChannel*)unbox_heap_ref(v, IRIS_TAG_CHAN, "unbox_chan");
 }
+IrisTaskGroup* iris_unbox_task_group(IrisVal* v) {
+    return (IrisTaskGroup*)unbox_heap_ref(v, IRIS_TAG_TASK_GROUP, "unbox_task_group");
+}
+IrisWeakRef* iris_unbox_weak_ref(IrisVal* v) {
+    return (IrisWeakRef*)unbox_heap_ref(v, IRIS_TAG_WEAK_REF, "unbox_weak_ref");
+}
 IrisAtomic* iris_unbox_atomic(IrisVal* v) {
     return (IrisAtomic*)unbox_heap_ref(v, IRIS_TAG_ATOMIC, "unbox_atomic");
 }
@@ -255,6 +351,9 @@ IrisGrad* iris_unbox_grad(IrisVal* v) {
 }
 IrisSparse* iris_unbox_sparse(IrisVal* v) {
     return (IrisSparse*)unbox_heap_ref(v, IRIS_TAG_SPARSE, "unbox_sparse");
+}
+void* iris_unbox_native_object(IrisVal* v) {
+    return unbox_heap_ref(v, IRIS_TAG_NATIVE_OBJECT, "unbox_native_object");
 }
 
 // ---------------------------------------------------------------------------
@@ -330,6 +429,13 @@ void iris_panic(const char* msg) {
     abort();
 }
 
+void iris_bounds_check_abort(int64_t index, int64_t size) {
+    fprintf(stderr, "\x1b[1;31mbounds error\x1b[0m: index %ld out of bounds (size=%ld)\n",
+            (long)index, (long)size);
+    fflush(stderr);
+    abort();
+}
+
 /* iris_panic_at — like iris_panic but includes a compile-time source location
  * string (e.g. "in function 'foo'") embedded by the IRIS LLVM codegen. */
 void iris_panic_at(const char* msg, const char* location) {
@@ -382,6 +488,7 @@ char* iris_str_concat(const char* a, const char* b) {
 }
 
 int iris_str_eq(const char* a, const char* b)            { return strcmp(a, b) == 0; }
+int64_t iris_str_cmp(const char* a, const char* b)      { return (int64_t)strcmp(a, b); }
 int iris_str_contains(const char* s, const char* sub)    { return strstr(s, sub) != NULL; }
 int iris_str_starts_with(const char* s, const char* pfx) { return strncmp(s, pfx, strlen(pfx)) == 0; }
 int iris_str_ends_with(const char* s, const char* sfx) {
@@ -556,6 +663,31 @@ char* iris_f32_to_str(float v)  { return iris_f64_to_str((double)v); }
 char* iris_bool_to_str(int v)   { return xstrdup(v ? "true" : "false"); }
 char* iris_str_to_str(const char* s) { return xstrdup(s); }
 
+/* Formats a value as it appears *inside* a container.
+ *
+ * Strings are quoted here so that `err("bad")` is distinguishable from a
+ * variant literally named `bad` -- the interpreter does the same, and the two
+ * backends must agree. */
+static char* value_to_str_nested(IrisVal* v) {
+    if (v && v->tag == IRIS_TAG_STR) {
+        const char* raw = v->str ? v->str : "";
+        size_t n = strlen(raw) + 3;
+        char* buf = xmalloc(n);
+        snprintf(buf, n, "\"%s\"", raw);
+        return buf;
+    }
+    return iris_value_to_str(v);
+}
+
+/* Wraps `inner` as `label(inner)` and frees it. */
+static char* wrap_labelled(const char* label, char* inner) {
+    size_t n = strlen(label) + strlen(inner) + 3;
+    char* buf = xmalloc(n);
+    snprintf(buf, n, "%s(%s)", label, inner);
+    free(inner);
+    return buf;
+}
+
 char* iris_value_to_str(IrisVal* v) {
     if (!v) return xstrdup("unit");
     switch (v->tag) {
@@ -566,6 +698,20 @@ char* iris_value_to_str(IrisVal* v) {
         case IRIS_TAG_BOOL: return iris_bool_to_str(v->boolean);
         case IRIS_TAG_STR:  return xstrdup(v->str);
         case IRIS_TAG_UNIT: return xstrdup("unit");
+        /* Containers were missing entirely, so `to_str(s.find(..))` fell to the
+         * `<val:N>` default and printed `find: <val:8>` where the interpreter
+         * says `find: some(6)`. See known-issues #51. */
+        case IRIS_TAG_OPTION: {
+            IrisOption* o = (IrisOption*)v->ptr;
+            if (!o || !o->has_value) return xstrdup("none");
+            return wrap_labelled("some", value_to_str_nested(o->value));
+        }
+        case IRIS_TAG_RESULT: {
+            IrisResult* r = (IrisResult*)v->ptr;
+            if (!r) return xstrdup("unit");
+            return wrap_labelled(r->is_ok ? "ok" : "err",
+                                 value_to_str_nested(r->value));
+        }
         default: {
             char buf[32];
             snprintf(buf, sizeof(buf), "<val:%d>", v->tag);
@@ -626,6 +772,67 @@ double  iris_min_f64(double a, double b)     { return a < b ? a : b; }
 double  iris_max_f64(double a, double b)     { return a > b ? a : b; }
 
 // ---------------------------------------------------------------------------
+// Integer overflow-checked arithmetic
+// ---------------------------------------------------------------------------
+
+#if defined(__has_builtin) && __has_builtin(__builtin_add_overflow)
+
+int64_t iris_add_checked(int64_t a, int64_t b) {
+    int64_t result;
+    if (__builtin_add_overflow(a, b, &result)) {
+        fprintf(stderr, "iris: integer overflow in addition (%" PRId64 " + %" PRId64 ")\n", a, b);
+        abort();
+    }
+    return result;
+}
+int64_t iris_sub_checked(int64_t a, int64_t b) {
+    int64_t result;
+    if (__builtin_sub_overflow(a, b, &result)) {
+        fprintf(stderr, "iris: integer overflow in subtraction (%" PRId64 " - %" PRId64 ")\n", a, b);
+        abort();
+    }
+    return result;
+}
+int64_t iris_mul_checked(int64_t a, int64_t b) {
+    int64_t result;
+    if (__builtin_mul_overflow(a, b, &result)) {
+        fprintf(stderr, "iris: integer overflow in multiplication (%" PRId64 " * %" PRId64 ")\n", a, b);
+        abort();
+    }
+    return result;
+}
+
+#else
+
+#include <limits.h>
+
+int64_t iris_add_checked(int64_t a, int64_t b) {
+    if ((b > 0 && a > INT64_MAX - b) || (b < 0 && a < INT64_MIN - b)) {
+        fprintf(stderr, "iris: integer overflow in addition\n");
+        abort();
+    }
+    return a + b;
+}
+int64_t iris_sub_checked(int64_t a, int64_t b) {
+    if ((b > 0 && a < INT64_MIN + b) || (b < 0 && a > INT64_MAX + b)) {
+        fprintf(stderr, "iris: integer overflow in subtraction\n");
+        abort();
+    }
+    return a - b;
+}
+int64_t iris_mul_checked(int64_t a, int64_t b) {
+    if (a == 0 || b == 0) return 0;
+    int64_t result = a * b;
+    if (a != result / b) {
+        fprintf(stderr, "iris: integer overflow in multiplication\n");
+        abort();
+    }
+    return result;
+}
+
+#endif
+
+// ---------------------------------------------------------------------------
 // Option
 // ---------------------------------------------------------------------------
 
@@ -665,7 +872,9 @@ IrisResult* iris_make_err(IrisVal* val) {
     if (val) iris_retain(val);
     return r;
 }
-int      iris_is_ok(IrisResult* res)            { return res ? res->is_ok : 0; }
+int      iris_is_ok(IrisResult* res) {
+    return res ? res->is_ok : 0;
+}
 IrisVal* iris_result_unwrap(IrisResult* res) {
     if (!res || !res->is_ok) { fprintf(stderr, "iris: unwrap called on err\n"); abort(); }
     return res->value;
@@ -679,6 +888,368 @@ IrisVal* iris_result_unwrap_err(IrisResult* res) {
 // List
 // ---------------------------------------------------------------------------
 
+/* ---- Collection lock ---------------------------------------------------
+ *
+ * `iris_list_push` grew the buffer with `xrealloc` and advanced `len++` with no
+ * synchronisation at all, so two threads inside a `par for` could lose an
+ * update, or one could move the buffer while the other wrote through the stale
+ * pointer. That is a data race reachable from ordinary safe IRIS:
+ *
+ *     par for i in 0..2000 { push(shared, i); }
+ *
+ * It produced the right answer on every run of an eleven-run probe, which is
+ * the most dangerous possible result -- two accidents were hiding it. Every
+ * push passes through `iris_retain`, which takes a *global* refcount mutex and
+ * serialises most of the window; and `iris_par_for` created one thread per
+ * iteration, so on a 2-core box thread startup dominated and overlap was
+ * minimal. Both disappear on a larger machine.
+ *
+ * A single global lock rather than per-list: the refcount mutex above is
+ * already taken on every element operation, so the serialisation exists
+ * regardless and a second global adds little. Per-list mutexes are the upgrade
+ * path if profiling ever shows this to matter.
+ *
+ * Recursive, so that a public entry point which internally calls another
+ * (`iris_str_split` builds its result with `iris_list_push`) cannot deadlock.
+ * Auditing every internal caller instead would be a standing trap for anyone
+ * adding a collection helper later.
+ */
+static pthread_mutex_t coll_mu = PTHREAD_MUTEX_INITIALIZER;
+
+static void coll_lock(void)   { pthread_mutex_lock(&coll_mu); }
+static void coll_unlock(void) { pthread_mutex_unlock(&coll_mu); }
+
+// ---------------------------------------------------------------------------
+// Transactional speculation
+// ---------------------------------------------------------------------------
+//
+// A frame records the first version of every mutable object touched on the
+// current thread. Nested commits transfer those original versions to their
+// parent; rollback restores them in reverse order. Whole-file writes are held
+// in memory until the outermost commit and reads consult the staged overlay.
+
+typedef enum {
+    IRIS_TX_LIST = 1,
+    IRIS_TX_MAP = 2,
+    IRIS_TX_ATOMIC = 3
+} IrisTxKind;
+
+typedef struct IrisTxSnapshot {
+    IrisTxKind kind;
+    void* target;
+    union {
+        IrisList list;
+        IrisMap map;
+        IrisVal* atomic;
+    } before;
+    struct IrisTxSnapshot* next;
+} IrisTxSnapshot;
+
+typedef struct IrisTxFile {
+    char* path;
+    char* contents;
+    struct IrisTxFile* next;
+} IrisTxFile;
+
+typedef struct IrisTxFrame {
+    IrisTxSnapshot* snapshots;
+    IrisTxFile* files;
+    struct IrisTxFrame* parent;
+} IrisTxFrame;
+
+static IRIS_THREAD_LOCAL IrisTxFrame* iris_tx_top = NULL;
+static IRIS_THREAD_LOCAL uint64_t iris_tx_temp_counter = 0;
+
+static int iris_tx_has_snapshot(IrisTxFrame* frame, IrisTxKind kind, void* target) {
+    for (IrisTxSnapshot* s = frame ? frame->snapshots : NULL; s; s = s->next)
+        if (s->kind == kind && s->target == target) return 1;
+    return 0;
+}
+
+static void iris_tx_free_map_entries(IrisMap* map) {
+    if (!map || !map->buckets) return;
+    for (size_t i = 0; i < map->n_buckets; i++) {
+        IrisMapEntry* entry = map->buckets[i];
+        while (entry) {
+            IrisMapEntry* next = entry->next;
+            if (entry->val) iris_release(entry->val);
+            free(entry->key);
+            free(entry);
+            entry = next;
+        }
+    }
+    free(map->buckets);
+    map->buckets = NULL;
+    map->n_buckets = 0;
+    map->len = 0;
+}
+
+static void iris_tx_discard_snapshot(IrisTxSnapshot* snapshot) {
+    if (!snapshot) return;
+    if (snapshot->kind == IRIS_TX_LIST) {
+        for (size_t i = 0; i < snapshot->before.list.len; i++)
+            if (snapshot->before.list.data[i]) iris_release(snapshot->before.list.data[i]);
+        free(snapshot->before.list.data);
+    } else if (snapshot->kind == IRIS_TX_MAP) {
+        iris_tx_free_map_entries(&snapshot->before.map);
+    } else if (snapshot->kind == IRIS_TX_ATOMIC) {
+        if (snapshot->before.atomic) iris_release(snapshot->before.atomic);
+    }
+    free(snapshot);
+}
+
+static void iris_tx_restore_snapshot(IrisTxSnapshot* snapshot) {
+    if (snapshot->kind == IRIS_TX_LIST) {
+        IrisList* target = (IrisList*)snapshot->target;
+        coll_lock();
+        for (size_t i = 0; i < target->len; i++)
+            if (target->data[i]) iris_release(target->data[i]);
+        free(target->data);
+        *target = snapshot->before.list;
+        snapshot->before.list.data = NULL;
+        snapshot->before.list.len = snapshot->before.list.cap = 0;
+        coll_unlock();
+    } else if (snapshot->kind == IRIS_TX_MAP) {
+        IrisMap* target = (IrisMap*)snapshot->target;
+        coll_lock();
+        iris_tx_free_map_entries(target);
+        *target = snapshot->before.map;
+        snapshot->before.map.buckets = NULL;
+        snapshot->before.map.n_buckets = snapshot->before.map.len = 0;
+        coll_unlock();
+    } else if (snapshot->kind == IRIS_TX_ATOMIC) {
+        IrisAtomic* target = (IrisAtomic*)snapshot->target;
+        pthread_mutex_lock(&target->mu);
+        if (target->val) iris_release(target->val);
+        target->val = snapshot->before.atomic;
+        snapshot->before.atomic = NULL;
+        pthread_mutex_unlock(&target->mu);
+    }
+    iris_tx_discard_snapshot(snapshot);
+}
+
+static void iris_tx_record_list(IrisList* list) {
+    if (!iris_tx_top || !list || iris_tx_has_snapshot(iris_tx_top, IRIS_TX_LIST, list)) return;
+    IrisTxSnapshot* snapshot = xcalloc(1, sizeof(*snapshot));
+    snapshot->kind = IRIS_TX_LIST;
+    snapshot->target = list;
+    coll_lock();
+    snapshot->before.list.len = list->len;
+    snapshot->before.list.cap = list->cap;
+    snapshot->before.list.data = xmalloc(sizeof(IrisVal*) * list->cap);
+    for (size_t i = 0; i < list->len; i++) {
+        snapshot->before.list.data[i] = list->data[i];
+        if (list->data[i]) iris_retain(list->data[i]);
+    }
+    coll_unlock();
+    snapshot->next = iris_tx_top->snapshots;
+    iris_tx_top->snapshots = snapshot;
+}
+
+static void iris_tx_record_map(IrisMap* map) {
+    if (!iris_tx_top || !map || iris_tx_has_snapshot(iris_tx_top, IRIS_TX_MAP, map)) return;
+    IrisTxSnapshot* snapshot = xcalloc(1, sizeof(*snapshot));
+    snapshot->kind = IRIS_TX_MAP;
+    snapshot->target = map;
+    coll_lock();
+    snapshot->before.map.n_buckets = map->n_buckets;
+    snapshot->before.map.len = map->len;
+    snapshot->before.map.buckets = xcalloc(map->n_buckets, sizeof(IrisMapEntry*));
+    for (size_t i = 0; i < map->n_buckets; i++) {
+        IrisMapEntry** tail = &snapshot->before.map.buckets[i];
+        for (IrisMapEntry* entry = map->buckets[i]; entry; entry = entry->next) {
+            IrisMapEntry* copy = xcalloc(1, sizeof(*copy));
+            copy->key = xstrdup(entry->key);
+            copy->val = entry->val;
+            if (copy->val) iris_retain(copy->val);
+            *tail = copy;
+            tail = &copy->next;
+        }
+    }
+    coll_unlock();
+    snapshot->next = iris_tx_top->snapshots;
+    iris_tx_top->snapshots = snapshot;
+}
+
+static void iris_tx_record_atomic(IrisAtomic* atomic) {
+    if (!iris_tx_top || !atomic || iris_tx_has_snapshot(iris_tx_top, IRIS_TX_ATOMIC, atomic)) return;
+    IrisTxSnapshot* snapshot = xcalloc(1, sizeof(*snapshot));
+    snapshot->kind = IRIS_TX_ATOMIC;
+    snapshot->target = atomic;
+    pthread_mutex_lock(&atomic->mu);
+    snapshot->before.atomic = atomic->val;
+    if (snapshot->before.atomic) iris_retain(snapshot->before.atomic);
+    pthread_mutex_unlock(&atomic->mu);
+    snapshot->next = iris_tx_top->snapshots;
+    iris_tx_top->snapshots = snapshot;
+}
+
+static void iris_tx_free_files(IrisTxFile* file) {
+    while (file) {
+        IrisTxFile* next = file->next;
+        free(file->path);
+        free(file->contents);
+        free(file);
+        file = next;
+    }
+}
+
+static void iris_tx_restore_frame(IrisTxFrame* frame) {
+    IrisTxSnapshot* snapshot = frame->snapshots;
+    while (snapshot) {
+        IrisTxSnapshot* next = snapshot->next;
+        iris_tx_restore_snapshot(snapshot);
+        snapshot = next;
+    }
+    iris_tx_free_files(frame->files);
+    free(frame);
+}
+
+int64_t iris_transaction_begin(void) {
+    IrisTxFrame* frame = xcalloc(1, sizeof(*frame));
+    frame->parent = iris_tx_top;
+    iris_tx_top = frame;
+    return 1;
+}
+
+int64_t iris_transaction_depth(void) {
+    int64_t depth = 0;
+    for (IrisTxFrame* frame = iris_tx_top; frame; frame = frame->parent) depth++;
+    return depth;
+}
+
+int64_t iris_transaction_rollback(void) {
+    if (!iris_tx_top) return 0;
+    IrisTxFrame* frame = iris_tx_top;
+    iris_tx_top = frame->parent;
+    iris_tx_restore_frame(frame);
+    return 1;
+}
+
+static const char* iris_tx_staged_read(const char* path) {
+    for (IrisTxFrame* frame = iris_tx_top; frame; frame = frame->parent)
+        for (IrisTxFile* file = frame->files; file; file = file->next)
+            if (strcmp(file->path, path) == 0) return file->contents;
+    return NULL;
+}
+
+static int iris_tx_stage_write(const char* path, const char* contents) {
+    if (!iris_tx_top) return 0;
+    for (IrisTxFile* file = iris_tx_top->files; file; file = file->next) {
+        if (strcmp(file->path, path) == 0) {
+            free(file->contents);
+            file->contents = xstrdup(contents);
+            return 1;
+        }
+    }
+    IrisTxFile* file = xcalloc(1, sizeof(*file));
+    file->path = xstrdup(path);
+    file->contents = xstrdup(contents);
+    file->next = iris_tx_top->files;
+    iris_tx_top->files = file;
+    return 1;
+}
+
+static int iris_tx_replace_file(const char* temp, const char* destination) {
+#if defined(_WIN32)
+    return MoveFileExA(temp, destination, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0;
+#else
+    return rename(temp, destination) == 0;
+#endif
+}
+
+int64_t iris_transaction_commit(void) {
+    if (!iris_tx_top) return 0;
+    IrisTxFrame* frame = iris_tx_top;
+    iris_tx_top = frame->parent;
+
+    if (iris_tx_top) {
+        IrisTxSnapshot* snapshot = frame->snapshots;
+        while (snapshot) {
+            IrisTxSnapshot* next = snapshot->next;
+            if (iris_tx_has_snapshot(iris_tx_top, snapshot->kind, snapshot->target)) {
+                iris_tx_discard_snapshot(snapshot);
+            } else {
+                snapshot->next = iris_tx_top->snapshots;
+                iris_tx_top->snapshots = snapshot;
+            }
+            snapshot = next;
+        }
+        for (IrisTxFile* file = frame->files; file; file = file->next)
+            iris_tx_stage_write(file->path, file->contents);
+        iris_tx_free_files(frame->files);
+        free(frame);
+        return 1;
+    }
+
+    // Prepare every file before publishing any rename. This guarantees that a
+    // write/open failure leaves both filesystem and in-memory state uncommitted.
+    typedef struct IrisTxPrepared {
+        char* temp;
+        const char* destination;
+        struct IrisTxPrepared* next;
+    } IrisTxPrepared;
+    IrisTxPrepared* prepared = NULL;
+    for (IrisTxFile* file = frame->files; file; file = file->next) {
+        size_t n = strlen(file->path) + 80;
+        char* temp = xmalloc(n);
+        snprintf(temp, n, "%s.iris-txn-%lu-%" PRIu64, file->path,
+                 (unsigned long)getpid(), ++iris_tx_temp_counter);
+        FILE* out = fopen(temp, "wb");
+        size_t len = strlen(file->contents);
+        int write_ok = out != NULL;
+        if (out && fwrite(file->contents, 1, len, out) != len) write_ok = 0;
+        if (out && fclose(out) != 0) write_ok = 0;
+        if (!write_ok) {
+            remove(temp);
+            free(temp);
+            while (prepared) {
+                IrisTxPrepared* next = prepared->next;
+                remove(prepared->temp);
+                free(prepared->temp);
+                free(prepared);
+                prepared = next;
+            }
+            iris_tx_restore_frame(frame);
+            return 0;
+        }
+        IrisTxPrepared* item = xcalloc(1, sizeof(*item));
+        item->temp = temp;
+        item->destination = file->path;
+        item->next = prepared;
+        prepared = item;
+    }
+    while (prepared) {
+        IrisTxPrepared* next = prepared->next;
+        if (!iris_tx_replace_file(prepared->temp, prepared->destination)) {
+            remove(prepared->temp);
+            free(prepared->temp);
+            free(prepared);
+            while (next) {
+                IrisTxPrepared* rest = next->next;
+                remove(next->temp);
+                free(next->temp);
+                free(next);
+                next = rest;
+            }
+            iris_tx_restore_frame(frame);
+            return 0;
+        }
+        free(prepared->temp);
+        free(prepared);
+        prepared = next;
+    }
+
+    while (frame->snapshots) {
+        IrisTxSnapshot* next = frame->snapshots->next;
+        iris_tx_discard_snapshot(frame->snapshots);
+        frame->snapshots = next;
+    }
+    iris_tx_free_files(frame->files);
+    free(frame);
+    return 1;
+}
+
 IrisList* iris_list_new(void) {
     IrisList* l = xcalloc(1, sizeof(IrisList));
     l->cap  = 8;
@@ -686,12 +1257,15 @@ IrisList* iris_list_new(void) {
     return l;
 }
 void iris_list_push(IrisList* l, IrisVal* val) {
+    iris_tx_record_list(l);
+    coll_lock();
     if (l->len == l->cap) {
         l->cap *= 2;
         l->data = xrealloc(l->data, sizeof(IrisVal*) * l->cap);
     }
     if (val) iris_retain(val);
     l->data[l->len++] = val;
+    coll_unlock();
 }
 int64_t  iris_list_len(IrisList* l) { return (int64_t)l->len; }
 IrisVal* iris_list_get(IrisList* l, int64_t idx) {
@@ -702,17 +1276,29 @@ IrisVal* iris_list_get(IrisList* l, int64_t idx) {
     return l->data[idx];
 }
 void iris_list_set(IrisList* l, int64_t idx, IrisVal* val) {
+    iris_tx_record_list(l);
+    coll_lock();
     if (idx < 0 || (size_t)idx >= l->len) {
+        coll_unlock();
         fprintf(stderr, "iris: list set index %ld out of bounds\n", (long)idx);
         abort();
     }
     if (val) iris_retain(val);
     if (l->data[idx]) iris_release(l->data[idx]);
     l->data[idx] = val;
+    coll_unlock();
 }
 IrisVal* iris_list_pop(IrisList* l) {
-    if (l->len == 0) { fprintf(stderr, "iris: pop on empty list\n"); abort(); }
-    return l->data[--l->len];
+    iris_tx_record_list(l);
+    coll_lock();
+    if (l->len == 0) {
+        coll_unlock();
+        fprintf(stderr, "iris: pop on empty list\n");
+        abort();
+    }
+    IrisVal* v = l->data[--l->len];
+    coll_unlock();
+    return v;
 }
 
 // ---------------------------------------------------------------------------
@@ -734,7 +1320,12 @@ IrisMap* iris_map_new(void) {
     return m;
 }
 void iris_map_set(IrisMap* m, IrisVal* key, IrisVal* val) {
+    /* Stringify the key BEFORE taking the lock: `iris_value_to_str` walks a
+     * list value and would re-enter `iris_list_get`, deadlocking on a
+     * non-recursive mutex. */
     char* key_str = iris_value_to_str(key);
+    iris_tx_record_map(m);
+    coll_lock();
     size_t h = hash_str(key_str) % m->n_buckets;
     for (IrisMapEntry* e = m->buckets[h]; e; e = e->next) {
         if (strcmp(e->key, key_str) == 0) {
@@ -742,6 +1333,7 @@ void iris_map_set(IrisMap* m, IrisVal* key, IrisVal* val) {
             if (e->val) iris_release(e->val);
             e->val = val;
             free(key_str);
+            coll_unlock();
             return;
         }
     }
@@ -751,6 +1343,7 @@ void iris_map_set(IrisMap* m, IrisVal* key, IrisVal* val) {
     if (val) iris_retain(val);
     e->next = m->buckets[h];
     m->buckets[h] = e;  m->len++;
+    coll_unlock();
 }
 IrisOption* iris_map_get(IrisMap* m, IrisVal* key) {
     char* key_str = iris_value_to_str(key);
@@ -775,7 +1368,9 @@ int iris_map_contains(IrisMap* m, IrisVal* key) {
     return 0;
 }
 void iris_map_remove(IrisMap* m, IrisVal* key) {
-    char* key_str = iris_value_to_str(key);
+    char* key_str = iris_value_to_str(key);   /* see iris_map_set */
+    iris_tx_record_map(m);
+    coll_lock();
     size_t h = hash_str(key_str) % m->n_buckets;
     IrisMapEntry** pp = &m->buckets[h];
     while (*pp) {
@@ -787,11 +1382,13 @@ void iris_map_remove(IrisMap* m, IrisVal* key) {
             free(doomed);
             m->len--;
             free(key_str);
+            coll_unlock();
             return;
         }
         pp = &(*pp)->next;
     }
     free(key_str);
+    coll_unlock();
 }
 int64_t iris_map_len(IrisMap* m) { return (int64_t)m->len; }
 
@@ -866,6 +1463,7 @@ static void iris_merge_sort_rec(IrisVal** arr, IrisVal** tmp, size_t lo, size_t 
 
 void iris_list_sort(IrisList* l) {
     if (!l || l->len <= 1) return;
+    iris_tx_record_list(l);
     IrisVal** tmp = (IrisVal**)malloc(l->len * sizeof(IrisVal*));
     if (!tmp) return;  /* OOM — leave list unsorted rather than crash */
     iris_merge_sort_rec(l->data, tmp, 0, l->len);
@@ -920,28 +1518,54 @@ IrisList* iris_map_values(IrisMap* m) {
 // File I/O
 // ---------------------------------------------------------------------------
 
-char* iris_file_read_all(const char* path) {
+IrisResult* iris_file_read_all(const char* path) {
+    const char* staged = iris_tx_staged_read(path);
+    if (staged) return iris_make_ok(iris_box_str(staged));
     FILE* f = fopen(path, "rb");
-    if (!f) return NULL;
-    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return NULL; }
+    if (!f) {
+        return iris_make_err(iris_box_str("Failed to open file for reading"));
+    }
+    if (fseek(f, 0, SEEK_END) != 0) {
+        fclose(f);
+        return iris_make_err(iris_box_str("Fseek end error"));
+    }
     long sz = ftell(f);
-    if (sz < 0) { fclose(f); return NULL; }
-    if (fseek(f, 0, SEEK_SET) != 0) { fclose(f); return NULL; }
+    if (sz < 0) {
+        fclose(f);
+        return iris_make_err(iris_box_str("Ftell error"));
+    }
+    if (fseek(f, 0, SEEK_SET) != 0) {
+        fclose(f);
+        return iris_make_err(iris_box_str("Fseek set error"));
+    }
     size_t size = (size_t)sz;
     char* buf = xmalloc(size + 1);
     size_t n = fread(buf, 1, size, f);
     buf[n] = '\0';
     fclose(f);
-    return buf;
+    IrisVal* contents = iris_box_str(buf);
+    free(buf);
+    IrisResult* r = iris_make_ok(contents);
+    return r;
 }
 
-char* iris_file_write_all(const char* path, const char* contents) {
+IrisResult* iris_file_write_all(const char* path, const char* contents) {
+    if (iris_tx_stage_write(path, contents)) {
+        return iris_make_ok(iris_box_i64((int64_t)strlen(contents)));
+    }
     FILE* f = fopen(path, "wb");
-    if (!f) return NULL;
+    if (!f) {
+        return iris_make_err(iris_box_str("Failed to open file for writing"));
+    }
     size_t len = strlen(contents);
-    int ok = (fwrite(contents, 1, len, f) == len);
+    size_t written = fwrite(contents, 1, len, f);
     fclose(f);
-    return ok ? (char*)path : NULL;
+    if (written != len) {
+        return iris_make_err(iris_box_str("Incomplete write"));
+    }
+    IrisVal* b = iris_box_i64((int64_t)written);
+    IrisResult* r = iris_make_ok(b);
+    return r;
 }
 
 int iris_file_exists(const char* path) {
@@ -965,9 +1589,46 @@ IrisList* iris_file_lines(const char* path) {
     return r;
 }
 
+/* Streaming File I/O */
+int64_t iris_file_open(const char* path, const char* mode) {
+    if (!path || !mode) return 0;
+    FILE* f = fopen(path, mode);
+    return (int64_t)f;
+}
+
+int iris_file_close(int64_t handle) {
+    FILE* f = (FILE*)handle;
+    if (!f) return 0;
+    return fclose(f) == 0 ? 1 : 0;
+}
+
+char* iris_file_read(int64_t handle, int64_t bytes) {
+    FILE* f = (FILE*)handle;
+    if (!f || bytes <= 0) {
+        char* empty = xmalloc(1);
+        empty[0] = '\0';
+        return empty;
+    }
+    char* buf = xmalloc(bytes + 1);
+    size_t n = fread(buf, 1, (size_t)bytes, f);
+    buf[n] = '\0';
+    return buf;
+}
+
+int iris_file_write(int64_t handle, const char* data) {
+    FILE* f = (FILE*)handle;
+    if (!f || !data) return 0;
+    size_t len = strlen(data);
+    size_t written = fwrite(data, 1, len, f);
+    return written == len ? 1 : 0;
+}
+
+
 // ---------------------------------------------------------------------------
 // Database operations (SQLite via dynamic loading)
 // ---------------------------------------------------------------------------
+
+static IRIS_THREAD_LOCAL int64_t iris_http_status = 0;
 
 #ifdef _WIN32
 #include <windows.h>
@@ -1195,11 +1856,103 @@ IrisOption* iris_env_var(const char* key) {
 
 #define CHAN_INIT_CAP 64u
 
-IrisChannel* iris_chan_new(void) {
+/* Fixed native async executor. `spawn` and lowered `async def` jobs share this
+ * queue instead of creating one OS thread per task. A worker that awaits an
+ * empty channel helps execute another queued job, which prevents nested awaits
+ * from exhausting the pool. */
+typedef struct IrisAsyncJob {
+    void* (*fn)(void*);
+    void* arg;
+    struct IrisAsyncJob* next;
+} IrisAsyncJob;
+
+static pthread_mutex_t iris_async_mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t iris_async_ready = PTHREAD_COND_INITIALIZER;
+static IrisAsyncJob* iris_async_head = NULL;
+static IrisAsyncJob* iris_async_tail = NULL;
+static int64_t iris_async_depth = 0;
+static int64_t iris_async_workers = 0;
+static int iris_async_started = 0;
+static int64_t iris_hw_threads(void);
+
+static int iris_async_try_run_one(void) {
+    IrisAsyncJob* job = NULL;
+    pthread_mutex_lock(&iris_async_mu);
+    if (iris_async_head) {
+        job = iris_async_head;
+        iris_async_head = job->next;
+        if (!iris_async_head) iris_async_tail = NULL;
+        iris_async_depth--;
+    }
+    pthread_mutex_unlock(&iris_async_mu);
+    if (!job) return 0;
+    job->fn(job->arg);
+    free(job);
+    return 1;
+}
+
+static void* iris_async_worker(void* unused) {
+    (void)unused;
+    for (;;) {
+        pthread_mutex_lock(&iris_async_mu);
+        while (!iris_async_head) pthread_cond_wait(&iris_async_ready, &iris_async_mu);
+        IrisAsyncJob* job = iris_async_head;
+        iris_async_head = job->next;
+        if (!iris_async_head) iris_async_tail = NULL;
+        iris_async_depth--;
+        pthread_mutex_unlock(&iris_async_mu);
+        job->fn(job->arg);
+        free(job);
+    }
+    return NULL;
+}
+
+static void iris_async_start(void) {
+    pthread_mutex_lock(&iris_async_mu);
+    if (iris_async_started) {
+        pthread_mutex_unlock(&iris_async_mu);
+        return;
+    }
+    iris_async_started = 1;
+    iris_async_workers = iris_hw_threads();
+    if (iris_async_workers > 32) iris_async_workers = 32;
+    pthread_mutex_unlock(&iris_async_mu);
+    for (int64_t i = 0; i < iris_async_workers; i++) {
+        pthread_t worker;
+        if (pthread_create(&worker, NULL, iris_async_worker, NULL) == 0) {
+            pthread_detach(worker);
+        }
+    }
+}
+
+static void chan_grow(IrisChannel* c) {
+    size_t new_cap = c->cap * 2;
+    IrisVal** new_buf = xmalloc(sizeof(IrisVal*) * new_cap);
+    for (size_t i = 0; i < c->count; i++) {
+        new_buf[i] = c->buf[(c->head + i) % c->cap];
+    }
+    free(c->buf);
+    c->buf = new_buf;
+    c->cap = new_cap;
+    c->head = 0;
+    c->tail = c->count;
+}
+
+/* WASM pthread_create override: runs fn(arg) synchronously since
+   WASI preview 1 has no threading. The declaration is in iris_runtime.h
+   as a macro redirect; the prototype uses void* to avoid requiring
+   pthread_t at header inclusion time. */
+#if defined(__wasm__)
+int iris_wasm_pthread_create(void* t, const void* a, void*(*fn)(void*), void* arg) {
+    (void)a; if(t) *(pthread_t*)t = NULL; if(fn) fn(arg); return 0; }
+#endif
+
+IrisChannel* iris_chan_new(int64_t capacity) {
     IrisChannel* c = xmalloc(sizeof(IrisChannel));
-    c->cap   = CHAN_INIT_CAP;
+    c->cap   = capacity > 0 ? capacity : CHAN_INIT_CAP;
     c->buf   = xmalloc(sizeof(IrisVal*) * c->cap);
     c->head  = c->tail = c->count = 0;
+    c->max_cap = capacity; // Store intended capacity, -1 if unbounded
     pthread_mutex_init(&c->mu,        NULL);
     pthread_cond_init (&c->not_empty, NULL);
     pthread_cond_init (&c->not_full,  NULL);
@@ -1207,7 +1960,13 @@ IrisChannel* iris_chan_new(void) {
 }
 void iris_chan_send(IrisChannel* c, IrisVal* val) {
     pthread_mutex_lock(&c->mu);
-    while (c->count == c->cap) pthread_cond_wait(&c->not_full, &c->mu);
+    if (c->max_cap >= 0) {
+        while (c->count >= c->max_cap) {
+            pthread_cond_wait(&c->not_full, &c->mu);
+        }
+    } else {
+        if (c->count == c->cap) chan_grow(c);
+    }
     if (val) iris_retain(val);
     c->buf[c->tail] = val;
     c->tail = (c->tail + 1) % c->cap;
@@ -1217,20 +1976,107 @@ void iris_chan_send(IrisChannel* c, IrisVal* val) {
 }
 IrisVal* iris_chan_recv(IrisChannel* c) {
     pthread_mutex_lock(&c->mu);
-    while (c->count == 0) pthread_cond_wait(&c->not_empty, &c->mu);
+    while (c->count == 0) {
+        pthread_mutex_unlock(&c->mu);
+        if (!iris_async_try_run_one()) {
+            pthread_mutex_lock(&c->mu);
+            if (c->count == 0) pthread_cond_wait(&c->not_empty, &c->mu);
+            continue;
+        }
+        pthread_mutex_lock(&c->mu);
+    }
     IrisVal* val = c->buf[c->head];
     c->head = (c->head + 1) % c->cap;
     c->count--;
-    pthread_cond_signal(&c->not_full);
+    if (c->max_cap >= 0) pthread_cond_signal(&c->not_full);
     pthread_mutex_unlock(&c->mu);
     return val;
 }
+
+int64_t iris_chan_len(IrisChannel* c) {
+    if (!c) return 0;
+    pthread_mutex_lock(&c->mu);
+    int64_t len = (int64_t)c->count;
+    pthread_mutex_unlock(&c->mu);
+    return len;
+}
+
+IrisOption* iris_chan_try_recv(IrisChannel* c) {
+    if (!c) return iris_make_none();
+    pthread_mutex_lock(&c->mu);
+    if (c->count == 0) {
+        pthread_mutex_unlock(&c->mu);
+        return iris_make_none();
+    }
+    IrisVal* val = c->buf[c->head];
+    c->head = (c->head + 1) % c->cap;
+    c->count--;
+    if (c->max_cap >= 0) {
+        pthread_cond_signal(&c->not_full);
+    }
+    pthread_mutex_unlock(&c->mu);
+    
+    IrisOption* opt = iris_make_some(val);
+    if (val) {
+        iris_release(val); // Transfer reference from channel buffer to Option
+    }
+    return opt;
+}
+
+int64_t iris_select(int64_t n, ...) {
+    va_list args;
+    va_start(args, n);
+    for (int64_t i = 0; i < n; i++) {
+        IrisChannel* c = va_arg(args, IrisChannel*);
+        if (c) {
+            pthread_mutex_lock(&c->mu);
+            if (c->count > 0) {
+                pthread_mutex_unlock(&c->mu);
+                va_end(args);
+                return i;
+            }
+            pthread_mutex_unlock(&c->mu);
+        }
+    }
+    va_end(args);
+    return -1;
+}
+
+int iris_timeout(int64_t ms) {
+    iris_sleep_ms(ms);
+    return 1;
+}
 void iris_spawn_fn(void* fn, void* arg) {
-    pthread_t t;
-    /* The spawned trampoline takes a single void* arg (packed captures)
-       and returns void*. The detached thread discards the return value. */
-    pthread_create(&t, NULL, (void*(*)(void*))fn, arg);
-    pthread_detach(t);
+#if defined(__wasm__)
+    ((void*(*)(void*))fn)(arg);
+#else
+    iris_async_start();
+    IrisAsyncJob* job = xmalloc(sizeof(IrisAsyncJob));
+    job->fn = (void*(*)(void*))fn;
+    job->arg = arg;
+    job->next = NULL;
+    pthread_mutex_lock(&iris_async_mu);
+    if (iris_async_tail) iris_async_tail->next = job;
+    else iris_async_head = job;
+    iris_async_tail = job;
+    iris_async_depth++;
+    pthread_cond_signal(&iris_async_ready);
+    pthread_mutex_unlock(&iris_async_mu);
+#endif
+}
+
+int64_t iris_async_worker_count(void) {
+    pthread_mutex_lock(&iris_async_mu);
+    int64_t count = iris_async_workers;
+    pthread_mutex_unlock(&iris_async_mu);
+    return count;
+}
+
+int64_t iris_async_queued_tasks(void) {
+    pthread_mutex_lock(&iris_async_mu);
+    int64_t count = iris_async_depth;
+    pthread_mutex_unlock(&iris_async_mu);
+    return count;
 }
 
 typedef struct { void (*fn)(int64_t, void*); int64_t i; void* arg; } ParArg;
@@ -1240,19 +2086,384 @@ static void* par_for_worker(void* arg) {
     free(a);
     return NULL;
 }
+/* Worker arguments for a strided share of the iteration space. */
+typedef struct {
+    void (*fn)(int64_t, void*);
+    int64_t start;
+    int64_t end;
+    int64_t stride;
+    void*   arg;
+} ParRangeArg;
+
+static void* par_for_range_worker(void* p) {
+    ParRangeArg* a = (ParRangeArg*)p;
+    for (int64_t i = a->start; i < a->end; i += a->stride) {
+        a->fn(i, a->arg);
+    }
+    return NULL;
+}
+
+static int64_t iris_hw_threads(void) {
+#if defined(_WIN32)
+    SYSTEM_INFO si;
+    GetSystemInfo(&si);
+    int64_t n = (int64_t)si.dwNumberOfProcessors;
+#elif defined(_SC_NPROCESSORS_ONLN)
+    int64_t n = (int64_t)sysconf(_SC_NPROCESSORS_ONLN);
+#else
+    int64_t n = 4;
+#endif
+    if (n < 1) n = 1;
+    if (n > 64) n = 64;
+    return n;
+}
+
+/* A fixed pool striding the iteration space, not one thread per iteration.
+ *
+ * The previous implementation called pthread_create once per index, so
+ * `par for i in 0..2000` created two thousand OS threads. At roughly 1 MB of
+ * reserved stack each that is an address-space problem before it is a
+ * performance one, and the creation cost so dominated that iterations barely
+ * overlapped -- which was one of two accidents hiding the unsynchronised
+ * collection mutation now fixed above.
+ *
+ * Striding rather than contiguous blocks keeps the split even when the body
+ * cost varies with the index, which it usually does. */
 void iris_par_for(void (*fn)(int64_t, void*), int64_t start, int64_t end, void* arg) {
     int64_t n = end - start;
     if (n <= 0) return;
-    pthread_t* threads = xmalloc(sizeof(pthread_t) * (size_t)n);
-    for (int64_t i = start; i < end; i++) {
-        ParArg* a = xmalloc(sizeof(ParArg));
-        a->fn = fn;  a->i = i;  a->arg = arg;
-        pthread_create(&threads[i - start], NULL, par_for_worker, a);
+
+    int64_t workers = iris_hw_threads();
+    if (workers > n) workers = n;
+    if (workers <= 1) {
+        for (int64_t i = start; i < end; i++) fn(i, arg);
+        return;
     }
-    for (int64_t i = 0; i < n; i++) pthread_join(threads[i], NULL);
+
+    pthread_t* threads = xmalloc(sizeof(pthread_t) * (size_t)workers);
+    ParRangeArg* args = xmalloc(sizeof(ParRangeArg) * (size_t)workers);
+    /* Per-slot, not a high-water mark: a failed create in the middle would
+     * otherwise leave an uninitialised handle inside the join range. */
+    unsigned char* created = xmalloc((size_t)workers);
+    for (int64_t w = 0; w < workers; w++) {
+        args[w].fn = fn;
+        args[w].start = start + w;
+        args[w].end = end;
+        args[w].stride = workers;
+        args[w].arg = arg;
+        if (pthread_create(&threads[w], NULL, par_for_range_worker, &args[w]) == 0) {
+            created[w] = 1;
+        } else {
+            /* Out of threads: run this share inline rather than dropping it. */
+            created[w] = 0;
+            par_for_range_worker(&args[w]);
+        }
+    }
+    for (int64_t w = 0; w < workers; w++) {
+        if (created[w]) pthread_join(threads[w], NULL);
+    }
+    free(created);
     free(threads);
+    free(args);
+}
+
+typedef struct {
+    void* (*fn)(IrisVal*);
+    IrisVal* arg;
+    IrisVal* result;
+    pthread_mutex_t* mu;
+} ParMapArg;
+
+static void* par_map_worker(void* arg) {
+    ParMapArg* a = (ParMapArg*)arg;
+    a->result = a->fn(a->arg);
+    return NULL;
+}
+
+IrisList* iris_par_map(IrisList* list, void* (*fn)(IrisVal*)) {
+    int64_t n = iris_list_len(list);
+    IrisList* results = iris_list_new();
+    if (n <= 0) return results;
+    pthread_t* threads = xmalloc(sizeof(pthread_t) * (size_t)n);
+    ParMapArg* args = xmalloc(sizeof(ParMapArg) * (size_t)n);
+    /* Pre-size results list */
+    for (int64_t i = 0; i < n; i++) {
+        iris_list_push(results, iris_box_i64(0)); /* placeholder */
+    }
+    for (int64_t i = 0; i < n; i++) {
+        args[i].fn = fn;
+        args[i].arg = iris_list_get(list, i);
+        args[i].result = NULL;
+        pthread_create(&threads[i], NULL, par_map_worker, &args[i]);
+    }
+    for (int64_t i = 0; i < n; i++) {
+        pthread_join(threads[i], NULL);
+        /* Replace placeholder at index i with actual result */
+        ((IrisVal**)results->data)[i] = args[i].result;
+    }
+    free(threads);
+    free(args);
+    return results;
 }
 void iris_barrier(void) { /* no-op outside par_for; par_for already joins all */ }
+
+// ── TaskGroup ──────────────────────────────────────────────────────────
+typedef struct {
+    IrisTaskGroup* group;
+    void* (*fn)(void*);
+    void* arg;
+} IrisTaskGroupJob;
+
+static IRIS_THREAD_LOCAL IrisTaskGroup* iris_current_task_group = NULL;
+
+static void* iris_task_group_worker(void* raw) {
+    IrisTaskGroupJob* job = (IrisTaskGroupJob*)raw;
+    IrisTaskGroup* previous = iris_current_task_group;
+    iris_current_task_group = job->group;
+    job->fn(job->arg);
+    iris_current_task_group = previous;
+
+    pthread_mutex_lock(&job->group->mu);
+    if (job->group->active > 0) job->group->active--;
+    if (job->group->active == 0) pthread_cond_signal(&job->group->done);
+    pthread_mutex_unlock(&job->group->mu);
+    free(job);
+    return NULL;
+}
+
+IrisTaskGroup* iris_task_group_new(void) {
+    IrisTaskGroup* tg = xmalloc(sizeof(IrisTaskGroup));
+    tg->active = 0;
+    tg->cancelled = 0;
+    tg->closed = 0;
+    pthread_mutex_init(&tg->mu, NULL);
+    pthread_cond_init(&tg->done, NULL);
+    return tg;
+}
+void iris_task_group_spawn(IrisTaskGroup* tg, void* fn, void* arg) {
+    if (!tg || !fn) iris_panic("invalid task-group spawn");
+    pthread_mutex_lock(&tg->mu);
+    if (tg->closed) {
+        pthread_mutex_unlock(&tg->mu);
+        iris_panic("cannot spawn into a joined task group");
+    }
+    tg->active++;
+    pthread_mutex_unlock(&tg->mu);
+
+    IrisTaskGroupJob* job = xmalloc(sizeof(IrisTaskGroupJob));
+    job->group = tg;
+    job->fn = (void*(*)(void*))fn;
+    job->arg = arg;
+    iris_spawn_fn((void*)iris_task_group_worker, job);
+}
+void iris_task_group_join(IrisTaskGroup* tg) {
+    if (!tg) return;
+    if (iris_current_task_group == tg) {
+        iris_panic("a task cannot join its own task group");
+    }
+    pthread_mutex_lock(&tg->mu);
+    tg->closed = 1;
+    while (tg->active > 0) {
+        pthread_mutex_unlock(&tg->mu);
+        if (!iris_async_try_run_one()) {
+            pthread_mutex_lock(&tg->mu);
+            if (tg->active > 0) pthread_cond_wait(&tg->done, &tg->mu);
+            continue;
+        }
+        pthread_mutex_lock(&tg->mu);
+    }
+    pthread_mutex_unlock(&tg->mu);
+}
+void iris_task_group_cancel(IrisTaskGroup* tg) {
+    if (!tg) return;
+    pthread_mutex_lock(&tg->mu);
+    tg->cancelled = 1;
+    pthread_mutex_unlock(&tg->mu);
+}
+int32_t iris_task_group_is_cancelled(IrisTaskGroup* tg) {
+    if (!tg) return 0;
+    pthread_mutex_lock(&tg->mu);
+    int32_t cancelled = tg->cancelled ? 1 : 0;
+    pthread_mutex_unlock(&tg->mu);
+    return cancelled;
+}
+int32_t iris_current_task_cancelled(void) {
+    return iris_task_group_is_cancelled(iris_current_task_group);
+}
+int64_t iris_task_group_is_cancelled_i64(IrisTaskGroup* tg) {
+    return (int64_t)iris_task_group_is_cancelled(tg);
+}
+int64_t iris_current_task_cancelled_i64(void) {
+    return (int64_t)iris_current_task_cancelled();
+}
+
+// ---------------------------------------------------------------------------
+// Effect handlers — thread-local handler stack with direct LLVM dispatch
+// ---------------------------------------------------------------------------
+
+#include <string.h>
+
+#ifdef _MSC_VER
+#define strdup _strdup
+#endif
+
+#define MAX_HANDLER_ARMS 64
+#define MAX_HANDLER_FRAMES 64
+
+typedef struct {
+    char* effect_name;
+    char* fn_name;
+    void* handler_fn;
+    int64_t num_args;
+    int32_t has_resume;
+} HandlerArm;
+
+typedef struct {
+    HandlerArm arms[MAX_HANDLER_ARMS];
+    int narms;
+} HandlerFrame;
+
+#ifdef _MSC_VER
+static __declspec(thread) HandlerFrame handler_frames[MAX_HANDLER_FRAMES];
+static __declspec(thread) int handler_frame_count = 0;
+static __declspec(thread) int handler_cur_narms = 0;
+#else
+static __thread HandlerFrame handler_frames[MAX_HANDLER_FRAMES];
+static __thread int handler_frame_count = 0;
+static __thread int handler_cur_narms = 0;
+#endif
+
+void iris_push_handler_arm(const char* effect_name, const char* fn_name, int64_t num_args, int32_t has_resume) {
+    if (handler_cur_narms >= MAX_HANDLER_ARMS) return;
+    HandlerFrame* frame = &handler_frames[handler_frame_count];
+    frame->arms[handler_cur_narms].effect_name = strdup(effect_name);
+    frame->arms[handler_cur_narms].fn_name = strdup(fn_name);
+    frame->arms[handler_cur_narms].handler_fn = NULL;
+    frame->arms[handler_cur_narms].num_args = num_args;
+    frame->arms[handler_cur_narms].has_resume = has_resume;
+    handler_cur_narms++;
+}
+
+void iris_push_handler_fn(void* fn) {
+    if (handler_cur_narms == 0) return;
+    HandlerFrame* frame = &handler_frames[handler_frame_count];
+    frame->arms[handler_cur_narms - 1].handler_fn = fn;
+}
+
+void iris_push_handler_frame(void) {
+    if (handler_frame_count >= MAX_HANDLER_FRAMES) return;
+    handler_frames[handler_frame_count].narms = handler_cur_narms;
+    handler_cur_narms = 0;
+    handler_frame_count++;
+}
+
+void iris_pop_handler(void) {
+    if (handler_frame_count <= 0) return;
+    handler_frame_count--;
+    HandlerFrame* frame = &handler_frames[handler_frame_count];
+    for (int i = 0; i < frame->narms; i++) {
+        free(frame->arms[i].effect_name);
+        free(frame->arms[i].fn_name);
+    }
+    handler_cur_narms = 0;
+}
+
+static HandlerArm* find_handler_arm(const char* name) {
+    for (int f = handler_frame_count - 1; f >= 0; f--) {
+        HandlerFrame* frame = &handler_frames[f];
+        for (int a = 0; a < frame->narms; a++) {
+            if (strcmp(frame->arms[a].effect_name, name) == 0) {
+                return &frame->arms[a];
+            }
+        }
+    }
+    return NULL;
+}
+
+int32_t iris_can_handle(const char* name) {
+    return find_handler_arm(name) != NULL ? 1 : 0;
+}
+
+int32_t iris_handler_has_resume(const char* name) {
+    HandlerArm* arm = find_handler_arm(name);
+    return arm ? arm->has_resume : 0;
+}
+
+void iris_resume_cont(Continuation* cont, int64_t value) {
+    if (cont == NULL) return;
+    cont->filled = 1;
+    cont->value = value;
+}
+
+int32_t iris_handler_depth(void) {
+    return handler_frame_count;
+}
+
+void* iris_find_handler_fn(const char* name) {
+    HandlerArm* arm = find_handler_arm(name);
+    return arm ? arm->handler_fn : NULL;
+}
+
+int64_t iris_effect_dispatch_or_call(
+    const char* effect_name,
+    void* real_fn,
+    void* cont,
+    int nargs,
+    const int64_t* args)
+{
+    /* Fast path: no handlers active → call real extern directly. */
+    if (handler_frame_count == 0) goto call_real;
+
+    {
+        void* hfn = iris_find_handler_fn(effect_name);
+        if (hfn) {
+            /* Handler signature: i64 handler(void* cont, i64, i64, ...) */
+            typedef int64_t (*hfn_t)(void*, int64_t, int64_t, int64_t,
+                                     int64_t, int64_t, int64_t, int64_t);
+            hfn_t fn = (hfn_t)hfn;
+            int64_t r = 0;
+            switch (nargs) {
+                case 0: r = fn(cont, 0, 0, 0, 0, 0, 0, 0); break;
+                case 1: r = fn(cont, args[0], 0, 0, 0, 0, 0, 0); break;
+                case 2: r = fn(cont, args[0], args[1], 0, 0, 0, 0, 0); break;
+                case 3: r = fn(cont, args[0], args[1], args[2], 0, 0, 0, 0); break;
+                case 4: r = fn(cont, args[0], args[1], args[2], args[3], 0, 0, 0); break;
+                case 5: r = fn(cont, args[0], args[1], args[2], args[3], args[4], 0, 0); break;
+                case 6: r = fn(cont, args[0], args[1], args[2], args[3], args[4], args[5], 0); break;
+                default: r = fn(cont, args[0], args[1], args[2], args[3], args[4], args[5], args[6]); break;
+            }
+            /* If resume was triggered, return the continuation value. */
+            if (cont) {
+                Continuation* c = (Continuation*)cont;
+                if (c->filled) return c->value;
+            }
+            return r;
+        }
+    }
+
+call_real:
+    if (!real_fn) {
+        /* No handler and no real function — panic. */
+        fprintf(stderr, "error: no handler for effect '%s' and no real implementation\n", effect_name);
+        abort();
+    }
+    {
+        /* Real extern signature: i64 real_fn(i64, i64, i64, i64, i64, i64, i64) */
+        typedef int64_t (*efn_t)(int64_t, int64_t, int64_t, int64_t,
+                                 int64_t, int64_t, int64_t);
+        efn_t fn = (efn_t)real_fn;
+        switch (nargs) {
+            case 0: return fn(0, 0, 0, 0, 0, 0, 0);
+            case 1: return fn(args[0], 0, 0, 0, 0, 0, 0);
+            case 2: return fn(args[0], args[1], 0, 0, 0, 0, 0);
+            case 3: return fn(args[0], args[1], args[2], 0, 0, 0, 0);
+            case 4: return fn(args[0], args[1], args[2], args[3], 0, 0, 0);
+            case 5: return fn(args[0], args[1], args[2], args[3], args[4], 0, 0);
+            case 6: return fn(args[0], args[1], args[2], args[3], args[4], args[5], 0);
+            default: return fn(args[0], args[1], args[2], args[3], args[4], args[5], args[6]);
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Atomics and mutexes
@@ -1272,6 +2483,7 @@ IrisVal* iris_atomic_load(IrisAtomic* a) {
     return v;
 }
 void iris_atomic_store(IrisAtomic* a, IrisVal* val) {
+    iris_tx_record_atomic(a);
     pthread_mutex_lock(&a->mu);
     if (val) iris_retain(val);
     if (a->val) iris_release(a->val);
@@ -1279,31 +2491,37 @@ void iris_atomic_store(IrisAtomic* a, IrisVal* val) {
     pthread_mutex_unlock(&a->mu);
 }
 IrisVal* iris_atomic_add(IrisAtomic* a, IrisVal* delta) {
+    iris_tx_record_atomic(a);
     pthread_mutex_lock(&a->mu);
     IrisVal* result = xmalloc(sizeof(IrisVal));
+    IrisVal* replacement = NULL;
     if (a->val && a->val->tag == IRIS_TAG_I64 && delta && delta->tag == IRIS_TAG_I64) {
-        a->val->i64 += delta->i64;
-        result->tag = IRIS_TAG_I64;  result->i64 = a->val->i64;
+        replacement = iris_box_i64(a->val->i64 + delta->i64);
+        result->tag = IRIS_TAG_I64;  result->i64 = replacement->i64;
     } else if (a->val && (a->val->tag == IRIS_TAG_F64 || a->val->tag == IRIS_TAG_F32)) {
         double d = iris_unbox_f64(a->val) + iris_unbox_f64(delta);
-        a->val->tag = IRIS_TAG_F64;  a->val->f64 = d;
+        replacement = iris_box_f64(d);
         result->tag = IRIS_TAG_F64;  result->f64 = d;
     } else {
         result->tag = IRIS_TAG_I64;  result->i64 = 0;
     }
+    if (replacement) {
+        iris_retain(replacement);
+        if (a->val) iris_release(a->val);
+        a->val = replacement;
+    }
     pthread_mutex_unlock(&a->mu);
     return result;
 }
-IrisMutex* iris_mutex_new(void) {
+IrisMutex* iris_mutex_new(IrisVal* initial) {
     IrisMutex* m = xmalloc(sizeof(IrisMutex));
     pthread_mutex_init(&m->mu, NULL);
+    m->val = initial;
     return m;
 }
 IrisVal* iris_mutex_lock(IrisMutex* m) {
     pthread_mutex_lock(&m->mu);
-    IrisVal* r = xmalloc(sizeof(IrisVal));
-    r->tag = IRIS_TAG_UNIT;  r->i64 = 0;
-    return r;
+    return m->val;
 }
 void iris_mutex_unlock(IrisMutex* m) {
     pthread_mutex_unlock(&m->mu);
@@ -1472,16 +2690,30 @@ int64_t iris_sparse_nnz(IrisSparse* sp) {
 // ---------------------------------------------------------------------------
 // Reverse-mode AD runtime
 // ---------------------------------------------------------------------------
-#if defined(_MSC_VER)
-  #define IRIS_THREAD_LOCAL __declspec(thread)
-#elif defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
-  #define IRIS_THREAD_LOCAL _Thread_local
-#else
-  #define IRIS_THREAD_LOCAL __thread
-#endif
-
 #define IRIS_TAPE_MAGIC ((uint64_t)0x4952495354415045ULL)
-#define IRIS_TAPE_ARENA_SIZE 131072
+
+// The tape was a *fixed thread-local array* of IRIS_TAPE_ARENA_SIZE nodes, plus
+// a topological buffer of the same length. At 88 bytes a node that is 11.5 MB +
+// 1 MB reserved per thread, whether or not the thread ever called `grad`:
+//
+//   $ size -A iris_runtime.o
+//   .tls$    12747312        <- 12.7 MB, against 86896 bytes of .text
+//
+// Measured at 77.4 MB for 4 threads and 808.1 MB for 64 -- ~12.2 MB per thread
+// of committed working set, for threads that only slept and sent an integer.
+// It also put a 12.7 MB TLS template in every binary IRIS produced. See
+// known-issues #47.
+//
+// Now allocated lazily, in chunks. Chunked rather than a single growable block
+// because nodes reference their parents by *pointer*: reallocating one block
+// would invalidate every parent pointer already recorded, silently corrupting
+// the graph rather than failing. Chunk addresses are stable for the life of the
+// tape, so growth is safe.
+//
+// The ceiling is unchanged, so wrap-around behaviour is exactly as before.
+#define IRIS_TAPE_CHUNK_NODES 4096
+#define IRIS_TAPE_MAX_CHUNKS  32
+#define IRIS_TAPE_ARENA_SIZE  (IRIS_TAPE_CHUNK_NODES * IRIS_TAPE_MAX_CHUNKS)
 
 typedef struct IrisTapeNode {
     uint64_t               magic;
@@ -1501,12 +2733,126 @@ typedef struct {
     size_t         cap;
 } IrisTapeVec;
 
-static IRIS_THREAD_LOCAL IrisTapeNode iris_tape_arena[IRIS_TAPE_ARENA_SIZE];
+// Thread-local state is now a chunk table rather than the chunks themselves:
+// 32 pointers and a few counters, ~300 bytes instead of 12.6 MB.
+// Two regions, because they have different lifetimes.
+//
+// `iris_backward` resets the arena index when it finishes, so the next
+// `tape(...)` used to hand back an address the previous leaf was still holding
+// -- `grad(x)` then read a later node's gradient and returned a plausible wrong
+// number with no error (known-issues #48):
+//
+//   dx=6 dy=6        <- dx should be 4
+//
+// Leaves are the only nodes a program keeps a handle to across a backward pass,
+// so leaves are now *pinned*: they live in their own region and are never
+// recycled. Intermediates, which nothing outlives the pass to reference, still
+// reset -- that is what keeps a training loop from growing without bound.
+static IRIS_THREAD_LOCAL IrisTapeNode* iris_tape_chunks[IRIS_TAPE_MAX_CHUNKS];
+static IRIS_THREAD_LOCAL size_t iris_tape_chunk_count = 0;
 static IRIS_THREAD_LOCAL size_t iris_tape_arena_index = 0;
-static IRIS_THREAD_LOCAL IrisTapeNode* iris_topo_buffer[IRIS_TAPE_ARENA_SIZE];
+
+static IRIS_THREAD_LOCAL IrisTapeNode* iris_leaf_chunks[IRIS_TAPE_MAX_CHUNKS];
+static IRIS_THREAD_LOCAL size_t iris_leaf_chunk_count = 0;
+static IRIS_THREAD_LOCAL size_t iris_leaf_index = 0;
+static IRIS_THREAD_LOCAL IrisTapeNode** iris_topo_buffer = NULL;
+static IRIS_THREAD_LOCAL size_t iris_topo_buffer_cap = 0;
 
 static IRIS_THREAD_LOCAL uint64_t iris_tape_grad_epoch  = 0;
 static IRIS_THREAD_LOCAL uint64_t iris_tape_visit_epoch = 0;
+
+// Releases this thread's tape. Called from a TLS destructor on thread exit and
+// from iris_runtime_cleanup for the main thread.
+static void iris_tape_thread_free(void) {
+    for (size_t i = 0; i < iris_tape_chunk_count; i++) {
+        free(iris_tape_chunks[i]);
+        iris_tape_chunks[i] = NULL;
+    }
+    iris_tape_chunk_count = 0;
+    iris_tape_arena_index = 0;
+    for (size_t i = 0; i < iris_leaf_chunk_count; i++) {
+        free(iris_leaf_chunks[i]);
+        iris_leaf_chunks[i] = NULL;
+    }
+    iris_leaf_chunk_count = 0;
+    iris_leaf_index = 0;
+    free(iris_topo_buffer);
+    iris_topo_buffer = NULL;
+    iris_topo_buffer_cap = 0;
+}
+
+// Without this, a thread that used autodiff would leak its chunks on exit --
+// which the old fixed array never had to worry about, because it was never
+// allocated. `spawn` calls the user function directly (no wrapper to free
+// from), and par_for workers are separate threads again, so a TLS destructor is
+// the one hook that covers every thread the runtime creates.
+#if !defined(_MSC_VER) && !defined(__wasm__)
+static pthread_key_t  iris_tape_tls_key;
+static pthread_once_t iris_tape_tls_once = PTHREAD_ONCE_INIT;
+
+static void iris_tape_tls_dtor(void* unused) {
+    (void)unused;
+    // Runs on the exiting thread, so the thread-local pointers are still ours.
+    iris_tape_thread_free();
+}
+static void iris_tape_tls_init(void) {
+    pthread_key_create(&iris_tape_tls_key, iris_tape_tls_dtor);
+}
+static void iris_tape_tls_arm(void) {
+    pthread_once(&iris_tape_tls_once, iris_tape_tls_init);
+    // The value is a sentinel; the destructor reads the thread-locals directly.
+    // It must be non-NULL or the destructor is not run.
+    if (!pthread_getspecific(iris_tape_tls_key)) {
+        pthread_setspecific(iris_tape_tls_key, (void*)1);
+    }
+}
+#else
+static void iris_tape_tls_arm(void) {}
+#endif
+
+// Hands out the next node from one of the two regions, allocating a chunk only
+// when one is actually needed. Returns NULL if allocation fails; callers must
+// tolerate that, and do, because iris_is_tape_node(NULL) is false and every
+// consumer checks it.
+static IrisTapeNode* iris_tape_alloc_from(IrisTapeNode** chunks,
+                                          size_t* chunk_count,
+                                          size_t* index,
+                                          int recycle) {
+    if (*index >= IRIS_TAPE_ARENA_SIZE) {
+        // Intermediates wrap, as before. Leaves must not: recycling a leaf is
+        // exactly the aliasing that #48 was, so a program that exceeds the leaf
+        // budget gets NULL -- a gradient of zero -- rather than another leaf's
+        // gradient reported as its own.
+        if (!recycle) return NULL;
+        *index = 0;
+    }
+    size_t idx   = *index;
+    size_t chunk = idx / IRIS_TAPE_CHUNK_NODES;
+    size_t off   = idx % IRIS_TAPE_CHUNK_NODES;
+
+    if (chunk >= *chunk_count) {
+        // Indices advance by one and wrap, so this is always the next chunk.
+        IrisTapeNode* c = (IrisTapeNode*)calloc(IRIS_TAPE_CHUNK_NODES, sizeof(IrisTapeNode));
+        if (!c) return NULL;
+        iris_tape_tls_arm();
+        chunks[chunk] = c;
+        *chunk_count  = chunk + 1;
+    }
+    (*index)++;
+    return &chunks[chunk][off];
+}
+
+// A leaf is a value the program holds a handle to and reads a gradient from
+// after `backward` returns, so its address must stay stable. Everything else is
+// internal to one backward pass and is recycled.
+static IrisTapeNode* iris_tape_alloc_node(int is_leaf) {
+    if (is_leaf) {
+        return iris_tape_alloc_from(iris_leaf_chunks, &iris_leaf_chunk_count,
+                                    &iris_leaf_index, 0);
+    }
+    return iris_tape_alloc_from(iris_tape_chunks, &iris_tape_chunk_count,
+                                &iris_tape_arena_index, 1);
+}
 
 static int iris_is_tape_node(const void* ptr) {
     if (!ptr) return 0;
@@ -1550,10 +2896,11 @@ static void iris_tape_accumulate(IrisTapeNode* parent, double delta, uint64_t gr
 
 void* iris_tape_record(double value, const char* op, int64_t parent_count,
                        void* const* parents, const double* parent_primals) {
-    if (iris_tape_arena_index >= IRIS_TAPE_ARENA_SIZE) {
-        iris_tape_arena_index = 0;
-    }
-    IrisTapeNode* node = &iris_tape_arena[iris_tape_arena_index++];
+    // A leaf is recorded with op "leaf" by the lowerer (ensure_taped_leaf), and
+    // is the only kind of node whose handle outlives the backward pass.
+    int is_leaf = (op && strcmp(op, "leaf") == 0);
+    IrisTapeNode* node = iris_tape_alloc_node(is_leaf);
+    if (!node) return NULL;
     node->magic = IRIS_TAPE_MAGIC;
     node->primal = value;
     node->op = op ? op : "";
@@ -1581,10 +2928,24 @@ void iris_backward(void* loss) {
     IrisTapeNode* loss_node = iris_is_tape_node(loss) ? (IrisTapeNode*)loss : NULL;
     if (!loss_node) return;
 
+    // Size the topological buffer to the tape actually in use, not to the
+    // ceiling. A thread that recorded 300 nodes needs one chunk's worth, not
+    // 1 MB.
+    size_t needed = (iris_tape_chunk_count + iris_leaf_chunk_count) * IRIS_TAPE_CHUNK_NODES;
+    if (needed == 0) return;
+    if (iris_topo_buffer_cap < needed) {
+        IrisTapeNode** grown =
+            (IrisTapeNode**)realloc(iris_topo_buffer, needed * sizeof(IrisTapeNode*));
+        if (!grown) return;
+        iris_tape_tls_arm();
+        iris_topo_buffer     = grown;
+        iris_topo_buffer_cap = needed;
+    }
+
     IrisTapeVec topo;
     topo.data = iris_topo_buffer;
     topo.len = 0;
-    topo.cap = IRIS_TAPE_ARENA_SIZE;
+    topo.cap = iris_topo_buffer_cap;
 
     uint64_t visit_epoch = iris_tape_next_epoch(&iris_tape_visit_epoch);
     uint64_t grad_epoch = iris_tape_next_epoch(&iris_tape_grad_epoch);
@@ -1689,7 +3050,9 @@ void iris_backward(void* loss) {
         }
     }
 
-    // Reset tape arena index for deterministic memory reuse in the next training step
+    // Recycle the intermediates for the next training step. The leaf region is
+    // deliberately untouched: the program still holds handles to those nodes
+    // and reads gradients from them after this returns. Recycling them was #48.
     iris_tape_arena_index = 0;
 }
 
@@ -1761,6 +3124,7 @@ int64_t iris_tensor_pool_destroy(void) {
 
 IrisTensor* iris_tensor_alloc(int32_t ndim, const int64_t* shape) {
     IrisTensor* t = xmalloc(sizeof(IrisTensor));
+    memset(t, 0, sizeof(*t));
     t->ndim = ndim;
     t->shape = xmalloc(ndim * sizeof(int64_t));
     t->numel = 1;
@@ -1891,6 +3255,7 @@ void iris_tensor_free(IrisTensor* t) {
     }
     
     free(t->shape);
+    free(t->grad);
     free(t);
 }
 
@@ -1918,6 +3283,36 @@ void iris_tensor_set(IrisTensor* t, int64_t flat_idx, float val) {
     t->data[flat_idx] = val;
 }
 
+enum {
+    IRIS_TAD_NONE = 0,
+    IRIS_TAD_LEAF,
+    IRIS_TAD_ADD,
+    IRIS_TAD_SUB,
+    IRIS_TAD_MUL,
+    IRIS_TAD_DIV,
+    IRIS_TAD_MATMUL,
+    IRIS_TAD_NEG,
+    IRIS_TAD_RELU,
+    IRIS_TAD_SIGMOID,
+    IRIS_TAD_TANH,
+    IRIS_TAD_EXP,
+    IRIS_TAD_LOG,
+    IRIS_TAD_SQRT,
+    IRIS_TAD_ABS,
+    IRIS_TAD_SUM_ALL
+};
+
+static void iris_tensor_ad_attach(IrisTensor* out, int32_t op,
+                                  IrisTensor* parent0, IrisTensor* parent1) {
+    if (!out) return;
+    if ((parent0 && parent0->requires_grad) || (parent1 && parent1->requires_grad)) {
+        out->requires_grad = 1;
+        out->ad_op = op;
+        out->ad_parent0 = parent0;
+        out->ad_parent1 = parent1;
+    }
+}
+
 // --- Matrix multiplication -------------------------------------------------
 // Supports 2D matmul: (M,K) @ (K,N) -> (M,N)
 
@@ -1939,6 +3334,7 @@ IrisTensor* iris_tensor_matmul(IrisTensor* a, IrisTensor* b) {
             }
         }
     }
+    iris_tensor_ad_attach(out, IRIS_TAD_MATMUL, a, b);
     return out;
 }
 
@@ -1957,6 +3353,7 @@ static IrisTensor* tensor_binop(IrisTensor* a, IrisTensor* b, int op) {
             default: out->data[i] = 0.0f; break;
         }
     }
+    iris_tensor_ad_attach(out, IRIS_TAD_ADD + op, a, b);
     return out;
 }
 
@@ -1984,6 +3381,7 @@ static IrisTensor* tensor_unary(IrisTensor* t, int op) {
             default: out->data[i] = x; break;
         }
     }
+    iris_tensor_ad_attach(out, IRIS_TAD_NEG + op, t, NULL);
     return out;
 }
 
@@ -2005,6 +3403,7 @@ IrisTensor* iris_tensor_reshape(IrisTensor* t, int32_t new_ndim, const int64_t* 
     if (new_numel != t->numel) return NULL;
 
     IrisTensor* out = xmalloc(sizeof(IrisTensor));
+    memset(out, 0, sizeof(*out));
     out->ndim = new_ndim;
     out->numel = new_numel;
     out->shape = xmalloc(new_ndim * sizeof(int64_t));
@@ -2135,6 +3534,171 @@ static IrisTensor* tensor_reduce(IrisTensor* t, int32_t axis, int keepdims, int 
 IrisTensor* iris_tensor_reduce_sum(IrisTensor* t, int32_t axis, int keepdims)  { return tensor_reduce(t, axis, keepdims, 0); }
 IrisTensor* iris_tensor_reduce_max(IrisTensor* t, int32_t axis, int keepdims)  { return tensor_reduce(t, axis, keepdims, 1); }
 IrisTensor* iris_tensor_reduce_mean(IrisTensor* t, int32_t axis, int keepdims) { return tensor_reduce(t, axis, keepdims, 2); }
+
+// --- Define-by-run reverse-mode tensor autodiff ----------------------------
+
+IrisTensor* iris_tensor_from_lists(IrisList* data, IrisList* shape) {
+    if (!data || !shape || shape->len == 0) return NULL;
+    int32_t ndim = (int32_t)shape->len;
+    int64_t* dims = xmalloc((size_t)ndim * sizeof(int64_t));
+    for (int32_t i = 0; i < ndim; i++) dims[i] = iris_unbox_i64(shape->data[i]);
+    IrisTensor* tensor = iris_tensor_zeros(ndim, dims);
+    free(dims);
+    if (!tensor || tensor->numel != (int64_t)data->len) {
+        if (tensor) iris_tensor_free(tensor);
+        return NULL;
+    }
+    for (int64_t i = 0; i < tensor->numel; i++)
+        tensor->data[i] = (float)iris_unbox_f64(data->data[i]);
+    return tensor;
+}
+
+IrisList* iris_tensor_to_list(IrisTensor* tensor) {
+    IrisList* values = iris_list_new();
+    if (!tensor) return values;
+    for (int64_t i = 0; i < tensor->numel; i++)
+        iris_list_push(values, iris_box_f64((double)tensor->data[i]));
+    return values;
+}
+
+IrisTensor* iris_tensor_tape(IrisTensor* tensor) {
+    if (!tensor) return NULL;
+    tensor->requires_grad = 1;
+    tensor->ad_op = IRIS_TAD_LEAF;
+    tensor->ad_parent0 = tensor->ad_parent1 = NULL;
+    return tensor;
+}
+
+IrisTensor* iris_tensor_sum_all(IrisTensor* tensor) {
+    if (!tensor) return NULL;
+    int64_t shape[1] = {1};
+    IrisTensor* out = iris_tensor_zeros(1, shape);
+    for (int64_t i = 0; i < tensor->numel; i++) out->data[0] += tensor->data[i];
+    iris_tensor_ad_attach(out, IRIS_TAD_SUM_ALL, tensor, NULL);
+    return out;
+}
+
+typedef struct {
+    IrisTensor** data;
+    size_t len;
+    size_t cap;
+} IrisTensorTopo;
+
+static int iris_tensor_topo_contains(IrisTensorTopo* topo, IrisTensor* tensor) {
+    for (size_t i = 0; i < topo->len; i++) if (topo->data[i] == tensor) return 1;
+    return 0;
+}
+
+static void iris_tensor_topo_collect(IrisTensor* tensor, IrisTensorTopo* topo) {
+    if (!tensor || !tensor->requires_grad || iris_tensor_topo_contains(topo, tensor)) return;
+    iris_tensor_topo_collect(tensor->ad_parent0, topo);
+    iris_tensor_topo_collect(tensor->ad_parent1, topo);
+    if (topo->len == topo->cap) {
+        topo->cap = topo->cap ? topo->cap * 2 : 32;
+        topo->data = xrealloc(topo->data, topo->cap * sizeof(IrisTensor*));
+    }
+    topo->data[topo->len++] = tensor;
+}
+
+static void iris_tensor_grad_add(IrisTensor* tensor, int64_t index, float value) {
+    if (!tensor || !tensor->requires_grad || index < 0 || index >= tensor->numel) return;
+    if (!tensor->grad) tensor->grad = xcalloc((size_t)tensor->numel, sizeof(float));
+    tensor->grad[index] += value;
+}
+
+int64_t iris_tensor_backward(IrisTensor* loss) {
+    if (!loss || !loss->requires_grad) return 0;
+    IrisTensorTopo topo = {0};
+    iris_tensor_topo_collect(loss, &topo);
+    for (size_t i = 0; i < topo.len; i++) {
+        free(topo.data[i]->grad);
+        topo.data[i]->grad = xcalloc((size_t)topo.data[i]->numel, sizeof(float));
+    }
+    for (int64_t i = 0; i < loss->numel; i++) loss->grad[i] = 1.0f;
+
+    for (size_t pos = topo.len; pos-- > 0;) {
+        IrisTensor* node = topo.data[pos];
+        IrisTensor* a = node->ad_parent0;
+        IrisTensor* b = node->ad_parent1;
+        if (!node->grad) continue;
+        switch (node->ad_op) {
+            case IRIS_TAD_ADD:
+            case IRIS_TAD_SUB:
+            case IRIS_TAD_MUL:
+            case IRIS_TAD_DIV:
+                for (int64_t i = 0; i < node->numel; i++) {
+                    float g = node->grad[i];
+                    if (node->ad_op == IRIS_TAD_ADD) {
+                        iris_tensor_grad_add(a, i, g);
+                        iris_tensor_grad_add(b, i, g);
+                    } else if (node->ad_op == IRIS_TAD_SUB) {
+                        iris_tensor_grad_add(a, i, g);
+                        iris_tensor_grad_add(b, i, -g);
+                    } else if (node->ad_op == IRIS_TAD_MUL) {
+                        iris_tensor_grad_add(a, i, g * b->data[i]);
+                        iris_tensor_grad_add(b, i, g * a->data[i]);
+                    } else if (b->data[i] != 0.0f) {
+                        iris_tensor_grad_add(a, i, g / b->data[i]);
+                        iris_tensor_grad_add(b, i, -g * a->data[i] / (b->data[i] * b->data[i]));
+                    }
+                }
+                break;
+            case IRIS_TAD_NEG:
+            case IRIS_TAD_RELU:
+            case IRIS_TAD_SIGMOID:
+            case IRIS_TAD_TANH:
+            case IRIS_TAD_EXP:
+            case IRIS_TAD_LOG:
+            case IRIS_TAD_SQRT:
+            case IRIS_TAD_ABS:
+                for (int64_t i = 0; i < node->numel; i++) {
+                    float x = a->data[i], local = 0.0f;
+                    switch (node->ad_op) {
+                        case IRIS_TAD_NEG: local = -1.0f; break;
+                        case IRIS_TAD_RELU: local = x > 0.0f ? 1.0f : 0.0f; break;
+                        case IRIS_TAD_SIGMOID: { float s = 1.0f / (1.0f + expf(-x)); local = s * (1.0f - s); break; }
+                        case IRIS_TAD_TANH: { float t = tanhf(x); local = 1.0f - t * t; break; }
+                        case IRIS_TAD_EXP: local = expf(x); break;
+                        case IRIS_TAD_LOG: local = x != 0.0f ? 1.0f / x : 0.0f; break;
+                        case IRIS_TAD_SQRT: local = x > 0.0f ? 0.5f / sqrtf(x) : 0.0f; break;
+                        case IRIS_TAD_ABS: local = x >= 0.0f ? 1.0f : -1.0f; break;
+                        default: break;
+                    }
+                    iris_tensor_grad_add(a, i, node->grad[i] * local);
+                }
+                break;
+            case IRIS_TAD_SUM_ALL:
+                for (int64_t i = 0; i < a->numel; i++) iris_tensor_grad_add(a, i, node->grad[0]);
+                break;
+            case IRIS_TAD_MATMUL: {
+                int64_t m = a->shape[a->ndim - 2];
+                int64_t k = a->shape[a->ndim - 1];
+                int64_t n = b->shape[b->ndim - 1];
+                for (int64_t i = 0; i < m; i++) for (int64_t p = 0; p < k; p++)
+                    for (int64_t j = 0; j < n; j++) {
+                        float g = node->grad[i * n + j];
+                        iris_tensor_grad_add(a, i * k + p, g * b->data[p * n + j]);
+                        iris_tensor_grad_add(b, p * n + j, a->data[i * k + p] * g);
+                    }
+                break;
+            }
+            default: break;
+        }
+    }
+    free(topo.data);
+    return 1;
+}
+
+IrisTensor* iris_tensor_grad(IrisTensor* tensor) {
+    if (!tensor) return NULL;
+    IrisTensor* grad = iris_tensor_zeros(tensor->ndim, tensor->shape);
+    if (tensor->grad) memcpy(grad->data, tensor->grad, (size_t)tensor->numel * sizeof(float));
+    return grad;
+}
+
+double iris_tensor_item(IrisTensor* tensor) {
+    return tensor && tensor->numel > 0 ? (double)tensor->data[0] : 0.0;
+}
 
 // ---------------------------------------------------------------------------
 // Time / OS (Phase 97)
@@ -2282,6 +3846,15 @@ static IrisVal* iris_mlrt_pair_from_tensor(IrisTensor* tensor) {
     return iris_make_tuple(2, iris_box_list(data), iris_box_list(shape));
 }
 
+static IrisList* iris_mlrt_empty_tensor_pair_unboxed(void) {
+    IrisList* data = iris_list_new();
+    IrisList* shape = iris_list_new();
+    IrisList* t_list = iris_list_new();
+    iris_list_push(t_list, iris_box_list(data));
+    iris_list_push(t_list, iris_box_list(shape));
+    return t_list;
+}
+
 static IrisVal* iris_mlrt_run_single(int64_t handle, IrisVal* input, IrisMlRunFn run_fn) {
     if (handle == 0 || !run_fn) return iris_mlrt_empty_tensor_pair();
 
@@ -2301,6 +3874,7 @@ static IrisVal* iris_mlrt_run_single(int64_t handle, IrisVal* input, IrisMlRunFn
     }
 
     IrisVal* result = iris_mlrt_pair_from_tensor(outputs[0]);
+
     for (size_t i = 0; i < n_outputs; i++) {
         if (outputs[i]) iris_tensor_free(outputs[i]);
     }
@@ -2308,60 +3882,218 @@ static IrisVal* iris_mlrt_run_single(int64_t handle, IrisVal* input, IrisMlRunFn
     return result;
 }
 
-int64_t iris_mlrt_onnx_load(const char* model_path) {
+static IrisList* iris_mlrt_run_multi(int64_t handle, IrisList* inputs_list, IrisMlRunFn run_fn) {
+    if (handle == 0 || !run_fn || !inputs_list) {
+        return iris_list_new();
+    }
+    int64_t n_inputs = iris_list_len(inputs_list);
+    if (n_inputs <= 0) {
+        return iris_list_new();
+    }
+
+    IrisTensor** inputs_array = (IrisTensor**)xmalloc(sizeof(IrisTensor*) * (size_t)n_inputs);
+    for (int64_t i = 0; i < n_inputs; i++) {
+        inputs_array[i] = iris_mlrt_tensor_from_pair(iris_list_get(inputs_list, i));
+    }
+
+    IrisTensor** outputs_array = NULL;
+    size_t n_outputs = 0;
+    int rc = run_fn((void*)(intptr_t)handle, inputs_array, (size_t)n_inputs, &outputs_array, &n_outputs);
+
+    for (int64_t i = 0; i < n_inputs; i++) {
+        if (inputs_array[i]) iris_tensor_free(inputs_array[i]);
+    }
+    free(inputs_array);
+
+    IrisList* out_list = iris_list_new();
+    if (rc == 0 && outputs_array && n_outputs > 0) {
+        for (size_t i = 0; i < n_outputs; i++) {
+            if (outputs_array[i]) {
+                iris_list_push(out_list, iris_mlrt_pair_from_tensor(outputs_array[i]));
+                iris_tensor_free(outputs_array[i]);
+            }
+        }
+    }
+    if (outputs_array) free(outputs_array);
+
+    return out_list;
+}
+
+#ifdef _WIN32
+#define IRIS_EXPORT __declspec(dllexport)
+#else
+#define IRIS_EXPORT __attribute__((visibility("default")))
+#endif
+
+IRIS_EXPORT int64_t iris_mlrt_onnx_load(const char* model_path) {
     return (int64_t)(intptr_t)iris_onnx_session_create(model_path);
 }
 
-int64_t iris_mlrt_onnx_free(int64_t session) {
+IRIS_EXPORT int64_t iris_mlrt_onnx_free(int64_t session) {
     iris_onnx_session_free((void*)(intptr_t)session);
     return 0;
 }
 
-IrisVal* iris_mlrt_onnx_run(int64_t session, IrisVal* input) {
+IRIS_EXPORT IrisVal* iris_mlrt_onnx_run(int64_t session, IrisVal* input) {
     return iris_mlrt_run_single(session, input, iris_onnx_session_run);
 }
 
-int64_t iris_mlrt_pytorch_load(const char* model_path) {
-#if defined(LIBTORCH_ENABLED)
-    return (int64_t)(intptr_t)iris_pytorch_load(model_path);
+IRIS_EXPORT IrisList* iris_mlrt_onnx_run_multi(int64_t session, IrisList* inputs_list) {
+    return iris_mlrt_run_multi(session, inputs_list, iris_onnx_session_run);
+}
+
+/* ---------------------------------------------------------------------------
+ * LibTorch plugin (loaded at runtime).
+ *
+ * LibTorch exposes a C++ API, so unlike ONNX/TensorFlow it cannot be dlopen'd
+ * directly — the mangled symbols and C++ ABI make that impractical. Instead
+ * pytorch_shim.cpp (which already declares its entry points `extern "C"`) is
+ * built into a *separate* shared library that links LibTorch, and the core
+ * runtime resolves those four C symbols from it on first use.
+ *
+ * The upshot: iris_runtime.o never references LibTorch, so it stays identical
+ * whether or not the SDK is installed — which is what lets us ship one
+ * prebuilt runtime object per target.
+ * ------------------------------------------------------------------------- */
+
+typedef void*  (*fn_iris_pytorch_load)(const char*);
+typedef int    (*fn_iris_pytorch_run)(void*, IrisTensor**, size_t, IrisTensor***, size_t*);
+typedef void   (*fn_iris_pytorch_free)(void*);
+typedef double (*fn_iris_pytorch_train_step)(void*, IrisTensor**, size_t, IrisTensor**, size_t, double);
+
+static fn_iris_pytorch_load       p_iris_pytorch_load       = NULL;
+static fn_iris_pytorch_run        p_iris_pytorch_run        = NULL;
+static fn_iris_pytorch_free       p_iris_pytorch_free       = NULL;
+static fn_iris_pytorch_train_step p_iris_pytorch_train_step = NULL;
+
+/* Returns 1 when the LibTorch plugin is loaded and usable, 0 otherwise.
+ * Caches both outcomes so the warning is printed at most once. */
+static int iris_torch_available(void) {
+    static int state = -1; /* -1 unknown, 0 unavailable, 1 ready */
+    if (state >= 0) return state;
+
+    static const char* const candidates[] = {
+#ifdef _WIN32
+        "iris_torch_plugin.dll",
+#elif defined(__APPLE__)
+        "libiris_torch_plugin.dylib",
 #else
-    (void)model_path;
-    fprintf(stderr, "iris: libtorch support not enabled at build time\n");
+        "libiris_torch_plugin.so",
+#endif
+    };
+
+    void* lib = NULL;
+    for (size_t i = 0; i < sizeof(candidates) / sizeof(candidates[0]); ++i) {
+#ifdef _WIN32
+        lib = (void*)LoadLibraryA(candidates[i]);
+#else
+        lib = dlopen(candidates[i], RTLD_LAZY);
+#endif
+        if (lib) break;
+    }
+
+    if (!lib) {
+        fprintf(stderr,
+                "iris: LibTorch plugin (iris_torch_plugin) not found. It must be "
+                "built once against your LibTorch install and placed next to the "
+                "binary or on the library search path. "
+                "See docs/ml-backends.md.\n");
+        state = 0;
+        return 0;
+    }
+
+#ifdef _WIN32
+#define IRIS_TORCH_SYM(n) (void*)GetProcAddress((HMODULE)lib, n)
+#else
+#define IRIS_TORCH_SYM(n) dlsym(lib, n)
+#endif
+    p_iris_pytorch_load       = (fn_iris_pytorch_load)      IRIS_TORCH_SYM("iris_pytorch_load");
+    p_iris_pytorch_run        = (fn_iris_pytorch_run)       IRIS_TORCH_SYM("iris_pytorch_run");
+    p_iris_pytorch_free       = (fn_iris_pytorch_free)      IRIS_TORCH_SYM("iris_pytorch_free");
+    p_iris_pytorch_train_step = (fn_iris_pytorch_train_step)IRIS_TORCH_SYM("iris_pytorch_train_step");
+#undef IRIS_TORCH_SYM
+
+    if (!p_iris_pytorch_load || !p_iris_pytorch_run ||
+        !p_iris_pytorch_free || !p_iris_pytorch_train_step) {
+        fprintf(stderr, "iris: LibTorch plugin is missing required symbols — "
+                        "rebuild it against this version of IRIS.\n");
+        state = 0;
+        return 0;
+    }
+
+    state = 1;
+    return 1;
+}
+
+IRIS_EXPORT int64_t iris_mlrt_pytorch_load(const char* model_path) {
+    if (!iris_torch_available()) return 0;
+    return (int64_t)(intptr_t)p_iris_pytorch_load(model_path);
+}
+
+IRIS_EXPORT int64_t iris_mlrt_pytorch_free(int64_t model) {
+    if (!iris_torch_available()) return 0;
+    p_iris_pytorch_free((void*)(intptr_t)model);
     return 0;
-#endif
 }
 
-int64_t iris_mlrt_pytorch_free(int64_t model) {
-#if defined(LIBTORCH_ENABLED)
-    iris_pytorch_free((void*)(intptr_t)model);
-#else
-    (void)model;
-#endif
-    return 0;
+IRIS_EXPORT IrisVal* iris_mlrt_pytorch_run(int64_t model, IrisVal* input) {
+    if (!iris_torch_available()) return iris_mlrt_empty_tensor_pair();
+    return iris_mlrt_run_single(model, input, p_iris_pytorch_run);
 }
 
-IrisVal* iris_mlrt_pytorch_run(int64_t model, IrisVal* input) {
-#if defined(LIBTORCH_ENABLED)
-    return iris_mlrt_run_single(model, input, iris_pytorch_run);
-#else
-    (void)model;
-    (void)input;
-    fprintf(stderr, "iris: libtorch support not enabled at build time\n");
-    return iris_mlrt_empty_tensor_pair();
-#endif
+IRIS_EXPORT IrisList* iris_mlrt_pytorch_run_multi(int64_t model, IrisList* inputs_list) {
+    if (!iris_torch_available()) return iris_list_new();
+    return iris_mlrt_run_multi(model, inputs_list, p_iris_pytorch_run);
 }
 
-int64_t iris_mlrt_tf_load(const char* model_path) {
+IRIS_EXPORT double iris_mlrt_pytorch_train_step(int64_t model, IrisList* inputs_list, IrisList* targets_list, double lr) {
+    if (!iris_torch_available()) return 0.0;
+    if (model == 0 || !inputs_list || !targets_list) {
+        return 0.0;
+    }
+    int64_t n_inputs = iris_list_len(inputs_list);
+    int64_t n_targets = iris_list_len(targets_list);
+    if (n_inputs <= 0 || n_targets <= 0) return 0.0;
+
+    IrisTensor** inputs_array = (IrisTensor**)xmalloc(sizeof(IrisTensor*) * (size_t)n_inputs);
+    for (int64_t i = 0; i < n_inputs; i++) {
+        inputs_array[i] = iris_mlrt_tensor_from_pair(iris_list_get(inputs_list, i));
+    }
+
+    IrisTensor** targets_array = (IrisTensor**)xmalloc(sizeof(IrisTensor*) * (size_t)n_targets);
+    for (int64_t i = 0; i < n_targets; i++) {
+        targets_array[i] = iris_mlrt_tensor_from_pair(iris_list_get(targets_list, i));
+    }
+
+    double loss = p_iris_pytorch_train_step((void*)(intptr_t)model, inputs_array, (size_t)n_inputs, targets_array, (size_t)n_targets, lr);
+
+    for (int64_t i = 0; i < n_inputs; i++) {
+        if (inputs_array[i]) iris_tensor_free(inputs_array[i]);
+    }
+    free(inputs_array);
+    for (int64_t i = 0; i < n_targets; i++) {
+        if (targets_array[i]) iris_tensor_free(targets_array[i]);
+    }
+    free(targets_array);
+
+    return loss;
+}
+
+IRIS_EXPORT int64_t iris_mlrt_tf_load(const char* model_path) {
     return (int64_t)(intptr_t)iris_tf_load_saved_model(model_path);
 }
 
-int64_t iris_mlrt_tf_free(int64_t model) {
+IRIS_EXPORT int64_t iris_mlrt_tf_free(int64_t model) {
     iris_tf_free((void*)(intptr_t)model);
     return 0;
 }
 
-IrisVal* iris_mlrt_tf_run(int64_t model, IrisVal* input) {
+IRIS_EXPORT IrisVal* iris_mlrt_tf_run(int64_t model, IrisVal* input) {
     return iris_mlrt_run_single(model, input, iris_tf_run);
+}
+
+IRIS_EXPORT IrisList* iris_mlrt_tf_run_multi(int64_t model, IrisList* inputs_list) {
+    return iris_mlrt_run_multi(model, inputs_list, iris_tf_run);
 }
 
 /* Closure: stores a function pointer and captured environment. */
@@ -2398,6 +4130,39 @@ void iris_call_closure_void(IrisVal* closure, ...) {
     (void)closure;
 }
 
+/* ---- Trait-object (dyn Trait) helpers (Phase 91) ---- */
+
+#define IRIS_TAG_TRAIT_OBJECT 22
+
+/* Layout: { void* data, void* vtable_id } handled as a small heap object. */
+static IrisVal* iris_make_trait_object_impl(void* data, void* vtable_id) {
+    struct IrisTraitObject {
+        void* data;
+        void* vtable_id;
+    };
+    struct IrisTraitObject* p = (struct IrisTraitObject*)xmalloc(sizeof(struct IrisTraitObject));
+    p->data = data;
+    p->vtable_id = vtable_id;
+    IrisVal* r = (IrisVal*)xmalloc(sizeof(IrisVal));
+    r->tag = IRIS_TAG_TRAIT_OBJECT;
+    r->ptr = p;
+    return r;
+}
+
+IrisVal* iris_make_trait_object(void* data, void* vtable_id) {
+    return iris_make_trait_object_impl(data, vtable_id);
+}
+
+/* Stub: in stub backend, the method-name string paired with the vtable_id
+   is not actually resolved against any registered table. Return NULL so
+   error paths surface rather than silently miscalling. */
+IrisVal* iris_dyn_call(IrisVal* obj, const char* method_name, int32_t nargs, ...) {
+    (void)obj;
+    (void)method_name;
+    (void)nargs;
+    return NULL;
+}
+
 /* ---- Closure accessor helpers (called from generated LLVM IR) ---- */
 
 void* iris_closure_fn(IrisVal* closure) {
@@ -2417,7 +4182,11 @@ IrisVal* iris_closure_get_capture(IrisVal* closure, int idx) {
 /* ======================================================================== */
 
 int64_t iris_read_key(void) {
-#ifdef _WIN32
+#if defined(__wasm__)
+    /* WASM: terminal raw mode not available; use getchar */
+    int c = getchar();
+    return (int64_t)c;
+#elif defined(_WIN32)
     /* Windows: use _getch() — no echo, no Enter needed */
     int c = _getch();
     /* Extended keys (arrows, F-keys) produce 0 or 224 prefix */
@@ -2449,7 +4218,17 @@ char* iris_read_password(const char* prompt) {
     size_t cap = 256, len = 0;
     char* buf = (char*)xmalloc(cap);
 
-#ifdef _WIN32
+#if defined(__wasm__)
+    /* WASM: no echo-toggle; just read line from stdin */
+    {
+        int c;
+        while ((c = getchar()) != '\n' && c != EOF) {
+            if (c == 127 && len > 0) { len--; continue; }
+            if (len + 1 >= cap) { cap *= 2; buf = (char*)realloc(buf, cap); }
+            buf[len++] = (char)c;
+        }
+    }
+#elif defined(_WIN32)
     int c;
     while ((c = _getch()) != '\r' && c != '\n' && c != EOF) {
         if (c == '\b' && len > 0) { len--; continue; }
@@ -2527,7 +4306,9 @@ void iris_term_reset(void) {
 }
 
 int64_t iris_term_rows(void) {
-#ifdef _WIN32
+#if defined(__wasm__)
+    return 24; /* fallback */
+#elif defined(_WIN32)
     CONSOLE_SCREEN_BUFFER_INFO csbi;
     GetConsoleScreenBufferInfo(GetStdHandle(STD_OUTPUT_HANDLE), &csbi);
     return csbi.srWindow.Bottom - csbi.srWindow.Top + 1;
@@ -2539,7 +4320,9 @@ int64_t iris_term_rows(void) {
 }
 
 int64_t iris_term_cols(void) {
-#ifdef _WIN32
+#if defined(__wasm__)
+    return 80; /* fallback */
+#elif defined(_WIN32)
     CONSOLE_SCREEN_BUFFER_INFO csbi;
     GetConsoleScreenBufferInfo(GetStdHandle(STD_OUTPUT_HANDLE), &csbi);
     return csbi.srWindow.Right - csbi.srWindow.Left + 1;
@@ -2560,7 +4343,9 @@ static void ensure_wsa(void);
 #endif
 
 int64_t iris_udp_open(int64_t port) {
-#ifdef _WIN32
+#ifdef __IRIS_WASM_STUB
+    (void)port; return -1; /* no networking on WASM P1 */
+#elif defined(_WIN32)
     ensure_wsa();
     SOCKET s = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     if (s == INVALID_SOCKET) return -1;
@@ -2590,6 +4375,7 @@ int64_t iris_udp_open(int64_t port) {
 #endif
 }
 
+#ifndef __IRIS_WASM_STUB
 void iris_udp_send(int64_t fd, const char* addr_port, int64_t data_len) {
     /* addr_port format: "host:port:data" — data starts after second colon */
     char host[256] = {0}; uint16_t port = 0;
@@ -2604,7 +4390,7 @@ void iris_udp_send(int64_t fd, const char* addr_port, int64_t data_len) {
     struct sockaddr_in dst = {0};
     dst.sin_family = AF_INET;
     dst.sin_port = htons(port);
-    dst.sin_addr.s_addr = inet_addr(host);
+    if (inet_pton(AF_INET, host, &dst.sin_addr) != 1) dst.sin_addr.s_addr = INADDR_NONE;
     size_t dlen = data_len > 0 ? (size_t)data_len : strlen(data);
 #ifdef _WIN32
     sendto((SOCKET)fd, data, (int)dlen, 0, (struct sockaddr*)&dst, sizeof(dst));
@@ -2626,11 +4412,12 @@ char* iris_udp_recv(int64_t fd) {
 #endif
     if (n < 0) { char* e = (char*)xmalloc(1); *e = '\0'; return e; }
     buf[n] = '\0';
-    char* ip = inet_ntoa(src.sin_addr);
+    char ip_buf[64];
+    inet_ntop(AF_INET, &src.sin_addr, ip_buf, sizeof(ip_buf));
     uint16_t port = ntohs(src.sin_port);
-    size_t needed = strlen(ip) + 6 + n + 2;
+    size_t needed = strlen(ip_buf) + 6 + n + 2;
     char* result = (char*)xmalloc(needed);
-    snprintf(result, needed, "%s:%d:%s", ip, port, buf);
+    snprintf(result, needed, "%s:%d:%s", ip_buf, port, buf);
     return result;
 }
 
@@ -2641,23 +4428,18 @@ void iris_udp_close(int64_t fd) {
     close((int)fd);
 #endif
 }
-
-/* ======================================================================== */
-/*  HTTP (extended)                                                          */
-/* ======================================================================== */
-
-char* iris_http_request(const char* method, const char* url,
-                        const char* body, const char* content_type) {
-    /* Delegate to GET or POST based on method */
-    if (!method || strcmp(method, "GET") == 0) return iris_http_get(url);
-    return iris_http_post(url, body ? body : "",
-                         content_type ? content_type : "application/json");
-}
+#else
+/* WASM: networking stubs */
+void iris_udp_send(int64_t fd, const char* addr_port, int64_t data_len) { (void)fd;(void)addr_port;(void)data_len; }
+char* iris_udp_recv(int64_t fd) { (void)fd;char*e=xmalloc(1);*e='\0';return e; }
+void iris_udp_close(int64_t fd) { (void)fd; }
+#endif
 
 /* ======================================================================== */
 /*  TCP Networking                                                          */
 /* ======================================================================== */
 
+#ifndef __IRIS_WASM_STUB
 #ifdef _WIN32
 static int wsa_initialized = 0;
 static void ensure_wsa(void) {
@@ -2766,6 +4548,61 @@ void iris_tcp_write(int64_t conn, const char* data) {
 #endif
 }
 
+int64_t iris_tcp_set_timeout(int64_t conn, int64_t read_timeout_ms, int64_t write_timeout_ms) {
+    if (read_timeout_ms < 0 || write_timeout_ms < 0) return -1;
+#ifdef _WIN32
+    DWORD read_ms = (DWORD)read_timeout_ms;
+    DWORD write_ms = (DWORD)write_timeout_ms;
+    if (setsockopt((SOCKET)conn, SOL_SOCKET, SO_RCVTIMEO, (const char*)&read_ms, sizeof(read_ms)) != 0) return -1;
+    if (setsockopt((SOCKET)conn, SOL_SOCKET, SO_SNDTIMEO, (const char*)&write_ms, sizeof(write_ms)) != 0) return -1;
+#else
+    struct timeval read_tv = { (time_t)(read_timeout_ms / 1000), (suseconds_t)((read_timeout_ms % 1000) * 1000) };
+    struct timeval write_tv = { (time_t)(write_timeout_ms / 1000), (suseconds_t)((write_timeout_ms % 1000) * 1000) };
+    if (setsockopt((int)conn, SOL_SOCKET, SO_RCVTIMEO, &read_tv, sizeof(read_tv)) != 0) return -1;
+    if (setsockopt((int)conn, SOL_SOCKET, SO_SNDTIMEO, &write_tv, sizeof(write_tv)) != 0) return -1;
+#endif
+    return 0;
+}
+
+int64_t iris_tcp_write_all(int64_t conn, const char* data) {
+    if (!data) return -1;
+    size_t len = strlen(data);
+    size_t sent = 0;
+    while (sent < len) {
+#ifdef _WIN32
+        int n = send((SOCKET)conn, data + sent, (int)(len - sent), 0);
+#else
+        ssize_t n = send((int)conn, data + sent, len - sent, 0);
+#endif
+        if (n <= 0) return -1;
+        sent += (size_t)n;
+    }
+    return (int64_t)sent;
+}
+
+char* iris_tcp_read_max(int64_t conn, int64_t max_bytes) {
+    if (max_bytes <= 0 || max_bytes > 16 * 1024 * 1024) {
+        char* empty = (char*)xmalloc(1); empty[0] = '\0'; return empty;
+    }
+    char* result = (char*)xmalloc((size_t)max_bytes + 1);
+#ifdef _WIN32
+    int n = recv((SOCKET)conn, result, (int)max_bytes, 0);
+#else
+    ssize_t n = recv((int)conn, result, (size_t)max_bytes, 0);
+#endif
+    if (n <= 0) { result[0] = '\0'; return result; }
+    result[n] = '\0';
+    return result;
+}
+
+int64_t iris_tcp_shutdown(int64_t conn) {
+#ifdef _WIN32
+    return shutdown((SOCKET)conn, SD_BOTH) == 0 ? 0 : -1;
+#else
+    return shutdown((int)conn, SHUT_RDWR) == 0 ? 0 : -1;
+#endif
+}
+
 void iris_tcp_close(int64_t conn) {
 #ifdef _WIN32
     closesocket((SOCKET)conn);
@@ -2773,11 +4610,25 @@ void iris_tcp_close(int64_t conn) {
     close((int)conn);
 #endif
 }
+#else /* __IRIS_WASM_STUB */
+/* WASM P1: no TCP networking */
+int64_t iris_tcp_connect(const char* host, int64_t port) { (void)host;(void)port;return -1; }
+int64_t iris_tcp_listen(int64_t port) { (void)port;return -1; }
+int64_t iris_tcp_accept(int64_t listener) { (void)listener;return -1; }
+char* iris_tcp_read(int64_t conn) { (void)conn;char*e=xmalloc(1);*e='\0';return e; }
+void iris_tcp_write(int64_t conn, const char* data) { (void)conn;(void)data; }
+void iris_tcp_close(int64_t conn) { (void)conn; }
+int64_t iris_tcp_set_timeout(int64_t conn, int64_t read_timeout_ms, int64_t write_timeout_ms) { (void)conn;(void)read_timeout_ms;(void)write_timeout_ms;return -1; }
+int64_t iris_tcp_write_all(int64_t conn, const char* data) { (void)conn;(void)data;return -1; }
+char* iris_tcp_read_max(int64_t conn, int64_t max_bytes) { (void)conn;(void)max_bytes;char*e=xmalloc(1);*e='\0';return e; }
+int64_t iris_tcp_shutdown(int64_t conn) { (void)conn;return -1; }
+#endif /* __IRIS_WASM_STUB */
 
 /* ======================================================================== */
 /*  HTTP (simple implementation using TCP sockets)                          */
 /* ======================================================================== */
 
+#ifndef __IRIS_WASM_STUB
 /* Parse a URL into host, port, path.  Returns 0 on success. */
 static int parse_url(const char* url, char* host, int* port, char* path) {
     *port = 80;
@@ -2804,7 +4655,103 @@ static int parse_url(const char* url, char* host, int* port, char* path) {
     return 0;
 }
 
+#ifdef _WIN32
+static wchar_t* iris_utf8_to_wide(const char* text) {
+    int count = MultiByteToWideChar(CP_UTF8, 0, text, -1, NULL, 0);
+    if (count <= 0) return NULL;
+    wchar_t* wide = (wchar_t*)xmalloc((size_t)count * sizeof(wchar_t));
+    if (MultiByteToWideChar(CP_UTF8, 0, text, -1, wide, count) <= 0) {
+        free(wide);
+        return NULL;
+    }
+    return wide;
+}
+
+static char* iris_winhttp_request(const char* method, const char* url, const char* body,
+                                  const char* extra_headers, int64_t timeout_ms) {
+    iris_http_status = 0;
+    char host[256] = {0}, path[2048] = {0};
+    int port = 443;
+    if (parse_url(url, host, &port, path) != 0) {
+        char* empty = (char*)xmalloc(1); empty[0] = '\0'; return empty;
+    }
+    wchar_t* host_w = iris_utf8_to_wide(host);
+    wchar_t* path_w = iris_utf8_to_wide(path);
+    wchar_t* method_w = iris_utf8_to_wide(method && *method ? method : "GET");
+    const char* default_header = "Content-Type: application/json\r\n";
+    size_t header_bytes = strlen(default_header) + (extra_headers ? strlen(extra_headers) : 0) + 1;
+    char* combined_headers = (char*)xmalloc(header_bytes);
+    snprintf(combined_headers, header_bytes, "%s%s", default_header, extra_headers ? extra_headers : "");
+    wchar_t* headers_w = iris_utf8_to_wide(combined_headers);
+    if (!host_w || !path_w || !method_w || !headers_w) goto fail_early;
+
+    HINTERNET session = WinHttpOpen(L"IRIS/1.0", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
+                                    WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    HINTERNET connection = NULL;
+    HINTERNET request = NULL;
+    char* response = NULL;
+    int succeeded = 0;
+    if (!session) goto cleanup;
+    int timeout = timeout_ms > 0 && timeout_ms <= INT32_MAX ? (int)timeout_ms : 30000;
+    WinHttpSetTimeouts(session, timeout, timeout, timeout, timeout);
+    connection = WinHttpConnect(session, host_w, (INTERNET_PORT)port, 0);
+    if (!connection) goto cleanup;
+    request = WinHttpOpenRequest(connection, method_w, path_w, NULL, WINHTTP_NO_REFERER,
+                                 WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE);
+    if (!request) goto cleanup;
+
+    const char* payload = body ? body : "";
+    DWORD payload_len = (DWORD)strlen(payload);
+    if (!WinHttpSendRequest(request, headers_w, (DWORD)-1L,
+                            payload_len > 0 ? (LPVOID)payload : WINHTTP_NO_REQUEST_DATA,
+                            payload_len, payload_len, 0)) goto cleanup;
+    if (!WinHttpReceiveResponse(request, NULL)) goto cleanup;
+    {
+        DWORD status = 0;
+        DWORD status_size = sizeof(status);
+        if (WinHttpQueryHeaders(request, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                                WINHTTP_HEADER_NAME_BY_INDEX, &status, &status_size,
+                                WINHTTP_NO_HEADER_INDEX)) {
+            iris_http_status = (int64_t)status;
+        }
+    }
+
+    size_t capacity = 16384;
+    size_t length = 0;
+    response = (char*)xmalloc(capacity);
+    for (;;) {
+        DWORD available = 0;
+        if (!WinHttpQueryDataAvailable(request, &available)) goto cleanup;
+        if (available == 0) break;
+        if (length + available + 1 > 64 * 1024 * 1024) goto cleanup;
+        while (length + available + 1 > capacity) capacity *= 2;
+        response = (char*)realloc(response, capacity);
+        DWORD received = 0;
+        if (!WinHttpReadData(request, response + length, available, &received)) goto cleanup;
+        length += received;
+    }
+    response[length] = '\0';
+    succeeded = 1;
+
+cleanup:
+    if (request) WinHttpCloseHandle(request);
+    if (connection) WinHttpCloseHandle(connection);
+    if (session) WinHttpCloseHandle(session);
+    free(host_w); free(path_w); free(method_w); free(headers_w); free(combined_headers);
+    if (succeeded) return response;
+    free(response);
+    { char* empty = (char*)xmalloc(1); empty[0] = '\0'; return empty; }
+
+fail_early:
+    free(host_w); free(path_w); free(method_w); free(headers_w); free(combined_headers);
+    { char* empty = (char*)xmalloc(1); empty[0] = '\0'; return empty; }
+}
+#endif
+
 char* iris_http_get(const char* url) {
+#ifdef _WIN32
+    if (url && strncmp(url, "https://", 8) == 0) return iris_winhttp_request("GET", url, "", "", 30000);
+#endif
     char host[256] = {0}, path[2048] = {0};
     int port = 80;
     if (parse_url(url, host, &port, path) != 0) {
@@ -2853,6 +4800,9 @@ char* iris_http_get(const char* url) {
 }
 
 char* iris_http_post(const char* url, const char* body, const char* content_type) {
+#ifdef _WIN32
+    if (url && strncmp(url, "https://", 8) == 0) return iris_winhttp_request("POST", url, body, "", 30000);
+#endif
     char host[256] = {0}, path[2048] = {0};
     int port = 80;
     if (parse_url(url, host, &port, path) != 0) {
@@ -2903,6 +4853,162 @@ char* iris_http_post(const char* url, const char* body, const char* content_type
 char* iris_http_post_json(const char* url, const char* json_body) {
     return iris_http_post(url, json_body, "application/json");
 }
+
+char* iris_http_request(const char* method, const char* url, const char* body) {
+    const char* m = (method && *method) ? method : "GET";
+#ifdef _WIN32
+    if (url && strncmp(url, "https://", 8) == 0) return iris_winhttp_request(m, url, body, "", 30000);
+#endif
+    const char* content_type = "application/json";
+    if (strcmp(m, "GET") == 0 && (!body || strlen(body) == 0)) {
+        return iris_http_get(url);
+    }
+    char host[256] = {0}, path[2048] = {0};
+    int port = 80;
+    if (parse_url(url, host, &port, path) != 0) {
+        char* e = (char*)xmalloc(1); e[0] = '\0'; return e;
+    }
+    int64_t fd = iris_tcp_connect(host, port);
+    if (fd < 0) { char* e = (char*)xmalloc(1); e[0] = '\0'; return e; }
+
+    size_t body_len = body ? strlen(body) : 0;
+    char req[8192];
+    if (body_len > 0) {
+        snprintf(req, sizeof(req),
+            "%s %s HTTP/1.0\r\nHost: %s\r\nContent-Type: %s\r\nContent-Length: %zu\r\nConnection: close\r\n\r\n",
+            m, path, host, content_type, body_len);
+    } else {
+        snprintf(req, sizeof(req),
+            "%s %s HTTP/1.0\r\nHost: %s\r\nConnection: close\r\n\r\n",
+            m, path, host);
+    }
+    iris_tcp_write(fd, req);
+    if (body && body_len > 0) iris_tcp_write(fd, body);
+
+    size_t cap = 16384, len = 0;
+    char* resp = (char*)xmalloc(cap);
+    for (;;) {
+        char buf[4096];
+        int n;
+#ifdef _WIN32
+        n = recv((SOCKET)fd, buf, sizeof(buf), 0);
+#else
+        n = recv((int)fd, buf, sizeof(buf), 0);
+#endif
+        if (n <= 0) break;
+        while (len + n + 1 > cap) { cap *= 2; resp = (char*)realloc(resp, cap); }
+        memcpy(resp + len, buf, n);
+        len += n;
+    }
+    resp[len] = '\0';
+    iris_tcp_close(fd);
+
+    char* hdr_end = strstr(resp, "\r\n\r\n");
+    if (hdr_end) {
+        hdr_end += 4;
+        size_t blen = len - (hdr_end - resp);
+        char* result = (char*)xmalloc(blen + 1);
+        memcpy(result, hdr_end, blen);
+        result[blen] = '\0';
+        free(resp);
+        return result;
+    }
+    return resp;
+}
+
+char* iris_http_request_headers(const char* method, const char* url, const char* body,
+                                const char* headers, int64_t timeout_ms) {
+    iris_http_status = 0;
+    const char* m = (method && *method) ? method : "GET";
+#ifdef _WIN32
+    if (url && strncmp(url, "https://", 8) == 0) {
+        return iris_winhttp_request(m, url, body, headers, timeout_ms);
+    }
+#else
+    if (url && strncmp(url, "https://", 8) == 0) {
+        char* empty = (char*)xmalloc(1); empty[0] = '\0'; return empty;
+    }
+#endif
+    char host[256] = {0}, path[2048] = {0};
+    int port = 80;
+    if (parse_url(url, host, &port, path) != 0) {
+        char* empty = (char*)xmalloc(1); empty[0] = '\0'; return empty;
+    }
+    int64_t fd = iris_tcp_connect(host, port);
+    if (fd < 0) { char* empty = (char*)xmalloc(1); empty[0] = '\0'; return empty; }
+    int64_t timeout = timeout_ms > 0 ? timeout_ms : 30000;
+    (void)iris_tcp_set_timeout(fd, timeout, timeout);
+
+    const char* payload = body ? body : "";
+    const char* extra = headers ? headers : "";
+    size_t payload_len = strlen(payload);
+    size_t request_capacity = strlen(m) + strlen(path) + strlen(host) + strlen(extra) + payload_len + 512;
+    char* request_text = (char*)xmalloc(request_capacity);
+    int request_len = snprintf(request_text, request_capacity,
+        "%s %s HTTP/1.1\r\nHost: %s\r\nContent-Type: application/json\r\n%sContent-Length: %zu\r\nConnection: close\r\n\r\n%s",
+        m, path, host, extra, payload_len, payload);
+    if (request_len < 0 || (size_t)request_len >= request_capacity || iris_tcp_write_all(fd, request_text) < 0) {
+        free(request_text); iris_tcp_close(fd);
+        char* empty = (char*)xmalloc(1); empty[0] = '\0'; return empty;
+    }
+    free(request_text);
+
+    size_t capacity = 16384, length = 0;
+    char* response = (char*)xmalloc(capacity);
+    for (;;) {
+        char buffer[8192];
+#ifdef _WIN32
+        int count = recv((SOCKET)fd, buffer, sizeof(buffer), 0);
+#else
+        ssize_t count = recv((int)fd, buffer, sizeof(buffer), 0);
+#endif
+        if (count <= 0) break;
+        if (length + (size_t)count + 1 > 64 * 1024 * 1024) {
+            free(response); iris_tcp_close(fd);
+            char* empty = (char*)xmalloc(1); empty[0] = '\0'; return empty;
+        }
+        while (length + (size_t)count + 1 > capacity) capacity *= 2;
+        response = (char*)realloc(response, capacity);
+        memcpy(response + length, buffer, (size_t)count);
+        length += (size_t)count;
+    }
+    iris_tcp_close(fd);
+    response[length] = '\0';
+    {
+        long long parsed_status = 0;
+        if (sscanf(response, "HTTP/%*s %lld", &parsed_status) == 1) iris_http_status = (int64_t)parsed_status;
+    }
+    char* body_start = strstr(response, "\r\n\r\n");
+    if (!body_start) return response;
+    body_start += 4;
+    size_t body_len = length - (size_t)(body_start - response);
+    char* result = (char*)xmalloc(body_len + 1);
+    memcpy(result, body_start, body_len);
+    result[body_len] = '\0';
+    free(response);
+    return result;
+}
+
+int64_t iris_http_last_status(void) {
+    return iris_http_status;
+}
+
+int64_t iris_http_tls_available(void) {
+#ifdef _WIN32
+    return 1;
+#else
+    return 0;
+#endif
+}
+#else /* __IRIS_WASM_STUB */
+char* iris_http_get(const char* url) { (void)url;char*e=xmalloc(1);*e='\0';return e; }
+char* iris_http_post(const char* url, const char* body, const char* content_type) { (void)url;(void)body;(void)content_type;char*e=xmalloc(1);*e='\0';return e; }
+char* iris_http_post_json(const char* url, const char* json_body) { return iris_http_post(url, json_body, "application/json"); }
+char* iris_http_request(const char* method, const char* url, const char* body) { (void)method;(void)url;(void)body;char*e=xmalloc(1);*e='\0';return e; }
+char* iris_http_request_headers(const char* method, const char* url, const char* body, const char* headers, int64_t timeout_ms) { (void)method;(void)url;(void)body;(void)headers;(void)timeout_ms;char*e=xmalloc(1);*e='\0';return e; }
+int64_t iris_http_last_status(void) { return 0; }
+int64_t iris_http_tls_available(void) { return 0; }
+#endif /* __IRIS_WASM_STUB */
 
 /* ======================================================================== */
 /*  JSON (minimal recursive descent parser + serializer)                    */
@@ -3112,6 +5218,65 @@ static void json_stringify_val(IrisVal* v, char** out, size_t* len, size_t* cap)
             else JSON_APPEND("null");
             break;
         }
+        case IRIS_TAG_RESULT: {
+            IrisResult* res = (IrisResult*)v->ptr;
+            if (res && res->is_ok) {
+                JSON_APPEND("{\"ok\":");
+                json_stringify_val(res->value, out, len, cap);
+                JSON_APPEND_CHAR('}');
+            } else {
+                JSON_APPEND("{\"err\":");
+                if (res) json_stringify_val(res->value, out, len, cap);
+                else JSON_APPEND("null");
+                JSON_APPEND_CHAR('}');
+            }
+            break;
+        }
+        case IRIS_TAG_TUPLE: {
+            IrisList* t = (IrisList*)v->ptr;
+            JSON_APPEND_CHAR('[');
+            if (t) {
+                for (size_t i = 0; i < t->len; i++) {
+                    if (i > 0) JSON_APPEND_CHAR(',');
+                    json_stringify_val(t->data[i], out, len, cap);
+                }
+            }
+            JSON_APPEND_CHAR(']');
+            break;
+        }
+        case IRIS_TAG_STRUCT: {
+            // Struct is stored as IrisList of field values.
+            // Field names are not available at runtime; use numeric indices.
+            IrisList* fields = (IrisList*)v->ptr;
+            JSON_APPEND_CHAR('{');
+            if (fields) {
+                for (size_t i = 0; i < fields->len; i++) {
+                    if (i > 0) JSON_APPEND_CHAR(',');
+                    char idx_buf[16]; snprintf(idx_buf, sizeof(idx_buf), "\"%zu\":", i);
+                    JSON_APPEND(idx_buf);
+                    json_stringify_val(fields->data[i], out, len, cap);
+                }
+            }
+            JSON_APPEND_CHAR('}');
+            break;
+        }
+        case IRIS_TAG_ENUM: {
+            IrisEnum* e = (IrisEnum*)v->ptr;
+            if (e) {
+                char buf[64]; snprintf(buf, sizeof(buf), "{\"tag\":%lld,\"fields\":[", (long long)e->tag);
+                JSON_APPEND(buf);
+                for (size_t i = 0; i < e->len; i++) {
+                    if (i > 0) JSON_APPEND_CHAR(',');
+                    json_stringify_val(e->fields[i], out, len, cap);
+                }
+                JSON_APPEND("]}");
+            } else {
+                JSON_APPEND("null");
+            }
+            break;
+        }
+        case IRIS_TAG_UNIT:
+            JSON_APPEND("null"); break;
         default: JSON_APPEND("null"); break;
     }
     #undef JSON_APPEND
@@ -3124,6 +5289,52 @@ char* iris_json_stringify(IrisVal* val) {
     json_stringify_val(val, &out, &len, &cap);
     out[len] = '\0';
     return out;
+}
+
+char* iris_json_query(const char* json, const char* path) {
+    if (!json || !path) return xstrdup("");
+    const char* cursor = json_skip_ws(json);
+    IrisVal* current = json_parse_value(&cursor);
+    const char* segment = path;
+    while (*segment) {
+        const char* dot = strchr(segment, '.');
+        size_t length = dot ? (size_t)(dot - segment) : strlen(segment);
+        if (length == 0 || length >= 256 || !current) return xstrdup("");
+        char key[256];
+        memcpy(key, segment, length);
+        key[length] = '\0';
+        if (current->tag == IRIS_TAG_MAP) {
+            IrisMap* map = (IrisMap*)current->ptr;
+            IrisVal* found = NULL;
+            if (map) {
+                for (size_t bucket = 0; bucket < map->n_buckets && !found; bucket++) {
+                    for (IrisMapEntry* entry = map->buckets[bucket]; entry; entry = entry->next) {
+                        if (entry->key && strcmp(entry->key, key) == 0) {
+                            found = entry->val;
+                            break;
+                        }
+                    }
+                }
+            }
+            current = found;
+        } else if (current->tag == IRIS_TAG_LIST) {
+            char* endptr = NULL;
+            long index = strtol(key, &endptr, 10);
+            IrisList* list = (IrisList*)current->ptr;
+            if (!endptr || *endptr != '\0' || index < 0 || !list || (size_t)index >= list->len) {
+                return xstrdup("");
+            }
+            current = list->data[index];
+        } else {
+            return xstrdup("");
+        }
+        if (!current) return xstrdup("");
+        if (!dot) break;
+        segment = dot + 1;
+    }
+    if (!current) return xstrdup("");
+    if (current->tag == IRIS_TAG_STR) return xstrdup(current->str ? current->str : "");
+    return iris_json_stringify(current);
 }
 
 /* ======================================================================== */
@@ -3152,6 +5363,7 @@ int iris_set_contains(IrisList* set, IrisVal* val) {
 
 void iris_set_remove(IrisList* set, IrisVal* val) {
     if (!set || !val) return;
+    iris_tx_record_list(set);
     for (size_t i = 0; i < set->len; i++) {
         if (iris_val_equal(set->data[i], val)) {
             /* Shift remaining elements */
@@ -3176,13 +5388,207 @@ IrisList* iris_set_to_list(IrisList* set) {
 /*  Regex (simple pattern matching — no external dependency)                */
 /* ======================================================================== */
 /* We implement a simple regex subset: exact match, ., *, +, ?, ^, $        */
+/* Extended: [...] char classes, (...) grouping, | alternation,              */
+/*           \d \w \s shorthand classes, [^...] negated classes             */
 /* For full regex, compiled code can use platform regex via FFI.             */
 
 static int simple_match(const char* pat, const char* str);
+static int match_here(const char* re, const char* text);
+
+static int match_char_class(const char* cc, char c, const char** end) {
+    /* cc points past the opening '['. Returns 1 if c matches, sets *end past ']'. */
+    int negated = 0;
+    if (*cc == '^') { negated = 1; cc++; }
+    int matched = 0;
+    while (*cc != '\0' && *cc != ']') {
+        char lo = *cc;
+        if (cc[1] == '-' && cc[2] != '\0' && cc[2] != ']') {
+            /* Range: lo-hi */
+            char hi = cc[2];
+            if (c >= lo && c <= hi) matched = 1;
+            cc += 3;
+            if (*cc == '-') { cc++; } /* skip trailing dash if present */
+        } else if (lo == '\\' && cc[1] != '\0') {
+            /* Escape inside class */
+            cc++;
+            char esc = *cc++;
+            if (esc == 'd' && isdigit((unsigned char)c)) matched = 1;
+            else if (esc == 'w' && (isalnum((unsigned char)c) || c == '_')) matched = 1;
+            else if (esc == 's' && (c == ' ' || c == '\t' || c == '\n' || c == '\r')) matched = 1;
+            else if (c == esc) matched = 1;
+        } else {
+            if (c == lo) matched = 1;
+            cc++;
+        }
+    }
+    if (*cc == ']') cc++;
+    *end = cc;
+    return negated ? !matched : matched;
+}
 
 static int match_here(const char* re, const char* text) {
     if (re[0] == '\0') return 1;
     if (re[0] == '$' && re[1] == '\0') return *text == '\0';
+
+    /* Grouping: (sub-pattern) */
+    if (re[0] == '(') {
+        /* Find matching ')' accounting for nested parens */
+        int depth = 1;
+        const char* p = re + 1;
+        while (*p != '\0' && depth > 0) {
+            if (*p == '(') depth++;
+            else if (*p == ')') depth--;
+            p++;
+        }
+        /* p now points past the matching ')' */
+        size_t group_len = (size_t)(p - re - 2); /* exclude parens */
+        char* group = (char*)xmalloc(group_len + 1);
+        memcpy(group, re + 1, group_len);
+        group[group_len] = '\0';
+
+        /* Check for alternation inside the group */
+        const char* alt = group;
+        int found_alt = 0;
+        int adepth = 0;
+        for (size_t i = 0; i < group_len; i++) {
+            if (group[i] == '(') adepth++;
+            else if (group[i] == ')') adepth--;
+            else if (group[i] == '|' && adepth == 0) {
+                found_alt = 1;
+                break;
+            }
+        }
+
+        if (found_alt) {
+            /* Split on | and try each alternative */
+            char* save = group;
+            char* alt_start = group;
+            int match_result = 0;
+            while (1) {
+                char* sep = NULL;
+                adepth = 0;
+                for (char* q = alt_start; *q != '\0'; q++) {
+                    if (*q == '(') adepth++;
+                    else if (*q == ')') adepth--;
+                    else if (*q == '|' && adepth == 0) { sep = q; break; }
+                }
+                if (sep) *sep = '\0';
+                /* Try matching alt_start then the rest of re */
+                /* Build combined pattern: alt + rest_of_re */
+                size_t alt_len = strlen(alt_start);
+                size_t rest_len = strlen(p);
+                char* combined = (char*)xmalloc(alt_len + rest_len + 1);
+                memcpy(combined, alt_start, alt_len);
+                memcpy(combined + alt_len, p, rest_len + 1);
+                if (simple_match(combined, text)) { match_result = 1; free(combined); break; }
+                free(combined);
+                if (sep) { alt_start = sep + 1; } else break;
+            }
+            free(save);
+            return match_result;
+        } else {
+            /* No alternation: try matching the group content then the rest */
+            size_t rest_len = strlen(p);
+            char* combined = (char*)xmalloc(group_len + rest_len + 1);
+            memcpy(combined, group, group_len);
+            memcpy(combined + group_len, p, rest_len + 1);
+            int result = simple_match(combined, text);
+            free(combined);
+            free(group);
+            return result;
+        }
+    }
+
+    /* Escape sequences: \d, \w, \s */
+    if (re[0] == '\\' && re[1] != '\0') {
+        char esc = re[1];
+        int match = 0;
+        if (esc == 'd') match = isdigit((unsigned char)*text);
+        else if (esc == 'w') match = (isalnum((unsigned char)*text) || *text == '_');
+        else if (esc == 's') match = (*text == ' ' || *text == '\t' || *text == '\n' || *text == '\r');
+        else match = (*text == esc);
+        const char* after_esc = re + 2;
+        if (after_esc[0] == '+' || after_esc[0] == '*' || after_esc[0] == '?') {
+            char q = after_esc[0];
+            after_esc++;
+            if (q == '+') {
+                /* One or more */
+                if (!match || *text == '\0') return 0;
+                text++;
+                /* Greedy: try matching rest first, then consume more */
+                do {
+                    if (match_here(after_esc, text)) return 1;
+                } while (*text != '\0' && ((esc == 'd' && isdigit((unsigned char)*text)) ||
+                                           (esc == 'w' && (isalnum((unsigned char)*text) || *text == '_')) ||
+                                           (esc == 's' && (*text == ' ' || *text == '\t' || *text == '\n' || *text == '\r')) ||
+                                           (esc != 'd' && esc != 'w' && esc != 's' && *text == esc)));
+                return 0;
+            } else if (q == '*') {
+                /* Zero or more */
+                do {
+                    if (match_here(after_esc, text)) return 1;
+                } while (*text != '\0' && ((esc == 'd' && isdigit((unsigned char)*text)) ||
+                                           (esc == 'w' && (isalnum((unsigned char)*text) || *text == '_')) ||
+                                           (esc == 's' && (*text == ' ' || *text == '\t' || *text == '\n' || *text == '\r')) ||
+                                           (esc != 'd' && esc != 'w' && esc != 's' && *text == esc)));
+                return 0;
+            } else {
+                /* ? : zero or one */
+                if (match && *text != '\0') {
+                    if (match_here(after_esc, text + 1)) return 1;
+                }
+                return match_here(after_esc, text);
+            }
+        }
+        if (match && text[0] != '\0')
+            return match_here(after_esc, text + 1);
+        return 0;
+    }
+
+    /* Character class: [...] */
+    if (re[0] == '[') {
+        const char* end;
+        int cm = match_char_class(re + 1, *text, &end);
+        if (*end == '+' || *end == '*' || *end == '?') {
+            char q = *end;
+            end++;
+            if (q == '+') {
+                /* One or more */
+                if (!cm || *text == '\0') return 0;
+                text++;
+                if (match_here(end, text)) return 1;
+                while (*text != '\0') {
+                    const char* dummy;
+                    if (match_char_class(re + 1, *text, &dummy)) {
+                        text++;
+                        if (match_here(end, text)) return 1;
+                    } else break;
+                }
+                return 0;
+            } else if (q == '*') {
+                /* Zero or more */
+                if (match_here(end, text)) return 1;
+                while (*text != '\0') {
+                    const char* dummy;
+                    if (match_char_class(re + 1, *text, &dummy)) {
+                        text++;
+                        if (match_here(end, text)) return 1;
+                    } else break;
+                }
+                return 0;
+            } else {
+                /* ? : zero or one */
+                if (cm && *text != '\0') {
+                    if (match_here(end, text + 1)) return 1;
+                }
+                return match_here(end, text);
+            }
+        }
+        if (cm && *text != '\0')
+            return match_here(end, text + 1);
+        return 0;
+    }
+
     if (re[1] == '*') {
         /* Match zero or more of re[0] */
         do {
@@ -3224,49 +5630,173 @@ int iris_regex_match(const char* pattern, const char* str) {
     return simple_match(pattern, str);
 }
 
+/*
+ * mpl: match prefix length — returns chars consumed, or -1.
+ */
+static int mpl(const char* re, const char* text) {
+    if (re[0] == '\0') return 0;
+    if (re[0] == '$' && re[1] == '\0') return (*text == '\0') ? 0 : -1;
+
+    /* Grouping: (sub-pattern) */
+    if (re[0] == '(') {
+        int depth = 1;
+        const char* p = re + 1;
+        while (*p != '\0' && depth > 0) {
+            if (*p == '(') depth++;
+            else if (*p == ')') { depth--; if (depth == 0) { p++; break; } }
+            p++;
+        }
+        size_t glen = (size_t)(p - re - 2);
+        char* group = (char*)xmalloc(glen + 1);
+        memcpy(group, re + 1, glen);
+        group[glen] = '\0';
+        const char* rest = p;
+
+        int found_alt = 0; int ad = 0;
+        for (size_t i = 0; i < glen; i++) {
+            if (group[i] == '(') ad++;
+            else if (group[i] == ')') ad--;
+            else if (group[i] == '|' && ad == 0) { found_alt = 1; break; }
+        }
+
+        int best = -1;
+        if (found_alt) {
+            char* save = group;
+            char* astart = group;
+            while (1) {
+                char* sep = NULL; ad = 0;
+                for (char* q = astart; *q != '\0'; q++) {
+                    if (*q == '(') ad++;
+                    else if (*q == ')') ad--;
+                    else if (*q == '|' && ad == 0) { sep = q; break; }
+                }
+                if (sep) *sep = '\0';
+                size_t al = strlen(astart); size_t rl = strlen(rest);
+                char* c = (char*)xmalloc(al + rl + 1);
+                memcpy(c, astart, al); memcpy(c + al, rest, rl + 1);
+                int r = mpl(c, text);
+                free(c);
+                if (r >= 0 && r > best) best = r;
+                if (sep) { *sep = '|'; astart = sep + 1; } else break;
+            }
+            free(save);
+        } else {
+            size_t rl = strlen(rest);
+            char* c = (char*)xmalloc(glen + rl + 1);
+            memcpy(c, group, glen); memcpy(c + glen, rest, rl + 1);
+            best = mpl(c, text);
+            free(c);
+            free(group);
+        }
+        return best;
+    }
+
+    /* Escape: \d, \w, \s */
+    if (re[0] == '\\' && re[1] != '\0') {
+        char esc = re[1]; const char* af = re + 2;
+        int m = 0;
+        if (esc == 'd') m = isdigit((unsigned char)*text);
+        else if (esc == 'w') m = (isalnum((unsigned char)*text) || *text == '_');
+        else if (esc == 's') m = (*text == ' ' || *text == '\t' || *text == '\n' || *text == '\r');
+        else m = (*text == esc);
+        /* helper macro for counting matching chars */
+        #define ESC_MATCH(ch) ((esc=='d' && isdigit((unsigned char)(ch))) || \
+            (esc=='w' && (isalnum((unsigned char)(ch)) || (ch)=='_')) || \
+            (esc=='s' && ((ch)==' '||(ch)=='\t'||(ch)=='\n'||(ch)=='\r')) || \
+            (esc!='d' && esc!='w' && esc!='s' && (ch)==esc))
+        if (af[0] == '+' || af[0] == '*' || af[0] == '?') {
+            char q = af[0]; const char* rest = af + 1;
+            if (q == '+') {
+                if (!m) return -1;
+                int cnt = 0; const char* t = text;
+                while (*t != '\0' && ESC_MATCH(*t)) { cnt++; t++; }
+                for (int i = cnt; i >= 1; i--) { int r = mpl(rest, text + i); if (r >= 0) return i + r; }
+                return -1;
+            } else if (q == '*') {
+                int cnt = 0; const char* t = text;
+                while (*t != '\0' && ESC_MATCH(*t)) { cnt++; t++; }
+                for (int i = cnt; i >= 0; i--) { int r = mpl(rest, text + i); if (r >= 0) return i + r; }
+                return -1;
+            } else {
+                if (m && *text != '\0') { int r = mpl(rest, text + 1); if (r >= 0) return 1 + r; }
+                return mpl(rest, text);
+            }
+        }
+        #undef ESC_MATCH
+        if (m && *text != '\0') { int r = mpl(af, text + 1); if (r >= 0) return 1 + r; }
+        return -1;
+    }
+
+    /* Character class: [...] */
+    if (re[0] == '[') {
+        const char* end;
+        int cm = match_char_class(re + 1, *text, &end);
+        if (*end == '+' || *end == '*' || *end == '?') {
+            char q = *end; const char* rest = end + 1;
+            if (q == '+') {
+                if (!cm) return -1;
+                int cnt = 0; const char* t = text;
+                while (*t != '\0') { const char* d; if (!match_char_class(re+1,*t,&d)) break; cnt++; t++; }
+                for (int i = cnt; i >= 1; i--) { int r = mpl(rest, text + i); if (r >= 0) return i + r; }
+                return -1;
+            } else if (q == '*') {
+                int cnt = 0; const char* t = text;
+                while (*t != '\0') { const char* d; if (!match_char_class(re+1,*t,&d)) break; cnt++; t++; }
+                for (int i = cnt; i >= 0; i--) { int r = mpl(rest, text + i); if (r >= 0) return i + r; }
+                return -1;
+            } else {
+                if (cm && *text != '\0') { int r = mpl(rest, text + 1); if (r >= 0) return 1 + r; }
+                return mpl(rest, text);
+            }
+        }
+        if (cm && *text != '\0') { int r = mpl(end, text + 1); if (r >= 0) return 1 + r; }
+        return -1;
+    }
+
+    /* Single char with quantifiers */
+    if (re[1] == '*') {
+        int cnt = 0; const char* t = text;
+        while (*t != '\0' && (re[0] == '.' || *t == re[0])) { cnt++; t++; }
+        for (int i = cnt; i >= 0; i--) { int r = mpl(re + 2, text + i); if (r >= 0) return i + r; }
+        return -1;
+    }
+    if (re[1] == '+') {
+        if (*text == '\0' || (re[0] != '.' && *text != re[0])) return -1;
+        int cnt = 0; const char* t = text;
+        while (*t != '\0' && (re[0] == '.' || *t == re[0])) { cnt++; t++; }
+        for (int i = cnt; i >= 1; i--) { int r = mpl(re + 2, text + i); if (r >= 0) return i + r; }
+        return -1;
+    }
+    if (re[1] == '?') {
+        if (*text != '\0' && (re[0] == '.' || *text == re[0])) {
+            int r = mpl(re + 2, text + 1); if (r >= 0) return 1 + r;
+        }
+        return mpl(re + 2, text);
+    }
+    if (*text != '\0' && (re[0] == '.' || *text == re[0])) {
+        int r = mpl(re + 1, text + 1); if (r >= 0) return 1 + r;
+    }
+    return -1;
+}
+
 IrisList* iris_regex_find_all(const char* pattern, const char* str) {
     IrisList* results = iris_list_new();
     if (!pattern || !str) return results;
-    /* For simple patterns, find all substrings matching */
-    size_t plen = strlen(pattern);
+    const char* pat = pattern;
+    if (pat[0] == '^') pat++;
     size_t slen = strlen(str);
-    /* Handle anchored patterns */
-    if (pattern[0] == '^') {
-        if (match_here(pattern + 1, str)) {
-            /* Find how many chars matched (greedy — take longest) */
-            for (size_t end = slen; end > 0; end--) {
-                char* sub = (char*)xmalloc(end + 1);
-                memcpy(sub, str, end); sub[end] = '\0';
-                if (match_here(pattern + 1, sub)) {
-                    iris_list_push(results, iris_box_str(sub));
-                    free(sub);
-                    break;
-                }
-                free(sub);
-            }
-        }
-        return results;
-    }
-    /* Unanchored: simple contains-based search for literal patterns */
-    /* For general patterns, find all non-overlapping occurrences */
-    for (size_t i = 0; i < slen; i++) {
-        if (match_here(pattern, str + i)) {
-            /* Find the end of the match */
-            size_t best_end = i + 1;
-            for (size_t end = slen; end > i; end--) {
-                /* Check if pattern matches str[i..end] */
-                char saved = 0;
-                char* mutable_str = (char*)(str + i);
-                /* Just take single char for now as simple heuristic */
-                best_end = i + 1;
-                break;
-            }
-            char* sub = (char*)xmalloc(best_end - i + 1);
-            memcpy(sub, str + i, best_end - i);
-            sub[best_end - i] = '\0';
-            iris_list_push(results, iris_box_str(sub));
-            free(sub);
-            i = best_end - 1; /* Skip past match */
+    size_t pos = 0;
+    while (pos < slen) {
+        int len = mpl(pat, str + pos);
+        if (len > 0) {
+            char* match = (char*)xmalloc(len + 1);
+            memcpy(match, str + pos, len);
+            match[len] = '\0';
+            iris_list_push(results, iris_box_str(match));
+            free(match);
+            pos += len;
+        } else {
+            pos++;
         }
     }
     return results;
@@ -3276,24 +5806,56 @@ char* iris_regex_replace(const char* pattern, const char* str, const char* repla
     if (!pattern || !str || !replacement) {
         char* e = (char*)xmalloc(1); e[0] = '\0'; return e;
     }
-    /* Simple implementation: use str_replace for literal patterns */
-    /* For regex, do character-by-character replacement of first match */
+    const char* pat = pattern[0] == '^' ? pattern + 1 : pattern;
     size_t slen = strlen(str);
     size_t rlen = strlen(replacement);
     size_t cap = slen + rlen + 64;
     char* out = (char*)xmalloc(cap);
     size_t olen = 0;
+    size_t pos = 0;
     int replaced = 0;
-    for (size_t i = 0; i < slen; i++) {
-        if (!replaced && match_here(pattern[0] == '^' ? pattern + 1 : pattern, str + i)) {
-            /* Replace at this position — skip one char of match, insert replacement */
+    while (pos < slen) {
+        if (!replaced) {
+            int len = mpl(pat, str + pos);
+            if (len > 0) {
+                while (olen + rlen + 1 > cap) { cap *= 2; out = (char*)realloc(out, cap); }
+                memcpy(out + olen, replacement, rlen);
+                olen += rlen;
+                pos += len;
+                replaced = 1;
+                continue;
+            }
+        }
+        if (olen + 2 > cap) { cap *= 2; out = (char*)realloc(out, cap); }
+        out[olen++] = str[pos];
+        pos++;
+    }
+    out[olen] = '\0';
+    return out;
+}
+
+char* iris_regex_replace_all(const char* pattern, const char* str, const char* replacement) {
+    if (!pattern || !str || !replacement) {
+        char* e = (char*)xmalloc(1); e[0] = '\0'; return e;
+    }
+    const char* pat = pattern[0] == '^' ? pattern + 1 : pattern;
+    size_t slen = strlen(str);
+    size_t rlen = strlen(replacement);
+    size_t cap = slen * 2 + rlen + 64;
+    char* out = (char*)xmalloc(cap);
+    size_t olen = 0;
+    size_t pos = 0;
+    while (pos < slen) {
+        int len = mpl(pat, str + pos);
+        if (len > 0) {
             while (olen + rlen + 1 > cap) { cap *= 2; out = (char*)realloc(out, cap); }
             memcpy(out + olen, replacement, rlen);
             olen += rlen;
-            replaced = 1;
+            pos += len;
         } else {
             if (olen + 2 > cap) { cap *= 2; out = (char*)realloc(out, cap); }
-            out[olen++] = str[i];
+            out[olen++] = str[pos];
+            pos++;
         }
     }
     out[olen] = '\0';
@@ -3446,6 +6008,7 @@ char* iris_type_of(IrisVal* val) {
         case IRIS_TAG_SPARSE:  name = "sparse"; break;
         case IRIS_TAG_UNIT:    name = "unit"; break;
         case IRIS_TAG_ENUM:    name = "enum"; break;
+        case IRIS_TAG_NATIVE_OBJECT: name = "native_object"; break;
         default:               name = "unknown"; break;
     }
     size_t len = strlen(name);
@@ -3458,20 +6021,87 @@ char* iris_type_of(IrisVal* val) {
 /*  Random                                                                  */
 /* ======================================================================== */
 
-static int rand_seeded = 0;
-static void ensure_rand(void) {
-    if (!rand_seeded) { srand((unsigned int)time(NULL)); rand_seeded = 1; }
+/*
+ * Deterministic, seedable RNG -- SplitMix64.
+ *
+ * This replaces libc `rand()`/`srand()`, which was wrong here in three
+ * separate ways:
+ *
+ *   1. It could not be seeded from IRIS, so an evolved system could never be
+ *      replayed. For a language whose pitch is a *verifiable* autonomy layer,
+ *      a self-evolving system that cannot be reproduced cannot be audited --
+ *      you cannot ask "how did it get here" and get an answer.
+ *   2. `RAND_MAX` is 32767 on this toolchain, so `rand()/RAND_MAX` produced
+ *      only 32768 distinct values. Evolutionary search over a genome of f64
+ *      genes was quantising every draw to 15 bits.
+ *   3. The interpreter used an entirely different generator (a chained
+ *      `DefaultHasher`), so the two backends produced different sequences for
+ *      the same program -- and kept two independent streams besides, one for
+ *      `random` and one for `random_range`.
+ *
+ * SplitMix64 is used because it is exactly reproducible with plain 64-bit
+ * wrapping arithmetic, which means the Rust interpreter can implement it bit
+ * for bit. `src/interp/mod.rs` carries the identical constants; the two are
+ * asserted equal in tests/test_random_determinism.iris. Changing one without
+ * the other reintroduces the divergence this replaced.
+ */
+
+static uint64_t iris_rng_state = 0;
+static int64_t  iris_rng_seed_value = 0;
+static int      iris_rng_seeded = 0;
+
+static void iris_rng_autoseed(void) {
+    if (iris_rng_seeded) return;
+    uint64_t seed = (uint64_t)time(NULL);
+#ifdef _WIN32
+    seed ^= ((uint64_t)GetCurrentProcessId() << 16);
+    seed ^= ((uint64_t)GetTickCount() & 0xFFFFu);
+#else
+    seed ^= ((uint64_t)getpid() << 16);
+    {
+        struct timespec ts;
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+        seed ^= ((uint64_t)ts.tv_nsec & 0xFFFFu);
+    }
+#endif
+    iris_rng_state = seed;
+    iris_rng_seed_value = (int64_t)seed;
+    iris_rng_seeded = 1;
+}
+
+static uint64_t iris_rng_next(void) {
+    iris_rng_autoseed();
+    iris_rng_state += 0x9E3779B97F4A7C15ULL;
+    uint64_t z = iris_rng_state;
+    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
+    z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
+    return z ^ (z >> 31);
+}
+
+/* Set the stream. Returns the seed, so a run can log what it used. */
+int64_t iris_seed(int64_t seed) {
+    iris_rng_state = (uint64_t)seed;
+    iris_rng_seed_value = seed;
+    iris_rng_seeded = 1;
+    return seed;
+}
+
+/* The seed currently in effect, auto-generating one if never set. This is what
+ * makes a run reproducible after the fact: print it, pass it back to seed(). */
+int64_t iris_random_seed(void) {
+    iris_rng_autoseed();
+    return iris_rng_seed_value;
 }
 
 double iris_random(void) {
-    ensure_rand();
-    return (double)rand() / (double)RAND_MAX;
+    /* Top 53 bits scaled into [0, 1) -- the full mantissa, no quantisation. */
+    return (double)(iris_rng_next() >> 11) / 9007199254740992.0;
 }
 
 int64_t iris_random_range(int64_t lo, int64_t hi) {
-    ensure_rand();
     if (hi <= lo) return lo;
-    return lo + (int64_t)(rand() % (int)(hi - lo));
+    uint64_t span = (uint64_t)(hi - lo);
+    return lo + (int64_t)(iris_rng_next() % span);
 }
 
 /* ======================================================================== */
@@ -3682,6 +6312,9 @@ void iris_exit_code(int64_t code) {
 }
 
 char* iris_exec_cmd(const char* cmd) {
+#if defined(__wasm__)
+    (void)cmd; { char* e = (char*)xmalloc(1); e[0] = '\0'; return e; }
+#else
     if (!cmd) { char* e = (char*)xmalloc(1); e[0] = '\0'; return e; }
 #ifdef _WIN32
     FILE* fp = _popen(cmd, "r");
@@ -3705,6 +6338,7 @@ char* iris_exec_cmd(const char* cmd) {
     pclose(fp);
 #endif
     return buf;
+#endif
 }
 
 int64_t iris_pid(void) {
@@ -3833,6 +6467,7 @@ IrisList* iris_deque_new(void) { return iris_list_new(); }
 
 IrisList* iris_deque_push_front(IrisList* dq, int64_t val) {
     if (!dq) return dq;
+    iris_tx_record_list(dq);
     IrisVal* boxed = iris_box_i64(val);
     /* shift elements right */
     if (dq->len >= dq->cap) {
@@ -3853,6 +6488,7 @@ IrisList* iris_deque_push_back(IrisList* dq, int64_t val) {
 
 int64_t iris_deque_pop_front(IrisList* dq) {
     if (!dq || dq->len == 0) return 0;
+    iris_tx_record_list(dq);
     IrisVal* v = dq->data[0];
     memmove(dq->data, dq->data + 1, sizeof(IrisVal*) * (dq->len - 1));
     dq->len--;
@@ -3863,6 +6499,7 @@ int64_t iris_deque_pop_front(IrisList* dq) {
 
 int64_t iris_deque_pop_back(IrisList* dq) {
     if (!dq || dq->len == 0) return 0;
+    iris_tx_record_list(dq);
     IrisVal* v = dq->data[--dq->len];
     int64_t res = v ? v->i64 : 0;
     if (v) iris_release(v);
@@ -3894,6 +6531,7 @@ IrisList* iris_bitset_new(int64_t nbits) {
 
 IrisList* iris_bitset_set(IrisList* bs, int64_t pos) {
     if (!bs) return bs;
+    iris_tx_record_list(bs);
     int64_t word_idx = pos / 64;
     int64_t bit_idx  = pos % 64;
     while ((int64_t)bs->len <= word_idx) {
@@ -3932,6 +6570,7 @@ int64_t iris_bitset_count(IrisList* bs) {
 
 IrisList* iris_bitset_clear(IrisList* bs, int64_t pos) {
     if (!bs) return bs;
+    iris_tx_record_list(bs);
     int64_t word_idx = pos / 64;
     int64_t bit_idx  = pos % 64;
     if (word_idx < (int64_t)bs->len) {
@@ -4037,7 +6676,13 @@ static int64_t ffi_dispatch_i64(void* fn_ptr, int64_t* args, int n) {
     typedef int64_t (*fn4)(int64_t, int64_t, int64_t, int64_t);
     typedef int64_t (*fn5)(int64_t, int64_t, int64_t, int64_t, int64_t);
     typedef int64_t (*fn6)(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
-    if (!fn_ptr) return -1;
+    typedef int64_t (*fn7)(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+    typedef int64_t (*fn8)(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+    typedef int64_t (*fn9)(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+    typedef int64_t (*fn10)(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+    typedef int64_t (*fn11)(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+    typedef int64_t (*fn12)(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+    if (!fn_ptr || n < 0 || n > 12) return -1;
     switch (n) {
         case 0: return ((fn0)fn_ptr)();
         case 1: return ((fn1)fn_ptr)(args[0]);
@@ -4045,7 +6690,14 @@ static int64_t ffi_dispatch_i64(void* fn_ptr, int64_t* args, int n) {
         case 3: return ((fn3)fn_ptr)(args[0], args[1], args[2]);
         case 4: return ((fn4)fn_ptr)(args[0], args[1], args[2], args[3]);
         case 5: return ((fn5)fn_ptr)(args[0], args[1], args[2], args[3], args[4]);
-        default: return ((fn6)fn_ptr)(args[0], args[1], args[2], args[3], args[4], args[5]);
+        case 6: return ((fn6)fn_ptr)(args[0], args[1], args[2], args[3], args[4], args[5]);
+        case 7: return ((fn7)fn_ptr)(args[0], args[1], args[2], args[3], args[4], args[5], args[6]);
+        case 8: return ((fn8)fn_ptr)(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7]);
+        case 9: return ((fn9)fn_ptr)(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8]);
+        case 10: return ((fn10)fn_ptr)(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9]);
+        case 11: return ((fn11)fn_ptr)(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9], args[10]);
+        case 12: return ((fn12)fn_ptr)(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9], args[10], args[11]);
+        default: return -1;
     }
 }
 
@@ -4093,6 +6745,119 @@ void iris_ffi_call_void(void* handle, const char* func_name, int64_t* args, int 
     }
 }
 
+/* ---- FFI out-parameter cells -------------------------------------------
+ *
+ * A great many C functions return their result through a pointer argument:
+ *
+ *     int64_t iris_rcl_take_twist(int64_t sub, double* out);   // writes 6 doubles
+ *     int64_t iris_rcl_take_string(int64_t sub, char* buf, int32_t max);
+ *
+ * IRIS could not call any of those. `ffi_dispatch_i64` already passes an array
+ * of int64 slots, and on every supported target a pointer fits in one -- so the
+ * missing piece was never the calling convention. It was that IRIS had no way to
+ * own a piece of memory and name its address.
+ *
+ * These give it one. `iris_ffi_out_new` returns the address of a zeroed block as
+ * an int64, which is passed straight through as an ordinary argument; the
+ * typed readers then pull values back out. Indexed reads matter because a single
+ * out-pointer often receives several values (a Twist is six doubles).
+ *
+ * Ownership is explicit: the caller frees. That is deliberate -- these cells are
+ * handed to foreign code, so tying them to the refcounting GC would mean
+ * reasoning about a lifetime the GC cannot see.
+ */
+
+/* Every cell carries a 16-byte header immediately before the address handed
+ * out: a magic word and the payload length.
+ *
+ * That buys two properties the interpreter already had, and the two backends
+ * must agree or a policy behaves differently under `--emit eval` than in a
+ * built binary. Bounds are checked on every read, so an out-param the callee
+ * did not fill returns zero rather than garbage; and `out_free` is idempotent,
+ * because the magic is cleared on release and a second free sees it gone.
+ *
+ * Idempotence is not a nicety here: the error path of a foreign call typically
+ * frees on the way out, and a double free was corrupting the heap
+ * (exit 0xC0000409) where the interpreter simply ignored it.
+ *
+ * 16 bytes keeps the payload 16-byte aligned, which is enough for any scalar a
+ * C ABI will write through an out-pointer. */
+#define IRIS_CELL_MAGIC 0x4952495343454C4CULL
+#define IRIS_CELL_HDR   16
+
+int64_t iris_ffi_out_new(int64_t nbytes) {
+    if (nbytes <= 0) return 0;
+    unsigned char* base = (unsigned char*)calloc(1, (size_t)nbytes + IRIS_CELL_HDR);
+    if (!base) return 0;
+    *(uint64_t*)base = IRIS_CELL_MAGIC;
+    *(uint64_t*)(base + 8) = (uint64_t)nbytes;
+    return (int64_t)(intptr_t)(base + IRIS_CELL_HDR);
+}
+
+/* Returns the payload length, or 0 if `cell` is not a live cell. */
+static uint64_t iris_cell_len(int64_t cell) {
+    if (!cell) return 0;
+    unsigned char* base = (unsigned char*)(intptr_t)cell - IRIS_CELL_HDR;
+    if (*(uint64_t*)base != IRIS_CELL_MAGIC) return 0;
+    return *(uint64_t*)(base + 8);
+}
+
+void iris_ffi_out_free(int64_t cell) {
+    if (!cell) return;
+    unsigned char* base = (unsigned char*)(intptr_t)cell - IRIS_CELL_HDR;
+    if (*(uint64_t*)base != IRIS_CELL_MAGIC) return;   /* already freed */
+    *(uint64_t*)base = 0;
+    free(base);
+}
+
+int64_t iris_ffi_out_sizeof_f64(void) { return (int64_t)sizeof(double); }
+int64_t iris_ffi_out_sizeof_i64(void) { return (int64_t)sizeof(int64_t); }
+
+double iris_ffi_out_get_f64(int64_t cell, int64_t index) {
+    uint64_t len = iris_cell_len(cell);
+    if (index < 0 || (uint64_t)(index + 1) * sizeof(double) > len) return 0.0;
+    return ((double*)(intptr_t)cell)[index];
+}
+
+int64_t iris_ffi_out_get_i64(int64_t cell, int64_t index) {
+    uint64_t len = iris_cell_len(cell);
+    if (index < 0 || (uint64_t)(index + 1) * sizeof(int64_t) > len) return 0;
+    return ((int64_t*)(intptr_t)cell)[index];
+}
+
+int32_t iris_ffi_out_get_i32(int64_t cell, int64_t index) {
+    uint64_t len = iris_cell_len(cell);
+    if (index < 0 || (uint64_t)(index + 1) * sizeof(int32_t) > len) return 0;
+    return ((int32_t*)(intptr_t)cell)[index];
+}
+
+/* Read the cell as a NUL-terminated string, bounded by the payload length so an
+ * unterminated buffer cannot run off the end. Returns a fresh copy, so the cell
+ * may be freed immediately afterwards. */
+char* iris_ffi_out_get_str(int64_t cell) {
+    uint64_t len = iris_cell_len(cell);
+    if (!len) return xstrdup("");
+    const char* p = (const char*)(intptr_t)cell;
+    uint64_t n = 0;
+    while (n < len && p[n] != 0) n++;
+    char* out = (char*)xmalloc((size_t)n + 1);
+    memcpy(out, p, (size_t)n);
+    out[n] = 0;
+    return out;
+}
+
+void iris_ffi_out_set_f64(int64_t cell, int64_t index, double v) {
+    uint64_t len = iris_cell_len(cell);
+    if (index < 0 || (uint64_t)(index + 1) * sizeof(double) > len) return;
+    ((double*)(intptr_t)cell)[index] = v;
+}
+
+void iris_ffi_out_set_i64(int64_t cell, int64_t index, int64_t v) {
+    uint64_t len = iris_cell_len(cell);
+    if (index < 0 || (uint64_t)(index + 1) * sizeof(int64_t) > len) return;
+    ((int64_t*)(intptr_t)cell)[index] = v;
+}
+
 /* -- Python FFI -- */
 
 static char python_buf[65536];
@@ -4110,6 +6875,9 @@ static const char* find_python_cmd(void) {
 }
 
 const char* iris_python_eval(const char* code) {
+#if defined(__wasm__)
+    (void)code; snprintf(python_buf, sizeof(python_buf), "error: python not available on WASM"); return python_buf;
+#else
     const char* py = find_python_cmd();
     if (!py || !code) { snprintf(python_buf, sizeof(python_buf), "error: python not found"); return python_buf; }
     char cmd[8192];
@@ -4128,6 +6896,7 @@ const char* iris_python_eval(const char* code) {
     pclose(fp);
 #endif
     return python_buf;
+#endif
 }
 
 int64_t iris_python_exec(const char* code_or_path) {
@@ -4146,12 +6915,20 @@ int64_t iris_python_exec(const char* code_or_path) {
 }
 
 const char* iris_python_call(const char* module, const char* func, const char* args_json) {
+#if defined(__wasm__)
+    (void)module;(void)func;(void)args_json; snprintf(python_buf, sizeof(python_buf), "error: python not available on WASM"); return python_buf;
+#else
     const char* py = find_python_cmd();
     if (!py || !module || !func) { snprintf(python_buf, sizeof(python_buf), "error: python not found"); return python_buf; }
     char cmd[8192];
     const char* a = args_json ? args_json : "";
     snprintf(cmd, sizeof(cmd),
-        "%s -c \"import %s; print(%s.%s(%s))\"",
+        /* The argument is quoted. Without the quotes it was interpolated as
+         * a bare Python expression, so `py_call1("os.path", "basename",
+         * "/a/b/c.txt")` generated `basename(/a/b/c.txt)` -- a SyntaxError.
+         * The interpreter quotes it, so the two backends disagreed on every
+         * non-numeric argument. See known-issues #44. */
+        "%s -c \"import %s; print(%s.%s('%s'))\"",
         py, module, module, func, a);
 #ifdef _WIN32
     FILE* fp = _popen(cmd, "r");
@@ -4169,9 +6946,13 @@ const char* iris_python_call(const char* module, const char* func, const char* a
     pclose(fp);
 #endif
     return python_buf;
+#endif
 }
 
 const char* iris_python_version(void) {
+#if defined(__wasm__)
+    return "Python not available on WASM";
+#else
     const char* py = find_python_cmd();
     if (!py) return "Python not found";
     char cmd[256];
@@ -4191,6 +6972,7 @@ const char* iris_python_version(void) {
     pclose(fp);
 #endif
     return python_buf;
+#endif
 }
 
 /* -- Rust FFI (aliases for C FFI — Rust cdylibs export extern "C") -- */
@@ -4322,18 +7104,22 @@ int64_t iris_thread_count(void) {
 #define RC_COLOR_WHITE  2   /* unreachable, collect me */
 
 typedef struct RcEntry {
-    void*          ptr;
-    int32_t        kind;
-    int64_t        count;
-    int64_t        scan_count; /* scratch counter used by cycle collector */
-    int            color;
-    int            buffered;   /* 1 if in possible_roots */
-    struct RcEntry* next;
+    void*               ptr;
+    int32_t             kind;
+    int64_t             count;
+    int64_t             scan_count; /* scratch counter used by cycle collector */
+    int                 color;
+    int                 buffered;   /* 1 if in possible_roots */
+    IrisWeakRef*        weak_refs;  /* list of active weak refs pointing to this ptr */
+    struct RcEntry*     next;
 } RcEntry;
 
 static RcEntry* rc_table[RC_TABLE_BUCKETS];
 static int64_t  gc_total_allocated = 0;
 static int64_t  gc_total_freed = 0;
+static int64_t  gc_cycles_collected = 0;
+static int64_t  gc_weak_refs_invalidated = 0;
+static int64_t  gc_auto_threshold = 10000;
 
 /* Global mutex protecting the rc_table from concurrent retain/release calls. */
 static pthread_mutex_t rc_global_mu = PTHREAD_MUTEX_INITIALIZER;
@@ -4342,6 +7128,19 @@ static pthread_mutex_t rc_global_mu = PTHREAD_MUTEX_INITIALIZER;
 #define POSSIBLE_ROOTS_MAX 512
 static void* possible_roots[POSSIBLE_ROOTS_MAX];
 static int   possible_roots_count = 0;
+
+static void iris_gc_cycle_collect_locked(void);
+
+static void invalidate_weak_refs_locked(RcEntry* e) {
+    if (!e) return;
+    IrisWeakRef* w = e->weak_refs;
+    while (w) {
+        w->target = NULL;
+        gc_weak_refs_invalidated++;
+        w = w->next_weak;
+    }
+    e->weak_refs = NULL;
+}
 
 static size_t rc_hash(void* ptr) {
     uintptr_t v = (uintptr_t)ptr;
@@ -4370,9 +7169,13 @@ static RcEntry* rc_insert(void* ptr, int32_t kind) {
     e->scan_count = 0;
     e->color = RC_COLOR_BLACK;
     e->buffered = 0;
+    e->weak_refs = NULL;
     e->next = rc_table[h];
     rc_table[h] = e;
     gc_total_allocated++;
+    if (gc_auto_threshold > 0 && (gc_total_allocated % gc_auto_threshold == 0)) {
+        iris_gc_cycle_collect_locked();
+    }
     return e;
 }
 
@@ -4437,8 +7240,18 @@ static void rc_free_atomic_payload(IrisAtomic* a) {
 
 static void rc_free_mutex_payload(IrisMutex* m) {
     if (!m) return;
+    if (m->val) iris_release(m->val);
     pthread_mutex_destroy(&m->mu);
     free(m);
+}
+
+static void rc_free_task_group_payload(IrisTaskGroup* tg) {
+    if (!tg) return;
+    iris_task_group_cancel(tg);
+    iris_task_group_join(tg);
+    pthread_cond_destroy(&tg->done);
+    pthread_mutex_destroy(&tg->mu);
+    free(tg);
 }
 
 static void rc_free_sparse_payload(IrisSparse* sp) {
@@ -4490,6 +7303,12 @@ static void rc_deep_free_by_kind(void* ptr, int32_t kind) {
                     break;
                 case IRIS_TAG_MUTEX:
                     iris_release_kind(val->ptr, IRIS_RC_MUTEX);
+                    break;
+                case IRIS_TAG_TASK_GROUP:
+                    iris_release_kind(val->ptr, IRIS_RC_TASK_GROUP);
+                    break;
+                case IRIS_TAG_NATIVE_OBJECT:
+                    iris_release_kind(val->ptr, IRIS_RC_NATIVE_OBJECT);
                     break;
                 case IRIS_TAG_TUPLE:
                 case IRIS_TAG_STRUCT:
@@ -4551,6 +7370,9 @@ static void rc_deep_free_by_kind(void* ptr, int32_t kind) {
         case IRIS_RC_SPARSE:
             rc_free_sparse_payload((IrisSparse*)ptr);
             break;
+        case IRIS_RC_TASK_GROUP:
+            rc_free_task_group_payload((IrisTaskGroup*)ptr);
+            break;
         default:
             free(ptr);
             break;
@@ -4595,6 +7417,7 @@ void iris_release_kind(void* ptr, int32_t kind) {
         while (*pp) {
             if ((*pp)->ptr == ptr) {
                 RcEntry* tmp = *pp;
+                invalidate_weak_refs_locked(tmp);
                 *pp = tmp->next;
                 free(tmp);
                 break;
@@ -4618,6 +7441,19 @@ void iris_release_kind(void* ptr, int32_t kind) {
 
 void iris_release(void* ptr) {
     iris_release_kind(ptr, IRIS_RC_BOXED);
+}
+
+/* Drop an owned temporary IrisVal box. Spawn environments own their boxes but
+ * do not insert the wrappers into the RC table unless another container has
+ * retained them. Scalars therefore need an explicit destruction path, while
+ * heap-reference boxes must also release the payload retain from box_heap_ref. */
+void iris_drop_box(IrisVal* value) {
+    if (!value) return;
+    pthread_mutex_lock(&rc_global_mu);
+    int tracked = rc_find(value) != NULL;
+    pthread_mutex_unlock(&rc_global_mu);
+    if (tracked) iris_release(value);
+    else rc_deep_free_by_kind(value, IRIS_RC_BOXED);
 }
 
 int64_t iris_refcount(void* ptr) {
@@ -4648,6 +7484,8 @@ static void rc_each_child(void* ptr, int32_t kind, ChildFn fn, void* ctx) {
                 case IRIS_TAG_GRAD:
                 case IRIS_TAG_SPARSE:
                 case IRIS_TAG_MUTEX:
+                case IRIS_TAG_TASK_GROUP:
+                case IRIS_TAG_NATIVE_OBJECT:
                     if (val->ptr) fn(val->ptr, ctx);
                     break;
                 case IRIS_TAG_TUPLE:
@@ -4829,6 +7667,9 @@ int64_t iris_gc_stats_freed(void) {
  * Also frees the RC side-table itself.  Registered via atexit() in the
  * constructor below so that sanitizers (ASAN/Valgrind) report a clean heap. */
 static void iris_runtime_cleanup(void) {
+    /* The main thread has no TLS destructor to run, so free its tape here. */
+    iris_tape_thread_free();
+
     /* Run cycle collector one final time before cleanup. */
     pthread_mutex_lock(&rc_global_mu);
     iris_gc_cycle_collect_locked();
@@ -4956,7 +7797,640 @@ IrisVal* iris_extract_variant_field(IrisVal* v, int64_t field_idx) {
 }
 
 
+// ── Adaptive AI runtime (std.adaptive) ────────────────────────────────────
+
+struct IrisAdaptiveState {
+    char*     name;
+    double*   params;
+    int64_t   n_params;
+    double    learning_rate;
+    double    risk_threshold;
+    double    retrain_threshold;
+    int64_t   min_obs_retrain;
+    int64_t   obs_count;
+    double    mean_err;
+    double    m2;
+    /* Largest |error| seen. Previously never tracked, so `risk_max_error`
+     * reported the *mean* instead -- a strictly smaller number, in the module
+     * whose job is deciding when it is safe to act. See known-issues #34. */
+    double    max_err;
+    /* Observations whose |error| exceeded `risk_threshold`. Previously
+     * `risk_errors` reported the observation count instead. */
+    int64_t   err_count;
+    double    last_prediction;
+    int       initialized;
+};
+
+// ── Internal implementations (IrisAdaptiveState*) ──────────────────────────
+
+IrisAdaptiveState* iris_adaptive_new_impl(const char* name,
+                                           int64_t n_params,
+                                           double learning_rate,
+                                           double risk_threshold) {
+    IrisAdaptiveState* s = (IrisAdaptiveState*)xmalloc(sizeof(IrisAdaptiveState));
+    s->name = name ? xstrdup(name) : xstrdup("adaptive");
+    s->n_params = n_params;
+    s->params = (double*)xcalloc((size_t)(n_params > 0 ? n_params : 1), sizeof(double));
+    s->learning_rate = learning_rate > 0.0 ? learning_rate : 0.01;
+    s->risk_threshold = risk_threshold > 0.0 ? risk_threshold : 2.0;
+    s->retrain_threshold = 0.05;
+    s->min_obs_retrain = 10;
+    s->obs_count = 0;
+    s->mean_err = 0.0;
+    s->m2 = 0.0;
+    s->max_err = 0.0;
+    s->err_count = 0;
+    s->last_prediction = 0.0;
+    s->initialized = 1;
+    return s;
+}
+
+void iris_adaptive_free_impl(IrisAdaptiveState* state) {
+    if (!state) return;
+    if (state->name) free(state->name);
+    if (state->params) free(state->params);
+    free(state);
+}
+
+const char* iris_adaptive_name_impl(IrisAdaptiveState* state) {
+    return state ? state->name : "";
+}
+
+double iris_adaptive_get_param_impl(IrisAdaptiveState* state, int64_t idx) {
+    if (!state || idx < 0 || idx >= state->n_params) return 0.0;
+    return state->params[idx];
+}
+
+void iris_adaptive_set_param_impl(IrisAdaptiveState* state, int64_t idx, double value) {
+    if (!state || idx < 0 || idx >= state->n_params) return;
+    state->params[idx] = value;
+}
+
+int64_t iris_adaptive_n_params_impl(IrisAdaptiveState* state) {
+    return state ? state->n_params : 0;
+}
+
+double iris_adaptive_learning_rate_impl(IrisAdaptiveState* state) {
+    return state ? state->learning_rate : 0.0;
+}
+
+void iris_adaptive_set_learning_rate_impl(IrisAdaptiveState* state, double lr) {
+    if (state) state->learning_rate = lr > 0.0 ? lr : 0.001;
+}
+
+void iris_adaptive_observe_impl(IrisAdaptiveState* state,
+                                 const double* inputs, int64_t n_inputs,
+                                 double target) {
+    if (!state || !inputs || n_inputs <= 0) return;
+    double pred = iris_adaptive_predict_impl(state, inputs, n_inputs);
+    double error = pred - target;
+    state->last_prediction = pred;
+    iris_adaptive_record_error_impl(state, error);
+    double lr = state->learning_rate;
+    for (int64_t i = 0; i < n_inputs && i < state->n_params; i++) {
+        state->params[i] -= lr * error * inputs[i];
+    }
+}
+
+double iris_adaptive_predict_impl(IrisAdaptiveState* state,
+                                  const double* inputs, int64_t n_inputs) {
+    if (!state || !inputs) return 0.0;
+    double pred = 0.0;
+    for (int64_t i = 0; i < n_inputs && i < state->n_params; i++) {
+        pred += state->params[i] * inputs[i];
+    }
+    return pred;
+}
+
+double iris_adaptive_train_batch_impl(IrisAdaptiveState* state,
+                                       const double* inputs, int64_t n_samples,
+                                       int64_t n_features, const double* targets) {
+    if (!state || !inputs || !targets || n_samples <= 0) return 0.0;
+    double total_loss = 0.0;
+    for (int64_t b = 0; b < n_samples; b++) {
+        const double* row = inputs + b * n_features;
+        double pred = iris_adaptive_predict_impl(state, row, n_features);
+        double error = pred - targets[b];
+        total_loss += error * error;
+        double lr = state->learning_rate;
+        for (int64_t i = 0; i < n_features && i < state->n_params; i++) {
+            state->params[i] -= lr * error * row[i];
+        }
+    }
+    state->last_prediction = total_loss / (double)n_samples;
+    return state->last_prediction;
+}
+
+void iris_adaptive_record_error_impl(IrisAdaptiveState* state, double error) {
+    if (!state) return;
+    state->obs_count++;
+    double delta = error - state->mean_err;
+    state->mean_err += delta / (double)state->obs_count;
+    double delta2 = error - state->mean_err;
+    state->m2 += delta * delta2;
+    /* Track what `risk_max_error` and `risk_errors` claim to report. */
+    double abs_err = fabs(error);
+    if (abs_err > state->max_err) state->max_err = abs_err;
+    if (abs_err > state->risk_threshold) state->err_count++;
+}
+
+IrisRiskMetrics iris_adaptive_get_risk_impl(IrisAdaptiveState* state) {
+    IrisRiskMetrics m;
+    m.mean_error = state ? state->mean_err : 0.0;
+    m.max_error = state ? state->max_err : 0.0;
+    m.observations = state ? state->obs_count : 0;
+    m.errors = state ? state->err_count : 0;
+    m.last_risk = 0.0;
+    m.confidence = 1.0;
+    if (state && state->obs_count > 1) {
+        double variance = state->m2 / (double)(state->obs_count - 1);
+        double std_dev = sqrt(variance);
+        double risk_score = std_dev + fabs(state->mean_err);
+        m.last_risk = risk_score > 1.0 ? 1.0 : risk_score;
+        m.confidence = std_dev > 0.0 ? exp(-fabs(state->mean_err) / std_dev) : 1.0;
+        if (m.confidence > 1.0) m.confidence = 1.0;
+    }
+    return m;
+}
+
+int iris_adaptive_is_unsafe_impl(IrisAdaptiveState* state) {
+    if (!state) return 0;
+    IrisRiskMetrics m = iris_adaptive_get_risk_impl(state);
+    /* This used a hardcoded 0.5 and ignored `risk_threshold` entirely, so
+     * `adaptive_set_risk_threshold` had no effect on the only guard anyone
+     * calls: a caller set a threshold, saw a guard, and got a guard answering a
+     * different question. `last_risk` is clamped to 1.0, so a threshold above
+     * that would make the risk arm unreachable -- it is clamped to the same
+     * range the score lives in. See known-issues #34. */
+    double threshold = state->risk_threshold;
+    if (threshold <= 0.0) threshold = 0.5;
+    if (threshold > 1.0) threshold = 1.0;
+    return m.last_risk > threshold || m.confidence < 0.3;
+}
+
+void iris_adaptive_set_risk_threshold_impl(IrisAdaptiveState* state, double threshold) {
+    if (state) state->risk_threshold = threshold > 0.0 ? threshold : 1.0;
+}
+
+IrisUncertainty iris_adaptive_predict_with_uncertainty_impl(IrisAdaptiveState* state,
+                                                             const double* inputs,
+                                                             int64_t n_inputs) {
+    IrisUncertainty u;
+    u.mean = iris_adaptive_predict_impl(state, inputs, n_inputs);
+    u.variance = 1.0;
+    u.lower_95 = u.mean - 1.96;
+    u.upper_95 = u.mean + 1.96;
+    u.confidence = 0.5;
+    if (state && state->obs_count > 1) {
+        u.variance = state->m2 / (double)(state->obs_count - 1);
+        double std_dev = sqrt(u.variance);
+        u.lower_95 = u.mean - 1.96 * std_dev;
+        u.upper_95 = u.mean + 1.96 * std_dev;
+        u.confidence = std_dev > 0.0 ? exp(-fabs(u.mean) / std_dev) : 0.5;
+        if (u.confidence > 1.0) u.confidence = 1.0;
+    }
+    return u;
+}
+
+double iris_adaptive_uncertainty_bayes_update_impl(IrisAdaptiveState* state,
+                                                    double prior_mean, double prior_var,
+                                                    double observation, double obs_var) {
+    if (!state) return 0.0;
+    /*
+     * Normal-normal conjugate update, treating `observation` as one new datum
+     * on top of the state's accumulated error statistics.
+     *
+     * This previously computed a posterior from the accumulated data only and
+     * then returned `posterior_mean + observation`. That is not a posterior:
+     * with no accumulated data it returned `prior_mean + observation`, where a
+     * Bayesian update with no data must return the prior mean, and the result
+     * grew without bound as observations arrived. The `observation` argument
+     * was never actually folded into the update. Since this value is what an
+     * adaptive system uses to decide whether it is confident enough to act, a
+     * posterior that is not a posterior is a live hazard. See known-issues #30.
+     */
+    if (prior_var <= 0.0) prior_var = 1.0;
+    if (obs_var <= 0.0) obs_var = 1.0;
+    double n = (double)state->obs_count;
+    double posterior_precision = 1.0 / prior_var + (n + 1.0) / obs_var;
+    if (posterior_precision <= 0.0) posterior_precision = 1.0;
+    double data_sum = n * state->mean_err + observation;
+    return (prior_mean / prior_var + data_sum / obs_var) / posterior_precision;
+}
+
+int iris_adaptive_should_retrain_impl(IrisAdaptiveState* state) {
+    if (!state) return 0;
+    if (state->obs_count < state->min_obs_retrain) return 0;
+    return fabs(state->mean_err) > state->retrain_threshold;
+}
+
+double iris_adaptive_auto_retrain_impl(IrisAdaptiveState* state,
+                                       const double* inputs, int64_t n_samples,
+                                       int64_t n_features, const double* targets) {
+    if (!state) return 0.0;
+    if (!iris_adaptive_should_retrain_impl(state)) {
+        return state->mean_err;
+    }
+    double loss = iris_adaptive_train_batch_impl(state, inputs, n_samples, n_features, targets);
+    iris_adaptive_reset_stats_impl(state);
+    return loss;
+}
+
+void iris_adaptive_set_retrain_threshold_impl(IrisAdaptiveState* state, double threshold) {
+    if (state) state->retrain_threshold = threshold > 0.0 ? threshold : 0.01;
+}
+
+void iris_adaptive_set_min_observations_for_retrain_impl(IrisAdaptiveState* state, int64_t n) {
+    if (state) state->min_obs_retrain = n > 0 ? n : 1;
+}
+
+void iris_adaptive_adapt_threshold_impl(IrisAdaptiveState* state, double observed_error) {
+    if (!state) return;
+    double current = state->risk_threshold;
+    double alpha = 0.1;
+    double abs_err = fabs(observed_error);
+    if (abs_err > current) {
+        state->risk_threshold = current + alpha * (abs_err - current);
+    } else {
+        state->risk_threshold = current - alpha * (current - abs_err) * 0.5;
+    }
+    if (state->risk_threshold < 0.1) state->risk_threshold = 0.1;
+    double error_rate = fabs(state->mean_err);
+    if (state->obs_count > 0 && error_rate > 0.05) {
+        state->learning_rate *= 1.01;
+        if (state->learning_rate > 1.0) state->learning_rate = 1.0;
+    } else if (state->obs_count > 10 && error_rate < 0.001) {
+        state->learning_rate *= 0.99;
+        if (state->learning_rate < 0.0001) state->learning_rate = 0.0001;
+    }
+}
+
+double iris_adaptive_current_threshold_impl(IrisAdaptiveState* state) {
+    return state ? state->risk_threshold : 0.0;
+}
+
+int64_t iris_adaptive_observation_count_impl(IrisAdaptiveState* state) {
+    return state ? state->obs_count : 0;
+}
+
+double iris_adaptive_mean_error_impl(IrisAdaptiveState* state) {
+    return state ? state->mean_err : 0.0;
+}
+
+void iris_adaptive_reset_stats_impl(IrisAdaptiveState* state) {
+    if (!state) return;
+    state->obs_count = 0;
+    state->mean_err = 0.0;
+    state->m2 = 0.0;
+}
+
+// ── Extern-compatible wrappers (int64_t handle) ───────────────────────────
+static IrisAdaptiveState* ad_h(int64_t h) { return (IrisAdaptiveState*)(intptr_t)h; }
+
+int64_t iris_adaptive_new(const char* name, int64_t n_params,
+                           double learning_rate, double risk_threshold) {
+    return (int64_t)(intptr_t)iris_adaptive_new_impl(name, n_params, learning_rate, risk_threshold);
+}
+int64_t iris_adaptive_free(int64_t handle) {
+    iris_adaptive_free_impl(ad_h(handle));
+    return 0;
+}
+const char* iris_adaptive_name(int64_t handle) {
+    IrisAdaptiveState* state = ad_h(handle);
+    if (state && state->name) return xstrdup(state->name);
+    return xstrdup("");
+}
+double iris_adaptive_get_param(int64_t handle, int64_t idx) {
+    return iris_adaptive_get_param_impl(ad_h(handle), idx);
+}
+int64_t iris_adaptive_set_param(int64_t handle, int64_t idx, double value) {
+    iris_adaptive_set_param_impl(ad_h(handle), idx, value);
+    return 0;
+}
+int64_t iris_adaptive_n_params(int64_t handle) {
+    return iris_adaptive_n_params_impl(ad_h(handle));
+}
+double iris_adaptive_learning_rate(int64_t handle) {
+    return iris_adaptive_learning_rate_impl(ad_h(handle));
+}
+int64_t iris_adaptive_set_learning_rate(int64_t handle, double lr) {
+    iris_adaptive_set_learning_rate_impl(ad_h(handle), lr);
+    return 0;
+}
+int64_t iris_adaptive_record_error(int64_t handle, double error) {
+    iris_adaptive_record_error_impl(ad_h(handle), error);
+    return 0;
+}
+int iris_adaptive_is_unsafe(int64_t handle) {
+    return iris_adaptive_is_unsafe_impl(ad_h(handle));
+}
+int64_t iris_adaptive_set_risk_threshold(int64_t handle, double threshold) {
+    iris_adaptive_set_risk_threshold_impl(ad_h(handle), threshold);
+    return 0;
+}
+int iris_adaptive_should_retrain(int64_t handle) {
+    return iris_adaptive_should_retrain_impl(ad_h(handle));
+}
+int64_t iris_adaptive_set_retrain_threshold(int64_t handle, double threshold) {
+    iris_adaptive_set_retrain_threshold_impl(ad_h(handle), threshold);
+    return 0;
+}
+int64_t iris_adaptive_set_min_observations_for_retrain(int64_t handle, int64_t n) {
+    iris_adaptive_set_min_observations_for_retrain_impl(ad_h(handle), n);
+    return 0;
+}
+int64_t iris_adaptive_adapt_threshold(int64_t handle, double observed_error) {
+    iris_adaptive_adapt_threshold_impl(ad_h(handle), observed_error);
+    return 0;
+}
+double iris_adaptive_current_threshold(int64_t handle) {
+    return iris_adaptive_current_threshold_impl(ad_h(handle));
+}
+int64_t iris_adaptive_observation_count(int64_t handle) {
+    return iris_adaptive_observation_count_impl(ad_h(handle));
+}
+double iris_adaptive_mean_error(int64_t handle) {
+    return iris_adaptive_mean_error_impl(ad_h(handle));
+}
+/* Accessors for the metrics `adaptive_get_risk` claims to report. Without
+ * these the stdlib had nothing real to read and substituted the mean for the
+ * max and the observation count for the error count. See known-issues #34. */
+double iris_adaptive_max_error(int64_t handle) {
+    IrisAdaptiveState* s = ad_h(handle);
+    return s ? s->max_err : 0.0;
+}
+int64_t iris_adaptive_error_count(int64_t handle) {
+    IrisAdaptiveState* s = ad_h(handle);
+    return s ? s->err_count : 0;
+}
+double iris_adaptive_last_risk(int64_t handle) {
+    IrisAdaptiveState* s = ad_h(handle);
+    if (!s) return 0.0;
+    return iris_adaptive_get_risk_impl(s).last_risk;
+}
+double iris_adaptive_confidence(int64_t handle) {
+    IrisAdaptiveState* s = ad_h(handle);
+    if (!s) return 1.0;
+    return iris_adaptive_get_risk_impl(s).confidence;
+}
+int64_t iris_adaptive_reset_stats(int64_t handle) {
+    iris_adaptive_reset_stats_impl(ad_h(handle));
+    return 0;
+}
+double iris_adaptive_uncertainty_bayes_update(int64_t handle,
+                                               double prior_mean, double prior_var,
+                                               double observation, double obs_var) {
+    return iris_adaptive_uncertainty_bayes_update_impl(ad_h(handle),
+               prior_mean, prior_var, observation, obs_var);
+}
+
 int iris_sandbox_check_ffi(const char* lib_path) {
     (void)lib_path;
     return sandbox_allow_ffi ? 0 : 1;
+}
+
+// ---------------------------------------------------------------------------
+// Weak References, GC Stats, and Concurrency Timeouts
+// ---------------------------------------------------------------------------
+
+IrisWeakRef* iris_weak_ref_new(void* target) {
+    IrisWeakRef* w = (IrisWeakRef*)xmalloc(sizeof(IrisWeakRef));
+    w->target = target;
+    w->next_weak = NULL;
+    if (!target) return w;
+    pthread_mutex_lock(&rc_global_mu);
+    RcEntry* e = rc_find(target);
+    if (e) {
+        w->next_weak = e->weak_refs;
+        e->weak_refs = w;
+    } else {
+        w->target = NULL;
+    }
+    pthread_mutex_unlock(&rc_global_mu);
+    return w;
+}
+
+IrisOption* iris_weak_ref_upgrade(IrisWeakRef* w) {
+    if (!w || !w->target) return iris_make_none();
+    pthread_mutex_lock(&rc_global_mu);
+    RcEntry* e = rc_find(w->target);
+    if (e && e->count > 0) {
+        e->count++;
+        e->color = RC_COLOR_BLACK;
+        void* ptr = w->target;
+        pthread_mutex_unlock(&rc_global_mu);
+        return iris_make_some((IrisVal*)ptr);
+    }
+    w->target = NULL;
+    pthread_mutex_unlock(&rc_global_mu);
+    return iris_make_none();
+}
+
+int32_t iris_weak_ref_alive(IrisWeakRef* w) {
+    if (!w || !w->target) return 0;
+    pthread_mutex_lock(&rc_global_mu);
+    RcEntry* e = rc_find(w->target);
+    int32_t alive = (e && e->count > 0) ? 1 : 0;
+    if (!alive) w->target = NULL;
+    pthread_mutex_unlock(&rc_global_mu);
+    return alive;
+}
+
+void iris_gc_stats(int64_t* out_alloc, int64_t* out_freed, int64_t* out_cycles, int64_t* out_weak_inval) {
+    pthread_mutex_lock(&rc_global_mu);
+    if (out_alloc) *out_alloc = gc_total_allocated;
+    if (out_freed) *out_freed = gc_total_freed;
+    if (out_cycles) *out_cycles = gc_cycles_collected;
+    if (out_weak_inval) *out_weak_inval = gc_weak_refs_invalidated;
+    pthread_mutex_unlock(&rc_global_mu);
+}
+
+IrisOption* iris_chan_recv_timeout(IrisChannel* c, int64_t timeout_ms) {
+    if (!c || timeout_ms <= 0) return iris_chan_try_recv(c);
+    pthread_mutex_lock(&c->mu);
+    if (c->count == 0) {
+        struct timespec ts;
+#if defined(_WIN32) || defined(_WIN64)
+        SYSTEMTIME st;
+        GetSystemTime(&st);
+        FILETIME ft;
+        SystemTimeToFileTime(&st, &ft);
+        ULARGE_INTEGER uli;
+        uli.LowPart = ft.dwLowDateTime;
+        uli.HighPart = ft.dwHighDateTime;
+        uint64_t ns_total = uli.QuadPart * 100 + (uint64_t)timeout_ms * 1000000;
+        ts.tv_sec = (time_t)(ns_total / 1000000000);
+        ts.tv_nsec = (long)(ns_total % 1000000000);
+#else
+        clock_gettime(CLOCK_REALTIME, &ts);
+        int64_t ns = ts.tv_nsec + (timeout_ms % 1000) * 1000000;
+        ts.tv_sec += (timeout_ms / 1000) + (ns / 1000000000);
+        ts.tv_nsec = ns % 1000000000;
+#endif
+        while (c->count == 0) {
+            int res = pthread_cond_timedwait(&c->not_empty, &c->mu, &ts);
+            if (res != 0) break;
+        }
+    }
+    if (c->count == 0) {
+        pthread_mutex_unlock(&c->mu);
+        return iris_make_none();
+    }
+    IrisVal* val = c->buf[c->head];
+    c->head = (c->head + 1) % c->cap;
+    c->count--;
+    if (c->max_cap >= 0) pthread_cond_signal(&c->not_full);
+    pthread_mutex_unlock(&c->mu);
+    IrisOption* opt = iris_make_some(val);
+    if (val) iris_release(val);
+    return opt;
+}
+
+int32_t iris_task_group_join_timeout(IrisTaskGroup* tg, int64_t timeout_ms) {
+    (void)timeout_ms;
+    if (!tg) return 1;
+    iris_task_group_join(tg);
+    return 1;
+}
+
+// ---------------------------------------------------------------------------
+// New builtins (called via generic BuiltinCall codegen path)
+// ---------------------------------------------------------------------------
+
+int64_t iris_list_remove(IrisList* l, int64_t idx) {
+    if (idx < 0 || (size_t)idx >= l->len) {
+        fprintf(stderr, "iris: list_remove index %ld out of bounds (len=%zu)\n", (long)idx, l->len);
+        abort();
+    }
+    iris_tx_record_list(l);
+    IrisVal* removed = l->data[idx];
+    for (size_t j = (size_t)idx; j + 1 < l->len; j++)
+        l->data[j] = l->data[j + 1];
+    l->len--;
+    return removed->i64;
+}
+
+int64_t iris_list_insert(IrisList* l, int64_t idx, IrisVal* val) {
+    if (idx < 0 || (size_t)idx > l->len) {
+        fprintf(stderr, "iris: list_insert index %ld out of bounds (len=%zu)\n", (long)idx, l->len);
+        abort();
+    }
+    iris_tx_record_list(l);
+    if (l->len == l->cap) {
+        l->cap *= 2;
+        l->data = xrealloc(l->data, sizeof(IrisVal*) * l->cap);
+    }
+    for (size_t j = l->len; j > (size_t)idx; j--)
+        l->data[j] = l->data[j - 1];
+    if (val) iris_retain(val);
+    l->data[idx] = val;
+    l->len++;
+    return 0;
+}
+
+IrisVal* iris_map_entries(IrisVal* map_val) {
+    IrisMap* m = iris_unbox_map(map_val);
+    IrisList* entries = iris_list_new();
+    for (size_t b = 0; b < m->n_buckets; b++) {
+        for (IrisMapEntry* e = m->buckets[b]; e; e = e->next) {
+            IrisVal* key = iris_box_str(e->key);
+            IrisVal* pair = iris_make_struct(2, key, e->val);
+            iris_list_push(entries, pair);
+        }
+    }
+    return iris_box_list(entries);
+}
+
+IrisVal* iris_recv_timeout(IrisVal* chan_val, int64_t timeout_ms) {
+    IrisChannel* c = iris_unbox_chan(chan_val);
+    IrisOption* opt = iris_chan_recv_timeout(c, timeout_ms);
+    return (IrisVal*)opt;
+}
+
+void iris_chan_send_b(IrisVal* chan_val, IrisVal* val) {
+    IrisChannel* c = iris_unbox_chan(chan_val);
+    iris_chan_send(c, val);
+}
+
+IrisWeakRef* iris_weak_ref(IrisVal* val) {
+    return iris_weak_ref_new(val);
+}
+
+int32_t iris_weak_alive(IrisWeakRef* w) {
+    return iris_weak_ref_alive(w);
+}
+
+IrisVal* iris_weak_upgrade(IrisWeakRef* w) {
+    IrisOption* opt = iris_weak_ref_upgrade(w);
+    return (IrisVal*)opt;
+}
+
+IrisVal* iris_gc_stats_map(void) {
+    int64_t alloc = 0, freed = 0, cycles = 0, weak_inv = 0;
+    iris_gc_stats(&alloc, &freed, &cycles, &weak_inv);
+    IrisMap* m = iris_map_new();
+    iris_map_set(m, iris_box_str("allocated"),   iris_box_i64(alloc));
+    iris_map_set(m, iris_box_str("freed"),       iris_box_i64(freed));
+    iris_map_set(m, iris_box_str("cycles"),      iris_box_i64(cycles));
+    iris_map_set(m, iris_box_str("weak_invalidated"), iris_box_i64(weak_inv));
+    return iris_box_map(m);
+}
+
+int32_t iris_gc_collect_call(void) {
+    iris_gc_collect();
+    return 0;
+}
+
+/* ------------------------------------------------------------------------- */
+/* Dynamic reflection                                                       */
+/* ------------------------------------------------------------------------- */
+
+/* Full source reflection is implemented by the Rust IR interpreter, which
+ * owns the parser, borrow checker, effect checker and IR verifier. A native
+ * program currently links only this compact C runtime, not the compiler.
+ *
+ * The previous native implementation guessed at one integer operator or
+ * concatenated every quoted substring, returned Ok for invalid programs, and
+ * therefore made reflect_validate execute unvalidated input while claiming it
+ * had been type checked. An explicit capability failure is safe and honest;
+ * silently evaluating a different language is not. */
+int32_t iris_reflection_available(void) { return 0; }
+
+int32_t iris_validate(const char* source) {
+    (void)source;
+    return 0;
+}
+
+static IrisResult* iris_reflection_unavailable(void) {
+    return iris_make_err(iris_box_str(
+        "source reflection is unavailable in standalone native binaries; run with IRIS_FORCE_INTERP=1"
+    ));
+}
+
+IrisResult* iris_eval(const char* source) {
+    (void)source;
+    return iris_reflection_unavailable();
+}
+
+IrisResult* iris_eval_i64(const char* source) {
+    (void)source;
+    return iris_reflection_unavailable();
+}
+
+IrisResult* iris_meta_analyze(const char* source) {
+    (void)source;
+    return iris_reflection_unavailable();
+}
+
+IrisResult* iris_meta_emit_ir(const char* source) {
+    (void)source;
+    return iris_reflection_unavailable();
+}
+
+IrisResult* iris_meta_apply_edit(const char* source, int64_t start_byte, int64_t end_byte, const char* replacement) {
+    (void)source;
+    (void)start_byte;
+    (void)end_byte;
+    (void)replacement;
+    return iris_reflection_unavailable();
 }

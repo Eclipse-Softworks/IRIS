@@ -1,5 +1,103 @@
 # IRIS Language Extension Changelog
 
+## 1.0.5
+
+### New Features
+
+- Native Test Explorer discovery, run, cancellation, output, duration, and
+  debug profiles for zero-argument `test_*` functions.
+- Named-function DAP launches so Debug Test runs the selected test instead of
+  `main`.
+- Rich hovers for functions, traits, algebraic effects, fields, and builtins,
+  including docs, generics, declared/inferred effects, and unsafe status.
+- Dead/unused, unreachable, unsafe, and possible-infinite-loop diagnostics with
+  exact ranges, fading tags, and matching semantic-token modifiers.
+- Complete standard-library module completions and snippets for structured
+  concurrency, tensor autodiff, AIS, LLM integration, typed metaprogramming,
+  checked networking, ownership, ROS 2, and assertion-backed tests.
+
+### Formatting
+
+- The compiler formatter now preserves line/doc/nested block comments and
+  literal spelling, refuses to rewrite invalid source, is idempotence tested,
+  and wraps at safe comma boundaries.
+- Added configurable indentation and preferred line width settings.
+
+### Compatibility
+
+- Targets IRIS compiler `1.0.0-rc1`; this extension release does not rename the
+  compiler release to RC2.
+- Debugging remains interpreter-trace based rather than native-process attach.
+
+## 1.0.4
+
+### New Features
+
+- Added workspace test and formatting commands, per-test CodeLens actions, the
+  complete compiler-output picker, toolchain diagnostics, and expanded current
+  syntax/stdlib snippets.
+- Added editor-title run/debug actions and safer process-based command launch.
+
+## 1.0.3
+
+### Bug Fixes
+
+- **Language server no longer fails with an opaque "exited with code 1".** The
+  extension picked its executable by checking only that a file existed, so a
+  stale global install at `~/.iris/bin/iris.exe` was chosen even though it could
+  not load — an older build still statically imported `onnxruntime.dll`,
+  `tensorflow.dll`, `c10.dll` and `torch_cpu.dll`, so Windows failed it at image
+  load with `STATUS_DLL_NOT_FOUND` (0xC0000135) before `main` ran. Candidates are
+  now probed with `--version` and the loader status is decoded and reported.
+- **A workspace build is now preferred** over a global install, so working on the
+  compiler uses the binary matching the sources being edited.
+- **`$iris` problem matcher was referenced by every task but never declared**, so
+  compiler errors from tasks never reached the Problems panel. It is now defined
+  against the real diagnostic format (`error[E0005]: …` / ` --> file:line:col`).
+- **`TaskGroup.Run` does not exist** in the VS Code API; the run task set its
+  group to `undefined`. esbuild does not typecheck, which is how this shipped.
+- **Run/build no longer go through a shell**, so paths containing spaces are
+  passed verbatim instead of being re-parsed.
+- **Settings now take effect.** `iris.executablePath` and the `iris.inlayHints.*`
+  flags are only read at server startup, and the change handler was an empty
+  stub; both now trigger a restart.
+
+### New Features
+
+- **Syntax highlighting completed against `src/parser/lexer.rs`.** Added the 23
+  reserved words the grammar was missing: `match`, `let`, `mod`, `by`, `effect`,
+  `handle`, `resume`, `with`, `raise`, `try`, `catch`, `defer`, `select`, `yield`,
+  `move`, `unsafe`, `dyn`, `defmacro`. Removed `and`, `or` and `not`, which are
+  not IRIS keywords, and `layer`, `input`, `output` and `where`, which are
+  contextual identifiers rather than reserved words and so mis-coloured ordinary
+  variables. Loop labels are now highlighted in `break`/`continue`.
+- **New commands**: Explain Error Code (seeded from the diagnostic under the
+  cursor), Check Formatting, Run Tests in File, Run Benchmarks, Generate
+  Documentation, Package Manager, Diagnose Toolchain, and Show Compiler Output
+  for all eleven text emit kinds (`graph`, `cuda`, `cuda-ptx`, `simd`,
+  `llvm-complete`, `onnx`, `tensorrt`, `pgo-*`) — previously only `ir` and `llvm`
+  were reachable.
+- **New settings**: `iris.sandbox`, `iris.noCache`, `iris.target`.
+- **New snippets** for `trait`, `impl`, effect operations, `handle` blocks with
+  and without `resume`, `defer`, `select`, labelled loops, and `assert`.
+
+## 1.0.2
+
+### New Features
+
+- **Syntax highlighting**: Added support for Higher-Kinded Types (HKT) generic parameter placeholders `[_]`.
+- **Language Specifications**: Highlighting for `where` clauses and angle bracket generic arguments.
+
+## 1.0.1
+
+### Bug Fixes
+
+- **Syntax highlighting**: Fixed `-` arithmetic operator incorrectly matching inside `->` arrow type annotations
+- **Syntax highlighting**: Fixed `!` logical-NOT operator incorrectly matching inside `!=` comparison operators
+- **Grammar**: Added AIS/MAPE-K stdlib functions (`mapek_agent_init`, `mapek_step`, `mapek_run`, `homeostasis_*`, `active_inf_*`, `epistemic_*`, `safety_check`, etc.)
+- **Grammar**: Added concurrency primitives (`atomic_cas`, `mutex_new`, `mutex_lock`, `mutex_unlock`, `par_for`, `par_map`, `par_reduce`)
+- **Rebuild**: Clean production build of bundled extension JS
+
 ## 1.0.0
 
 ### New Features

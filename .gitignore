@@ -1,129 +1,156 @@
-# Ignore Rust build artifacts and common editor files
-# Build
-/target
+# ────────────────────────────────────────────────────────────
+# Rust build artifacts
+# ────────────────────────────────────────────────────────────
+/target/
 /target-*
+/target_verify/
+/target_validate/
 **/target-*
-
-# Cargo
-
-# Compiled files
 *.rlib
 *.rmeta
 
-# Editor/IDE
-.vscode/
-/.idea/
-*.swp
-*.swo
-# ── Build artifacts ──
-/target/
-/fuzz/target/
-/target_verify/
-working/
-
-# ── Generated project outputs ──
-projects/taskman/*.exe
-projects/taskman/.taskman.db
-examples/*.exe
-installer/*.exe
-*.db
-
-# ── IDE / Editor ──
+# ────────────────────────────────────────────────────────────
+# IDE / Editor
+# ────────────────────────────────────────────────────────────
 .vscode/
 .idea/
 *.swp
 *.swo
 *~
 
-# ── OS junk ──
+# ────────────────────────────────────────────────────────────
+# OS junk
+# ────────────────────────────────────────────────────────────
 .DS_Store
 Thumbs.db
 Desktop.ini
 
-# ── Installer build artifacts ──
+# ────────────────────────────────────────────────────────────
+# Build / binary artifacts (repo root)
+# ────────────────────────────────────────────────────────────
+/*.exe
+/*.dll
+/*.lib
+/*.o
+/*.obj
+/*.def
+/*.exp
+/*.tmp
+/*.pdb
+/*.ll
+/*.svg
+/*.db
+/*.json
+/temp_*
+
+# Generated project outputs
+# Release bundles and learning-program output (sources remain tracked).
+/dist/
+/iris-example-note.txt
+examples/*.exe
+installer/*.exe
+*.db
+
+# ────────────────────────────────────────────────────────────
+# Installer / packaging
+# ────────────────────────────────────────────────────────────
 installer/_stage/
 installer/dist/
 
-# ── VS Code extension build artifacts ──
+# ────────────────────────────────────────────────────────────
+# VS Code extension
+# ────────────────────────────────────────────────────────────
 vscode-iris/node_modules/
 vscode-iris/out/
 vscode-iris/*.vsix
 
-# ── Release archives & generated docs ──
+# ────────────────────────────────────────────────────────────
+# Release / docs / generated
+# ────────────────────────────────────────────────────────────
 *.zip
 *.pdf
-
-# ── Backup files ──
-*.bak
-
-# ── Claude / AI agent state ──
-.claude/
-
-# ── Misc temp files ──
 *.log
-test_output*.txt
-
-# ── Stale build / debug artifacts in repo root ──
-/*.exe
-/*.tmp
-/*.o
-/*.obj
-
-# Test output
-test_results.txt
-tests/_all_tests.txt
-
-# ── Miscellaneous ──
-*.env
-
-# ── VS Code extension build artifacts ──
-vscode-iris/node_modules/
-vscode-iris/out/
-vscode-iris/*.vsix
-
-# ── Release archives & generated docs ──
-*.zip
-*.pdf
-
-# ── Backup files ──
 *.bak
-
-# ── Claude / AI agent state ──
-.claude/
-
-# ── Misc temp files ──
-*.log
-test_output*.txt
-
-# ── Stale build / debug artifacts in repo root ──
-/*.exe
-/*.tmp
-/*.o
-/*.obj
-
-# Test output
-test_results.txt
-tests/_all_tests.txt
-
-# ── Miscellaneous ──
-*.env
-*.local
 *.ll
 *.typst
 .typst_cache/
 .typst
-*.pdb
 
-# ── ML Models & Visualizations ──
+# ────────────────────────────────────────────────────────────
+# AI / agent state
+# ────────────────────────────────────────────────────────────
+.claude/
+
+# ────────────────────────────────────────────────────────────
+# Test output
+# ────────────────────────────────────────────────────────────
+test_output*.txt
+test_results.txt
+tests/_all_tests.txt
+
+# ────────────────────────────────────────────────────────────
+# Ad-hoc debug dumps at the repo root
+# ────────────────────────────────────────────────────────────
+#
+# Redirecting a build or test run to a file at the repo root is a normal way to
+# capture output, but 25 such files had accumulated untracked and would have
+# shipped in a source tarball. These patterns are deliberately anchored to the
+# root with a leading slash so a legitimately tracked file of the same name
+# deeper in the tree is unaffected.
+/dump_*.txt
+/nf_*.txt
+/tmp_*.txt
+/stdout*.txt
+/stderr*.txt
+/test_err.txt
+/test_out.txt
+/full_test_*.txt
+/llvm_out.txt
+/llvm_err.txt
+/build_errors.txt
+/wasm_test_output.txt
+
+# Scratch directory for one-off reproductions.
+/tmp/
+
+# Generated IDE and example runtime state. These files were previously tracked,
+# but are host/user-specific outputs and must not ship in source releases.
+/compile_flags.txt
+/kv.auth
+/kv.dat
+
+# ────────────────────────────────────────────────────────────
+# Local build configuration
+# ────────────────────────────────────────────────────────────
+#
+# .cargo/config.toml here pins a machine-specific linker (lld-link) and other
+# host-tuned build settings. Committing it breaks a fresh clone on any machine
+# without that toolchain, which is exactly the portability problem the release
+# work is removing, so it stays local.
+/.cargo/
+
+# ────────────────────────────────────────────────────────────
+# Environment / secrets
+# ────────────────────────────────────────────────────────────
+*.env
+*.local
+
+# ────────────────────────────────────────────────────────────
+# ML models
+# ────────────────────────────────────────────────────────────
 models/
 
-# ── CI Artifacts ──
+# ────────────────────────────────────────────────────────────
+# CI artifacts
+# ────────────────────────────────────────────────────────────
 /ci-artifacts/
 /sqlite3.dll
 /scratch_test.iris
 /IRIS-Book.pdf
 
-# -- Python --
+# ────────────────────────────────────────────────────────────
+# Python
+# ────────────────────────────────────────────────────────────
 __pycache__/
 *.pyc
 *.pyo
@@ -132,10 +159,29 @@ __pycache__/
 env/
 .build_new_book.py
 
-# -- Windows test DLLs and validation directory --
-/*.dll
-/*.lib
-/*.def
-/*.exp
-/target_validate/
 
+# Vendored native libraries.
+#
+# These were committed in the branch's first commit -- 27 files, 1.28 GB, with
+# tensorflow.dll at 909 MB and torch_cpu.dll at 240 MB, both over GitHub's
+# 100 MB hard limit. That made the branch unpushable, and no amount of chunking
+# helps: the blobs are in the history, so every push is rejected.
+#
+# ML backends are resolved at runtime via dlopen (see src/runtime/
+# iris_ml_dynload.h), so these belong in a local install, not in git.
+*.dll
+*.exe
+*.lib
+*.so
+*.dylib
+*.pdb
+
+# Build artifacts. ~11.3 GB of these were committed and later removed, so the
+# blobs stayed in history: target/ 6.6 GB, target-local-ci/ 1.6 GB,
+# fuzz/target/ 841 MB, plus target-run*/ target-test*/ target_verify/ and
+# vscode-iris/node_modules/. Purged from this branch's history; keep them out.
+/target-*/
+/target_*/
+fuzz/target/
+vscode-iris/node_modules/
+vscode-iris/out/

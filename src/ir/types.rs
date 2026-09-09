@@ -31,6 +31,41 @@ impl std::fmt::Display for DType {
     }
 }
 
+impl DType {
+    /// Returns true if this is an integer type (signed or unsigned).
+    pub fn is_integer(&self) -> bool {
+        matches!(
+            self,
+            DType::I8
+                | DType::U8
+                | DType::I32
+                | DType::U32
+                | DType::I64
+                | DType::U64
+                | DType::USize
+        )
+    }
+
+    /// Returns true if this is a signed integer type.
+    pub fn is_signed(&self) -> bool {
+        matches!(self, DType::I8 | DType::I32 | DType::I64)
+    }
+
+    /// Returns true if this is a floating-point type.
+    pub fn is_float(&self) -> bool {
+        matches!(self, DType::F32 | DType::F64)
+    }
+
+    /// Returns the bit width of this type.
+    pub fn bit_width(&self) -> u32 {
+        match self {
+            DType::Bool | DType::I8 | DType::U8 => 8,
+            DType::I32 | DType::U32 | DType::F32 => 32,
+            DType::I64 | DType::U64 | DType::USize | DType::F64 => 64,
+        }
+    }
+}
+
 /// A single dimension of a tensor shape.
 /// Symbolic dims allow shapes like [M, K] to be tracked at compile time
 /// without requiring concrete values.
@@ -129,12 +164,44 @@ pub enum IrType {
     List(Box<IrType>),
     /// Hash map type: `map<K, V>` — a key-value store.
     Map(Box<IrType>, Box<IrType>),
+    /// TaskGroup type for structured concurrency.
+    TaskGroup,
+    /// WeakRef type: `weak_ref<T>` — non-owning reference.
+    WeakRef(Box<IrType>),
+    /// A handle to a reverse-mode autodiff tape node.
+    ///
+    /// Opaque: a pointer into the runtime's tape, not a value the program can
+    /// take apart. It exists as a type so a tape handle can flow through a block
+    /// parameter — without it, a taped value crossing a loop back-edge became an
+    /// ordinary `f64` and `backward` was rejected at codegen with "requires a
+    /// lowered tape handle", which is why a loop-accumulated loss could not be
+    /// expressed at all (known-issues #49).
+    TapeRef,
+    /// `dyn Trait` — fat pointer { data_ptr, vtable_ptr }.
+    /// At the IR level, we store the trait name and the method signatures
+    /// (param types + return type) so the codegen can lay out the vtable
+    /// and DynCall sites can produce well-typed indirect calls. Method
+    /// bodies are looked up at runtime via the impl dispatch table.
+    TraitObject {
+        name: String,
+        /// Method signatures in vtable slot order (no `self`).
+        methods: Vec<TraitMethodSig>,
+    },
+}
+
+/// Signature of a single method on a trait object's vtable slot.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TraitMethodSig {
+    pub name: String,
+    pub params: Vec<IrType>,
+    pub ret: Box<IrType>,
 }
 
 impl std::fmt::Display for IrType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             IrType::Scalar(d) => write!(f, "{}", d),
+            IrType::TapeRef => f.write_str("tape_ref"),
             IrType::Tensor { dtype, shape } => write!(f, "tensor<{}, {}>", dtype, shape),
             IrType::Fn { params, ret } => {
                 f.write_str("fn(")?;
@@ -170,6 +237,29 @@ impl std::fmt::Display for IrType {
             IrType::Sparse(inner) => write!(f, "sparse<{}>", inner),
             IrType::List(elem) => write!(f, "list<{}>", elem),
             IrType::Map(k, v) => write!(f, "map<{}, {}>", k, v),
+            IrType::TaskGroup => f.write_str("task_group"),
+            IrType::WeakRef(inner) => write!(f, "weak_ref<{}>", inner),
+            IrType::TraitObject { name, methods } => {
+                write!(f, "dyn {}", name)?;
+                if !methods.is_empty() {
+                    f.write_str(" {")?;
+                    for (i, m) in methods.iter().enumerate() {
+                        if i > 0 {
+                            f.write_str("; ")?;
+                        }
+                        write!(f, "{}(", m.name)?;
+                        for (j, p) in m.params.iter().enumerate() {
+                            if j > 0 {
+                                f.write_str(", ")?;
+                            }
+                            write!(f, "{}", p)?;
+                        }
+                        write!(f, ") -> {}", m.ret)?;
+                    }
+                    f.write_str("}")?;
+                }
+                Ok(())
+            }
         }
     }
 }

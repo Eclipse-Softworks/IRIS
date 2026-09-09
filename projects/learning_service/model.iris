@@ -1,0 +1,21 @@
+bring std.nn /// A deterministic one-input neural model. Training uses std.nn backprop + SGD.
+pub def train_weights(steps : i64) -> (list<f64>, list<f64>) {
+    var weights : list<f64> = list(0.0);
+    var biases : list<f64> = list(0.0);
+    val shapes : list<i64> = list(encode_shape(1, 1));
+    for step in 0 .. steps {
+        val low = mlp_train_step(weights, biases, shapes, list(0.0), list(0.0), 1.0, 0);
+        weights = low.0;
+        biases = low.1;
+        val high = mlp_train_step(weights, biases, shapes, list(1.0), list(1.0), 1.0, 0);
+        weights = high.0;
+        biases = high.1;
+
+    }
+    ;
+    return(weights, biases)
+}
+pub def predict(weights : list<f64>, biases : list<f64>, input : f64) -> f64 {
+    val activations = mlp_forward(weights, biases, list(encode_shape(1, 1)), list(input), 0);
+    return list_get(list_get(activations, 1), 0)
+}

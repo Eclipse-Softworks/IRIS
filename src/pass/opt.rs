@@ -17,6 +17,27 @@ use crate::ir::module::IrModule;
 use crate::ir::value::ValueId;
 use crate::pass::Pass;
 
+/// Combined Optimization Pass that runs CSE, DCE, and OpExpand.
+/// This fulfills the formal 15-pass pipeline architecture.
+pub struct OptPass;
+
+impl Pass for OptPass {
+    fn name(&self) -> &'static str {
+        "opt"
+    }
+
+    fn run(&mut self, module: &mut IrModule) -> Result<(), PassError> {
+        let mut dce = DcePass;
+        let mut cse = CsePass;
+        let mut op_expand = OpExpandPass;
+
+        cse.run(module)?;
+        dce.run(module)?;
+        op_expand.run(module)?;
+        Ok(())
+    }
+}
+
 // ===========================================================================
 // DcePass
 // ===========================================================================
@@ -55,6 +76,9 @@ fn is_side_effecting(instr: &IrInstr) -> bool {
             | IrInstr::ArrayStore { .. }
             | IrInstr::ChanSend { .. }
             | IrInstr::Spawn { .. }
+            | IrInstr::TaskGroupSpawn { .. }
+            | IrInstr::TaskGroupJoin { .. }
+            | IrInstr::TaskGroupCancel { .. }
             | IrInstr::ParFor { .. }
             | IrInstr::AtomicStore { .. }
             | IrInstr::AtomicAdd { .. }
@@ -168,6 +192,22 @@ impl Pass for CsePass {
                 let mut known: HashMap<CseKey, ValueId> = HashMap::new();
                 cse_block(block, &mut known, &mut replacements);
             }
+
+            // --- Cross-block replacement sweep (critical correctness fix) ---
+            // Per-block CSE eliminates values and accumulates replacements but
+            // only applies them to instructions *within* the current block.
+            // After processing all blocks, Br/CondBr arguments in blocks that
+            // were processed *before* a replacement was created may still
+            // reference eliminated value IDs. A second full sweep is needed to
+            // guarantee all uses are updated before stale entries are removed.
+            if !replacements.is_empty() {
+                for block in &mut func.blocks {
+                    for instr in &mut block.instrs {
+                        apply_replacements(instr, &replacements);
+                    }
+                }
+            }
+
             // Remove stale type/def entries for eliminated values.
             for old in replacements.keys() {
                 func.value_types.remove(old);
@@ -344,6 +384,15 @@ pub(crate) fn apply_replacements(instr: &mut IrInstr, reps: &HashMap<ValueId, Va
         IrInstr::GetField { base, .. } => {
             replace(base);
         }
+        IrInstr::MakeTraitObject { value, .. } => {
+            replace(value);
+        }
+        IrInstr::DynCall { obj, args, .. } => {
+            replace(obj);
+            for v in args {
+                replace(v);
+            }
+        }
         IrInstr::MakeVariant { fields, .. } => {
             for v in fields {
                 replace(v);
@@ -412,7 +461,9 @@ pub(crate) fn apply_replacements(instr: &mut IrInstr, reps: &HashMap<ValueId, Va
                 replace(v);
             }
         }
-        IrInstr::ChanNew { .. } => {}
+        IrInstr::ChanNew { capacity, .. } => {
+            replace(capacity);
+        }
         IrInstr::ChanSend { chan, value } => {
             replace(chan);
             replace(value);
@@ -424,6 +475,19 @@ pub(crate) fn apply_replacements(instr: &mut IrInstr, reps: &HashMap<ValueId, Va
             for v in args {
                 replace(v);
             }
+        }
+        IrInstr::TaskGroupNew { .. } => {}
+        IrInstr::TaskGroupSpawn { group, args, .. } => {
+            replace(group);
+            for v in args {
+                replace(v);
+            }
+        }
+        IrInstr::TaskGroupJoin { group, .. } => {
+            replace(group);
+        }
+        IrInstr::TaskGroupCancel { group, .. } => {
+            replace(group);
         }
         IrInstr::AtomicNew { value, .. } => {
             replace(value);
@@ -480,6 +544,9 @@ pub(crate) fn apply_replacements(instr: &mut IrInstr, reps: &HashMap<ValueId, Va
         IrInstr::Densify { operand, .. } => {
             replace(operand);
         }
+        IrInstr::SparseNnz { operand, .. } => {
+            replace(operand);
+        }
         IrInstr::MakeGrad { value, tangent, .. } => {
             replace(value);
             replace(tangent);
@@ -533,7 +600,7 @@ pub(crate) fn apply_replacements(instr: &mut IrInstr, reps: &HashMap<ValueId, Va
             replace(operand);
             replace(count);
         }
-        IrInstr::Panic { msg } => {
+        IrInstr::Panic { msg, .. } => {
             replace(msg);
         }
         IrInstr::ValueToStr { operand, .. } => {
@@ -748,6 +815,12 @@ pub(crate) fn apply_replacements(instr: &mut IrInstr, reps: &HashMap<ValueId, Va
             for a in args {
                 replace(a);
             }
+        }
+        IrInstr::PushHandler { .. } => {}
+        IrInstr::PopHandler => {}
+        IrInstr::ResumeCont { cont, value, .. } => {
+            replace(cont);
+            replace(value);
         }
     }
 }

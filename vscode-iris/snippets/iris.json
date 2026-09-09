@@ -19,6 +19,88 @@
     "body": ["choice ${1:Name} {", "\t${2:Variant1},", "\t${3:Variant2}", "}"],
     "description": "Define a choice (enum) type"
   },
+  "Trait": {
+    "prefix": "trait",
+    "body": ["trait ${1:Name} { def ${2:method}(${3:self}) -> ${4:type} }"],
+    "description": "Declare a trait"
+  },
+  "Impl block": {
+    "prefix": "impl",
+    "body": [
+      "impl ${1:Trait} for ${2:Type} {",
+      "\tdef ${3:method}(self${4:, other: ${2:Type}}) -> ${5:type} {",
+      "\t\t$0",
+      "\t}",
+      "}"
+    ],
+    "description": "Implement a trait for a type"
+  },
+  "Extern effect operation": {
+    "prefix": "effectop",
+    "body": ["extern def ${1:op}(${2:s: str}) -> ${3:str}"],
+    "description": "Declare an extern function usable as an interceptable effect operation"
+  },
+  "Handle block": {
+    "prefix": "handle",
+    "body": [
+      "val ${1:result} = handle {",
+      "\t${2:op}(${3:arg})",
+      "} with {",
+      "\t${2:op}(${4:x}) => $0",
+      "};"
+    ],
+    "description": "Handle an effect operation, replacing its result"
+  },
+  "Handle block with resume": {
+    "prefix": "handleresume",
+    "body": [
+      "val ${1:result} = handle {",
+      "\t${2:op}(${3:arg})",
+      "} with {",
+      "\t${2:op}(${4:x}) -> resume(${5:k}) => ${5:k}($0)",
+      "};"
+    ],
+    "description": "Handle an effect operation and resume the continuation"
+  },
+  "Defer": {
+    "prefix": "defer",
+    "body": ["defer { $0 };"],
+    "description": "Run a block when the enclosing scope exits"
+  },
+  "Select": {
+    "prefix": "select",
+    "body": [
+      "select {",
+      "\trecv(${1:ch}) => $0",
+      "}"
+    ],
+    "description": "Select over channel operations"
+  },
+  "Labeled for loop": {
+    "prefix": "labeledfor",
+    "body": [
+      "for ${1:outer} ${2:i} in ${3:0}..${4:n} {",
+      "\t$0",
+      "\tbreak ${1:outer};",
+      "}"
+    ],
+    "description": "Labelled for loop — the label follows the keyword, and break/continue can target it"
+  },
+  "Labeled loop": {
+    "prefix": "labeledloop",
+    "body": [
+      "loop ${1:name} {",
+      "\t$0",
+      "\tbreak ${1:name};",
+      "}"
+    ],
+    "description": "Labelled infinite loop with a targeted break"
+  },
+  "Assert": {
+    "prefix": "assert",
+    "body": ["assert(${1:condition});"],
+    "description": "Assert a condition — every test and example should assert its results"
+  },
   "Val binding": {
     "prefix": "val",
     "body": ["val ${1:name} = $0"],
@@ -56,12 +138,12 @@
   },
   "Main function": {
     "prefix": "main",
-    "body": ["def main() -> i64 {", "\t$0", "\t0", "}"],
+    "body": ["def main() -> i64 {", "\t$0", "\treturn 0", "}"],
     "description": "Main entry point"
   },
   "Bring stdlib": {
     "prefix": "bring",
-    "body": ["bring std.${1|math,string,fmt,json,csv,http,fs,path,time,set,queue,heap,kv,table,dataset,dataframe,ffi,crypto,os,testing,log,async,deque,sorted,bitset|}"],
+    "body": ["bring std.${1|adaptive,ais,async,bitset,collections,container,crypto,csv,dataframe,dataset,deque,ffi,fmt,fs,heap,http,http_server,iter,json,kv,llm,log,math,meta,meta_learning,ml,net,nn,os,path,queue,reflect,rl,ros2,serial,set,speculation,sql,stochastic,string,svg,table,tensor,tensorx,termplot,testing,time,uncertainty,unicode|}"],
     "description": "Import a stdlib module"
   },
   "List operations": {
@@ -192,10 +274,10 @@
       "def test_${1:name}() -> bool {",
       "\tval ${2:result} = ${3:expr}",
       "\tassert(${2:result} == ${4:expected})",
-      "\ttrue",
+      "\treturn 0",
       "}"
     ],
-    "description": "Define a test function"
+    "description": "Define an assertion-backed zero-argument test function"
   },
   "Doc comment": {
     "prefix": "///",
@@ -367,5 +449,164 @@
       "val ${5:y} = ${1:t}.1"
     ],
     "description": "Create and destructure a tuple"
+  },
+  "Trait Object (dyn Trait)": {
+    "prefix": "dyn",
+    "body": [
+      "val ${1:obj}: dyn ${2:Trait} = ${3:concrete_val};",
+      "val ${4:res} = ${1:obj}.${5:method}();"
+    ],
+    "description": "Create and dispatch dynamically on a trait object"
+  },
+  "Move binding": {
+    "prefix": "move",
+    "body": ["val ${1:dest} = move ${2:src};"],
+    "description": "Move ownership of a value with linear/affine semantics"
+  },
+  "Borrow Reference": {
+    "prefix": "ref",
+    "body": ["val ${1:r}: &${2:T} = &${3:val};"],
+    "description": "Borrow an immutable reference"
+  },
+  "Mutable Reference": {
+    "prefix": "refmut",
+    "body": ["val ${1:r}: &mut ${2:T} = &mut ${3:val};"],
+    "description": "Borrow a mutable reference"
+  },
+  "Reverse-mode Autodiff": {
+    "prefix": "autodiff",
+    "body": [
+      "val ${1:w} = tape(${2:1.0});",
+      "val ${3:loss} = ${4:w * w};",
+      "val _ = backward(${3:loss});",
+      "val ${5:dw} = grad(${1:w});"
+    ],
+    "description": "Compute reverse-mode automatic differentiation gradients using a tape"
+  },
+  "Forward-mode Dual Number": {
+    "prefix": "dual",
+    "body": [
+      "val ${1:x} = Dual { primal: ${2:2.0}, tangent: 1.0 };",
+      "val ${3:y} = ${4:x * x};"
+    ],
+    "description": "Forward-mode automatic differentiation with Dual numbers"
+  },
+  "Model declaration": {
+    "prefix": "model",
+    "body": [
+      "model ${1:Classifier} {",
+      "\tlayer dense(${2:64}, relu)",
+      "\tlayer dense(${3:10}, softmax)",
+      "}"
+    ],
+    "description": "Declare a deep learning neural network model architecture"
+  },
+  "ROS 2 Node & Publisher": {
+    "prefix": "ros2",
+    "body": [
+      "bring std.ros2",
+      "val ${1:ctx} = rcl_init();",
+      "val ${2:node} = node_create(${1:ctx}, \"${3:my_node}\", \"\");",
+      "val ${4:pub} = publisher_create(${2:node}, \"${5:topic_name}\");",
+      "publish_float64(${4:pub}, ${6:42.0});"
+    ],
+    "description": "Initialize a ROS 2 node and publish telemetry"
+  },
+  "Generic Trait": {
+    "prefix": "traitg",
+    "body": [
+      "trait ${1:Container}[${2:T}] {",
+      "\tdef ${3:get}(self, ${4:index}: i64) -> ${2:T}",
+      "}"
+    ],
+    "description": "Declare a generic trait"
+  },
+  "Higher-Kinded Type Function": {
+    "prefix": "hkt",
+    "body": [
+      "def ${1:passthrough}[F[_], T](c: F<T>) -> F<T> {",
+      "\tc",
+      "}"
+    ],
+    "description": "Define a function parameterized over a higher-kinded type constructor F[_]"
+  },
+  "IRIS Test Suite Function": {
+    "prefix": "testsuite",
+    "body": [
+      "def test_${1:feature}() -> i64 {",
+      "\tval ${2:actual} = ${3:expr};",
+      "\tassert(${2:actual} == ${4:expected});",
+      "\treturn 0",
+      "}"
+    ],
+    "description": "Define a zero-argument test function returning 0 for iris test runner"
+  },
+  "Structured task group": {
+    "prefix": "taskgroup",
+    "body": [
+      "bring std.async",
+      "val ${1:group} = new_task_group()",
+      "spawn(${1:group}) {",
+      "\tif !cancellation_requested() {",
+      "\t\t$0",
+      "\t}",
+      "}",
+      "task_group_join(${1:group});"
+    ],
+    "description": "Spawn work in a structured task group and join it before leaving scope"
+  },
+  "Differentiable tensor": {
+    "prefix": "tensorad",
+    "body": [
+      "bring std.tensor",
+      "val ${1:parameter} = tensor_ad_parameter(tensor_ad_from_data(${2:data}, ${3:shape}))",
+      "val ${4:loss} = tensor_ad_sum(tensor_ad_mul(${1:parameter}, ${1:parameter}))",
+      "val _ = tensor_ad_backward(${4:loss})",
+      "val ${5:gradient} = tensor_ad_grad(${1:parameter})"
+    ],
+    "description": "Create a differentiable tensor parameter and run reverse-mode autodiff"
+  },
+  "LLM client": {
+    "prefix": "llmclient",
+    "body": [
+      "bring std.llm",
+      "val ${1:client} = llm_client(${2:endpoint}, ${2:endpoint}, \"${3:model}\", \"${4:IRIS_LLM_API_KEY}\", ${5:30000})",
+      "val ${6:messages}: list<LlmMessage> = list()",
+      "list_push(${6:messages}, llm_message(\"user\", ${7:prompt}));",
+      "val ${8:response} = llm_chat(${1:client}, ${6:messages}, ${9:0.2}, ${10:256})"
+    ],
+    "description": "Call an OpenAI-compatible chat endpoint through std.llm"
+  },
+  "Typed metaprogram edit": {
+    "prefix": "metaedit",
+    "body": [
+      "bring std.meta",
+      "val ${1:program} = meta_program(${2:source})",
+      "val ${3:analysis} = meta_analyze(${1:program})",
+      "val ${4:edited} = meta_apply(${1:program}, MetaEdit { start_byte: ${5:0}, end_byte: ${6:0}, replacement: ${7:\"\"} })"
+    ],
+    "description": "Analyze and apply a typed compiler-hosted source edit"
+  },
+  "Checked TCP client": {
+    "prefix": "tcpchecked",
+    "body": [
+      "bring std.net",
+      "val ${1:connection} = tcp_connect_checked(${2:\"127.0.0.1\"}, ${3:8080}, ${4:5000}, ${5:5000})",
+      "if is_err(${1:connection}) { return ${6:1} }",
+      "val ${7:stream} = unwrap(${1:connection})",
+      "val _ = tcp_write_all_checked(${7:stream}, ${8:\"hello\"})",
+      "val ${9:response} = tcp_read_bounded(${7:stream}, ${10:65536})",
+      "tcp_close_checked(${7:stream});"
+    ],
+    "description": "Use typed, bounded TCP networking with explicit Result handling"
+  },
+  "AIS production step": {
+    "prefix": "aisstep",
+    "body": [
+      "bring std.ais",
+      "val ${1:runtime} = agent_runtime_new(${2:3})",
+      "val ${3:next_runtime} = agent_record_outcome(${1:runtime}, ${4:observation}, ${5:reward}, ${6:true})"
+    ],
+    "description": "Create an AIS runtime and record a production outcome"
   }
 }

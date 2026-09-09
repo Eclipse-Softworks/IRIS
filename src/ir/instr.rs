@@ -280,6 +280,33 @@ pub enum IrInstr {
         result_ty: IrType,
     },
 
+    // ---- Trait object operations ----
+    /// Box a concrete value into a `dyn Trait` fat pointer.
+    /// The result is a 2-field struct { data_ptr, vtable_ptr }.
+    MakeTraitObject {
+        result: ValueId,
+        /// Value to box.
+        value: ValueId,
+        /// Trait being abstracted.
+        target_trait: String,
+        /// Concrete type at the impl site (for vtable selection).
+        concrete_ty: String,
+        /// The struct-like type of the trait object (2 fields).
+        result_ty: IrType,
+    },
+    /// Dynamic dispatch through a trait object's vtable.
+    DynCall {
+        result: ValueId,
+        /// Source trait-object value (2-field struct).
+        obj: ValueId,
+        /// Method name (matched against vtable slot names).
+        method_name: String,
+        /// Args (excluding `self`).
+        args: Vec<ValueId>,
+        /// Type of the result.
+        result_ty: IrType,
+    },
+
     // ---- Enum operations ----
     /// Construct an enum variant (tag integer, optional payload fields).
     MakeVariant {
@@ -333,11 +360,14 @@ pub enum IrInstr {
         result_ty: IrType,
     },
     /// Call a closure value with the given arguments.
+    /// If pass_env is true (default for lambdas), ptr %closure is passed
+    /// as the first argument so the lambda can extract captures from %env.
     CallClosure {
         result: Option<ValueId>,
         closure: ValueId,
         args: Vec<ValueId>,
         result_ty: IrType,
+        pass_env: bool,
     },
 
     // ---- Array operations ----
@@ -422,6 +452,7 @@ pub enum IrInstr {
     ChanNew {
         result: ValueId,
         elem_ty: IrType,
+        capacity: ValueId,
     },
     /// Send a value on a channel (side-effecting, no result).
     ChanSend {
@@ -439,12 +470,31 @@ pub enum IrInstr {
         body_fn: String,
         args: Vec<ValueId>,
     },
+    /// Create a new TaskGroup for structured concurrency.
+    TaskGroupNew {
+        result: ValueId,
+    },
+    /// Spawn a task within a TaskGroup.
+    TaskGroupSpawn {
+        group: ValueId,
+        body_fn: String,
+        args: Vec<ValueId>,
+    },
+    /// Wait for all tasks in a TaskGroup to complete.
+    TaskGroupJoin {
+        group: ValueId,
+    },
+    /// Cancel all tasks in a TaskGroup.
+    TaskGroupCancel {
+        group: ValueId,
+    },
 
     /// Parallel for-loop over a range (sequential simulation).
     ParFor {
         var: ValueId, // loop variable (result placeholder)
         start: ValueId,
         end: ValueId,
+        inclusive: bool,
         body_fn: String,
         /// Captured outer-scope values passed as extra params to body_fn.
         args: Vec<ValueId>,
@@ -551,10 +601,20 @@ pub enum IrInstr {
         ty: IrType,
     },
     /// Convert a sparse representation back to dense.
+    ///
+    /// Produces a dense collection, matching the name, the documented signature
+    /// (`densify(s: sparse<T, S>) -> tensor<T, S>`) and the runtime's
+    /// `iris_densify`. It previously produced the count of non-zero elements as
+    /// an i64, which is what [`SparseNnz`] is for.
     Densify {
         result: ValueId,
         operand: ValueId,
         ty: IrType,
+    },
+    /// Number of non-zero elements held by a sparse value.
+    SparseNnz {
+        result: ValueId,
+        operand: ValueId,
     },
 
     // ---- String operations ----
@@ -621,6 +681,19 @@ pub enum IrInstr {
     /// Unconditional abort with a message string. Terminates execution.
     Panic {
         msg: ValueId,
+        /// Source byte offset of the `panic(...)` or `assert(...)` that produced
+        /// this instruction.
+        ///
+        /// Carried *on the instruction* rather than in `IrFunction::span_table`,
+        /// which is keyed by `(block_id, instr_idx)` and which no optimisation
+        /// pass maintains. Const-folding routinely deletes the `ConstStr` holding
+        /// the panic message, every following index in the block shifts down, and
+        /// the table then attributes the panic to whichever instruction moved
+        /// into its slot — in practice the preceding statement. Reporting a line
+        /// that succeeded is worse than reporting none, and assertions are the
+        /// primary failure signal in every `.iris` test, so this one position is
+        /// worth making immune to instruction motion. See known-issues #20.
+        span_byte: Option<u32>,
     },
     /// Convert any scalar or string value to its string representation.
     ValueToStr {
@@ -945,6 +1018,39 @@ pub enum IrInstr {
         args: Vec<ValueId>,
         result_ty: IrType,
     },
+
+    // ---- Effect handlers ----
+    /// Push a handler frame onto the handler stack.
+    /// Intercepts extern calls matching any of the effect names.
+    PushHandler {
+        arms: Vec<HandlerArm>,
+    },
+    /// Pop the top handler frame from the handler stack.
+    PopHandler,
+    /// Resume a captured continuation with `value`.
+    /// Sets the resume cell in the corresponding `Continuation` value,
+    /// then returns from the handler body with `value` as the result.
+    ResumeCont {
+        /// The continuation value (block param) to resume.
+        cont: ValueId,
+        /// The value to pass to the resumed continuation.
+        value: ValueId,
+        /// Where to store the resumed value (the handler's return value).
+        result: ValueId,
+    },
+}
+
+/// A handler arm describing how to handle an effect operation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HandlerArm {
+    /// Name of the effect operation to intercept (e.g. "write_file", "read_file").
+    pub effect_name: String,
+    /// Name of the IR function to call when this effect is performed.
+    pub func_name: String,
+    /// Number of payload arguments the effect carries.
+    pub num_args: usize,
+    /// Whether this arm accepts a `resume(val)` continuation.
+    pub has_resume: bool,
 }
 
 impl IrInstr {
@@ -967,6 +1073,8 @@ impl IrInstr {
             IrInstr::Call { result, .. } => *result,
             IrInstr::MakeStruct { result, .. } => Some(*result),
             IrInstr::GetField { result, .. } => Some(*result),
+            IrInstr::MakeTraitObject { result, .. } => Some(*result),
+            IrInstr::DynCall { result, .. } => Some(*result),
             IrInstr::MakeVariant { result, .. } => Some(*result),
             IrInstr::SwitchVariant { .. } => None,
             IrInstr::ExtractVariantField { result, .. } => Some(*result),
@@ -982,6 +1090,10 @@ impl IrInstr {
             IrInstr::ChanSend { .. } => None,
             IrInstr::ChanRecv { result, .. } => Some(*result),
             IrInstr::Spawn { .. } => None,
+            IrInstr::TaskGroupNew { result, .. } => Some(*result),
+            IrInstr::TaskGroupSpawn { .. } => None,
+            IrInstr::TaskGroupJoin { .. } => None,
+            IrInstr::TaskGroupCancel { .. } => None,
             IrInstr::AtomicNew { result, .. } => Some(*result),
             IrInstr::AtomicLoad { result, .. } => Some(*result),
             IrInstr::AtomicStore { .. } => None,
@@ -1001,6 +1113,7 @@ impl IrInstr {
             IrInstr::Barrier => None,
             IrInstr::Sparsify { result, .. } => Some(*result),
             IrInstr::Densify { result, .. } => Some(*result),
+            IrInstr::SparseNnz { result, .. } => Some(*result),
             IrInstr::MakeGrad { result, .. } => Some(*result),
             IrInstr::GradValue { result, .. } => Some(*result),
             IrInstr::GradTangent { result, .. } => Some(*result),
@@ -1081,6 +1194,9 @@ impl IrInstr {
             IrInstr::NowMs { result } => Some(*result),
             IrInstr::SleepMs { result, .. } => Some(*result),
             IrInstr::BuiltinCall { result, .. } => Some(*result),
+            IrInstr::PushHandler { .. } => None,
+            IrInstr::PopHandler => None,
+            IrInstr::ResumeCont { result, .. } => Some(*result),
         }
     }
 
@@ -1092,6 +1208,7 @@ impl IrInstr {
                 | IrInstr::CondBr { .. }
                 | IrInstr::Return { .. }
                 | IrInstr::SwitchVariant { .. }
+                | IrInstr::Panic { .. }
         )
     }
 
@@ -1137,6 +1254,12 @@ impl IrInstr {
             IrInstr::Call { args, .. } => args.clone(),
             IrInstr::MakeStruct { fields, .. } => fields.clone(),
             IrInstr::GetField { base, .. } => vec![*base],
+            IrInstr::MakeTraitObject { value, .. } => vec![*value],
+            IrInstr::DynCall { obj, args, .. } => {
+                let mut ops = vec![*obj];
+                ops.extend_from_slice(args);
+                ops
+            }
             IrInstr::MakeVariant { fields, .. } => fields.clone(),
             IrInstr::SwitchVariant { scrutinee, .. } => vec![*scrutinee],
             IrInstr::ExtractVariantField { operand, .. } => vec![*operand],
@@ -1162,10 +1285,18 @@ impl IrInstr {
                 ops.extend_from_slice(args);
                 ops
             }
-            IrInstr::ChanNew { .. } => vec![],
+            IrInstr::ChanNew { capacity, .. } => vec![*capacity],
             IrInstr::ChanSend { chan, value } => vec![*chan, *value],
             IrInstr::ChanRecv { chan, .. } => vec![*chan],
             IrInstr::Spawn { args, .. } => args.clone(),
+            IrInstr::TaskGroupNew { .. } => vec![],
+            IrInstr::TaskGroupSpawn { group, args, .. } => {
+                let mut ops = vec![*group];
+                ops.extend_from_slice(args);
+                ops
+            }
+            IrInstr::TaskGroupJoin { group, .. } => vec![*group],
+            IrInstr::TaskGroupCancel { group, .. } => vec![*group],
             IrInstr::AtomicNew { value, .. } => vec![*value],
             IrInstr::AtomicLoad { atomic, .. } => vec![*atomic],
             IrInstr::AtomicStore { atomic, value } => vec![*atomic, *value],
@@ -1185,6 +1316,7 @@ impl IrInstr {
             IrInstr::Barrier => vec![],
             IrInstr::Sparsify { operand, .. } => vec![*operand],
             IrInstr::Densify { operand, .. } => vec![*operand],
+            IrInstr::SparseNnz { operand, .. } => vec![*operand],
             IrInstr::MakeGrad { value, tangent, .. } => vec![*value, *tangent],
             IrInstr::GradValue { operand, .. } => vec![*operand],
             IrInstr::GradTangent { operand, .. } => vec![*operand],
@@ -1212,7 +1344,7 @@ impl IrInstr {
             IrInstr::StrToLower { operand, .. } => vec![*operand],
             IrInstr::StrTrim { operand, .. } => vec![*operand],
             IrInstr::StrRepeat { operand, count, .. } => vec![*operand, *count],
-            IrInstr::Panic { msg } => vec![*msg],
+            IrInstr::Panic { msg, .. } => vec![*msg],
             IrInstr::ValueToStr { operand, .. } => vec![*operand],
             IrInstr::ReadLine { .. } => vec![],
             IrInstr::ReadI64 { .. } => vec![],
@@ -1289,6 +1421,9 @@ impl IrInstr {
             IrInstr::NowMs { .. } => vec![],
             IrInstr::SleepMs { ms, .. } => vec![*ms],
             IrInstr::BuiltinCall { args, .. } => args.clone(),
+            IrInstr::PushHandler { .. } => vec![],
+            IrInstr::PopHandler => vec![],
+            IrInstr::ResumeCont { cont, value, .. } => vec![*cont, *value],
         }
     }
 }
@@ -1570,6 +1705,7 @@ mod tests {
             closure: ValueId(0),
             args: vec![ValueId(1), ValueId(2)],
             result_ty: IrType::Scalar(crate::ir::types::DType::I64),
+            pass_env: true,
         };
         assert_eq!(i.operands(), vec![ValueId(0), ValueId(1), ValueId(2)]);
     }

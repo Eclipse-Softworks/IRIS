@@ -1,8 +1,8 @@
 import * as vscode from 'vscode';
 
 export class IrisCodeLensProvider implements vscode.CodeLensProvider {
-    // Find all zero-argument function definitions: `def name() ->` or `pub def name() ->`
-    private readonly zeroArgFn = /^(?:pub\s+)?def\s+(\w+)\s*\(\s*\)\s*->/gm;
+    // Find all zero-argument function definitions: `def name()` or `pub def name()`
+    private readonly zeroArgFn = /^(?:pub\s+)?def\s+(\w+)\s*\(\s*\)/gm;
 
     provideCodeLenses(document: vscode.TextDocument): vscode.CodeLens[] {
         const lenses: vscode.CodeLens[] = [];
@@ -35,16 +35,15 @@ export class IrisCodeLensProvider implements vscode.CodeLensProvider {
             } else {
                 lenses.push(
                     new vscode.CodeLens(range, {
-                        title: '▷ Run',
-                        command: 'iris.runFunction',
-                        arguments: [uri, fnName],
-                        tooltip: `Run ${fnName}()`,
+                        title: '▷ Run File',
+                        command: 'iris.runFile',
+                        tooltip: `Run the file containing ${fnName}()`,
                     }),
                     new vscode.CodeLens(range, {
-                        title: '⬡ Debug',
+                        title: '⬡ Debug File',
                         command: 'iris.debugFile',
                         arguments: [document.uri],
-                        tooltip: `Debug ${fnName}()`,
+                        tooltip: `Debug the file containing ${fnName}()`,
                     }),
                 );
             }

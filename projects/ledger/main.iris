@@ -1,0 +1,18 @@
+bring "domain.iris" /// Beginner project: integer-money ledger with rejected overdrafts.
+def test_ledger() -> i64 {
+    val entries : list<Entry> = list(Entry {
+        label : "opening", cents : 10000
+    }
+   );
+    assert(unwrap(debit(entries, "parts", 2500)) == 7500);
+    assert(is_err(debit(entries, "too expensive", 8000)));
+    assert(is_err(debit(entries, "invalid", - 1)));
+    assert(balance(entries) == 7500);
+    assert(list_len(entries) == 2);
+    return 0
+}
+def main() -> i64 {
+    assert(test_ledger() == 0);
+    println("ledger: opening=10000, spent=2500, balance=7500; overdraft rejected");
+    return 0
+}

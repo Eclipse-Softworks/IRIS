@@ -1,0 +1,7 @@
+pub
+record Job {
+    id : i64, value : i64
+}
+pub def compute(job : Job) -> i64 {
+    return job.value * job.value
+}

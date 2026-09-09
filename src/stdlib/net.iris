@@ -1,0 +1,167 @@
+// src/stdlib/net.iris -- IRIS networking library.
+// All functions return raw i64 socket handles (unboxed, no heap allocation).
+// A return value of -1 indicates error.
+
+pub record TcpStream {
+    handle: i64,
+}
+
+pub record TcpListener {
+    handle: i64,
+}
+
+extern def iris_tcp_set_timeout(handle: i64, read_timeout_ms: i64, write_timeout_ms: i64) -> i64 effect net
+extern def iris_tcp_write_all(handle: i64, data: str) -> i64 effect net
+extern def iris_tcp_read_max(handle: i64, max_bytes: i64) -> str effect net, alloc
+extern def iris_tcp_shutdown(handle: i64) -> i64 effect net
+
+/// Connect and configure bounded blocking I/O. Errors are explicit rather than
+/// encoded as a raw negative handle.
+pub def tcp_connect_checked(host: str, port: i64, read_timeout_ms: i64, write_timeout_ms: i64) -> result<TcpStream, str> effect net {
+    val handle = tcp_connect(host, port)
+    if handle < 0 {
+        return err("tcp connect failed")
+    }
+    if iris_tcp_set_timeout(handle, read_timeout_ms, write_timeout_ms) != 0 {
+        tcp_close(handle);
+        return err("tcp timeout configuration failed")
+    }
+    return ok(TcpStream { handle: handle })
+}
+
+pub def tcp_listen_checked(port: i64) -> result<TcpListener, str> effect net {
+    val handle = tcp_listen(port)
+    if handle < 0 { return err("tcp listen failed") }
+    return ok(TcpListener { handle: handle })
+}
+
+pub def tcp_accept_checked(listener: TcpListener, read_timeout_ms: i64, write_timeout_ms: i64) -> result<TcpStream, str> effect net {
+    val handle = tcp_accept(listener.handle)
+    if handle < 0 { return err("tcp accept failed") }
+    if iris_tcp_set_timeout(handle, read_timeout_ms, write_timeout_ms) != 0 {
+        tcp_close(handle);
+        return err("accepted stream timeout configuration failed")
+    }
+    return ok(TcpStream { handle: handle })
+}
+
+pub def tcp_write_all_checked(stream: TcpStream, data: str) -> result<i64, str> effect net {
+    val written = iris_tcp_write_all(stream.handle, data)
+    if written < 0 { return err("tcp write failed") }
+    return ok(written)
+}
+
+pub def tcp_read_bounded(stream: TcpStream, max_bytes: i64) -> result<str, str> effect net, alloc {
+    if max_bytes <= 0 || max_bytes > 16777216 {
+        return err("tcp read bound must be between 1 and 16777216 bytes")
+    }
+    return ok(iris_tcp_read_max(stream.handle, max_bytes))
+}
+
+pub def tcp_shutdown_checked(stream: TcpStream) -> result<i64, str> effect net {
+    val status = iris_tcp_shutdown(stream.handle)
+    if status != 0 { return err("tcp shutdown failed") }
+    return ok(status)
+}
+
+pub def tcp_close_checked(stream: TcpStream) -> i64 effect net {
+    tcp_close(stream.handle);
+    return 0
+}
+
+pub def tcp_close_listener(listener: TcpListener) -> i64 effect net {
+    tcp_close(listener.handle);
+    return 0
+}
+
+// ── TCP Connection ───────────────────────────────────────────────────────────
+
+/// Connect to a remote TCP host and port.
+/// Returns socket handle on success, or -1 on failure.
+pub def tcp_connect_to(host: str, port: i64) -> i64 effect net {
+    tcp_connect(host, port)
+}
+
+/// Write string data to a TCP connection handle.
+pub def tcp_write_conn(handle: i64, data: str) -> bool effect net {
+    tcp_write(handle, data);
+    true
+}
+
+/// Read incoming data from a TCP connection handle as a string.
+pub def tcp_read_conn(handle: i64) -> str effect net {
+    tcp_read(handle)
+}
+
+/// Close a TCP connection handle.
+pub def tcp_close_conn(handle: i64) -> bool effect net {
+    tcp_close(handle);
+    true
+}
+
+// ── TCP Server ───────────────────────────────────────────────────────────────
+
+/// Listen on a local TCP port for incoming connections.
+/// Returns server socket handle on success, or -1 on failure.
+pub def tcp_listen_on(port: i64) -> i64 effect net {
+    tcp_listen(port)
+}
+
+/// Accept an incoming client connection on a TCP server.
+/// Blocks until a connection is received.
+/// Returns client socket handle on success, or -1 on failure.
+pub def tcp_accept_conn(server_handle: i64) -> i64 effect net {
+    tcp_accept(server_handle)
+}
+
+/// Close a TCP listening server handle.
+pub def tcp_close_server(handle: i64) -> bool effect net {
+    tcp_close(handle);
+    true
+}
+
+// ── UDP Socket ───────────────────────────────────────────────────────────────
+
+/// Bind a UDP socket to a local port (or port 0 for an ephemeral port).
+/// Returns UDP socket handle on success, or -1 on failure.
+pub def udp_bind(port: i64) -> i64 effect net {
+    udp_open(port)
+}
+
+/// Send data over a UDP socket to a target host and port.
+pub def udp_send_to(socket_handle: i64, host: str, port: i64, data: str) -> bool effect net {
+    val addr_port = concat(concat(concat(concat(host, ":"), to_str(port)), ":"), data)
+    udp_send(socket_handle, addr_port);
+    true
+}
+
+/// Receive data from a UDP socket.
+/// Blocks until a packet is received.
+/// Returns a tuple containing: (source_ip, source_port, payload_data).
+pub def udp_recv_from(socket_handle: i64) -> (str, i64, str) effect net {
+    val raw = udp_recv(socket_handle)
+    val first_colon = find(raw, ":")
+    if is_some(first_colon) {
+        val fidx = unwrap(first_colon)
+        val ip = slice(raw, 0, fidx)
+        val rest = slice(raw, fidx + 1, len(raw))
+        val second_colon = find(rest, ":")
+        if is_some(second_colon) {
+            val sidx = unwrap(second_colon)
+            val port_str = slice(rest, 0, sidx)
+            val data = slice(rest, sidx + 1, len(rest))
+            val port = parse_i64(port_str)
+            (ip, if is_some(port) { unwrap(port) } else { 0 }, data)
+        } else {
+            (raw, 0, "")
+        }
+    } else {
+        (raw, 0, "")
+    }
+}
+
+/// Close a UDP socket handle.
+pub def udp_close_socket(socket_handle: i64) -> bool effect net {
+    udp_close(socket_handle);
+    true
+}

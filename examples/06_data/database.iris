@@ -1,0 +1,14 @@
+bring std.sql /// SQLite database in memory; parameters stay separate from SQL syntax.
+def main() -> i64 {
+    val db = sql_open(":memory:");
+    assert(db != 0);
+    assert(sql_exec(db, "CREATE TABLE tasks (title TEXT, done INTEGER)") >= 0);
+    assert(sql_exec_params(db, "INSERT INTO tasks VALUES (?, ?)", list("learn IRIS", "0")) >= 0);
+    assert(sql_exec_params(db, "INSERT INTO tasks VALUES (?, ?)", list("ship docs", "1")) >= 0);
+    val rows = sql_query_params(db, "SELECT title FROM tasks WHERE done = ?", list("0"));
+    assert(list_len(rows) == 1);
+    assert(list_get(list_get(rows, 0), 0) == "learn IRIS");
+    sql_close(db);
+    println("database: ok");
+    return 0
+}

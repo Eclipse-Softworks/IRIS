@@ -1,0 +1,13 @@
+def sum_to(n: i64, acc: i64) -> i64 {
+    if n == 0 {
+        acc
+    } else {
+        sum_to(n - 1, acc + n)
+    }
+}
+
+pub def test_recursion_depth() -> i64 {
+    val res = sum_to(200, 0);
+    assert(res == 20100);
+    0
+}

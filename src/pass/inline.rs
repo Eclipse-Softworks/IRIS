@@ -28,7 +28,30 @@ impl super::Pass for InlinePass {
             .iter()
             .enumerate()
             .filter(|(_, f)| {
-                f.blocks.len() == 1 && {
+                // A body containing effect-handler machinery is not inlinable.
+                //
+                // `PushHandler` names a separately lifted handler function and
+                // `ResumeCont` resumes through a continuation created by the
+                // matching `PushHandler`; copying those instructions into a
+                // caller detaches them from that pairing. Inlining a function
+                // whose body is a `handle` expression produced IR referencing a
+                // value that no longer existed --
+                // "[after inline] operand[0] = %0 not defined" -- which only
+                // became visible once `verify_uses_defined` was widened past
+                // branch arguments. See known-issues #16.
+                //
+                // Skipping is a missed optimisation; inlining is a wrong answer.
+                let has_handler = f.blocks.iter().any(|b| {
+                    b.instrs.iter().any(|i| {
+                        matches!(
+                            i,
+                            IrInstr::PushHandler { .. }
+                                | IrInstr::PopHandler
+                                | IrInstr::ResumeCont { .. }
+                        )
+                    })
+                });
+                !has_handler && f.blocks.len() == 1 && {
                     let non_term = f.blocks[0]
                         .instrs
                         .iter()
@@ -197,6 +220,8 @@ pub(crate) fn set_result(instr: &mut IrInstr, v: ValueId) {
         IrInstr::CallClosure { result, .. } => *result = Some(v),
         IrInstr::MakeStruct { result, .. } => *result = v,
         IrInstr::GetField { result, .. } => *result = v,
+        IrInstr::MakeTraitObject { result, .. } => *result = v,
+        IrInstr::DynCall { result, .. } => *result = v,
         IrInstr::MakeVariant { result, .. } => *result = v,
         IrInstr::ExtractVariantField { result, .. } => *result = v,
         IrInstr::MakeTuple { result, .. } => *result = v,
@@ -206,6 +231,7 @@ pub(crate) fn set_result(instr: &mut IrInstr, v: ValueId) {
         IrInstr::ArrayLoad { result, .. } => *result = v,
         IrInstr::ChanNew { result, .. } => *result = v,
         IrInstr::ChanRecv { result, .. } => *result = v,
+        IrInstr::TaskGroupNew { result, .. } => *result = v,
         IrInstr::AtomicNew { result, .. } => *result = v,
         IrInstr::AtomicLoad { result, .. } => *result = v,
         IrInstr::AtomicAdd { result, .. } => *result = v,
@@ -280,6 +306,56 @@ pub(crate) fn set_result(instr: &mut IrInstr, v: ValueId) {
         IrInstr::TcpAccept { result, .. } => *result = v,
         IrInstr::TcpRead { result, .. } => *result = v,
         IrInstr::BuiltinCall { result, .. } => *result = v,
-        _ => {}
+
+        // These five defined a result but sat in a `_ => {}` catch-all, so a
+        // callee containing any of them kept the *callee's* ValueId after being
+        // inlined into a caller that numbers its values independently. `nnz` in
+        // a one-line helper was enough:
+        //
+        //   [after inline] main: block0 instr17 operand[0] = %28 not defined
+        //
+        // Found on 2026-08-16 while building the mutual-recursion trampoline,
+        // which needs the same renumbering and would have inherited the hole.
+        IrInstr::TapeRecord { result, .. } => *result = v,
+        IrInstr::Backward { result, .. } => *result = v,
+        IrInstr::TapeGrad { result, .. } => *result = v,
+        IrInstr::SparseNnz { result, .. } => *result = v,
+        IrInstr::ResumeCont { result, .. } => *result = v,
+
+        // Everything below defines no result. Listed explicitly rather than
+        // caught by `_`, so that adding an `IrInstr` variant fails the build
+        // here instead of silently doing nothing -- which is exactly how the
+        // five above were missed. This is the fifth defect of this shape in the
+        // codebase (see known-issues #33, #42); an enumeration a human has to
+        // remember to update has now been wrong every time it mattered.
+        IrInstr::Store { .. }
+        | IrInstr::Br { .. }
+        | IrInstr::CondBr { .. }
+        | IrInstr::Return { .. }
+        | IrInstr::Retain { .. }
+        | IrInstr::Release { .. }
+        | IrInstr::SwitchVariant { .. }
+        | IrInstr::ArrayStore { .. }
+        | IrInstr::ChanSend { .. }
+        | IrInstr::Spawn { .. }
+        | IrInstr::TaskGroupSpawn { .. }
+        | IrInstr::TaskGroupJoin { .. }
+        | IrInstr::TaskGroupCancel { .. }
+        | IrInstr::ParFor { .. }
+        | IrInstr::AtomicStore { .. }
+        | IrInstr::MutexUnlock { .. }
+        | IrInstr::Barrier
+        | IrInstr::Print { .. }
+        | IrInstr::Panic { .. }
+        | IrInstr::ListPush { .. }
+        | IrInstr::ListSet { .. }
+        | IrInstr::MapSet { .. }
+        | IrInstr::MapRemove { .. }
+        | IrInstr::ListSort { .. }
+        | IrInstr::ProcessExit { .. }
+        | IrInstr::TcpWrite { .. }
+        | IrInstr::TcpClose { .. }
+        | IrInstr::PushHandler { .. }
+        | IrInstr::PopHandler => {}
     }
 }

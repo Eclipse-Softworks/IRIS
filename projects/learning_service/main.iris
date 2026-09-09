@@ -1,0 +1,22 @@
+bring "model.iris" bring std.ml bring std.ais /// Software-only learning, evaluation, registration, and degraded-state tracking.
+def main() -> i64 {
+    val initial = predict(list(0.0), list(0.0), 1.0);
+    val trained = train_weights(300);
+    val low = predict(trained.0, trained.1, 0.0);
+    val high = predict(trained.0, trained.1, 1.0);
+    assert(initial == 0.5);
+    assert(low<0.2);
+    assert(high>0.8);
+    var registry = model_registry_new();
+    registry = model_registry_add(registry, "binary-sensor", "1.0.0", "iris-nn", "in-memory");
+    assert(model_registry_find(registry, "binary-sensor", "1.0.0") == 0);
+    var health = model_health_new();
+    health = model_health_observe(health, true, 1, "", 2);
+    assert(health.requests == 1);
+    var agent = agent_runtime_new(2);
+    agent = agent_record_outcome(agent, 1.0, - 1.0, false);
+    agent = agent_record_outcome(agent, 1.0, - 1.0, false);
+    assert(agent.state == "degraded");
+    println("learning service: trained, evaluated, registered; degradation checked");
+    return 0
+}

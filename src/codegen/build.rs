@@ -21,6 +21,14 @@ use std::process::Command;
 use crate::error::CodegenError;
 use crate::ir::module::IrModule;
 
+/// Helper: convert a Path to &str, returning a descriptive error on non-UTF8 paths.
+fn path_str(p: &Path) -> Result<&str, CodegenError> {
+    p.to_str().ok_or_else(|| CodegenError::Unsupported {
+        backend: "binary".into(),
+        detail: format!("path contains non-UTF8 characters: {}", p.display()),
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Embedded runtime sources (compiled into the IRIS Rust binary itself)
 // ---------------------------------------------------------------------------
@@ -39,6 +47,27 @@ pub const ONNX_SHIM_H_SRC: &str = include_str!("../runtime/onnx_shim.h");
 pub const ONNX_SHIM_C_SRC: &str = include_str!("../runtime/onnx_shim.c");
 pub const TF_SHIM_C_SRC: &str = include_str!("../runtime/tf_shim.c");
 pub const PYTORCH_SHIM_CPP_SRC: &str = include_str!("../runtime/pytorch_shim.cpp");
+
+/// Lazy runtime loader for the ML backends. Lets the shims compile with no ML
+/// SDK installed — the shared libraries are resolved via dlopen on first use.
+pub const ML_DYNLOAD_H_SRC: &str = include_str!("../runtime/iris_ml_dynload.h");
+
+// Prebuilt runtime objects embedded by the top-level build script. Defines
+// `PrebuiltRuntime`, `RUNTIME_SOURCES_HASH` and `PREBUILT_RUNTIMES`. When a set
+// is present for the target triple we skip the C compiler entirely.
+include!(concat!(env!("OUT_DIR"), "/prebuilt_runtime.rs"));
+
+/// Look up prebuilt runtime objects for `triple`, if this compiler embeds any.
+///
+/// The build script only emits entries whose recorded source hash matches the
+/// current C sources, so anything returned here is known to be up to date.
+fn find_prebuilt_runtime(triple: &str) -> Option<&'static PrebuiltRuntime> {
+    PREBUILT_RUNTIMES.iter().find(|p| p.triple == triple)
+}
+
+/// Vendored ONNX Runtime C API header (MIT, Microsoft). Supplies the ABI layout
+/// only; it creates no link-time dependency. See src/runtime/vendor/README.md.
+pub const ONNXRUNTIME_C_API_H_SRC: &str = include_str!("../runtime/vendor/onnxruntime_c_api.h");
 
 /// ML compute kernels header — convolution, pooling, losses, optimizers, etc.
 pub const ML_KERNELS_H_SRC: &str = include_str!("../runtime/iris_ml_kernels.h");
@@ -67,14 +96,25 @@ pub fn build_binary_with_target(
     target: Option<&str>,
 ) -> Result<PathBuf, CodegenError> {
     use crate::codegen::llvm_ir::emit_llvm_ir_for_binary;
+    let link_libs: Vec<String> = module
+        .extern_fns
+        .iter()
+        .filter_map(|e| e.link_lib.clone())
+        .collect();
     if target.is_some() {
         build_binary_impl(
             crate::codegen::llvm_ir::emit_llvm_ir_for_binary_with_target(module, target)?,
             output_path,
             target,
+            link_libs,
         )
     } else {
-        build_binary_impl(emit_llvm_ir_for_binary(module)?, output_path, None)
+        build_binary_impl(
+            emit_llvm_ir_for_binary(module)?,
+            output_path,
+            None,
+            link_libs,
+        )
     }
 }
 
@@ -95,14 +135,20 @@ pub fn build_binary_for_eval_with_target(
     target: Option<&str>,
 ) -> Result<PathBuf, CodegenError> {
     use crate::codegen::llvm_ir::emit_llvm_ir_for_eval;
+    let link_libs: Vec<String> = module
+        .extern_fns
+        .iter()
+        .filter_map(|e| e.link_lib.clone())
+        .collect();
     if target.is_some() {
         build_binary_impl(
             crate::codegen::llvm_ir::emit_llvm_ir_for_eval_with_target(module, target)?,
             output_path,
             target,
+            link_libs,
         )
     } else {
-        build_binary_impl(emit_llvm_ir_for_eval(module)?, output_path, None)
+        build_binary_impl(emit_llvm_ir_for_eval(module)?, output_path, None, link_libs)
     }
 }
 
@@ -120,11 +166,16 @@ pub fn execute_binary_for_eval_with_target(
     target: Option<&str>,
 ) -> Result<String, CodegenError> {
     let output = run_binary_for_eval_entry_capture(module, None, target)?;
-    let stdout = String::from_utf8_lossy(&output.stdout).replace('\r', "");
-    if !output.stderr.is_empty() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        eprint!("{}", stderr);
-    }
+    // Undo the Windows CRT's text-mode translation so eval output matches the
+    // interpreter: a program's `\n` reaches us as `\r\n`, and genuine `\r\n`
+    // data reaches us as `\r\r\n`, which this collapses back correctly.
+    //
+    // Do NOT additionally map lone `\r` to `\n`. That destroyed real carriage
+    // returns in program data — `http_get_request` emits a correct
+    // `GET / HTTP/1.1\r\nHost: …` and eval reported `\n\n`, which looked like a
+    // codegen bug for as long as it went unmeasured. The compiled binary was
+    // right all along; only this capture was wrong.
+    let stdout = String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n");
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(CodegenError::Unsupported {
@@ -140,8 +191,13 @@ pub(crate) fn run_binary_for_eval_entry_capture(
     entry_name: Option<&str>,
     target: Option<&str>,
 ) -> Result<std::process::Output, CodegenError> {
+    let link_libs: Vec<String> = module
+        .extern_fns
+        .iter()
+        .filter_map(|e| e.link_lib.clone())
+        .collect();
     let bin_path = if let Some(name) = entry_name {
-        build_binary_from_llvm_ir(
+        build_binary_impl(
             crate::codegen::llvm_ir::emit_llvm_ir_for_named_eval_with_target(
                 module,
                 Some(name),
@@ -149,18 +205,97 @@ pub(crate) fn run_binary_for_eval_entry_capture(
             )?,
             &temp_eval_binary_path(),
             target,
+            link_libs,
         )?
     } else {
         build_binary_for_eval_with_target(module, &temp_eval_binary_path(), target)?
     };
     let run_path = std::fs::canonicalize(&bin_path).unwrap_or(bin_path.clone());
-    let output = Command::new(&run_path).output().map_err(CodegenError::Io)?;
-    if let Some(parent) = bin_path.parent() {
-        let _ = std::fs::remove_dir_all(parent);
-    } else {
-        let _ = std::fs::remove_file(&run_path);
-    }
+    // Removed on every exit path, including the timeout below.
+    let _exe_guard = TempExeGuard(run_path.clone());
+    // Run the native binary with a timeout. Programs that use spawn/TCP may hang
+    // indefinitely in the native runtime, so we fall back to the interpreter.
+    //
+    // The limit is configurable because it is wall-clock, not work: on a slow or
+    // loaded machine a correct program can exceed a fixed budget and be reported
+    // as a failure, which is a false negative rather than a real defect.
+    let timeout_secs = native_timeout_secs();
+    let output = run_with_timeout(&run_path, std::time::Duration::from_secs(timeout_secs))
+        .map_err(|_| CodegenError::Unsupported {
+            backend: "native".into(),
+            detail: format!(
+                "native binary timed out ({}s); raise IRIS_NATIVE_TIMEOUT or use the interpreter",
+                timeout_secs
+            ),
+        })?;
     Ok(output)
+}
+
+/// Wall-clock budget for a natively built program run under `--emit eval`.
+///
+/// Override with `IRIS_NATIVE_TIMEOUT` (seconds). Values that do not parse, or a
+/// zero, fall back to the default rather than disabling the timeout — an
+/// unbounded wait would hang the whole test suite on a single spawning program.
+pub(crate) fn native_timeout_secs() -> u64 {
+    const DEFAULT_NATIVE_TIMEOUT_SECS: u64 = 15;
+    std::env::var("IRIS_NATIVE_TIMEOUT")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(DEFAULT_NATIVE_TIMEOUT_SECS)
+}
+
+/// Whether to skip native compilation entirely and interpret instead.
+///
+/// Set `IRIS_FORCE_INTERP=1` to enable. `--emit eval` otherwise compiles and
+/// links a native binary per program, which dominates test-suite runtime: the
+/// suite pays a clang invocation per test even though the interpreter would
+/// answer in milliseconds. This is the switch that makes the suite fast enough
+/// to iterate on, and it also removes native-timeout flakiness from CI.
+pub fn force_interpreter() -> bool {
+    matches!(
+        std::env::var("IRIS_FORCE_INTERP").ok().as_deref(),
+        Some("1") | Some("true") | Some("yes")
+    )
+}
+
+/// Run a child process and wait for it to finish, with a timeout.
+fn run_with_timeout(
+    bin: &std::path::Path,
+    timeout: std::time::Duration,
+) -> Result<std::process::Output, ()> {
+    let mut child = std::process::Command::new(bin)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|_| ())?;
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                // Read remaining stdout/stderr in case the process buffered before exiting
+                let output = child.wait_with_output().map_err(|_| ())?;
+                return Ok(std::process::Output {
+                    status,
+                    stdout: output.stdout,
+                    stderr: output.stderr,
+                });
+            }
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(());
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(());
+            }
+        }
+    }
 }
 
 pub(crate) fn run_native_test_capture(
@@ -168,20 +303,22 @@ pub(crate) fn run_native_test_capture(
     entry_name: &str,
     target: Option<&str>,
 ) -> Result<std::process::Output, CodegenError> {
-    let bin_path = build_binary_from_llvm_ir(
+    let link_libs: Vec<String> = module
+        .extern_fns
+        .iter()
+        .filter_map(|e| e.link_lib.clone())
+        .collect();
+    let bin_path = build_binary_impl(
         crate::codegen::llvm_ir::emit_llvm_ir_for_test_entry_with_target(
             module, entry_name, target,
         )?,
         &temp_eval_binary_path(),
         target,
+        link_libs,
     )?;
     let run_path = std::fs::canonicalize(&bin_path).unwrap_or(bin_path.clone());
+    let _exe_guard = TempExeGuard(run_path.clone());
     let output = Command::new(&run_path).output().map_err(CodegenError::Io)?;
-    if let Some(parent) = bin_path.parent() {
-        let _ = std::fs::remove_dir_all(parent);
-    } else {
-        let _ = std::fs::remove_file(&run_path);
-    }
     Ok(output)
 }
 
@@ -195,24 +332,36 @@ fn temp_eval_binary_path() -> PathBuf {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .subsec_nanos();
-    let dir = std::env::temp_dir().join(format!("iris_eval_dir_{}_{}_{}", pid, tid, nanos));
-    let _ = std::fs::create_dir_all(&dir);
-    dir.join(format!("iris_eval{}", std::env::consts::EXE_SUFFIX))
+    std::env::temp_dir().join(format!(
+        "iris_eval_{}_{}_{}{}",
+        pid,
+        tid,
+        nanos,
+        std::env::consts::EXE_SUFFIX
+    ))
 }
 
-fn build_binary_from_llvm_ir(
+fn _build_binary_from_llvm_ir(
     llvm_ir: String,
     output_path: &Path,
     target: Option<&str>,
 ) -> Result<PathBuf, CodegenError> {
-    build_binary_impl(llvm_ir, output_path, target)
+    build_binary_impl(llvm_ir, output_path, target, vec![])
 }
 
 fn build_binary_impl(
     llvm_ir: String,
     output_path: &Path,
     target: Option<&str>,
+    link_libs: Vec<String>,
 ) -> Result<PathBuf, CodegenError> {
+    let resolved_target = resolve_target_triple(target);
+
+    // WASM compilation path — uses WASI sysroot + wasi-libc + compiler-rt.
+    if resolved_target.contains("wasm32") {
+        return build_wasm_binary_impl(&llvm_ir, output_path, &resolved_target);
+    }
+
     if !llvm_ir.contains("define i32 @main(") {
         return Err(CodegenError::Unsupported {
             backend: "binary".into(),
@@ -224,53 +373,23 @@ fn build_binary_impl(
     // 1. LLVM IR already emitted.
 
     // 2. Set up a per-call temp directory so parallel builds don't collide.
-    let (tmp_dir, is_custom_tmp) = if let Some(parent) = output_path.parent() {
-        if let Some(parent_name) = parent.file_name().and_then(|s| s.to_str()) {
-            if parent_name.starts_with("iris_eval_dir_") {
-                (parent.to_path_buf(), false)
-            } else {
-                let stem = output_path
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("iris");
-                let build_id = format!("{}_{}_bld", stem, std::process::id());
-                (std::env::temp_dir().join(build_id), true)
-            }
-        } else {
-            (
-                std::env::temp_dir().join(format!("iris_build_{}", std::process::id())),
-                true,
-            )
-        }
-    } else {
-        (
-            std::env::temp_dir().join(format!("iris_build_{}", std::process::id())),
-            true,
-        )
-    };
-
-    if is_custom_tmp {
-        std::fs::create_dir_all(&tmp_dir).map_err(|e| CodegenError::Unsupported {
-            backend: "binary".into(),
-            detail: format!("failed to create temp dir '{}': {}", tmp_dir.display(), e),
-        })?;
-    }
-
-    struct TempDirCleanup<'a> {
-        path: &'a std::path::Path,
-        active: bool,
-    }
-    impl<'a> Drop for TempDirCleanup<'a> {
-        fn drop(&mut self) {
-            if self.active {
-                let _ = std::fs::remove_dir_all(self.path);
-            }
-        }
-    }
-    let _cleanup = TempDirCleanup {
-        path: &tmp_dir,
-        active: is_custom_tmp,
-    };
+    // Derive from output_path's stem and add timestamp + pid to avoid collisions.
+    let now_nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let stem = output_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("iris_build");
+    let build_id = format!("{}_{}_{}_bld", stem, std::process::id(), now_nanos);
+    let tmp_dir = std::env::temp_dir().join(build_id);
+    std::fs::create_dir_all(&tmp_dir).map_err(|e| CodegenError::Unsupported {
+        backend: "binary".into(),
+        detail: format!("failed to create temp dir '{}': {}", tmp_dir.display(), e),
+    })?;
+    // Removes the directory on every exit path, success or error.
+    let _build_dir_guard = BuildDirGuard(tmp_dir.clone());
 
     // 3. Write LLVM IR.
     let ll_path = tmp_dir.join("module.ll");
@@ -293,6 +412,23 @@ fn build_binary_impl(
     std::fs::write(&c_path, RUNTIME_C_SRC).map_err(|e| CodegenError::Unsupported {
         backend: "binary".into(),
         detail: format!("failed to write runtime C source: {}", e),
+    })?;
+    // The ML dynamic loader and the vendored ONNX C API header must sit next to
+    // the shims: they are included by onnx_shim.c / tf_shim.c and resolved via
+    // the `-I <tmp_dir>` already passed to every compile step below.
+    let ml_dynload_h_path = tmp_dir.join("iris_ml_dynload.h");
+    let ort_api_h_path = tmp_dir.join("onnxruntime_c_api.h");
+    std::fs::write(&ml_dynload_h_path, ML_DYNLOAD_H_SRC).map_err(|e| {
+        CodegenError::Unsupported {
+            backend: "binary".into(),
+            detail: format!("failed to write ML dynamic-loader header: {}", e),
+        }
+    })?;
+    std::fs::write(&ort_api_h_path, ONNXRUNTIME_C_API_H_SRC).map_err(|e| {
+        CodegenError::Unsupported {
+            backend: "binary".into(),
+            detail: format!("failed to write vendored ONNX C API header: {}", e),
+        }
     })?;
     std::fs::write(&onnx_h_path, ONNX_SHIM_H_SRC).map_err(|e| CodegenError::Unsupported {
         backend: "binary".into(),
@@ -329,133 +465,27 @@ fn build_binary_impl(
     // clang — compiles LLVM IR (.ll) to object files AND compiles the C
     //         runtime AND links the final binary (with -fuse-ld=lld).
     //         No GCC installation is required.
-    #[allow(unused_mut)]
-    let mut clang = find_clang();
-    #[cfg(target_os = "windows")]
-    {
-        let clang_missing = if clang == "clang" {
-            Command::new("clang").arg("--version").output().is_err()
-        } else {
-            !Path::new(&clang).exists()
-        };
-
-        if clang_missing {
-            use std::io::{self, IsTerminal, Write};
-            if io::stdin().is_terminal() {
-                eprintln!("\x1b[1;33mWarning\x1b[0m: Clang/LLVM toolchain is required for native compilation, but was not found.");
-                eprintln!("IRIS compiles to native binaries via LLVM. We can automatically download and set up a lightweight");
-                eprintln!(
-                    "LLVM and MinGW compiler toolchain in your user home directory (~/.iris/)."
-                );
-                eprint!("Would you like to install the toolchain automatically now? [Y/n]: ");
-                let _ = io::stderr().flush();
-
-                let mut response = String::new();
-                if io::stdin().read_line(&mut response).is_ok() {
-                    let trimmed = response.trim().to_lowercase();
-                    if trimmed.is_empty() || trimmed.starts_with('y') {
-                        eprintln!();
-                        if let Err(e) = crate::setup::run_setup_command() {
-                            return Err(CodegenError::Unsupported {
-                                backend: "binary".into(),
-                                detail: format!("Toolchain auto-setup failed: {}", e),
-                            });
-                        }
-                        // Refresh clang path
-                        clang = find_clang();
-                    } else {
-                        return Err(CodegenError::Unsupported {
-                            backend: "binary".into(),
-                            detail: "Compilation aborted: LLVM/Clang toolchain is required but installation was declined.".into(),
-                        });
-                    }
-                }
-            } else {
-                return Err(CodegenError::Unsupported {
-                    backend: "binary".into(),
-                    detail: "LLVM/Clang toolchain not found. For non-interactive environments, please install LLVM manually or run 'iris setup' beforehand.".into(),
-                });
-            }
-        }
-    }
-
+    let clang = find_clang();
     let msys2_inc = msys2_ucrt64_include();
     let msys2_lib = msys2_ucrt64_lib();
     let gcc_lib = msys2_gcc_lib();
 
-    // Helper: convert a PathBuf to &str, returning a descriptive error on non-UTF8 paths.
-    fn path_str(p: &std::path::Path) -> Result<&str, CodegenError> {
-        p.to_str().ok_or_else(|| CodegenError::Unsupported {
-            backend: "binary".into(),
-            detail: format!("path contains non-UTF8 characters: {}", p.display()),
-        })
-    }
-
-    let resolved_target = resolve_target_triple(target);
     let target_args = ["-target".to_owned(), resolved_target.clone()];
-    let native_ml_backends = std::env::var("IRIS_NATIVE_ML_BACKENDS")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
-    if native_ml_backends
-        && resolved_target.contains("windows")
-        && !resolved_target.contains("msvc")
-    {
-        return Err(CodegenError::Unsupported {
-            backend: "binary".into(),
-            detail: "LibTorch is not supported on Windows MinGW/GNU target. Please target MSVC (e.g. --target x86_64-pc-windows-msvc) instead.".into(),
-        });
-    }
-    let use_blas = std::env::var("IRIS_USE_BLAS")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
-    let openblas_dir = if use_blas {
-        std::env::var("OPENBLAS_DIR")
-            .ok()
-            .map(PathBuf::from)
-            .or_else(|| {
-                if Path::new("C:\\openblas").exists() {
-                    Some(PathBuf::from("C:\\openblas"))
-                } else {
-                    None
-                }
-            })
+    let onnx_sdk = if let Ok(dir) = std::env::var("ONNXRUNTIME_DIR") {
+        Some(PathBuf::from(dir))
+    } else if Path::new("C:\\onnxruntime").exists() {
+        Some(PathBuf::from("C:\\onnxruntime"))
     } else {
         None
     };
-    let onnx_sdk = if native_ml_backends {
-        std::env::var("ONNXRUNTIME_DIR")
-            .ok()
-            .map(PathBuf::from)
-            .or_else(|| {
-                if Path::new("C:\\onnxruntime").exists() {
-                    Some(PathBuf::from("C:\\onnxruntime"))
-                } else {
-                    None
-                }
-            })
+    let tf_sdk = if let Ok(dir) = std::env::var("TENSORFLOW_DIR") {
+        Some(PathBuf::from(dir))
+    } else if Path::new("C:\\tensorflow").exists() {
+        Some(PathBuf::from("C:\\tensorflow"))
     } else {
         None
     };
-    let tf_sdk = if native_ml_backends {
-        std::env::var("TENSORFLOW_DIR")
-            .ok()
-            .map(PathBuf::from)
-            .or_else(|| {
-                if Path::new("C:\\tensorflow").exists() {
-                    Some(PathBuf::from("C:\\tensorflow"))
-                } else {
-                    None
-                }
-            })
-    } else {
-        None
-    };
-    // LibTorch: the pytorch_shim.cpp is always compiled with -target
-    // x86_64-pc-windows-msvc on Windows (see below) and all exported symbols
-    // use `extern "C"` linkage, so there is no ABI mismatch even when the main
-    // binary targets MinGW.  LLD can consume MSVC .lib import libraries in
-    // either mode, so we no longer gate on the target ABI.
-    let libtorch_sdk = if native_ml_backends {
+    let libtorch_sdk = if resolved_target.contains("msvc") {
         if let Ok(dir) = std::env::var("LIBTORCH_DIR") {
             Some(PathBuf::from(dir))
         } else if Path::new("C:\\libtorch").exists() {
@@ -466,325 +496,360 @@ fn build_binary_impl(
     } else {
         None
     };
-    eprintln!("[build.rs] native_ml_backends: {}", native_ml_backends);
-    eprintln!("[build.rs] libtorch_sdk: {:?}", libtorch_sdk);
-
-    // 5a. Compile iris_runtime.c → iris_runtime.o using clang.
-    let rt_obj = tmp_dir.join("iris_runtime.o");
-
-    let cache_dir = get_cache_dir();
-    let rt_hash = hash_str(&format!(
-        "{}_{}_{:?}_{:?}_{}",
-        RUNTIME_C_SRC,
-        resolved_target,
-        libtorch_sdk.is_some(),
-        msys2_inc,
-        env!("CARGO_PKG_VERSION")
-    ));
-    let mut rt_cached = None;
-    if let Some(ref cdir) = cache_dir {
-        let cached_path = cdir.join(format!("iris_runtime_{:x}.o", rt_hash));
-        if cached_path.exists() {
-            rt_cached = Some(cached_path);
-        }
+    let openblas_dir = if let Ok(dir) = std::env::var("OPENBLAS_DIR") {
+        Some(PathBuf::from(dir))
+    } else if Path::new("C:\\openblas").exists() {
+        Some(PathBuf::from("C:\\openblas"))
+    } else {
+        None
+    };
+    let use_blas = openblas_dir.is_some()
+        || std::env::var("IRIS_USE_BLAS")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+    // NOTE: IRIS_NATIVE_ML_BACKENDS no longer affects codegen. ONNX and
+    // TensorFlow are always compiled in and resolved at runtime via dlopen, and
+    // LibTorch is a separately built plugin. The SDK paths below are retained
+    // only so `iris build-plugin torch` can find LibTorch, and so the ONNX DLL
+    // can be staged next to the output binary as a convenience.
+    if std::env::var("IRIS_NATIVE_ML_BACKENDS").is_ok() {
+        eprintln!(
+            "iris_codegen: note — IRIS_NATIVE_ML_BACKENDS is obsolete and ignored; \
+             ML backends are now loaded at runtime"
+        );
     }
 
-    if let Some(ref cached_path) = rt_cached {
-        eprintln!("[build.rs] iris_runtime.o cache hit: true");
-        std::fs::copy(cached_path, &rt_obj).map_err(|e| CodegenError::Unsupported {
-            backend: "binary".into(),
-            detail: format!("Failed to copy cached iris_runtime.o: {}", e),
-        })?;
-    } else {
-        eprintln!("[build.rs] iris_runtime.o cache hit: false");
-        let mut compile_cmd = Command::new(&clang);
-        compile_cmd.args(&target_args);
-        compile_cmd.args([
+    // 5a. Compile iris_runtime.c → iris_runtime.o using clang (cached).
+    //     Cache lives next to the compiler binary or in ~/.iris/cache/.
+    //     Invalidated when the compiler binary is newer than the cached .o.
+    let rt_obj = tmp_dir.join("iris_runtime.o");
+    let compile_rt = |c_path: &Path, out_obj: &Path| -> Result<(), CodegenError> {
+        let mut cmd = Command::new(&clang);
+        cmd.args(&target_args);
+        cmd.args([
             "-O2",
             "-c",
-            path_str(&c_path)?,
+            path_str(c_path)?,
             "-o",
-            path_str(&rt_obj)?,
+            path_str(out_obj)?,
             "-I",
             path_str(&tmp_dir)?,
             "-Wno-pragma-pack",
         ]);
-        if libtorch_sdk.is_some() {
-            compile_cmd.arg("-DLIBTORCH_ENABLED");
-        }
+        // No -D<BACKEND>_ENABLED flags: the ML backends are resolved at runtime
+        // via dlopen (see iris_ml_dynload.h), so this object is byte-identical
+        // whether or not any SDK is installed. That invariant is what allows a
+        // single prebuilt iris_runtime.o to be shipped per target triple.
         if resolved_target.contains("windows") && !resolved_target.contains("msvc") {
             if let Some(ref inc) = msys2_inc {
-                compile_cmd.arg("-I").arg(inc);
+                cmd.arg("-I").arg(inc);
             }
         }
-        let c_output = compile_cmd
-            .output()
-            .map_err(|e| CodegenError::Unsupported {
-                backend: "binary".into(),
-                detail: format!("'{}' not found: {}", clang, e),
-            })?;
-        if !c_output.status.success() {
-            let stderr = String::from_utf8_lossy(&c_output.stderr);
-            let stdout = String::from_utf8_lossy(&c_output.stdout);
+        let output = cmd.output().map_err(|e| CodegenError::Unsupported {
+            backend: "binary".into(),
+            detail: format!("'{}' not found: {}", clang, e),
+        })?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stdout = String::from_utf8_lossy(&output.stdout);
             return Err(CodegenError::Unsupported {
                 backend: "binary".into(),
                 detail: format!(
                     "'{}' failed to compile iris_runtime.c (exit: {:?})\nstderr: {}\nstdout: {}",
                     clang,
-                    c_output.status.code(),
+                    output.status.code(),
                     stderr,
                     stdout
                 ),
             });
         }
-        if let Some(ref cdir) = cache_dir {
-            let cached_path = cdir.join(format!("iris_runtime_{:x}.o", rt_hash));
-            let _ = std::fs::copy(&rt_obj, cached_path);
+        Ok(())
+    };
+    // Preferred path: this compiler embeds runtime objects prebuilt for the
+    // target, so no C compiler is needed at all. Anything present here was
+    // verified by the build script to come from the current C sources.
+    let prebuilt = find_prebuilt_runtime(&resolved_target);
+    if let Some(pre) = prebuilt {
+        for (name, bytes) in pre.objects {
+            std::fs::write(tmp_dir.join(name), bytes).map_err(|e| CodegenError::Unsupported {
+                backend: "binary".into(),
+                detail: format!("failed to write prebuilt object '{}': {}", name, e),
+            })?;
+        }
+        eprintln!(
+            "iris_codegen: using prebuilt runtime objects for {} (no C compiler required)",
+            resolved_target
+        );
+    } else {
+        let cache_dir = runtime_cache_dir();
+        let cached_rt = cache_dir.join("iris_runtime.o");
+        let use_cache = std::fs::metadata(&cached_rt)
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .and_then(|cache_mtime| {
+                std::env::current_exe()
+                    .ok()
+                    .and_then(|exe| {
+                        std::fs::metadata(exe)
+                            .ok()
+                            .and_then(|em| em.modified().ok())
+                    })
+                    .map(|exe_mtime| exe_mtime <= cache_mtime)
+                    .or(Some(false))
+            })
+            .unwrap_or(false);
+        if use_cache {
+            std::fs::copy(&cached_rt, &rt_obj).map_err(|e| CodegenError::Unsupported {
+                backend: "binary".into(),
+                detail: format!("failed to copy cached iris_runtime.o: {}", e),
+            })?;
+        } else {
+            compile_rt(&c_path, &rt_obj)?;
+            // Populate cache (best-effort)
+            if std::fs::create_dir_all(&cache_dir).is_ok() {
+                let _ = std::fs::copy(&rt_obj, &cached_rt);
+            }
         }
     }
 
     // 5b. Compile LLVM IR → module.o using clang (only clang understands .ll).
     let mut support_objs = vec![rt_obj.clone()];
-    for (src_str, src, obj_name, backend_name) in [
-        (ONNX_SHIM_C_SRC, &onnx_c_path, "onnx_shim.o", "ONNX shim"),
-        (TF_SHIM_C_SRC, &tf_c_path, "tf_shim.o", "TensorFlow shim"),
-        (
-            PYTORCH_SHIM_CPP_SRC,
-            &pytorch_cpp_path,
-            "pytorch_shim.o",
-            "PyTorch shim",
-        ),
-        (
-            ML_KERNELS_C_SRC,
-            &ml_c_path,
-            "iris_ml_kernels.o",
-            "ML kernels",
-        ),
+    // The ONNX and TensorFlow shims compile against the vendored/hand-declared
+    // ABI in iris_ml_dynload.h and resolve their libraries via dlopen, so they
+    // need no SDK include paths and no -D switches.
+    //
+    // pytorch_shim.cpp is deliberately absent: LibTorch is C++, so it is built
+    // as a separate C-ABI plugin library rather than linked into every binary.
+    // See build_torch_plugin() and iris_torch_available() in iris_runtime.c.
+    for (src, obj_name, backend_name) in [
+        (&onnx_c_path, "onnx_shim.o", "ONNX shim"),
+        (&tf_c_path, "tf_shim.o", "TensorFlow shim"),
+        (&ml_c_path, "iris_ml_kernels.o", "ML kernels"),
     ] {
         let obj = tmp_dir.join(obj_name);
 
-        let shim_hash = hash_str(&format!(
-            "{}_{}_{}_{:?}_{:?}_{:?}_{}",
-            src_str,
-            resolved_target,
-            backend_name,
-            onnx_sdk.is_some(),
-            tf_sdk.is_some(),
-            libtorch_sdk.is_some(),
-            use_blas
-        ));
-        let mut shim_cached = None;
-        if let Some(ref cdir) = cache_dir {
-            let cached_path = cdir.join(format!(
-                "{}_{:x}.o",
-                backend_name.replace(" ", "_").to_lowercase(),
-                shim_hash
-            ));
-            if cached_path.exists() {
-                shim_cached = Some(cached_path);
+        // Already written from the embedded prebuilt set — nothing to compile.
+        if prebuilt.is_some() {
+            support_objs.push(obj);
+            continue;
+        }
+
+        let mut shim_cmd = Command::new(&clang);
+        shim_cmd.args(&target_args);
+        shim_cmd.args([
+            "-O2",
+            "-c",
+            path_str(src)?,
+            "-o",
+            path_str(&obj)?,
+            "-I",
+            path_str(&tmp_dir)?,
+            "-Wno-pragma-pack",
+        ]);
+        if resolved_target.contains("windows") && !resolved_target.contains("msvc") {
+            if let Some(ref inc) = msys2_inc {
+                shim_cmd.arg("-I").arg(inc);
+            }
+        }
+        if backend_name == "ML kernels" && use_blas {
+            shim_cmd.arg("-DIRIS_USE_BLAS");
+            if let Some(ref dir) = openblas_dir {
+                shim_cmd.arg("-I").arg(dir.join("include"));
             }
         }
 
-        if let Some(ref cached_path) = shim_cached {
-            eprintln!("[build.rs] {} cache hit: true", backend_name);
-            std::fs::copy(cached_path, &obj).map_err(|e| CodegenError::Unsupported {
+        let shim_output = shim_cmd.output().map_err(|e| CodegenError::Unsupported {
+            backend: "binary".into(),
+            detail: format!("'{}' could not compile {}: {}", clang, backend_name, e),
+        })?;
+        if !shim_output.status.success() {
+            let stderr = String::from_utf8_lossy(&shim_output.stderr);
+            let stdout = String::from_utf8_lossy(&shim_output.stdout);
+            return Err(CodegenError::Unsupported {
                 backend: "binary".into(),
-                detail: format!("Failed to copy cached {}: {}", obj_name, e),
-            })?;
-        } else {
-            eprintln!("[build.rs] {} cache hit: false", backend_name);
-            let mut shim_cmd = Command::new(&clang);
-            shim_cmd.args(&target_args);
-            shim_cmd.args([
-                "-O2",
-                "-c",
-                path_str(src)?,
-                "-o",
-                path_str(&obj)?,
-                "-I",
-                path_str(&tmp_dir)?,
-                "-Wno-pragma-pack",
-            ]);
-            if resolved_target.contains("windows")
-                && !resolved_target.contains("msvc")
-                && backend_name != "PyTorch shim"
-            {
-                if let Some(ref inc) = msys2_inc {
-                    shim_cmd.arg("-I").arg(inc);
-                }
-            }
-            if backend_name == "ONNX shim" {
-                if let Some(ref sdk) = onnx_sdk {
-                    shim_cmd.arg("-DONNX_RUNTIME_ENABLED");
-                    shim_cmd.arg("-I").arg(sdk.join("include"));
-                }
-            }
-            if backend_name == "TensorFlow shim" {
-                if let Some(ref sdk) = tf_sdk {
-                    shim_cmd.arg("-DTENSORFLOW_ENABLED");
-                    shim_cmd.arg("-I").arg(sdk.join("include"));
-                }
-            }
-            if backend_name == "PyTorch shim" {
-                if resolved_target.contains("windows") {
-                    shim_cmd.arg("-target").arg("x86_64-pc-windows-msvc");
-                    shim_cmd.arg("-D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH");
-                    shim_cmd.arg("-fno-autolink");
-                    shim_cmd.arg("-fms-compatibility");
-                    shim_cmd.arg("-fms-extensions");
-                }
-                if let Some(ref sdk) = libtorch_sdk {
-                    shim_cmd.arg("-DLIBTORCH_ENABLED");
-                    shim_cmd.arg("-DNDEBUG");
-                    shim_cmd.arg("-std=c++20");
-                    shim_cmd.arg("-I").arg(sdk.join("include"));
-                    shim_cmd
-                        .arg("-I")
-                        .arg(sdk.join("include/torch/csrc/api/include"));
-                }
-            }
-            if backend_name == "ML kernels" && use_blas {
-                shim_cmd.arg("-DIRIS_USE_BLAS");
-                if let Some(ref dir) = openblas_dir {
-                    shim_cmd.arg("-I").arg(dir.join("include"));
-                }
-            }
-
-            let shim_output = shim_cmd.output().map_err(|e| CodegenError::Unsupported {
-                backend: "binary".into(),
-                detail: format!("'{}' could not compile {}: {}", clang, backend_name, e),
-            })?;
-            if !shim_output.status.success() {
-                let stderr = String::from_utf8_lossy(&shim_output.stderr);
-                let stdout = String::from_utf8_lossy(&shim_output.stdout);
-                return Err(CodegenError::Unsupported {
-                    backend: "binary".into(),
-                    detail: format!(
-                        "'{}' failed to compile {} (exit: {:?})\nstderr: {}\nstdout: {}",
-                        clang,
-                        backend_name,
-                        shim_output.status.code(),
-                        stderr,
-                        stdout
-                    ),
-                });
-            }
-            if let Some(ref cdir) = cache_dir {
-                let cached_path = cdir.join(format!(
-                    "{}_{:x}.o",
-                    backend_name.replace(" ", "_").to_lowercase(),
-                    shim_hash
-                ));
-                let _ = std::fs::copy(&obj, cached_path);
-            }
+                detail: format!(
+                    "'{}' failed to compile {} (exit: {:?})\nstderr: {}\nstdout: {}",
+                    clang,
+                    backend_name,
+                    shim_output.status.code(),
+                    stderr,
+                    stdout
+                ),
+            });
         }
         support_objs.push(obj);
     }
 
-    // Use -O2 for user IR — we bundle LLVM 18 which handles complex IR patterns.
+    // Compile .ll -> .o.
+    //
+    // The LLVM C API is preferred: it needs no external compiler, which is what
+    // lets `iris build` work on a machine with only LLVM installed. clang
+    // remains the fallback.
+    //
+    // OPT-IN, via `IRIS_NO_CLANG=1`, and deliberately not the default.
+    //
+    // The handwritten binding's ABI and ownership bugs were fixed on
+    // 2026-08-29, and emitted bytes are now checked for a real object header.
+    // Clang stays the default until an LLVM-C host exercises the conditional
+    // emission test and platform linker smoke test. See known-issues #45.
+    //
+    // There is a second reason for caution: the LLVM C API and TensorFlow both
+    // embed LLVM, and loading both into one process can conflict.
     let mod_obj = tmp_dir.join("module.o");
-    let mut ir_cmd = Command::new(&clang);
-    ir_cmd.args(&target_args);
-    ir_cmd.args([
-        "-O2",
-        "-c",
-        path_str(&ll_path)?,
-        "-o",
-        path_str(&mod_obj)?,
-        "-Wno-override-module",
-    ]);
-    let ir_status = ir_cmd.status().map_err(|e| CodegenError::Unsupported {
-        backend: "binary".into(),
-        detail: format!("'{}' not found: {}", clang, e),
-    })?;
-    if !ir_status.success() {
-        return Err(CodegenError::Unsupported {
+    let no_clang = std::env::var("IRIS_NO_CLANG").is_ok();
+    if no_clang {
+        if !crate::codegen::llvm_c_api::is_llvm_c_api_available() {
+            return Err(CodegenError::Unsupported {
+                backend: "binary".into(),
+                detail: "IRIS_NO_CLANG is set, but no LLVM-C shared library is available".into(),
+            });
+        }
+        crate::codegen::llvm_c_api::compile_llvm_ir_to_object(
+            &llvm_ir,
+            &mod_obj,
+            Some(&resolved_target),
+        )?;
+    } else {
+        let mut ir_cmd = Command::new(&clang);
+        ir_cmd.args(&target_args);
+        ir_cmd.args([
+            "-O2",
+            "-c",
+            path_str(&ll_path)?,
+            "-o",
+            path_str(&mod_obj)?,
+            "-Wno-override-module",
+        ]);
+        let ir_status = ir_cmd.status().map_err(|e| CodegenError::Unsupported {
             backend: "binary".into(),
-            detail: format!(
-                "'{}' failed to compile LLVM IR (exit: {:?})",
-                clang,
-                ir_status.code()
-            ),
-        });
+            detail: format!("'{}' not found: {}", clang, e),
+        })?;
+        if !ir_status.success() {
+            // Clang failed; try LLVM C API as a last resort.
+            if let Err(e) = crate::codegen::llvm_c_api::compile_llvm_ir_to_object(
+                &llvm_ir,
+                &mod_obj,
+                Some(&resolved_target),
+            ) {
+                return Err(CodegenError::Unsupported {
+                    backend: "binary".into(),
+                    detail: format!(
+                        "both clang and LLVM C API failed to compile LLVM IR: {}. clang exit: {:?}",
+                        e,
+                        ir_status.code()
+                    ),
+                });
+            }
+        }
     }
 
-    // 6. Link module.o + iris_runtime.o → native binary using clang + lld.
-    let mut link_cmd = Command::new(&clang);
-    link_cmd.args(&target_args);
-    // Apple clang rejects -fuse-ld=lld; only request lld on non-macOS hosts.
-    if cfg!(target_os = "macos") {
-        link_cmd.args(["-O2", path_str(&mod_obj)?]);
+    // 6. Link module.o + iris_runtime.o → native binary.
+    //    Try ld.lld directly first (avoids clang subprocess), fall back to clang.
+    //    MinGW is supported through ld.lld's GNU driver using the MSYS2 UCRT
+    //    startup objects and import libraries.
+    // `IRIS_NO_CLANG=1` requires both LLVM-C object emission and direct linking.
+    // `IRIS_REQUIRE_DIRECT_LLD=1` is narrower: clang may emit objects, but must
+    // not be used as the linker driver. CI uses it to ensure the direct-link
+    // path cannot silently regress behind the clang fallback.
+    let require_direct_lld = no_clang || std::env::var("IRIS_REQUIRE_DIRECT_LLD").is_ok();
+    let lld_path = crate::codegen::build::find_lld();
+    let link_result = if let Some(lld) = lld_path {
+        link_with_lld(
+            &lld,
+            &resolved_target,
+            &mod_obj,
+            &support_objs,
+            output_path,
+            &target_args,
+            &msys2_lib,
+            &gcc_lib,
+            &onnx_sdk,
+            &tf_sdk,
+            &libtorch_sdk,
+            &openblas_dir,
+            use_blas,
+            &link_libs,
+        )
     } else {
-        link_cmd.args(["-fuse-ld=lld", "-O2", path_str(&mod_obj)?]);
-    }
-    for obj in &support_objs {
-        link_cmd.arg(path_str(obj)?);
-    }
-    link_cmd.args(["-o", path_str(output_path)?]);
-    if !resolved_target.contains("msvc") {
-        link_cmd.args(["-lm", "-lpthread"]);
-    }
-    // Windows: link WinSock2 for TCP/HTTP builtins
-    if resolved_target.contains("windows") {
-        link_cmd.arg("-lws2_32");
-    }
-    if resolved_target.contains("windows") {
-        let (msvc_lib, ucrt_lib, um_lib) = find_msvc_paths();
-        if let Some(ref dir) = msvc_lib {
-            link_cmd.arg(format!("-L{}", dir.display()));
+        Err(CodegenError::Unsupported {
+            backend: "binary".into(),
+            detail: format!(
+                "ld.lld not available (skipped for MinGW target {})",
+                resolved_target
+            ),
+        })
+    };
+
+    let link_output = match link_result {
+        Ok(()) => {
+            eprintln!("iris_codegen: linked via ld.lld directly");
+            stage_sqlite_dll_next_to(output_path);
+            stage_onnxruntime_dll_next_to(output_path);
+            return Ok(output_path.to_path_buf());
         }
-        if let Some(ref dir) = ucrt_lib {
-            link_cmd.arg(format!("-L{}", dir.display()));
+        Err(e) => {
+            if require_direct_lld {
+                return Err(CodegenError::Unsupported {
+                    backend: "binary".into(),
+                    detail: format!("direct ld.lld linking is required but failed: {}", e),
+                });
+            }
+            eprintln!(
+                "iris_codegen: ld.lld link failed ({}), falling back to clang",
+                e
+            );
+            // Fallback: link via clang
+            let mut link_cmd = Command::new(&clang);
+            link_cmd.args(&target_args);
+            if cfg!(target_os = "macos") {
+                link_cmd.args(["-O2", path_str(&mod_obj)?]);
+            } else {
+                link_cmd.args(["-fuse-ld=lld", "-O2", path_str(&mod_obj)?]);
+            }
+            for obj in &support_objs {
+                link_cmd.arg(path_str(obj)?);
+            }
+            link_cmd.args(["-o", path_str(output_path)?]);
+            if !resolved_target.contains("msvc") {
+                link_cmd.args(["-lm", "-lpthread"]);
+            }
+            if resolved_target.contains("windows") {
+                link_cmd.args(["-lws2_32", "-lwinhttp"]);
+            }
+            if resolved_target.contains("windows") && !resolved_target.contains("msvc") {
+                if let Some(ref lib) = msys2_lib {
+                    link_cmd.arg(format!("-L{}", lib));
+                }
+                if let Some(ref lib) = gcc_lib {
+                    link_cmd.arg(format!("-L{}", lib));
+                }
+            }
+            // ONNX Runtime, TensorFlow and LibTorch are intentionally NOT linked.
+            // They are resolved at runtime (dlopen) so that a binary which never
+            // calls into ML does not require the libraries to be present, and so
+            // that the runtime object stays SDK-independent.
+            if use_blas {
+                if let Some(ref dir) = openblas_dir {
+                    link_cmd.arg(format!("-L{}", dir.join("lib").display()));
+                }
+                link_cmd.arg("-lopenblas");
+            }
+            for lib in &link_libs {
+                link_cmd.arg(format!("-l{}", lib));
+            }
+            link_cmd.output()
         }
-        if let Some(ref dir) = um_lib {
-            link_cmd.arg(format!("-L{}", dir.display()));
+    };
+
+    let link_output = match link_output {
+        Ok(link_output) => link_output,
+        Err(e) => {
+            return Err(CodegenError::Unsupported {
+                backend: "binary".into(),
+                detail: format!("'{}' link step could not start: {}", clang, e),
+            })
         }
-    }
-    if resolved_target.contains("windows") && !resolved_target.contains("msvc") {
-        link_cmd.arg("-Wl,--allow-multiple-definition");
-        if let Some(ref lib) = msys2_lib {
-            link_cmd.arg(format!("-L{}", lib));
-        }
-        if let Some(ref lib) = gcc_lib {
-            link_cmd.arg(format!("-L{}", lib));
-        }
-    }
-    if let Some(ref sdk) = onnx_sdk {
-        link_cmd.arg(format!("-L{}", sdk.join("lib").display()));
-        link_cmd.arg("-lonnxruntime");
-    }
-    if let Some(ref sdk) = tf_sdk {
-        link_cmd.arg(format!("-L{}", sdk.join("lib").display()));
-        link_cmd.arg("-ltensorflow");
-    }
-    if let Some(ref sdk) = libtorch_sdk {
-        link_cmd.arg(format!("-L{}", sdk.join("lib").display()));
-        link_cmd.arg("-ltorch");
-        link_cmd.arg("-ltorch_cpu");
-        link_cmd.arg("-lc10");
-        if resolved_target.contains("msvc") {
-            link_cmd.arg("-llibcpmt");
-        } else {
-            link_cmd.arg("-lstdc++");
-        }
-    }
-    if use_blas {
-        if let Some(ref dir) = openblas_dir {
-            link_cmd.arg(format!("-L{}", dir.join("lib").display()));
-        }
-        if resolved_target.contains("msvc") {
-            link_cmd.arg("-llibopenblas");
-        } else {
-            link_cmd.arg("-lopenblas");
-        }
-    }
-    if !resolved_target.contains("windows") {
-        // Non-Windows targets keep relying on the target toolchain's standard sysroot.
-    }
-    let link_output = link_cmd.output().map_err(|e| CodegenError::Unsupported {
-        backend: "binary".into(),
-        detail: format!("'{}' link step could not start: {}", clang, e),
-    })?;
+    };
     if !link_output.status.success() {
         let stderr = String::from_utf8_lossy(&link_output.stderr);
         return Err(CodegenError::Unsupported {
@@ -798,8 +863,394 @@ fn build_binary_impl(
         });
     }
 
-    stage_required_dlls_next_to(output_path);
+    stage_sqlite_dll_next_to(output_path);
+    stage_onnxruntime_dll_next_to(output_path);
     Ok(output_path.to_path_buf())
+}
+
+/// Delete a per-build temp directory once its outputs have been linked.
+///
+/// These directories hold `module.ll`, the staged C runtime sources and the
+/// object files — tens of megabytes for a single build. Nothing removed them, and
+/// `--emit eval` creates one per evaluated program, so a test run leaked one
+/// directory per test: 2129 of them had accumulated on this machine, occupying
+/// roughly 23 GB and eventually filling the disk, which fails builds in ways that
+/// look nothing like a disk problem.
+///
+/// Best-effort by design: a build that succeeded must not be reported as failed
+/// because cleanup could not run. Set `IRIS_KEEP_BUILD_DIR=1` to retain the
+/// directory when inspecting generated IR or objects.
+fn cleanup_build_dir(tmp_dir: &std::path::Path) {
+    if std::env::var("IRIS_KEEP_BUILD_DIR").is_ok() {
+        eprintln!(
+            "iris_codegen: keeping build dir {} (IRIS_KEEP_BUILD_DIR set)",
+            tmp_dir.display()
+        );
+        return;
+    }
+    let _ = std::fs::remove_dir_all(tmp_dir);
+}
+
+/// Removes a build directory when it goes out of scope.
+///
+/// `build_binary_impl` returns early through `?` at roughly a dozen points — a
+/// missing compiler, a clang failure, a link error. Cleaning up only on the
+/// success paths therefore still leaked one directory per *failed* build, which a
+/// test run produces plenty of. Tying removal to scope exit covers every path,
+/// including the error ones, without threading cleanup through each `?`.
+struct BuildDirGuard(PathBuf);
+
+impl Drop for BuildDirGuard {
+    fn drop(&mut self) {
+        cleanup_build_dir(&self.0);
+    }
+}
+
+/// Removes a temporary executable when it goes out of scope.
+///
+/// The eval path deleted its binary only after a successful run, so every
+/// timeout or runtime failure left one behind — the same early-return leak as
+/// the build directories, and the reason 34 stray executables survived a single
+/// suite run. Honours `IRIS_KEEP_BUILD_DIR` for consistency with the directory
+/// guard, since inspecting a failing binary is the same debugging task.
+struct TempExeGuard(PathBuf);
+
+impl Drop for TempExeGuard {
+    fn drop(&mut self) {
+        if std::env::var("IRIS_KEEP_BUILD_DIR").is_ok() {
+            return;
+        }
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+/// Build a WASM binary using the WASI sysroot (wasi-libc + compiler-rt).
+fn build_wasm_binary_impl(
+    llvm_ir: &str,
+    output_path: &Path,
+    target: &str,
+) -> Result<PathBuf, CodegenError> {
+    // Locate the WASI sysroot.
+    let sysroot = find_wasi_sysroot()?;
+
+    // Determine P1 vs P2 target
+    let is_p2 = target.contains("wasip2");
+    let wasm_target = if is_p2 {
+        "wasm32-wasip2"
+    } else {
+        "wasm32-wasip1"
+    };
+    let wasm_lib_subdir = if is_p2 {
+        "wasm32-wasip2"
+    } else {
+        "wasm32-wasip1"
+    };
+
+    // Set up temp directory for build artifacts.
+    let build_id = output_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .map(|s| format!("{}_wasm", s))
+        .unwrap_or_else(|| format!("iris_wasm_build_{}", std::process::id()));
+    let tmp_dir = std::env::temp_dir().join(build_id);
+    std::fs::create_dir_all(&tmp_dir).map_err(|e| CodegenError::Unsupported {
+        backend: "wasm".into(),
+        detail: format!("failed to create temp dir '{}': {}", tmp_dir.display(), e),
+    })?;
+    // Same leak as the native path had; see BuildDirGuard.
+    let _build_dir_guard = BuildDirGuard(tmp_dir.clone());
+
+    let clang = find_clang();
+
+    // Write LLVM IR to module.ll
+    let ll_path = tmp_dir.join("module.ll");
+    std::fs::write(&ll_path, llvm_ir).map_err(|e| CodegenError::Unsupported {
+        backend: "wasm".into(),
+        detail: format!("failed to write LLVM IR to '{}': {}", ll_path.display(), e),
+    })?;
+
+    // Write embedded runtime sources
+    let h_path = tmp_dir.join("iris_runtime.h");
+    let c_path = tmp_dir.join("iris_runtime.c");
+    std::fs::write(&h_path, RUNTIME_H_SRC).map_err(|e| CodegenError::Unsupported {
+        backend: "wasm".into(),
+        detail: format!("failed to write runtime header: {}", e),
+    })?;
+    std::fs::write(&c_path, RUNTIME_C_SRC).map_err(|e| CodegenError::Unsupported {
+        backend: "wasm".into(),
+        detail: format!("failed to write runtime C source: {}", e),
+    })?;
+
+    // WASM compilation flags
+    let wasi_defines = [
+        "-D_POSIX_C_SOURCE=200809L",
+        "-D_WASI_EMULATED_SIGNAL",
+        "-D_WASI_EMULATED_PROCESS_CLOCKS",
+        "-D_WASI_EMULATED_GETPID",
+    ];
+    let sysroot_opt = format!("--sysroot={}", sysroot.display());
+    let inc_opt = format!("-I{}", tmp_dir.display());
+
+    // Step 1: Compile iris_runtime.c → iris_runtime.o
+    let rt_obj = tmp_dir.join("iris_runtime.o");
+    let mut rt_cmd = std::process::Command::new(&clang);
+    rt_cmd.args([
+        "-target",
+        wasm_target,
+        "-O2",
+        "-c",
+        path_str(&c_path)?,
+        "-o",
+        path_str(&rt_obj)?,
+        &inc_opt,
+        &sysroot_opt,
+    ]);
+    if is_p2 {
+        rt_cmd.arg("-D__wasip2__=1");
+    }
+    for def in &wasi_defines {
+        rt_cmd.arg(def);
+    }
+    let rt_output = rt_cmd.output().map_err(|e| CodegenError::Unsupported {
+        backend: "wasm".into(),
+        detail: format!("'{}' not found: {}", clang, e),
+    })?;
+    if !rt_output.status.success() {
+        let stderr = String::from_utf8_lossy(&rt_output.stderr);
+        return Err(CodegenError::Unsupported {
+            backend: "wasm".into(),
+            detail: format!(
+                "'{}' failed to compile iris_runtime.c for WASM (exit: {:?})\nstderr: {}",
+                clang,
+                rt_output.status.code(),
+                stderr,
+            ),
+        });
+    }
+
+    // Step 3: Link → .wasm (pass LLVM IR directly instead of pre-compiling to .o)
+    let sysroot_lib = sysroot.join("lib").join(wasm_lib_subdir);
+    let p1_lib_dir = sysroot.join("lib").join("wasm32-wasip1");
+    let mut link_cmd = std::process::Command::new(&clang);
+    link_cmd.args([
+        "-target",
+        wasm_target,
+        "-O2",
+        &sysroot_opt,
+        "-nodefaultlibs",
+        path_str(&ll_path)?, // LLVM IR directly (not pre-compiled)
+        path_str(&rt_obj)?,  // C runtime object
+    ]);
+    // Add library paths
+    link_cmd.arg(format!("-L{}", sysroot_lib.display()));
+    if is_p2 {
+        // P2 needs P1 lib dir for compiler-rt (not bundled in P2 sysroot)
+        link_cmd.arg(format!("-L{}", p1_lib_dir.display()));
+    }
+    link_cmd.args([
+        "-lc",
+        "-lwasi-emulated-signal",
+        "-lwasi-emulated-process-clocks",
+        "-lclang_rt.builtins-wasm32",
+        "-o",
+        path_str(output_path)?,
+    ]);
+    let link_output = link_cmd.output().map_err(|e| CodegenError::Unsupported {
+        backend: "wasm".into(),
+        detail: format!("'{}' link step could not start: {}", clang, e),
+    })?;
+    if !link_output.status.success() {
+        let stderr = String::from_utf8_lossy(&link_output.stderr);
+        return Err(CodegenError::Unsupported {
+            backend: "wasm".into(),
+            detail: format!(
+                "'{}' failed to link WASM binary (exit: {:?})\n{}",
+                clang,
+                link_output.status.code(),
+                stderr,
+            ),
+        });
+    }
+
+    // Step 4 (P2 only): Post-process with wasm-tools → P2 component
+    if is_p2 {
+        let wasm_tools = find_wasm_tools()?;
+        let adapter = find_wasi_p2_adapter()?;
+        let p2_output = tmp_dir.join("output.p2.wasm");
+
+        let mut component_cmd = std::process::Command::new(&wasm_tools);
+        component_cmd.args([
+            "component",
+            "new",
+            path_str(output_path)?,
+            "--adapt",
+            path_str(&adapter)?,
+            "-o",
+            path_str(&p2_output)?,
+        ]);
+        let comp_output = component_cmd
+            .output()
+            .map_err(|e| CodegenError::Unsupported {
+                backend: "wasm".into(),
+                detail: format!("'{}' could not start: {}", wasm_tools.display(), e),
+            })?;
+        if !comp_output.status.success() {
+            let stderr = String::from_utf8_lossy(&comp_output.stderr);
+            return Err(CodegenError::Unsupported {
+                backend: "wasm".into(),
+                detail: format!(
+                    "'{}' failed to convert WASM to P2 component (exit: {:?})\n{}",
+                    wasm_tools.display(),
+                    comp_output.status.code(),
+                    stderr,
+                ),
+            });
+        }
+        // Replace the output with the P2 component
+        std::fs::copy(&p2_output, output_path).map_err(|e| CodegenError::Unsupported {
+            backend: "wasm".into(),
+            detail: format!("failed to copy P2 component to output path: {}", e),
+        })?;
+    }
+
+    Ok(output_path.to_path_buf())
+}
+
+/// Locate `wasm-tools` executable by searching PATH.
+fn find_wasm_tools() -> Result<PathBuf, CodegenError> {
+    // Check environment override
+    if let Ok(path) = std::env::var("IRIS_WASM_TOOLS") {
+        let p = PathBuf::from(&path);
+        if p.is_file() {
+            return Ok(p);
+        }
+    }
+    // Search PATH using `where` (Windows) or `which` (Unix)
+    #[cfg(windows)]
+    let search_cmd = "where";
+    #[cfg(not(windows))]
+    let search_cmd = "which";
+    if let Ok(output) = std::process::Command::new(search_cmd)
+        .arg("wasm-tools")
+        .output()
+    {
+        if output.status.success() {
+            let path_str = String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .next()
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            if !path_str.is_empty() {
+                let p = PathBuf::from(&path_str);
+                if p.is_file() {
+                    return Ok(p);
+                }
+            }
+        }
+    }
+    Err(CodegenError::Unsupported {
+        backend: "wasm".into(),
+        detail:
+            "wasm-tools not found. Install with: 'cargo install wasm-tools' or set IRIS_WASM_TOOLS"
+                .into(),
+    })
+}
+
+/// Locate the WASI P1→P2 adapter module.
+fn find_wasi_p2_adapter() -> Result<PathBuf, CodegenError> {
+    // Check environment override
+    if let Ok(path) = std::env::var("IRIS_WASI_P2_ADAPTER") {
+        let p = PathBuf::from(&path);
+        if p.is_file() {
+            return Ok(p);
+        }
+    }
+    // Check alongside wasm-tools or in well-known locations
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .unwrap_or_else(|_| ".".into());
+    let candidates = [
+        format!(r"{}\AppData\Local\Temp\wasi_snapshot_preview1.wasm", home),
+        format!(r"{}\~\.iris\toolchain\wasi_snapshot_preview1.wasm", home),
+        "wasi_snapshot_preview1.wasm".to_string(),
+    ];
+    for c in &candidates {
+        let p = Path::new(c);
+        if p.is_file() {
+            return Ok(p.to_path_buf());
+        }
+    }
+    Err(CodegenError::Unsupported {
+        backend: "wasm".into(),
+        detail: "WASI P1→P2 adapter module not found. Download from https://github.com/bytecodealliance/wasmtime/releases and set IRIS_WASI_P2_ADAPTER".into(),
+    })
+}
+
+/// Locate the WASI sysroot directory (contains wasi-libc, compiler-rt, etc.).
+fn find_wasi_sysroot() -> Result<PathBuf, CodegenError> {
+    let candidates: Vec<PathBuf> = {
+        let mut c = Vec::new();
+        // IRIS_WASI_SYSROOT env var
+        if let Ok(v) = std::env::var("IRIS_WASI_SYSROOT") {
+            if !v.is_empty() {
+                c.push(PathBuf::from(v));
+            }
+        }
+        // Next to the running executable
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(dir) = exe.parent() {
+                c.push(dir.join("toolchain").join("wasi-sysroot"));
+            }
+        }
+        // Inno Setup default install
+        if let Ok(lad) = std::env::var("LOCALAPPDATA") {
+            c.push(PathBuf::from(lad).join("Programs/IRIS/toolchain/wasi-sysroot"));
+        }
+        // User-local .iris install
+        if let Ok(home) = std::env::var("USERPROFILE") {
+            c.push(PathBuf::from(home).join(".iris/toolchain/wasi-sysroot"));
+        }
+        if let Ok(home) = std::env::var("HOME") {
+            c.push(PathBuf::from(home).join(".iris/toolchain/wasi-sysroot"));
+        }
+        c
+    };
+
+    // Check each candidate for an actual sysroot version directory (e.g., wasi-sysroot-24.0)
+    for base in &candidates {
+        if !base.exists() {
+            continue;
+        }
+        // Look for a versioned subdirectory or use the base itself
+        if let Ok(entries) = std::fs::read_dir(base) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir()
+                    && path
+                        .file_name()
+                        .and_then(|s| s.to_str())
+                        .is_some_and(|s| s.starts_with("wasi-sysroot"))
+                {
+                    // Verify it has lib/wasm32-wasip1/libc.a
+                    let libc = path.join("lib/wasm32-wasip1/libc.a");
+                    if libc.exists() {
+                        return Ok(path);
+                    }
+                }
+            }
+            // Also check the base itself
+            let libc = base.join("lib/wasm32-wasip1/libc.a");
+            if libc.exists() {
+                return Ok(base.to_path_buf());
+            }
+        }
+    }
+
+    Err(CodegenError::Unsupported {
+        backend: "wasm".into(),
+        detail: "WASI sysroot not found. Install the WASI SDK (wasi-sysroot) to ~/.iris/toolchain/wasi-sysroot/ or set IRIS_WASI_SYSROOT".into(),
+    })
 }
 
 fn resolve_target_triple(target: Option<&str>) -> String {
@@ -810,97 +1261,65 @@ fn resolve_target_triple(target: Option<&str>) -> String {
     .to_owned()
 }
 
-fn stage_required_dlls_next_to(output_path: &Path) {
-    use std::path::{Path, PathBuf};
-
-    if let Some(parent) = output_path.parent() {
-        // 1. Stage sqlite3.dll
-        stage_sqlite_dll_next_to(output_path);
-
-        // 2. Stage iris_ros2.dll
-        let candidates = [
-            PathBuf::from("iris_ros2.dll"),
-            PathBuf::from("target/release/iris_ros2.dll"),
-            PathBuf::from("target/debug/iris_ros2.dll"),
-        ];
-        for candidate in candidates {
-            if candidate.exists() {
-                let _ = std::fs::copy(&candidate, parent.join("iris_ros2.dll"));
-                break;
-            }
+/// Locate `sqlite3.dll` to stage beside a built binary.
+///
+/// Explicit `SQLITE3_DIR` first, then the compiler's own directory, then any
+/// directory on `PATH`. Looking beside the compiler makes a release bundle
+/// self-contained even when compilation happens from a clean scratch directory.
+/// No install locations are hardcoded: this previously listed absolute paths to
+/// unrelated third-party applications that happen to ship a `sqlite3.dll`, which
+/// resolve on a single machine and disclose what was installed on it.
+fn find_sqlite_dll() -> Option<PathBuf> {
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    if let Some(dir) = std::env::var_os("SQLITE3_DIR") {
+        if !dir.is_empty() {
+            dirs.push(PathBuf::from(dir));
         }
-
-        // 3. Stage onnxruntime.dll
-        let onnx_dll = Path::new("C:\\onnxruntime\\lib\\onnxruntime.dll");
-        if onnx_dll.exists() {
-            let _ = std::fs::copy(onnx_dll, parent.join("onnxruntime.dll"));
+    }
+    if let Ok(executable) = std::env::current_exe() {
+        if let Some(parent) = executable.parent() {
+            dirs.push(parent.to_path_buf());
         }
-
-        // 4. Stage tensorflow.dll
-        let tf_dll = Path::new("C:\\tensorflow\\lib\\tensorflow.dll");
-        if tf_dll.exists() {
-            let _ = std::fs::copy(tf_dll, parent.join("tensorflow.dll"));
-        }
-
-        // 5. Stage libopenblas.dll
-        let blas_dll = Path::new("C:\\openblas\\bin\\libopenblas.dll");
-        if blas_dll.exists() {
-            let _ = std::fs::copy(blas_dll, parent.join("libopenblas.dll"));
-        }
-
-        // 6. Stage libtorch DLLs
-        let torch_lib_dir = Path::new("C:\\libtorch\\lib");
-        if torch_lib_dir.exists() {
-            if let Ok(entries) = std::fs::read_dir(torch_lib_dir) {
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    if path
-                        .extension()
-                        .and_then(|ext| ext.to_str())
-                        .map(|ext| ext.eq_ignore_ascii_case("dll"))
-                        .unwrap_or(false)
-                    {
-                        if let Some(file_name) = path.file_name() {
-                            let _ = std::fs::copy(&path, parent.join(file_name));
-                        }
-                    }
-                }
+    }
+    if let Some(path) = std::env::var_os("PATH") {
+        dirs.extend(std::env::split_paths(&path));
+    }
+    for dir in dirs {
+        for file_name in ["sqlite3.dll", "SQLite3.dll"] {
+            let candidate = dir.join(file_name);
+            if candidate.is_file() {
+                return Some(candidate);
             }
         }
     }
+    None
 }
 
 fn stage_sqlite_dll_next_to(output_path: &Path) {
-    use std::path::{Path, PathBuf};
-
-    let candidate_dirs = [
-        std::env::var("SQLITE3_DIR").ok(),
-        Some(r"C:\Program Files\Cheat Engine\win64".to_owned()),
-        Some(r"C:\Program Files\Common Files\Apple\Mobile Device Support".to_owned()),
-        Some(r"C:\Program Files (x86)\Common Files\Apple\Mobile Device Support".to_owned()),
-    ];
-
-    let mut source_path: Option<PathBuf> = None;
-    for dir in candidate_dirs.into_iter().flatten() {
-        for file_name in ["sqlite3.dll", "SQLite3.dll"] {
-            let path = Path::new(&dir).join(file_name);
-            if path.exists() {
-                source_path = Some(path);
-                break;
-            }
-        }
-        if source_path.is_some() {
-            break;
-        }
-    }
-
-    let Some(source_path) = source_path else {
+    let Some(source_path) = find_sqlite_dll() else {
         return;
     };
 
     if let Some(parent) = output_path.parent() {
         let target = parent.join(source_path.file_name().unwrap_or_default());
         let _ = std::fs::copy(&source_path, target);
+    }
+}
+
+fn stage_onnxruntime_dll_next_to(output_path: &Path) {
+    // `ONNXRUNTIME_DIR` overrides; the conventional install root is only the
+    // fallback, so a non-standard location no longer requires editing the source.
+    let root = std::env::var("ONNXRUNTIME_DIR").unwrap_or_else(|_| r"C:\onnxruntime".to_owned());
+    let lib_dir = Path::new(&root).join("lib");
+
+    let Some(parent) = output_path.parent() else {
+        return;
+    };
+    for name in ["onnxruntime.dll", "onnxruntime_providers_shared.dll"] {
+        let candidate = lib_dir.join(name);
+        if candidate.is_file() {
+            let _ = std::fs::copy(&candidate, parent.join(name));
+        }
     }
 }
 
@@ -942,11 +1361,16 @@ pub(crate) fn find_clang() -> String {
             ));
         }
 
-        // 3. System-wide LLVM installs
+        // 3. Standalone LLVM version directories (LLVM 20, etc.)
+        candidates.push(r"C:\llvm-20\bin\clang.exe".into());
+        candidates.push(r"C:\llvm-19\bin\clang.exe".into());
+        candidates.push(r"C:\llvm-18\bin\clang.exe".into());
+
+        // 4. System-wide LLVM installs (standard Inno Setup path)
         candidates.push(r"C:\Program Files\LLVM\bin\clang.exe".into());
         candidates.push(r"C:\Program Files (x86)\LLVM\bin\clang.exe".into());
 
-        // 4. Legacy user-local fallback
+        // 5. Legacy user-local fallback
         if let Ok(home) = std::env::var("USERPROFILE") {
             candidates.push(format!(r"{}\.iris\llvm\bin\clang.exe", home));
         }
@@ -988,6 +1412,252 @@ pub(crate) fn find_clang() -> String {
     }
     // Fall back to PATH lookup.
     "clang".to_owned()
+}
+
+/// Find `ld.lld` (LLVM linker) — used as a clang-free alternative for linking.
+/// Search order mirrors `find_clang`: env var, exe-relative, Inno Setup, system LLVM, PATH.
+pub(crate) fn find_lld() -> Option<String> {
+    if let Ok(v) = std::env::var("IRIS_LD") {
+        if !v.is_empty() && std::path::Path::new(&v).exists() {
+            return Some(v);
+        }
+    }
+
+    let exe_name = if cfg!(target_os = "windows") {
+        "ld.lld.exe"
+    } else {
+        "ld.lld"
+    };
+
+    let mut candidates: Vec<String> = Vec::new();
+
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            candidates.push(format!(r"{}\{}", dir.display(), exe_name));
+            candidates.push(format!(
+                r"{}\toolchain\llvm\bin\{}",
+                dir.display(),
+                exe_name
+            ));
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(lad) = std::env::var("LOCALAPPDATA") {
+            candidates.push(format!(
+                r"{}\Programs\IRIS\toolchain\llvm\bin\{}",
+                lad, exe_name
+            ));
+        }
+        // Standalone LLVM version directories (LLVM 20, etc.)
+        candidates.push(format!(r"C:\llvm-20\bin\{}", exe_name));
+        candidates.push(format!(r"C:\llvm-19\bin\{}", exe_name));
+        candidates.push(format!(r"C:\llvm-18\bin\{}", exe_name));
+        // System-wide LLVM (standard Inno Setup path)
+        candidates.push(format!(r"C:\Program Files\LLVM\bin\{}", exe_name));
+        candidates.push(format!(r"C:\Program Files (x86)\LLVM\bin\{}", exe_name));
+        if let Ok(home) = std::env::var("USERPROFILE") {
+            candidates.push(format!(r"{}\.iris\toolchain\llvm\bin\{}", home, exe_name));
+        }
+        candidates.push(format!("/c/Program Files/LLVM/bin/{}", exe_name));
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        candidates.push(format!(
+            "/usr/local/share/iris/toolchain/llvm/bin/{}",
+            exe_name
+        ));
+        candidates.push(format!("/opt/homebrew/opt/llvm/bin/{}", exe_name));
+        candidates.push(format!("/usr/local/opt/llvm/bin/{}", exe_name));
+        candidates.push(format!("/usr/bin/{}", exe_name));
+        if let Ok(home) = std::env::var("HOME") {
+            candidates.push(format!("{}/.iris/toolchain/llvm/bin/{}", home, exe_name));
+        }
+    }
+
+    for p in &candidates {
+        if std::path::Path::new(p).exists() {
+            return Some(p.clone());
+        }
+    }
+    None
+}
+
+/// Link object files into a native binary using `ld.lld` directly (no clang).
+/// This is a best-effort function: if linking fails, the caller falls back to clang.
+#[allow(clippy::too_many_arguments)]
+fn link_with_lld(
+    lld_path: &str,
+    target_triple: &str,
+    main_obj: &Path,
+    support_objs: &[PathBuf],
+    output: &Path,
+    _target_args: &[String],
+    msys2_lib: &Option<String>,
+    gcc_lib: &Option<String>,
+    _onnx_sdk: &Option<PathBuf>,
+    _tf_sdk: &Option<PathBuf>,
+    _libtorch_sdk: &Option<PathBuf>,
+    openblas_dir: &Option<PathBuf>,
+    use_blas: bool,
+    link_libs: &[String],
+) -> Result<(), CodegenError> {
+    let mut cmd = std::process::Command::new(lld_path);
+
+    // Target-specific linking
+    if target_triple.contains("windows") && !target_triple.contains("msvc") {
+        // MinGW uses GNU-driver syntax. Startup and termination objects are
+        // order-sensitive: crt2/crtbegin precede user objects and crtend is last.
+        cmd.args(["-m", "i386pep", "-Bdynamic"]);
+        cmd.arg("-o").arg(path_str(output)?);
+
+        if msys2_lib.is_none() || gcc_lib.is_none() {
+            return Err(CodegenError::Unsupported {
+                backend: "binary".into(),
+                detail: "direct MinGW linking requires the MSYS2 UCRT64 libraries and GCC runtime"
+                    .into(),
+            });
+        }
+
+        if let Some(ref lib) = msys2_lib {
+            cmd.arg(format!("-L{}", lib));
+            if let Some(root) = Path::new(lib).parent() {
+                cmd.arg(format!(
+                    "-L{}",
+                    root.join("x86_64-w64-mingw32").join("lib").display()
+                ));
+                cmd.arg(format!(
+                    "-L{}",
+                    root.join("x86_64-w64-mingw32")
+                        .join("mingw")
+                        .join("lib")
+                        .display()
+                ));
+            }
+        }
+        if let Some(ref lib) = gcc_lib {
+            cmd.arg(format!("-L{}", lib));
+        }
+
+        if let Some(ref lib) = msys2_lib {
+            let crt2 = Path::new(lib).join("crt2.o");
+            if !crt2.exists() {
+                return Err(CodegenError::Unsupported {
+                    backend: "binary".into(),
+                    detail: format!("MinGW startup object '{}' is missing", crt2.display()),
+                });
+            }
+            cmd.arg(path_str(&crt2)?);
+        }
+        if let Some(ref gcc) = gcc_lib {
+            let crt_begin = Path::new(gcc).join("crtbegin.o");
+            if !crt_begin.exists() {
+                return Err(CodegenError::Unsupported {
+                    backend: "binary".into(),
+                    detail: format!("MinGW startup object '{}' is missing", crt_begin.display()),
+                });
+            }
+            cmd.arg(path_str(&crt_begin)?);
+        }
+
+        cmd.arg(path_str(main_obj)?);
+        for obj in support_objs {
+            cmd.arg(path_str(obj)?);
+        }
+        append_optional_lld_libraries(&mut cmd, openblas_dir, use_blas, link_libs);
+        append_mingw_default_libraries(&mut cmd);
+
+        if let Some(ref gcc) = gcc_lib {
+            let crt_end = Path::new(gcc).join("crtend.o");
+            if !crt_end.exists() {
+                return Err(CodegenError::Unsupported {
+                    backend: "binary".into(),
+                    detail: format!(
+                        "MinGW termination object '{}' is missing",
+                        crt_end.display()
+                    ),
+                });
+            }
+            cmd.arg(path_str(&crt_end)?);
+        }
+    } else if target_triple.contains("msvc") {
+        cmd.arg(path_str(main_obj)?);
+        for obj in support_objs {
+            cmd.arg(path_str(obj)?);
+        }
+        cmd.arg("-o").arg(path_str(output)?);
+        // MSVC target — use lld-link compatible flags
+        // For MSVC, lld-link expects /NODEFAULTLIB etc.
+        // This is a best-effort path; the clang fallback handles this better.
+        cmd.arg("/defaultlib:libcmt");
+        cmd.arg("/defaultlib:oldnames");
+    } else {
+        cmd.arg(path_str(main_obj)?);
+        for obj in support_objs {
+            cmd.arg(path_str(obj)?);
+        }
+        cmd.arg("-o").arg(path_str(output)?);
+        // Linux/macOS: standard system libraries
+        cmd.arg("-lm");
+        cmd.arg("-lpthread");
+        append_optional_lld_libraries(&mut cmd, openblas_dir, use_blas, link_libs);
+    }
+
+    let output_result = cmd.output().map_err(|e| CodegenError::Unsupported {
+        backend: "binary".into(),
+        detail: format!("ld.lld could not start: {}", e),
+    })?;
+
+    if !output_result.status.success() {
+        let stderr = String::from_utf8_lossy(&output_result.stderr);
+        return Err(CodegenError::Unsupported {
+            backend: "binary".into(),
+            detail: format!("ld.lld failed: {}", stderr),
+        });
+    }
+
+    if !output.is_file() || std::fs::metadata(output).map(|m| m.len()).unwrap_or(0) == 0 {
+        return Err(CodegenError::Unsupported {
+            backend: "binary".into(),
+            detail: format!(
+                "ld.lld reported success but did not create a non-empty binary at '{}'",
+                output.display()
+            ),
+        });
+    }
+
+    Ok(())
+}
+
+fn append_optional_lld_libraries(
+    cmd: &mut std::process::Command,
+    openblas_dir: &Option<PathBuf>,
+    use_blas: bool,
+    link_libs: &[String],
+) {
+    if use_blas {
+        if let Some(dir) = openblas_dir {
+            cmd.arg(format!("-L{}", dir.join("lib").display()));
+        }
+        cmd.arg("-lopenblas");
+    }
+    for lib in link_libs {
+        cmd.arg(format!("-l{}", lib));
+    }
+}
+
+fn append_mingw_default_libraries(cmd: &mut std::process::Command) {
+    // The second MinGW/GCC group resolves dependencies introduced by the
+    // Windows import libraries in the first group, matching clang's driver.
+    for lib in [
+        "mingw32", "gcc", "gcc_eh", "moldname", "mingwex", "msvcrt", "advapi32", "shell32",
+        "user32", "kernel32", "ws2_32", "winhttp", "pthread", "m", "mingw32", "gcc", "gcc_eh",
+        "moldname", "mingwex", "msvcrt", "kernel32",
+    ] {
+        cmd.arg(format!("-l{}", lib));
+    }
 }
 
 /// Return the MinGW ucrt64 include path if it exists.
@@ -1073,8 +1743,6 @@ pub(crate) fn msys2_gcc_lib() -> Option<String> {
     #[cfg(target_os = "windows")]
     {
         let triple = "x86_64-w64-mingw32";
-        let versions = ["14.2.0", "14.1.0", "13.2.0", "13.1.0", "12.2.0"];
-
         let mut base_dirs: Vec<String> = Vec::new();
 
         // Next to the running executable
@@ -1097,15 +1765,144 @@ pub(crate) fn msys2_gcc_lib() -> Option<String> {
         base_dirs.push("/c/msys64/ucrt64/lib/gcc".into());
 
         for base in &base_dirs {
-            for ver in &versions {
-                let p = format!("{}\\{}\\{}", base, triple, ver);
-                if std::path::Path::new(&p).exists() {
-                    return Some(p);
-                }
+            let version_root = Path::new(base).join(triple);
+            let Ok(entries) = std::fs::read_dir(&version_root) else {
+                continue;
+            };
+            let mut versions: Vec<PathBuf> = entries
+                .filter_map(Result::ok)
+                .map(|entry| entry.path())
+                .filter(|path| path.is_dir() && path.join("crtbegin.o").exists())
+                .collect();
+            versions.sort_by_key(|path| mingw_gcc_version_key(path));
+            if let Some(path) = versions.into_iter().next_back() {
+                return Some(path.to_string_lossy().into_owned());
             }
         }
         None
     }
+}
+
+fn mingw_gcc_version_key(path: &Path) -> Vec<u32> {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default()
+        .split('.')
+        .map(|part| part.parse::<u32>().unwrap_or(0))
+        .collect()
+}
+
+/// Return a persistent cache directory for compiled C runtime objects.
+/// Prefers a directory next to the compiler binary; falls back to ~/.iris/cache/.
+fn runtime_cache_dir() -> PathBuf {
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let candidate = dir.join("iris_cache");
+            if candidate.exists() || std::fs::create_dir_all(&candidate).is_ok() {
+                return candidate;
+            }
+        }
+    }
+    if let Ok(home) = std::env::var("USERPROFILE").or_else(|_| std::env::var("HOME")) {
+        let candidate = PathBuf::from(home).join(".iris").join("cache");
+        if candidate.exists() || std::fs::create_dir_all(&candidate).is_ok() {
+            return candidate;
+        }
+    }
+    std::env::temp_dir().join("iris_cache")
+}
+
+/// Build the optional LibTorch plugin (`iris_torch_plugin`).
+///
+/// LibTorch exposes a C++ API, so unlike ONNX/TensorFlow it cannot be `dlopen`ed
+/// directly from the runtime. Instead `pytorch_shim.cpp` — whose entry points are
+/// already `extern "C"` — is compiled into a standalone shared library that links
+/// LibTorch, and `iris_torch_available()` in the runtime resolves its four
+/// symbols at first use.
+///
+/// This keeps `iris_runtime.o` free of any LibTorch reference, which is what
+/// allows a single prebuilt runtime object to be shipped per target triple.
+///
+/// `libtorch_dir` defaults to `$LIBTORCH_DIR`, then `C:\libtorch`.
+/// Returns the path to the produced shared library.
+pub fn build_torch_plugin(
+    libtorch_dir: Option<&Path>,
+    output_dir: &Path,
+) -> Result<PathBuf, CodegenError> {
+    let sdk: PathBuf = match libtorch_dir {
+        Some(p) => p.to_path_buf(),
+        None => std::env::var("LIBTORCH_DIR")
+            .map(PathBuf::from)
+            .ok()
+            .or_else(|| {
+                let d = PathBuf::from(r"C:\libtorch");
+                d.exists().then_some(d)
+            })
+            .ok_or_else(|| CodegenError::Unsupported {
+                backend: "torch-plugin".into(),
+                detail: "LibTorch not found — set LIBTORCH_DIR to your install".into(),
+            })?,
+    };
+
+    if !sdk.join("include").is_dir() {
+        return Err(CodegenError::Unsupported {
+            backend: "torch-plugin".into(),
+            detail: format!(
+                "'{}' does not look like a LibTorch install (no include/)",
+                sdk.display()
+            ),
+        });
+    }
+
+    std::fs::create_dir_all(output_dir).map_err(CodegenError::Io)?;
+
+    // Stage the sources the plugin needs: the shim itself plus the runtime
+    // header it includes for IrisTensor.
+    let src = output_dir.join("pytorch_shim.cpp");
+    std::fs::write(&src, PYTORCH_SHIM_CPP_SRC).map_err(CodegenError::Io)?;
+    std::fs::write(output_dir.join("iris_runtime.h"), RUNTIME_H_SRC).map_err(CodegenError::Io)?;
+
+    let lib_name = if cfg!(target_os = "windows") {
+        "iris_torch_plugin.dll"
+    } else if cfg!(target_os = "macos") {
+        "libiris_torch_plugin.dylib"
+    } else {
+        "libiris_torch_plugin.so"
+    };
+    let out = output_dir.join(lib_name);
+
+    let clang = find_clang();
+    let mut cmd = Command::new(&clang);
+    cmd.args(["-shared", "-O2", "-x", "c++", "-std=c++17"]);
+    cmd.arg("-DLIBTORCH_ENABLED");
+    cmd.arg(path_str(&src)?);
+    cmd.args(["-o", path_str(&out)?]);
+    cmd.arg("-I").arg(output_dir);
+    cmd.arg("-I").arg(sdk.join("include"));
+    cmd.arg("-I")
+        .arg(sdk.join("include/torch/csrc/api/include"));
+    cmd.arg(format!("-L{}", sdk.join("lib").display()));
+    cmd.args(["-ltorch", "-ltorch_cpu", "-lc10"]);
+    if !cfg!(target_os = "windows") {
+        cmd.arg("-lstdc++");
+    }
+
+    let output = cmd.output().map_err(|e| CodegenError::Unsupported {
+        backend: "torch-plugin".into(),
+        detail: format!("'{}' could not start: {}", clang, e),
+    })?;
+    if !output.status.success() {
+        return Err(CodegenError::Unsupported {
+            backend: "torch-plugin".into(),
+            detail: format!(
+                "failed to build LibTorch plugin (exit {:?})\n{}",
+                output.status.code(),
+                String::from_utf8_lossy(&output.stderr)
+            ),
+        });
+    }
+
+    Ok(out)
 }
 
 /// Emit LLVM IR text suitable for native binary compilation.
@@ -1128,110 +1925,19 @@ pub fn runtime_h_source() -> &'static str {
     RUNTIME_H_SRC
 }
 
-/// Helper to find MSVC runtime libraries and UCRT libraries on Windows.
-pub(crate) fn find_msvc_paths() -> (Option<PathBuf>, Option<PathBuf>, Option<PathBuf>) {
-    // 1. Run vswhere.exe to find VS installation path
-    let vs_install_path = if let Ok(output) = std::process::Command::new(
-        "C:\\Program Files (x86)\\Microsoft Visual Studio\\Installer\\vswhere.exe",
-    )
-    .args(["-latest", "-property", "installationPath"])
-    .output()
-    {
-        if output.status.success() {
-            let path_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if !path_str.is_empty() {
-                Some(PathBuf::from(path_str))
-            } else {
-                None
-            }
-        } else {
-            None
-        }
-    } else {
-        None
-    };
+#[cfg(test)]
+mod direct_link_tests {
+    use super::mingw_gcc_version_key;
+    use std::path::Path;
 
-    // If vswhere failed, check some fallback directories
-    let vs_install_path = vs_install_path.or_else(|| {
-        let fallbacks = [
-            r"C:\Program Files\Microsoft Visual Studio\2022\Community",
-            r"C:\Program Files\Microsoft Visual Studio\2022\Professional",
-            r"C:\Program Files\Microsoft Visual Studio\2022\Enterprise",
-            r"C:\Program Files (x86)\Microsoft Visual Studio\2022\Community",
-            r"C:\Program Files (x86)\Microsoft Visual Studio\2022\Professional",
-            r"C:\Program Files (x86)\Microsoft Visual Studio\2022\Enterprise",
-        ];
-        fallbacks.iter().map(PathBuf::from).find(|p| p.exists())
-    });
-
-    let msvc_lib_dir = vs_install_path.and_then(|vs_path| {
-        let msvc_tools_dir = vs_path.join(r"VC\Tools\MSVC");
-        if msvc_tools_dir.exists() {
-            // List versioned subdirectories and find the latest one (lexicographically)
-            if let Ok(entries) = std::fs::read_dir(&msvc_tools_dir) {
-                let mut versions: Vec<PathBuf> = entries
-                    .flatten()
-                    .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
-                    .map(|e| e.path())
-                    .collect();
-                versions.sort();
-                if let Some(latest_version) = versions.last() {
-                    let lib_x64 = latest_version.join(r"lib\x64");
-                    if lib_x64.exists() {
-                        return Some(lib_x64);
-                    }
-                }
-            }
-        }
-        None
-    });
-
-    // 2. Find Windows SDK / UCRT paths
-    // Check "C:\Program Files (x86)\Windows Kits\10\Lib"
-    let win_kits_dir = Path::new(r"C:\Program Files (x86)\Windows Kits\10\Lib");
-    let (ucrt_lib_dir, um_lib_dir) = if win_kits_dir.exists() {
-        if let Ok(entries) = std::fs::read_dir(win_kits_dir) {
-            let mut versions: Vec<PathBuf> = entries
-                .flatten()
-                .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
-                .map(|e| e.path())
-                .collect();
-            versions.sort();
-            if let Some(latest_version) = versions.last() {
-                let ucrt = latest_version.join(r"ucrt\x64");
-                let um = latest_version.join(r"um\x64");
-                (
-                    if ucrt.exists() { Some(ucrt) } else { None },
-                    if um.exists() { Some(um) } else { None },
-                )
-            } else {
-                (None, None)
-            }
-        } else {
-            (None, None)
-        }
-    } else {
-        (None, None)
-    };
-
-    (msvc_lib_dir, ucrt_lib_dir, um_lib_dir)
-}
-
-fn hash_str(s: &str) -> u64 {
-    let mut hash = 0xcbf29ce484222325u64;
-    for byte in s.as_bytes() {
-        hash ^= *byte as u64;
-        hash = hash.wrapping_mul(0x100000001b3u64);
+    #[test]
+    fn gcc_version_discovery_uses_numeric_order() {
+        assert!(
+            mingw_gcc_version_key(Path::new("15.2.0")) > mingw_gcc_version_key(Path::new("9.4.0"))
+        );
+        assert!(
+            mingw_gcc_version_key(Path::new("14.10.1"))
+                > mingw_gcc_version_key(Path::new("14.2.0"))
+        );
     }
-    hash
-}
-
-fn get_cache_dir() -> Option<PathBuf> {
-    let home = std::env::var("USERPROFILE")
-        .map(PathBuf::from)
-        .or_else(|_| std::env::var("HOME").map(PathBuf::from))
-        .ok()?;
-    let dir = home.join(".iris").join("cache");
-    let _ = std::fs::create_dir_all(&dir);
-    Some(dir)
 }

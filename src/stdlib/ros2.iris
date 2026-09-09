@@ -1,64 +1,592 @@
 // src/stdlib/ros2.iris -- IRIS standard ROS2 client library (rcl) DDS wrappers
-// Supports low-latency publisher/subscriber configurations for robotic control.
+// Supports dynamic node, publisher, and subscription creation for robotic control.
+//
+// Usage: bring std.ros2
+//
+// Architecture:
+//   ROS2Context  →  owns rcl_context_t   (DDS domain participant)
+//   ROS2Node     →  owns rcl_node_t      (DDS participant + namespace)
+//   ROS2Publisher→  owns rcl_publisher_t  (DDS data writer)
+//   ROS2Sub      →  owns rcl_subscription_t (DDS data reader)
+//
+// Message types supported:
+//   std_msgs/msg/Float64, std_msgs/msg/Int64, std_msgs/msg/String
+//   geometry_msgs/msg/Vector3, geometry_msgs/msg/Twist, geometry_msgs/msg/Pose
 
-// Get the OS-specific ROS2 library filename
-pub def get_rcl_lib() -> str {
-    "iris_ros2.dll"
-}
+// ===== Geometry Records =====
 
-// Initialize the global ROS2 context. Returns 0 on success.
+pub record Vector3 { x: f64, y: f64, z: f64 }
+pub record Twist   { linear: Vector3, angular: Vector3 }
+pub record Point   { x: f64, y: f64, z: f64 }
+pub record Quaternion { x: f64, y: f64, z: f64, w: f64 }
+pub record Pose    { position: Point, orientation: Quaternion }
+
+// ===== Handle Wrappers =====
+
+pub record ROS2Context { handle: i64 }
+pub record ROS2Node    { handle: i64, ctx: i64 }
+pub record ROS2Publisher { handle: i64, node: i64, msg_type: str }
+pub record ROS2Sub     { handle: i64, node: i64, ctx: i64, msg_type: str }
+
+// ===== DLL Name =====
+
+pub def get_rcl_lib() -> str { "iris_ros2.dll" }
+
+// ===== Legacy Singleton API (backward compat) =====
+
 pub def init() -> i64 {
-    val lib = get_rcl_lib();
-    val handle = ffi_open(lib);
-    if handle == -1 {
-        return -1
-    };
-    ffi_call(handle, "rcl_init")
+    val h = ffi_open(get_rcl_lib());
+    if h == -1 { return -1 };
+    ffi_call(h, "iris_rcl_init")
 }
 
-// Create a new ROS2 node. Returns the node handle (pointer).
-pub def create_node(name: str, namespace: str) -> i64 {
-    val lib = get_rcl_lib();
-    val handle = ffi_open(lib);
-    if handle == -1 {
-        return -1
-    };
-    
-    // Abstract zero-initialization and options creation
-    val node_ptr = ffi_call(handle, "rcl_get_zero_initialized_node");
-    node_ptr
+pub def legacy_create_node() -> i64 {
+    val h = ffi_open(get_rcl_lib());
+    if h == -1 { return -1 };
+    ffi_call(h, "iris_rcl_get_zero_initialized_node")
 }
 
-// Register a publisher on the given node for a specific topic
-pub def create_publisher(node: i64, topic: str, msg_type: str) -> i64 {
-    val lib = get_rcl_lib();
-    val handle = ffi_open(lib);
-    if handle == -1 {
-        return -1
-    };
-    
-    val pub_ptr = ffi_call(handle, "rcl_get_zero_initialized_publisher");
-    pub_ptr
+pub def legacy_create_publisher() -> i64 {
+    val h = ffi_open(get_rcl_lib());
+    if h == -1 { return -1 };
+    ffi_call(h, "iris_rcl_get_zero_initialized_publisher")
 }
 
-// Publish a Float64 message on a topic publisher
-pub def publish_float64(publisher: i64, value: f64) -> bool {
-    val lib = get_rcl_lib();
-    val handle = ffi_open(lib);
-    if handle == -1 {
-        return false
-    };
+pub def legacy_publish(publisher: i64, value: f64) -> bool {
+    val h = ffi_open(get_rcl_lib());
+    if h == -1 { return false };
     val scaled = (value * 100000000.0) to i64;
-    val status = ffi_call_i64(handle, "rcl_publish", publisher, scaled);
+    val status = ffi_call_i64(h, "iris_rcl_publish", publisher, scaled);
     status == 0
 }
 
 pub def shutdown() -> bool {
-    val lib = get_rcl_lib();
-    val handle = ffi_open(lib);
-    if handle == -1 {
-        return false
-    };
-    val status = ffi_call(handle, "rcl_shutdown");
+    val h = ffi_open(get_rcl_lib());
+    if h == -1 { return false };
+    val status = ffi_call(h, "iris_rcl_shutdown");
     status == 0
+}
+
+// ===== Legacy Compatibility Wrapper Functions =====
+
+pub def create_node(name: str, namespace: str) -> i64 {
+    legacy_create_node()
+}
+
+pub def create_publisher(node: i64, topic: str, msg_type: str) -> i64 {
+    legacy_create_publisher()
+}
+
+pub def publish_float64(publisher: i64, value: f64) -> bool {
+    legacy_publish(publisher, value)
+}
+
+
+// ===== Dynamic Context API =====
+
+pub def context_create() -> ROS2Context {
+    val h = ffi_open(get_rcl_lib());
+    if h == -1 { return ROS2Context { handle: 0 } };
+    val ctx = ffi_call(h, "iris_rcl_context_create");
+    ROS2Context { handle: ctx }
+}
+
+pub def context_destroy(ctx: ROS2Context) -> bool {
+    val h = ffi_open(get_rcl_lib());
+    if h == -1 { return false };
+    val rc = ffi_call_i64(h, "iris_rcl_context_destroy", ctx.handle);
+    rc == 0
+}
+
+// ===== Dynamic Node API =====
+
+pub def node_create(ctx: ROS2Context, name: str, ns: str) -> ROS2Node {
+    val h = ffi_open(get_rcl_lib());
+    if h == -1 { return ROS2Node { handle: 0, ctx: 0 } };
+    val node = ffi_call_i64(h, "iris_rcl_node_create", ctx.handle, name, ns);
+    ROS2Node { handle: node, ctx: ctx.handle }
+}
+
+pub def node_destroy(node: ROS2Node) -> bool {
+    val h = ffi_open(get_rcl_lib());
+    if h == -1 { return false };
+    val rc = ffi_call_i64(h, "iris_rcl_node_destroy", node.handle);
+    rc == 0
+}
+
+// ===== Dynamic Publisher API =====
+
+pub def publisher_create(node: ROS2Node, topic: str, msg_type: str) -> ROS2Publisher {
+    val h = ffi_open(get_rcl_lib());
+    if h == -1 { return ROS2Publisher { handle: 0, node: 0, msg_type: "" } };
+    val pub_h = ffi_call_i64(h, "iris_rcl_publisher_create", node.handle, topic, msg_type);
+    ROS2Publisher { handle: pub_h, node: node.handle, msg_type: msg_type }
+}
+
+pub def publisher_destroy(pub_obj: ROS2Publisher) -> bool {
+    val h = ffi_open(get_rcl_lib());
+    if h == -1 { return false };
+    val rc = ffi_call_i64(h, "iris_rcl_publisher_destroy", pub_obj.handle, pub_obj.node);
+    rc == 0
+}
+
+// ===== Dynamic Subscription API =====
+
+pub def subscription_create(node: ROS2Node, topic: str, msg_type: str) -> ROS2Sub {
+    val h = ffi_open(get_rcl_lib());
+    if h == -1 { return ROS2Sub { handle: 0, node: 0, ctx: 0, msg_type: "" } };
+    val sub_h = ffi_call_i64(h, "iris_rcl_subscription_create", node.handle, topic, msg_type);
+    ROS2Sub { handle: sub_h, node: node.handle, ctx: node.ctx, msg_type: msg_type }
+}
+
+pub def subscription_destroy(sub: ROS2Sub) -> bool {
+    val h = ffi_open(get_rcl_lib());
+    if h == -1 { return false };
+    val rc = ffi_call_i64(h, "iris_rcl_subscription_destroy", sub.handle, sub.node);
+    rc == 0
+}
+
+// ===== Typed Publish Functions =====
+
+pub def publish_float64_obj(pub_obj: ROS2Publisher, value: f64) -> bool {
+    val h = ffi_open(get_rcl_lib());
+    if h == -1 { return false };
+    // Pass f64 as scaled i64 (f64 → i64 bit representation via FFI)
+    val scaled = (value * 100000000.0) to i64;
+    val rc = ffi_call_i64(h, "iris_rcl_publish_float64", pub_obj.handle, scaled);
+    rc == 0
+}
+
+pub def publish_int64(pub_obj: ROS2Publisher, value: i64) -> bool {
+    val h = ffi_open(get_rcl_lib());
+    if h == -1 { return false };
+    val rc = ffi_call_i64(h, "iris_rcl_publish_int64", pub_obj.handle, value);
+    rc == 0
+}
+
+pub def publish_string(pub_obj: ROS2Publisher, value: str) -> bool {
+    val h = ffi_open(get_rcl_lib());
+    if h == -1 { return false };
+    val rc = ffi_call_i64(h, "iris_rcl_publish_string", pub_obj.handle, value);
+    rc == 0
+}
+
+pub def publish_vector3(pub_obj: ROS2Publisher, v: Vector3) -> bool {
+    val h = ffi_open(get_rcl_lib());
+    if h == -1 { return false };
+    val sx = (v.x * 100000000.0) to i64;
+    val sy = (v.y * 100000000.0) to i64;
+    val sz = (v.z * 100000000.0) to i64;
+    val rc = ffi_call_i64(h, "iris_rcl_publish_vector3", pub_obj.handle, sx, sy, sz);
+    rc == 0
+}
+
+pub def publish_twist(pub_obj: ROS2Publisher, t: Twist) -> bool {
+    val h = ffi_open(get_rcl_lib());
+    if h == -1 { return false };
+    val slx = (t.linear.x * 100000000.0) to i64;
+    val sly = (t.linear.y * 100000000.0) to i64;
+    val slz = (t.linear.z * 100000000.0) to i64;
+    val sax = (t.angular.x * 100000000.0) to i64;
+    val say = (t.angular.y * 100000000.0) to i64;
+    val saz = (t.angular.z * 100000000.0) to i64;
+    val rc = ffi_call_i64(h, "iris_rcl_publish_twist", pub_obj.handle, slx, sly, slz, sax, say, saz);
+    rc == 0
+}
+
+pub def publish_pose(pub_obj: ROS2Publisher, p: Pose) -> bool {
+    val h = ffi_open(get_rcl_lib());
+    if h == -1 { return false };
+    val spx = (p.position.x * 100000000.0) to i64;
+    val spy = (p.position.y * 100000000.0) to i64;
+    val spz = (p.position.z * 100000000.0) to i64;
+    val sox = (p.orientation.x * 100000000.0) to i64;
+    val soy = (p.orientation.y * 100000000.0) to i64;
+    val soz = (p.orientation.z * 100000000.0) to i64;
+    val sow = (p.orientation.w * 100000000.0) to i64;
+    val rc = ffi_call_i64(h, "iris_rcl_publish_pose", pub_obj.handle, spx, spy, spz, sox, soy, soz, sow);
+    rc == 0
+}
+
+// ===== Wait Set =====
+
+// Block until a message arrives on a subscription, or timeout_ms elapses.
+// Returns true if a message is ready to be taken.
+pub def wait_for_message(sub: ROS2Sub, timeout_ms: i64) -> bool {
+    val h = ffi_open(get_rcl_lib());
+    if h == -1 { return false };
+    val rc = ffi_call_i64(h, "iris_rcl_wait_for_message", sub.handle, sub.ctx, timeout_ms);
+    rc == 1
+}
+
+// ===== Taking messages =====
+//
+// These were the missing half of the subscription API. `ros2_bridge.c` has
+// implemented iris_rcl_take_float64 / take_int64_val / take_string /
+// take_vector3 / take_twist / take_pose since the bridge was written, and none
+// of them was callable: every one returns its payload through an out-pointer,
+// and the IRIS FFI had no way to pass one. `wait_for_message` returning a bool
+// was the whole of what a subscriber could observe.
+//
+// Each returns `option`, so "no message ready" and "a message whose value
+// happens to be zero" stay distinguishable — the distinction a sentinel return
+// destroys.
+
+// The `take_*` family returns `some` only when the bridge reports success.
+//
+// `iris_rcl_take_*` returns **1 on success and 0 on failure** -- not rcl's own
+// convention, where RCL_RET_OK is 0. All six of these tested `rc == 0`, so a
+// successful take produced `none()` and, worse, a *failed* take produced
+// `some()` wrapping whatever happened to be in the out-cell. A subscription
+// could therefore report a reading it never received.
+//
+// Verified against a live ROS 2 Humble installation: publish 42.5, wait, take,
+// and get 42.5 back.
+pub def take_f64(sub: ROS2Sub) -> option<f64> effect ffi, alloc {
+    val h = ffi_open(get_rcl_lib())
+    if h == -1 { return none() };
+    val cell = ffi_out_new(8)
+    if cell == 0 { return none() };
+    val rc = ffi_call_i64(h, "iris_rcl_take_float64", sub.handle, cell)
+    val v = ffi_out_get_f64(cell, 0)
+    ffi_out_free(cell);
+    if rc == 1 { some(v) } else { none() }
+}
+
+pub def take_i64(sub: ROS2Sub) -> option<i64> effect ffi, alloc {
+    val h = ffi_open(get_rcl_lib())
+    if h == -1 { return none() };
+    val cell = ffi_out_new(8)
+    if cell == 0 { return none() };
+    val rc = ffi_call_i64(h, "iris_rcl_take_int64_val", sub.handle, cell)
+    val v = ffi_out_get_i64(cell, 0)
+    ffi_out_free(cell);
+    if rc == 1 { some(v) } else { none() }
+}
+
+pub def take_str(sub: ROS2Sub, max_len: i64) -> option<str> effect ffi, alloc {
+    val h = ffi_open(get_rcl_lib())
+    if h == -1 { return none() };
+    val cell = ffi_out_new(max_len)
+    if cell == 0 { return none() };
+    val rc = ffi_call_i64(h, "iris_rcl_take_string", sub.handle, cell, max_len)
+    val v = ffi_out_get_str(cell)
+    ffi_out_free(cell);
+    if rc == 1 { some(v) } else { none() }
+}
+
+pub def take_vector3(sub: ROS2Sub) -> option<Vector3> effect ffi, alloc {
+    val h = ffi_open(get_rcl_lib())
+    if h == -1 { return none() };
+    val cell = ffi_out_new(24)
+    if cell == 0 { return none() };
+    val rc = ffi_call_i64(h, "iris_rcl_take_vector3", sub.handle, cell)
+    val v = make_vector3(ffi_out_get_f64(cell, 0), ffi_out_get_f64(cell, 1), ffi_out_get_f64(cell, 2))
+    ffi_out_free(cell);
+    if rc == 1 { some(v) } else { none() }
+}
+
+pub def take_twist(sub: ROS2Sub) -> option<Twist> effect ffi, alloc {
+    val h = ffi_open(get_rcl_lib())
+    if h == -1 { return none() };
+    val cell = ffi_out_new(48)
+    if cell == 0 { return none() };
+    val rc = ffi_call_i64(h, "iris_rcl_take_twist", sub.handle, cell)
+    val t = make_twist(
+        ffi_out_get_f64(cell, 0), ffi_out_get_f64(cell, 1), ffi_out_get_f64(cell, 2),
+        ffi_out_get_f64(cell, 3), ffi_out_get_f64(cell, 4), ffi_out_get_f64(cell, 5)
+    )
+    ffi_out_free(cell);
+    if rc == 1 { some(t) } else { none() }
+}
+
+pub def take_pose(sub: ROS2Sub) -> option<Pose> effect ffi, alloc {
+    val h = ffi_open(get_rcl_lib())
+    if h == -1 { return none() };
+    val cell = ffi_out_new(56)
+    if cell == 0 { return none() };
+    val rc = ffi_call_i64(h, "iris_rcl_take_pose", sub.handle, cell)
+    val p = make_pose(
+        ffi_out_get_f64(cell, 0), ffi_out_get_f64(cell, 1), ffi_out_get_f64(cell, 2),
+        ffi_out_get_f64(cell, 3), ffi_out_get_f64(cell, 4), ffi_out_get_f64(cell, 5), ffi_out_get_f64(cell, 6)
+    )
+    ffi_out_free(cell);
+    if rc == 1 { some(p) } else { none() }
+}
+
+// ===== Helper Constructors =====
+
+pub def make_vector3(x: f64, y: f64, z: f64) -> Vector3 {
+    Vector3 { x: x, y: y, z: z }
+}
+
+pub def make_twist(lx: f64, ly: f64, lz: f64, ax: f64, ay: f64, az: f64) -> Twist {
+    Twist {
+        linear: Vector3 { x: lx, y: ly, z: lz },
+        angular: Vector3 { x: ax, y: ay, z: az }
+    }
+}
+
+pub def make_pose(px: f64, py: f64, pz: f64, ox: f64, oy: f64, oz: f64, ow: f64) -> Pose {
+    Pose {
+        position: Point { x: px, y: py, z: pz },
+        orientation: Quaternion { x: ox, y: oy, z: oz, w: ow }
+    }
+}
+
+pub def zero_twist() -> Twist {
+    make_twist(0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+}
+
+pub def identity_pose() -> Pose {
+    make_pose(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0)
+}
+
+// ===== ROS 2 v2: QoS-aware endpoints =======================================
+// Policy values follow rmw_qos_* enum values used by ROS 2 Humble:
+// history 1=keep-last, 2=keep-all; reliability 1=reliable, 2=best-effort;
+// durability 1=transient-local, 2=volatile.
+
+pub record QoSProfile {
+    history: i64,
+    depth: i64,
+    reliability: i64,
+    durability: i64
+}
+
+pub def qos_default() -> QoSProfile {
+    QoSProfile { history: 1, depth: 10, reliability: 1, durability: 2 }
+}
+
+pub def qos_sensor_data() -> QoSProfile {
+    QoSProfile { history: 1, depth: 5, reliability: 2, durability: 2 }
+}
+
+pub def qos_control() -> QoSProfile {
+    QoSProfile { history: 1, depth: 1, reliability: 1, durability: 2 }
+}
+
+pub def publisher_create_qos(
+    node: ROS2Node,
+    topic: str,
+    msg_type: str,
+    qos: QoSProfile
+) -> ROS2Publisher {
+    val h = ffi_open(get_rcl_lib())
+    if h == -1 { return ROS2Publisher { handle: 0, node: 0, msg_type: "" } };
+    val pub_h = ffi_call_i64(
+        h, "iris_rcl_publisher_create_qos", node.handle, topic, msg_type,
+        qos.history, qos.depth, qos.reliability, qos.durability
+    )
+    ROS2Publisher { handle: pub_h, node: node.handle, msg_type: msg_type }
+}
+
+pub def subscription_create_qos(
+    node: ROS2Node,
+    topic: str,
+    msg_type: str,
+    qos: QoSProfile
+) -> ROS2Sub {
+    val h = ffi_open(get_rcl_lib())
+    if h == -1 { return ROS2Sub { handle: 0, node: 0, ctx: 0, msg_type: "" } };
+    val sub_h = ffi_call_i64(
+        h, "iris_rcl_subscription_create_qos", node.handle, topic, msg_type,
+        qos.history, qos.depth, qos.reliability, qos.durability
+    )
+    ROS2Sub { handle: sub_h, node: node.handle, ctx: node.ctx, msg_type: msg_type }
+}
+
+// ===== Deterministic single-threaded executor ===============================
+
+pub record ROS2Executor {
+    subscriptions: list<ROS2Sub>,
+    cursor: i64
+}
+
+pub def executor_new() -> ROS2Executor {
+    ROS2Executor { subscriptions: list(), cursor: 0 }
+}
+
+pub def executor_add(exec: ROS2Executor, sub: ROS2Sub) -> ROS2Executor {
+    val subscriptions = exec.subscriptions
+    list_push(subscriptions, sub);
+    ROS2Executor { subscriptions: subscriptions, cursor: exec.cursor }
+}
+
+// Poll each subscription once in round-robin order. Returns the ready index or
+// -1 on timeout. Payload extraction stays typed through take_*.
+pub def executor_spin_once(exec: ROS2Executor, timeout_ms: i64) -> (ROS2Executor, i64) {
+    val n = list_len(exec.subscriptions)
+    if n == 0 { return (exec, 0 - 1) };
+    for offset in 0..n {
+        val idx = (exec.cursor + offset) % n
+        val sub = list_get(exec.subscriptions, idx)
+        if wait_for_message(sub, 0) {
+            return (ROS2Executor { subscriptions: exec.subscriptions, cursor: (idx + 1) % n }, idx)
+        };
+    };
+    val blocking_idx = exec.cursor % n
+    val blocking_sub = list_get(exec.subscriptions, blocking_idx)
+    if wait_for_message(blocking_sub, timeout_ms) {
+        (ROS2Executor { subscriptions: exec.subscriptions, cursor: (blocking_idx + 1) % n }, blocking_idx)
+    } else {
+        (exec, 0 - 1)
+    }
+}
+
+// ===== Managed lifecycle state =============================================
+
+pub record LifecycleNode {
+    node: ROS2Node,
+    state: i64,
+    transitions: i64,
+    last_transition_ok: bool
+}
+
+pub def lifecycle_new(node: ROS2Node) -> LifecycleNode {
+    // 0=unconfigured, 1=inactive, 2=active, 3=finalized
+    LifecycleNode { node: node, state: 0, transitions: 0, last_transition_ok: true }
+}
+
+pub def lifecycle_transition(managed: LifecycleNode, transition: i64) -> LifecycleNode {
+    // 1=configure, 2=activate, 3=deactivate, 4=cleanup, 5=shutdown
+    val valid =
+        (transition == 1 && managed.state == 0) ||
+        (transition == 2 && managed.state == 1) ||
+        (transition == 3 && managed.state == 2) ||
+        (transition == 4 && managed.state == 1) ||
+        (transition == 5 && managed.state != 3)
+    val next = if !valid { managed.state } else {
+        if transition == 1 { 1 } else {
+            if transition == 2 { 2 } else {
+                if transition == 3 { 1 } else {
+                    if transition == 4 { 0 } else { 3 }
+                }
+            }
+        }
+    }
+    LifecycleNode {
+        node: managed.node,
+        state: next,
+        transitions: if valid { managed.transitions + 1 } else { managed.transitions },
+        last_transition_ok: valid
+    }
+}
+
+pub def lifecycle_can_publish(managed: LifecycleNode) -> bool { managed.state == 2 }
+
+// ===== tf2-compatible rigid transforms =====================================
+
+pub record Transform {
+    translation: Vector3,
+    rotation: Quaternion
+}
+
+pub record StampedTransform {
+    parent_frame: str,
+    child_frame: str,
+    stamp_ns: i64,
+    transform: Transform
+}
+
+pub record TransformBuffer { transforms: list<StampedTransform> }
+
+pub def quaternion_normalize(q: Quaternion) -> Quaternion {
+    val norm = sqrt(q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w)
+    if norm <= 1.0e-12 { Quaternion { x: 0.0, y: 0.0, z: 0.0, w: 1.0 } } else {
+        Quaternion { x: q.x / norm, y: q.y / norm, z: q.z / norm, w: q.w / norm }
+    }
+}
+
+pub def quaternion_multiply(a: Quaternion, b: Quaternion) -> Quaternion {
+    quaternion_normalize(Quaternion {
+        x: a.w * b.x + a.x * b.w + a.y * b.z - a.z * b.y,
+        y: a.w * b.y - a.x * b.z + a.y * b.w + a.z * b.x,
+        z: a.w * b.z + a.x * b.y - a.y * b.x + a.z * b.w,
+        w: a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z
+    })
+}
+
+pub def quaternion_conjugate(q: Quaternion) -> Quaternion {
+    Quaternion { x: 0.0 - q.x, y: 0.0 - q.y, z: 0.0 - q.z, w: q.w }
+}
+
+pub def quaternion_rotate(q_raw: Quaternion, v: Vector3) -> Vector3 {
+    val q = quaternion_normalize(q_raw)
+    val tx = 2.0 * (q.y * v.z - q.z * v.y)
+    val ty = 2.0 * (q.z * v.x - q.x * v.z)
+    val tz = 2.0 * (q.x * v.y - q.y * v.x)
+    Vector3 {
+        x: v.x + q.w * tx + (q.y * tz - q.z * ty),
+        y: v.y + q.w * ty + (q.z * tx - q.x * tz),
+        z: v.z + q.w * tz + (q.x * ty - q.y * tx)
+    }
+}
+
+pub def transform_identity() -> Transform {
+    Transform {
+        translation: Vector3 { x: 0.0, y: 0.0, z: 0.0 },
+        rotation: Quaternion { x: 0.0, y: 0.0, z: 0.0, w: 1.0 }
+    }
+}
+
+pub def transform_compose(a: Transform, b: Transform) -> Transform {
+    val rotated = quaternion_rotate(a.rotation, b.translation)
+    Transform {
+        translation: Vector3 {
+            x: a.translation.x + rotated.x,
+            y: a.translation.y + rotated.y,
+            z: a.translation.z + rotated.z
+        },
+        rotation: quaternion_multiply(a.rotation, b.rotation)
+    }
+}
+
+pub def transform_inverse(t: Transform) -> Transform {
+    val inverse_rotation = quaternion_conjugate(quaternion_normalize(t.rotation))
+    val negated = Vector3 {
+        x: 0.0 - t.translation.x,
+        y: 0.0 - t.translation.y,
+        z: 0.0 - t.translation.z
+    }
+    Transform { translation: quaternion_rotate(inverse_rotation, negated), rotation: inverse_rotation }
+}
+
+pub def transform_point(t: Transform, p: Point) -> Point {
+    val rotated = quaternion_rotate(t.rotation, Vector3 { x: p.x, y: p.y, z: p.z })
+    Point {
+        x: rotated.x + t.translation.x,
+        y: rotated.y + t.translation.y,
+        z: rotated.z + t.translation.z
+    }
+}
+
+pub def transform_buffer_new() -> TransformBuffer { TransformBuffer { transforms: list() } }
+
+pub def transform_buffer_set(buffer: TransformBuffer, transform: StampedTransform) -> TransformBuffer {
+    val transforms = buffer.transforms
+    list_push(transforms, transform);
+    TransformBuffer { transforms: transforms }
+}
+
+pub def transform_buffer_lookup(
+    buffer: TransformBuffer,
+    parent_frame: str,
+    child_frame: str
+) -> option<Transform> {
+    var found = false
+    var result = transform_identity()
+    for i in 0..list_len(buffer.transforms) {
+        val stamped = list_get(buffer.transforms, i)
+        if stamped.parent_frame == parent_frame && stamped.child_frame == child_frame {
+            found = true
+            result = stamped.transform
+        } else {
+            if stamped.parent_frame == child_frame && stamped.child_frame == parent_frame {
+                found = true
+                result = transform_inverse(stamped.transform)
+            };
+        };
+    };
+    if found { some(result) } else { none() }
 }

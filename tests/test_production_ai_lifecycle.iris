@@ -1,0 +1,22 @@
+bring std.ml
+bring std.ais
+
+def main() -> i64 effect alloc, throw {
+    var health = model_health_new()
+    health = model_health_observe(health, true, 12, "", 3)
+    health = model_health_observe(health, false, 20, "timeout", 3)
+    assert(health.requests == 2);
+    assert(health.failures == 1);
+    assert(model_health_error_rate(health) == 0.5);
+
+    var registry = model_registry_new()
+    registry = model_registry_add(registry, "vision", "1.0.0", "onnx", "vision.onnx")
+    assert(model_registry_find(registry, "vision", "1.0.0") == 0);
+
+    var runtime = agent_runtime_new(2)
+    runtime = agent_record_outcome(runtime, 1.0, 0.0 - 1.0, false)
+    runtime = agent_record_outcome(runtime, 1.0, 0.0 - 1.0, false)
+    assert(runtime.state == "degraded");
+    assert(runtime.consecutive_failures == 2);
+    return 0
+}

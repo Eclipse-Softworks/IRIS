@@ -1,0 +1,20 @@
+/// Named arguments can be reordered; an extension method uses its first argument.
+def difference(left : i64, right : i64) -> i64 {
+    return left - right
+}
+def doubled(value : i64) -> i64 {
+    return value * 2
+}
+def factorial(n : i64) -> i64 {
+    if n <= 1 {
+        return 1
+    };
+    return n * factorial(n - 1)
+}
+def main() -> i64 {
+    assert(difference(right = 3, left = 10) == 7);
+    assert(21.doubled() == 42);
+    assert(factorial(6) == 720);
+    println("functions: ok");
+    return 0
+}

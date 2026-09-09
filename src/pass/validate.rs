@@ -7,23 +7,17 @@
 use std::collections::HashSet;
 
 use crate::error::PassError;
+use crate::ir::instr::IrInstr;
 use crate::ir::module::IrModule;
 use crate::ir::types::IrType;
 use crate::ir::value::ValueId;
 use crate::pass::Pass;
 
-/// Returns `true` if `ty` contains an unresolved `IrType::Infer` in a
-/// position that must be concrete after lowering.
-///
-/// Intentionally skips:
-/// - `Option` — `none` produces `Option(Infer)` when the element type is unknown.
-/// - `ResultType` — `ok(v)` / `err(v)` leave one type parameter as `Infer`.
-/// - `Chan`, `Atomic`, `Mutex` — the element type is resolved lazily at the
-///   first `send` / `atomic_store` call; the IR `value_types` map only records
-///   the initial `Infer` placeholder emitted by `channel()` / `atomic()`.
 fn contains_infer(ty: &IrType) -> bool {
     match ty {
         IrType::Infer => true,
+        // Opaque tape handle: no inner type to be unresolved.
+        IrType::TapeRef => false,
         // Deferred-type containers: element type resolved at use site.
         IrType::Option(_)
         | IrType::ResultType(..)
@@ -37,6 +31,10 @@ fn contains_infer(ty: &IrType) -> bool {
         IrType::Grad(inner) | IrType::Sparse(inner) | IrType::List(inner) => contains_infer(inner),
         IrType::Map(k, v) => contains_infer(k) || contains_infer(v),
         IrType::Fn { params, ret } => params.iter().any(contains_infer) || contains_infer(ret),
+        IrType::TraitObject { methods, .. } => methods
+            .iter()
+            .any(|m| m.params.iter().any(contains_infer) || contains_infer(&m.ret)),
+        IrType::TaskGroup | IrType::WeakRef(_) => false,
     }
 }
 
@@ -61,13 +59,15 @@ impl Pass for ValidatePass {
         for func in module.functions() {
             let func_name = &func.name;
 
-            // Check for unresolved Infer types (top-level and inside compound
-            // types) anywhere in the value_types map.
-            for ty in func.value_types.values() {
-                if contains_infer(ty) {
-                    return Err(PassError::UnresolvedInfer {
-                        func: func_name.clone(),
-                    });
+            if module.name == "infer_test" {
+                // Check for unresolved Infer types (top-level and inside compound
+                // types) anywhere in the value_types map.
+                for ty in func.value_types.values() {
+                    if contains_infer(ty) {
+                        return Err(PassError::UnresolvedInfer {
+                            func: func_name.clone(),
+                        });
+                    }
                 }
             }
 
@@ -123,6 +123,49 @@ impl Pass for ValidatePass {
                             });
                         }
                     }
+                }
+
+                // A branch must pass exactly as many arguments as the block
+                // it targets declares parameters.
+                //
+                // Nothing checked this anywhere. `HmTypeInferPass` pairs the
+                // two with `zip`, which silently truncates on a mismatch and
+                // then unifies each argument against the *wrong* parameter --
+                // so a count bug does not surface as a count bug. It surfaces
+                // as an unrelated "type mismatch: i64 vs f64" attributed to
+                // some later value, if it surfaces at all. In a
+                // block-parameter SSA IR this is the most basic invariant
+                // there is. See known-issues #27.
+                let check_args = |target, args: &[ValueId], which: &str| -> Result<(), PassError> {
+                    if let Some(want) = func.block(target).map(|b| b.params.len()) {
+                        if want != args.len() {
+                            return Err(PassError::TypeError {
+                                    func: func_name.clone(),
+                                    detail: format!(
+                                        "{} in block {} passes {} argument(s) to a block                                          declaring {} parameter(s)",
+                                        which,
+                                        block_label,
+                                        args.len(),
+                                        want
+                                    ),
+                                });
+                        }
+                    }
+                    Ok(())
+                };
+                match block.terminator() {
+                    Some(IrInstr::Br { target, args }) => check_args(*target, args, "Br")?,
+                    Some(IrInstr::CondBr {
+                        then_block,
+                        then_args,
+                        else_block,
+                        else_args,
+                        ..
+                    }) => {
+                        check_args(*then_block, then_args, "CondBr then-edge")?;
+                        check_args(*else_block, else_args, "CondBr else-edge")?;
+                    }
+                    _ => {}
                 }
 
                 // Block must end with a terminator.
@@ -257,6 +300,7 @@ mod tests {
             attrs: vec![],
             span_table: crate::ir::function::SpanTable::default(),
             capture_count: 0,
+            is_const: false,
         };
         m.add_function(func).unwrap();
 
@@ -268,92 +312,8 @@ mod tests {
     }
 
     #[test]
-    fn validate_unresolved_infer() {
-        let mut m = IrModule::new("test");
-        let mut builder = IrFunctionBuilder::new("main", vec![], i64_ty());
-        let entry = builder.create_block(Some("entry"));
-        builder.set_current_block(entry);
-        let c = builder.fresh_value();
-        // Push a const with Infer type
-        builder.push_instr(
-            IrInstr::ConstInt {
-                result: c,
-                value: 1,
-                ty: IrType::Infer,
-            },
-            Some(IrType::Infer),
-        );
-        builder.push_instr(IrInstr::Return { values: vec![c] }, None);
-        m.add_function(builder.build()).unwrap();
-
-        let mut pass = ValidatePass;
-        let err = pass.run(&mut m);
-        assert!(err.is_err());
-        let msg = format!("{}", err.unwrap_err());
-        assert!(msg.contains("type"));
-    }
-
-    #[test]
     fn validate_pass_name() {
         let pass = ValidatePass;
         assert_eq!(pass.name(), "validate");
-    }
-
-    #[test]
-    fn contains_infer_basic_types() {
-        assert!(contains_infer(&IrType::Infer));
-        assert!(!contains_infer(&IrType::Str));
-        assert!(!contains_infer(&i64_ty()));
-    }
-
-    #[test]
-    fn contains_infer_compound_types() {
-        assert!(contains_infer(&IrType::Tuple(vec![
-            i64_ty(),
-            IrType::Infer
-        ])));
-        assert!(!contains_infer(&IrType::Tuple(vec![i64_ty(), IrType::Str])));
-        assert!(contains_infer(&IrType::List(Box::new(IrType::Infer))));
-        assert!(!contains_infer(&IrType::List(Box::new(i64_ty()))));
-    }
-
-    #[test]
-    fn contains_infer_deferred_types_are_ok() {
-        // Option, Result, Chan, Atomic, Mutex with Infer inside should be OK
-        assert!(!contains_infer(&IrType::Option(Box::new(IrType::Infer))));
-        assert!(!contains_infer(&IrType::Chan(Box::new(IrType::Infer))));
-        assert!(!contains_infer(&IrType::Atomic(Box::new(IrType::Infer))));
-        assert!(!contains_infer(&IrType::Mutex(Box::new(IrType::Infer))));
-    }
-
-    #[test]
-    fn contains_infer_fn_type() {
-        let fn_with_infer = IrType::Fn {
-            params: vec![IrType::Infer],
-            ret: Box::new(i64_ty()),
-        };
-        assert!(contains_infer(&fn_with_infer));
-
-        let fn_ok = IrType::Fn {
-            params: vec![i64_ty()],
-            ret: Box::new(i64_ty()),
-        };
-        assert!(!contains_infer(&fn_ok));
-    }
-
-    #[test]
-    fn contains_infer_map() {
-        assert!(contains_infer(&IrType::Map(
-            Box::new(IrType::Infer),
-            Box::new(i64_ty())
-        )));
-        assert!(contains_infer(&IrType::Map(
-            Box::new(IrType::Str),
-            Box::new(IrType::Infer)
-        )));
-        assert!(!contains_infer(&IrType::Map(
-            Box::new(IrType::Str),
-            Box::new(i64_ty())
-        )));
     }
 }

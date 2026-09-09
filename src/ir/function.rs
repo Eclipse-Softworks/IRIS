@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use crate::ir::block::{BlockId, IrBlock};
+use crate::ir::instr::IrInstr;
 use crate::ir::types::IrType;
 use crate::ir::value::{ValueDef, ValueId};
 
@@ -11,6 +12,8 @@ use crate::ir::value::{ValueDef, ValueId};
 pub struct SpanTable {
     /// Key: `(block_id.0, instr_index)`, value: byte offset into source text.
     pub(crate) entries: HashMap<(u32, usize), u32>,
+    /// Key: `ValueId`, value: byte offset into source text for value-producing instructions.
+    pub(crate) value_spans: HashMap<ValueId, u32>,
 }
 
 impl SpanTable {
@@ -19,9 +22,14 @@ impl SpanTable {
         self.entries.get(&(block_id, instr_idx)).copied()
     }
 
+    /// Returns the source byte offset for a specific result value, if known.
+    pub fn get_for_val(&self, val: ValueId) -> Option<u32> {
+        self.value_spans.get(&val).copied()
+    }
+
     /// Returns `true` if any spans have been recorded.
     pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
+        self.entries.is_empty() && self.value_spans.is_empty()
     }
 
     /// Returns the number of recorded spans.
@@ -39,6 +47,31 @@ pub struct FunctionId(pub u32);
 pub struct Param {
     pub name: String,
     pub ty: IrType,
+}
+
+/// An attribute annotation with arguments, e.g. `@adaptive(learning_rate=0.01)`.
+#[derive(Debug, Clone)]
+pub struct IrAttribute {
+    pub name: String,
+    pub args: Vec<IrInstr>, // Arguments as IR instructions (constants, etc.)
+}
+
+impl PartialEq<str> for IrAttribute {
+    fn eq(&self, other: &str) -> bool {
+        self.name == other
+    }
+}
+
+impl PartialEq<String> for IrAttribute {
+    fn eq(&self, other: &String) -> bool {
+        self.name == *other
+    }
+}
+
+impl PartialEq for IrAttribute {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name
+    }
 }
 
 /// A compiled function in SSA form.
@@ -62,14 +95,16 @@ pub struct IrFunction {
     pub(crate) value_types: HashMap<ValueId, IrType>,
     /// Counter for allocating fresh `ValueId`s.
     pub(crate) next_value: u32,
-    /// Function attributes, e.g. "kernel", "differentiable".
-    pub attrs: Vec<String>,
+    /// Function attributes, e.g. `@adaptive(learning_rate=0.01)`.
+    pub attrs: Vec<IrAttribute>,
     /// Source position table for the debugger: maps `(block_id, instr_idx)` to
     /// the byte offset of the statement that produced the instruction.
     pub span_table: SpanTable,
     /// Number of leading parameters that are lambda captures (0 for normal fns).
     /// Used by LLVM codegen to emit env-based capture extraction.
     pub capture_count: usize,
+    /// Whether this function is `const` — callable at compile time.
+    pub is_const: bool,
 }
 
 impl IrFunction {
@@ -84,6 +119,24 @@ impl IrFunction {
 
     pub fn blocks(&self) -> &[IrBlock] {
         &self.blocks
+    }
+
+    /// Returns the source byte offset for an instruction in a block, consulting
+    /// both the instruction index in the block and any result value it defines.
+    pub fn get_instr_span(&self, block_id: u32, instr_idx: usize) -> Option<u32> {
+        if let Some(byte) = self.span_table.get(block_id, instr_idx) {
+            return Some(byte);
+        }
+        if let Some(block) = self.block(BlockId(block_id)) {
+            if let Some(instr) = block.instrs.get(instr_idx) {
+                if let Some(res) = instr.result() {
+                    if let Some(byte) = self.span_table.get_for_val(res) {
+                        return Some(byte);
+                    }
+                }
+            }
+        }
+        None
     }
 
     /// Returns the type of a value, if known.

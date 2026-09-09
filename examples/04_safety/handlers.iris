@@ -1,0 +1,13 @@
+extern
+def echo(value : str) -> str
+def main() -> i64 {
+    val intercepted = handle {
+        echo("hello")
+    } with {
+        echo(value) => "handled",
+    };
+
+    assert(intercepted == "handled");
+    println("handlers: ok");
+    return 0
+}

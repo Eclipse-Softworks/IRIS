@@ -1,6 +1,10 @@
+pub mod ast_exhaustive;
+pub mod borrow_checker;
 pub mod const_fold;
 pub mod copy_prop;
 pub mod dead_node;
+pub mod effect_checker;
+pub mod effect_registry;
 pub mod exhaustive;
 pub mod gc_annotate;
 pub mod graph_pass;
@@ -12,10 +16,13 @@ pub mod opt;
 pub mod shape_check;
 pub mod shape_infer_graph;
 pub mod strength_reduce;
+pub mod tail_call;
 pub mod type_infer;
 pub mod type_infer_hm;
 pub mod validate;
+pub mod variance_checker;
 
+pub use ast_exhaustive::AstExhaustivenessPass;
 pub use const_fold::ConstFoldPass;
 pub use copy_prop::CopyPropPass;
 pub use dead_node::DeadNodePass;
@@ -24,7 +31,7 @@ pub use gc_annotate::GcAnnotatePass;
 pub use graph_pass::{GraphPass, GraphPassManager};
 pub use inline::InlinePass;
 pub use licm::LicmPass;
-pub use lint::{find_unused_vars, IrWarning};
+pub use lint::{find_source_warnings, find_unused_vars, IrWarning};
 pub use loop_unroll::LoopUnrollPass;
 pub use opt::{CsePass, DcePass, OpExpandPass};
 pub use shape_check::ShapeCheckPass;
@@ -34,6 +41,8 @@ pub use type_infer_hm::HmTypeInferPass;
 
 use crate::error::PassError;
 use crate::ir::module::IrModule;
+use crate::ir::value::ValueId;
+use std::collections::HashSet;
 
 /// A compiler pass that operates on an `IrModule` in place.
 ///
@@ -91,6 +100,27 @@ impl PassManager {
                     if let Ok(text) = emit_ir_text(module) {
                         eprintln!("--- IR after {} ---\n{}", pass.name(), text);
                     }
+                }
+            }
+            // Debug: verify all Br/CondBr args are defined after each pass.
+            if let Err(e) = verify_uses_defined(module, pass.name()) {
+                return Err((
+                    pass.name().to_owned(),
+                    PassError::TypeError {
+                        func: "verify_uses_defined".into(),
+                        detail: e,
+                    },
+                ));
+            }
+            if pass.name() == "GcAnnotate" {
+                if let Err(e) = verify_release_dominance(module) {
+                    return Err((
+                        pass.name().to_owned(),
+                        PassError::TypeError {
+                            func: "verify_release_dominance".into(),
+                            detail: e,
+                        },
+                    ));
                 }
             }
         }
@@ -213,4 +243,220 @@ impl Default for PassManager {
     fn default() -> Self {
         Self::new()
     }
+}
+
+// ---------------------------------------------------------------------------
+// Standard Pipeline Factory
+// ---------------------------------------------------------------------------
+
+/// Builds the formalized 15-pass SSA pipeline sequence.
+pub fn build_standard_pipeline() -> PassManager {
+    let mut pm = PassManager::new();
+    pm.add_pass(crate::pass::validate::ValidatePass);
+    pm.add_pass(HmTypeInferPass);
+    pm.add_pass(crate::pass::type_infer::TypeInferPass);
+    pm.add_pass(ShapeCheckPass);
+    pm.add_pass(InlinePass::default());
+    pm.add_pass(ConstFoldPass);
+    pm.add_pass(CopyPropPass);
+    // GraphPass (DeadNodePass) is skipped in this IR pipeline
+    // Tail calls become loops before LICM, so loop-invariant motion sees the
+    // recursion as the loop it now is.
+    pm.add_pass(crate::pass::tail_call::TailCallPass);
+    pm.add_pass(LicmPass);
+    pm.add_pass(LoopUnrollPass::default());
+    pm.add_pass(StrengthReducePass);
+    pm.add_pass(crate::pass::opt::OptPass);
+    pm.add_pass(ExhaustivePass);
+    pm.add_pass(GcAnnotatePass);
+    pm.add_pass(crate::pass::lint::IrLintPass);
+    pm
+}
+
+// ---------------------------------------------------------------------------
+// Debug verification: check that all uses of value IDs in Br/CondBr are defined
+// ---------------------------------------------------------------------------
+
+/// Verifies every function in the module: all value IDs referenced in `Br`
+/// and `CondBr` block arguments must exist as a result of some instruction
+/// or as a block parameter in the same function.
+/// Returns `Err` with a description on violation.
+pub fn verify_uses_defined(module: &IrModule, after_pass: &str) -> Result<(), String> {
+    for func in &module.functions {
+        // Collect ALL defined values: block params + instruction results.
+        let mut defined: HashSet<ValueId> = HashSet::new();
+        for block in &func.blocks {
+            for param in &block.params {
+                defined.insert(param.id);
+            }
+            for instr in &block.instrs {
+                if let Some(r) = instr.result() {
+                    defined.insert(r);
+                }
+            }
+        }
+        for (bi, block) in func.blocks.iter().enumerate() {
+            for (ii, instr) in block.instrs.iter().enumerate() {
+                let check = |label: &str, args: &[ValueId]| -> Result<(), String> {
+                    for (i, v) in args.iter().enumerate() {
+                        if !defined.contains(v) {
+                            let defs: Vec<u32> = defined.iter().map(|v| v.0).collect::<Vec<_>>();
+                            return Err(format!(
+                                "[after {}] {}: block{} instr{} {}[{}] = %{} not defined in function '{}'. defined IDs: {:?}",
+                                after_pass, func.name, bi, ii, label, i, v.0, func.name, defs
+                            ));
+                        }
+                    }
+                    Ok(())
+                };
+                // Every operand, not just branch arguments.
+                //
+                // This used to check `Br`/`CondBr` args only, which let an
+                // ordinary use-before-def through: LICM hoisted a constant out
+                // of a block and left `%18 = add %3, %17` behind with no
+                // reaching definition of `%17`. Because the surviving
+                // representative was chosen from a hash map, *which* run
+                // produced invalid IR varied — the same source compiled three
+                // different ways in six runs and crashed in three of them.
+                // See known-issues #17.
+                check("operand", &instr.operands())?;
+
+                match instr {
+                    crate::ir::instr::IrInstr::Br { args, .. } => {
+                        check("Br", args)?;
+                    }
+                    crate::ir::instr::IrInstr::CondBr {
+                        then_args,
+                        else_args,
+                        ..
+                    } => {
+                        check("CondBr.then", then_args)?;
+                        check("CondBr.else", else_args)?;
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Verifies that every `Release(v)` is dominated by the instruction or block parameter
+/// that defines `v`.
+pub fn verify_release_dominance(module: &IrModule) -> Result<(), String> {
+    for func in &module.functions {
+        if func.blocks.is_empty() {
+            continue;
+        }
+
+        // 1. Find definition block for every value
+        let mut def_blocks: std::collections::HashMap<
+            crate::ir::value::ValueId,
+            crate::ir::block::BlockId,
+        > = std::collections::HashMap::new();
+        for block in &func.blocks {
+            for param in &block.params {
+                def_blocks.insert(param.id, block.id);
+            }
+            for instr in &block.instrs {
+                if let Some(r) = instr.result() {
+                    def_blocks.insert(r, block.id);
+                }
+            }
+        }
+
+        // 2. Compute dominators
+        let block_ids: Vec<crate::ir::block::BlockId> = func.blocks.iter().map(|b| b.id).collect();
+        let all_ids: HashSet<crate::ir::block::BlockId> = block_ids.iter().cloned().collect();
+        let mut preds: std::collections::HashMap<
+            crate::ir::block::BlockId,
+            Vec<crate::ir::block::BlockId>,
+        > = block_ids.iter().map(|&b| (b, Vec::new())).collect();
+
+        for block in &func.blocks {
+            // Find successors
+            let mut succs = Vec::new();
+            for instr in &block.instrs {
+                match instr {
+                    crate::ir::instr::IrInstr::Br { target, .. } => succs.push(*target),
+                    crate::ir::instr::IrInstr::CondBr {
+                        then_block,
+                        else_block,
+                        ..
+                    } => {
+                        succs.push(*then_block);
+                        succs.push(*else_block);
+                    }
+                    crate::ir::instr::IrInstr::SwitchVariant {
+                        arms,
+                        default_block,
+                        ..
+                    } => {
+                        for (_, t) in arms {
+                            succs.push(*t);
+                        }
+                        if let Some(def) = default_block {
+                            succs.push(*def);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            for succ in succs {
+                if let Some(p) = preds.get_mut(&succ) {
+                    p.push(block.id);
+                }
+            }
+        }
+
+        let entry_id = block_ids[0];
+        let mut dom: std::collections::HashMap<
+            crate::ir::block::BlockId,
+            HashSet<crate::ir::block::BlockId>,
+        > = std::collections::HashMap::new();
+        let mut entry_set = HashSet::new();
+        entry_set.insert(entry_id);
+        dom.insert(entry_id, entry_set);
+        for &bid in &block_ids[1..] {
+            dom.insert(bid, all_ids.clone());
+        }
+
+        let mut changed = true;
+        while changed {
+            changed = false;
+            for &bid in &block_ids[1..] {
+                let preds_list = preds[&bid].clone();
+                if preds_list.is_empty() {
+                    continue;
+                }
+                let mut new_dom: HashSet<crate::ir::block::BlockId> = all_ids.clone();
+                for p in &preds_list {
+                    if let Some(pd) = dom.get(p) {
+                        new_dom = new_dom.intersection(pd).cloned().collect();
+                    }
+                }
+                new_dom.insert(bid);
+                if new_dom != dom[&bid] {
+                    dom.insert(bid, new_dom);
+                    changed = true;
+                }
+            }
+        }
+
+        // 3. Check every Release
+        for block in &func.blocks {
+            for instr in &block.instrs {
+                if let crate::ir::instr::IrInstr::Release { ptr, .. } = instr {
+                    if let Some(def_block) = def_blocks.get(ptr) {
+                        if let Some(dominators) = dom.get(&block.id) {
+                            if !dominators.contains(def_block) {
+                                return Err(format!("Release(v{}) in block {} is NOT dominated by its def in block {}", ptr.0, block.id.0, def_block.0));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
 }

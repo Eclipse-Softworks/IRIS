@@ -1,0 +1,5 @@
+// Inspect: iris --emit graph examples/07_ml/model_graph.iris
+// Export:  iris --emit onnx-binary examples/07_ml/model_graph.iris -o model.onnx
+model Classifier {
+    input features : tensor<f32, [1, 4]>layer hidden Dense(units = 8)layer activated ReLU(hidden)output activated
+}

@@ -1,29 +1,12 @@
-// strings.iris -- string operations
-//
-// Run: cargo run -- --emit eval examples/strings.iris
-
-def greet(name: str) -> str {
-    concat("Hello, ", concat(name, "!"))
-}
-
-def count_chars(s: str) -> i64 {
-    len(s)
-}
-
 def main() -> i64 {
-    val msg = greet("World")
-    print(msg);
-
-    val upper = to_upper("iris language")
-    print(upper);
-
-    val trimmed = trim("  spaces around  ")
-    print(concat("[", concat(trimmed, "]")));
-
-    val repeated = repeat("ab", 3)
-    print(repeated);
-
-    val n = count_chars("Hello")
-    print(concat("len('Hello') = ", to_str(n)));
-    0
+    val name = "IRIS";
+    val message = f"Welcome to {name}";
+    val words = split("learn,build,verify", ",");
+    assert(message == "Welcome to IRIS");
+    assert(len(name) == 4);
+    assert(contains(message, name));
+    assert(list_get(words, 2) == "verify");
+    assert(join(words, " / ") == "learn / build / verify");
+    println("strings: ok");
+    return 0
 }

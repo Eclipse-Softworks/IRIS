@@ -69,7 +69,13 @@ fn main() {
         .spawn(run)
         .expect("failed to spawn main thread with enlarged stack");
     if let Err(e) = handler.join() {
-        eprintln!("error: {:?}", e);
+        if let Some(msg) = e.downcast_ref::<&str>() {
+            eprintln!("error: {}", msg);
+        } else if let Some(msg) = e.downcast_ref::<String>() {
+            eprintln!("error: {}", msg);
+        } else {
+            eprintln!("error: thread panicked");
+        }
         process::exit(1);
     }
 }
@@ -101,8 +107,273 @@ fn run() {
                 process::exit(1);
             }
         }
-        Ok(ParseArgsResult::Pkg) => {
-            if let Err(e) = iris::pkg::run_pkg_command(&args) {
+        Ok(ParseArgsResult::Embedded {
+            file,
+            target,
+            output,
+            entry,
+        }) => {
+            iris::set_strict_effects(true);
+            let embedded_target = match iris::codegen::embedded::EmbeddedTarget::parse(&target) {
+                Some(target) => target,
+                None => {
+                    eprintln!(
+                        "error: unsupported embedded target '{}'; use arduino-uno, cortex-m4f, cortex-m33, esp32-c3, or esp32",
+                        target
+                    );
+                    process::exit(1);
+                }
+            };
+            let module = match iris::compile_file_to_module(&file) {
+                Ok(module) => module,
+                Err(error) => {
+                    let source = std::fs::read_to_string(&file).unwrap_or_default();
+                    eprint!("{}", render_error(&source, &error));
+                    process::exit(1);
+                }
+            };
+            let output = output.unwrap_or_else(|| {
+                let stem = file
+                    .file_stem()
+                    .and_then(|stem| stem.to_str())
+                    .unwrap_or("iris");
+                file.parent()
+                    .unwrap_or_else(|| std::path::Path::new("."))
+                    .join(format!("{}-{}-embedded", stem, embedded_target.preset()))
+            });
+            match iris::codegen::embedded::build_embedded_bundle(
+                &module,
+                &output,
+                embedded_target,
+                &entry,
+            ) {
+                Ok(bundle) => {
+                    eprintln!(
+                        "wrote allocation-free embedded bundle: {}",
+                        output.display()
+                    );
+                    eprintln!(
+                        "target: {} ({})",
+                        bundle.proof.target.preset(),
+                        bundle.proof.target.triple()
+                    );
+                    eprintln!("proof fingerprint: {}", bundle.proof.fingerprint);
+                    eprintln!(
+                        "fixed-array footprint: {} bytes",
+                        bundle.proof.fixed_array_bytes
+                    );
+                    if let Some(board_support) = &bundle.board_support {
+                        eprintln!("board support: {}", board_support.display());
+                    }
+                    eprintln!("hardware status: not validated until a matching IRIS-HW/1 board report is captured");
+                }
+                Err(error) => {
+                    eprintln!("error: embedded build failed: {}", error);
+                    process::exit(1);
+                }
+            }
+        }
+        Ok(ParseArgsResult::Evolve {
+            baseline,
+            candidate,
+            cases,
+            constitution,
+            constitution_sha256,
+            audit,
+            audit_head,
+            min_output,
+            max_output,
+        }) => {
+            if min_output > max_output {
+                eprintln!("error: --min-output cannot exceed --max-output");
+                process::exit(1);
+            }
+            let baseline_module = match iris::evolution::compile_candidate_file(&baseline) {
+                Ok(module) => module,
+                Err(error) => {
+                    eprintln!("error: baseline: {error}");
+                    process::exit(1);
+                }
+            };
+            let candidate_source = match std::fs::read_to_string(&candidate) {
+                Ok(source) => source,
+                Err(error) => {
+                    eprintln!("error: cannot read '{}': {error}", candidate.display());
+                    process::exit(1);
+                }
+            };
+            let candidate_module = match iris::evolution::compile_candidate_file(&candidate) {
+                Ok(module) => module,
+                Err(error) => {
+                    eprintln!("error: candidate: {error}");
+                    process::exit(1);
+                }
+            };
+            let canary_cases: Vec<iris::evolution::CanaryCase> =
+                match std::fs::read_to_string(&cases)
+                    .map_err(|error| error.to_string())
+                    .and_then(|json| serde_json::from_str(&json).map_err(|error| error.to_string()))
+                {
+                    Ok(cases) => cases,
+                    Err(error) => {
+                        eprintln!("error: invalid canary cases '{}': {error}", cases.display());
+                        process::exit(1);
+                    }
+                };
+            let constitution_source = match std::fs::read(&constitution) {
+                Ok(source) => source,
+                Err(error) => {
+                    eprintln!(
+                        "error: cannot read constitution '{}': {error}",
+                        constitution.display()
+                    );
+                    process::exit(1);
+                }
+            };
+            let trusted_constitution = iris::evolution::TrustedConstitution {
+                source: constitution_source,
+                expected_sha256: constitution_sha256,
+            };
+            let coordinator = match iris::evolution::EvolutionCoordinator::new(
+                iris::evolution::EvolutionPolicy::default(),
+            ) {
+                Ok(coordinator) => coordinator,
+                Err(error) => {
+                    eprintln!("error: {error}");
+                    process::exit(1);
+                }
+            };
+            if let Err(error) = coordinator.install_baseline(&baseline_module) {
+                eprintln!("error: baseline activation: {error}");
+                process::exit(1);
+            }
+            let mut audit_log =
+                match iris::evolution::audit::EvolutionAuditLog::open_with_checkpoint(
+                    &audit,
+                    &audit_head,
+                ) {
+                    Ok(log) => log,
+                    Err(error) => {
+                        eprintln!(
+                            "error: cannot open audit '{}' with head '{}': {error}",
+                            audit.display(),
+                            audit_head.display()
+                        );
+                        process::exit(1);
+                    }
+                };
+            match coordinator.evaluate_and_promote(
+                &candidate_source,
+                &candidate_module,
+                &canary_cases,
+                &trusted_constitution,
+                |_, output| output >= min_output && output <= max_output,
+                Some(&mut audit_log),
+            ) {
+                Ok(receipt) => {
+                    println!(
+                        "promoted {} generation {} after {}/7 gates",
+                        receipt.swap.function_name,
+                        receipt.swap.generation,
+                        receipt.gates.len()
+                    );
+                    println!(
+                        "canary exact: candidate {}/{}; baseline {}/{}",
+                        receipt.canary.candidate_exact,
+                        receipt.canary.cases,
+                        receipt.canary.baseline_exact,
+                        receipt.canary.cases
+                    );
+                    println!(
+                        "audit head: {}:{}",
+                        audit_log.head().sequence,
+                        audit_log.head().hash
+                    );
+                }
+                Err(error) => {
+                    eprintln!("error: {error}");
+                    process::exit(1);
+                }
+            }
+        }
+        Ok(ParseArgsResult::EvolveUnrestricted {
+            candidate,
+            manifest,
+            acknowledge_unsafe,
+        }) => {
+            use iris::evolution::unrestricted::{
+                acknowledge_unrestricted, UnrestrictedEvolutionAuthority,
+            };
+
+            let token = match acknowledge_unrestricted(&acknowledge_unsafe) {
+                Ok(token) => token,
+                Err(error) => {
+                    eprintln!("error: {error}");
+                    process::exit(1);
+                }
+            };
+            let source = match std::fs::read_to_string(&candidate) {
+                Ok(source) => source,
+                Err(error) => {
+                    eprintln!("error: cannot read '{}': {error}", candidate.display());
+                    process::exit(1);
+                }
+            };
+            let manifest: iris::evolution::manifest::ProgramManifest =
+                match std::fs::read_to_string(&manifest)
+                    .map_err(|error| error.to_string())
+                    .and_then(|json| serde_json::from_str(&json).map_err(|error| error.to_string()))
+                {
+                    Ok(manifest) => manifest,
+                    Err(error) => {
+                        eprintln!("error: invalid unrestricted manifest: {error}");
+                        process::exit(1);
+                    }
+                };
+            let authority = UnrestrictedEvolutionAuthority::new(token);
+            match authority.compile_and_activate(&source, "unrestricted_cli", &manifest) {
+                Ok(receipt) => println!(
+                    "UNSAFE: activated program {} generation {} from {}",
+                    receipt.swap.program_name, receipt.swap.generation, receipt.source_sha256
+                ),
+                Err(error) => {
+                    eprintln!("error: {error}");
+                    process::exit(1);
+                }
+            }
+        }
+        Ok(ParseArgsResult::Meta { file, emit_ir }) => {
+            let source = match std::fs::read_to_string(&file) {
+                Ok(source) => source,
+                Err(error) => {
+                    eprintln!("error: cannot read '{}': {error}", file.display());
+                    process::exit(1);
+                }
+            };
+            let module_name = file
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .unwrap_or("meta");
+            if emit_ir {
+                match iris::meta::emit_ir(&source, module_name) {
+                    Ok(ir) => print!("{ir}"),
+                    Err(error) => {
+                        eprintln!("error: {error}");
+                        process::exit(1);
+                    }
+                }
+            } else {
+                match iris::meta::analyze_source_json(&source, module_name) {
+                    Ok(json) => println!("{json}"),
+                    Err(error) => {
+                        eprintln!("error: cannot encode meta analysis: {error}");
+                        process::exit(1);
+                    }
+                }
+            }
+        }
+        Ok(ParseArgsResult::Pkg { args: pkg_args }) => {
+            if let Err(e) = iris::pkg::run_pkg_command(&pkg_args) {
                 eprintln!("error: {}", e);
                 process::exit(1);
             }
@@ -113,8 +384,12 @@ fn run() {
                 process::exit(1);
             }
         }
-        Ok(ParseArgsResult::Test) => {
-            if let Err(e) = iris::test_runner::run_test_command(&args) {
+        Ok(ParseArgsResult::Test {
+            file,
+            filter,
+            no_color,
+        }) => {
+            if let Err(e) = iris::test_runner::run_test_command(&args, file, filter, no_color) {
                 eprintln!("error: {}", e);
                 process::exit(1);
             }
@@ -144,15 +419,107 @@ fn run() {
                 process::exit(1);
             }
         }
+        Ok(ParseArgsResult::Install { url }) => {
+            if let Err(e) = iris::package_manager::run_install(&url.into_iter().collect::<Vec<_>>())
+            {
+                eprintln!("error: {}", e);
+                process::exit(1);
+            }
+        }
         Ok(ParseArgsResult::Setup) => {
             if let Err(e) = iris::setup::run_setup_command() {
                 eprintln!("error: {}", e);
                 process::exit(1);
             }
         }
+        Ok(ParseArgsResult::Docs { file, output }) => {
+            let path = match file {
+                Some(p) => p,
+                None => {
+                    eprintln!("error: docs requires an input file (e.g. `iris docs file.iris`)");
+                    process::exit(1);
+                }
+            };
+            let source = match std::fs::read_to_string(&path) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("error: cannot read '{}': {}", path.display(), e);
+                    process::exit(1);
+                }
+            };
+            let filename = path
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("module.iris");
+            match iris::docs::generate_docs(&source, filename) {
+                Ok(html) => {
+                    if let Some(out_path) = output {
+                        if let Err(e) = std::fs::write(&out_path, &html) {
+                            eprintln!("error: cannot write '{}': {}", out_path.display(), e);
+                            process::exit(1);
+                        }
+                        eprintln!("wrote documentation: {}", out_path.display());
+                    } else {
+                        print!("{}", html);
+                    }
+                }
+                Err(e) => {
+                    eprintln!("error: {}", e);
+                    process::exit(1);
+                }
+            }
+        }
+        Ok(ParseArgsResult::Fmt { file, check }) => {
+            let options = iris::formatter::FormatOptions::default();
+            match file {
+                Some(path) => match iris::formatter::format_file(&path, &options, check) {
+                    Ok(changed) => {
+                        if check && changed {
+                            eprintln!("would reformat: {}", path.display());
+                            process::exit(1);
+                        } else if !check && changed {
+                            eprintln!("formatted {}", path.display());
+                        } else if check {
+                            eprintln!("all files already formatted");
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("error: {}", e);
+                        process::exit(1);
+                    }
+                },
+                None => {
+                    let dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+                    match iris::formatter::format_directory(&dir, &options, check) {
+                        Ok((total, changed)) => {
+                            if check && changed > 0 {
+                                eprintln!(
+                                    "{} file(s) would be reformatted (of {} checked)",
+                                    changed, total
+                                );
+                                process::exit(1);
+                            } else if check {
+                                eprintln!("{} file(s) already formatted", total);
+                            } else if changed > 0 {
+                                eprintln!("formatted {} of {} file(s)", changed, total);
+                            } else {
+                                eprintln!("{} file(s) already formatted", total);
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("error: {}", e);
+                            process::exit(1);
+                        }
+                    }
+                }
+            }
+        }
         Ok(ParseArgsResult::Args(cli)) => {
             if cli.sandbox {
                 iris::security::set_security_policy(iris::security::SecurityPolicy::sandboxed());
+            }
+            if cli.strict_effects {
+                iris::set_strict_effects(true);
             }
             if cli.target.is_some()
                 && !matches!(
@@ -194,7 +561,16 @@ fn run() {
                         .file_stem()
                         .and_then(|s| s.to_str())
                         .unwrap_or("iris_out");
-                    PathBuf::from(format!("{}{}", stem, std::env::consts::EXE_SUFFIX))
+                    let is_wasm = cli
+                        .target
+                        .as_deref()
+                        .is_some_and(|t| resolved_target(Some(t)).contains("wasm32"));
+                    let ext = if is_wasm {
+                        ".wasm"
+                    } else {
+                        std::env::consts::EXE_SUFFIX
+                    };
+                    PathBuf::from(format!("{}{}", stem, ext))
                 });
                 match iris::codegen::build_binary_with_target(
                     &module,
@@ -271,6 +647,34 @@ fn run() {
                         }
                     } else {
                         print!("{}", output);
+
+                        // Propagate `main`'s return value as the process exit
+                        // code, which is what a built binary already does.
+                        //
+                        // `--emit eval` used to print the value and exit 0
+                        // regardless, so the documented test idiom -- "return a
+                        // non-zero code on mismatch" -- silently passed: a test
+                        // that detected a failure and returned 1 still exited 0.
+                        // 34 corpus files used exactly that idiom. See
+                        // known-issues #53.
+                        //
+                        // Both eval paths document the same output shape --
+                        // printed lines first, then the returned value last --
+                        // so the final line is the value. A non-integer return
+                        // (f64, str) leaves the exit code at 0, since there is
+                        // no meaningful code to report.
+                        if cli.emit == iris::EmitKind::Eval {
+                            if let Some(last) = output.lines().last() {
+                                if let Ok(code) = last.trim().parse::<i64>() {
+                                    if code != 0 {
+                                        // Exit codes are a byte; 256 would
+                                        // otherwise be reported as success.
+                                        let code = (code.rem_euclid(256)) as i32;
+                                        process::exit(if code == 0 { 1 } else { code });
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
                 Err(e) => {

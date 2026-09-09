@@ -1,21 +1,30 @@
 import * as vscode from 'vscode';
-import * as fs from 'fs';
-import * as path from 'path';
 import { initStatusBar, updateStatusBar, showServerMenu } from './statusBar';
 import { startLspClient, restartLsp, stopLsp, client } from './lspClient';
+import { getIrisExe, resetIrisExeCache, diagnoseCandidates } from './irisExe';
 import {
     runIrisFile,
     runNamedFunction,
     debugIrisFile,
     openRepl,
     showEmit,
+    showEmitPick,
     showFullVersion,
+    explainErrorCode,
+    checkFormatting,
+    runFileTests,
+    runWorkspaceTests,
+    fmtWorkspace,
+    runBenchmarks,
+    generateDocs,
+    pkgCommand,
     IrisEmitProvider,
     runDiagCollection,
 } from './commands';
 import { IrisDebugAdapterFactory } from './debugAdapter';
 import { IrisCodeLensProvider } from './codelens';
 import { IrisTaskProvider } from './tasks';
+import { IrisTestController } from './testController';
 
 let outputChannel: vscode.OutputChannel;
 let serverOutputChannel: vscode.OutputChannel;
@@ -40,6 +49,30 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         vscode.commands.registerCommand('iris.showIR',     () => showEmit('ir', getIrisExe, outputChannel)),
         vscode.commands.registerCommand('iris.showLLVM',   () => showEmit('llvm', getIrisExe, outputChannel)),
         vscode.commands.registerCommand('iris.showVersion', () => showFullVersion(getIrisExe, outputChannel)),
+        vscode.commands.registerCommand('iris.showEmit',    () => showEmitPick(getIrisExe, outputChannel)),
+        vscode.commands.registerCommand('iris.showGraph',   () => showEmit('graph', getIrisExe, outputChannel)),
+        vscode.commands.registerCommand('iris.showCuda',    () => showEmit('cuda', getIrisExe, outputChannel)),
+        vscode.commands.registerCommand('iris.showSimd',    () => showEmit('simd', getIrisExe, outputChannel)),
+        vscode.commands.registerCommand('iris.explainError', () => explainErrorCode(getIrisExe, outputChannel)),
+        vscode.commands.registerCommand('iris.checkFormat', () => checkFormatting(getIrisExe, outputChannel)),
+        vscode.commands.registerCommand('iris.runTests',    () => runFileTests(getIrisExe)),
+        vscode.commands.registerCommand('iris.runWorkspaceTests', () => runWorkspaceTests(getIrisExe)),
+        vscode.commands.registerCommand('iris.fmtWorkspace', () => fmtWorkspace(getIrisExe)),
+        vscode.commands.registerCommand('iris.runBench',    () => runBenchmarks(getIrisExe)),
+        vscode.commands.registerCommand('iris.generateDocs', () => generateDocs(getIrisExe)),
+        vscode.commands.registerCommand('iris.pkg',         () => pkgCommand(getIrisExe)),
+        vscode.commands.registerCommand('iris.diagnostics', () => {
+            outputChannel.clear();
+            outputChannel.appendLine('=== IRIS executable resolution ===');
+            outputChannel.appendLine('');
+            outputChannel.appendLine(`selected: ${getIrisExe()}`);
+            outputChannel.appendLine('');
+            outputChannel.appendLine('candidates (best first):');
+            for (const line of diagnoseCandidates()) {
+                outputChannel.appendLine(line);
+            }
+            outputChannel.show(true);
+        }),
         vscode.commands.registerCommand('iris.runFunction', (uri: string, fnName: string) =>
             runNamedFunction(uri, fnName, getIrisExe, outputChannel)),
         vscode.commands.registerCommand('iris.serverMenu', () => showServerMenu(context, client !== undefined, {
@@ -66,6 +99,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
                 request: 'launch',
                 name: `Debug Test ${fnName}`,
                 program: filePath,
+                entryFunction: fnName,
+                stopOnEntry: true,
             });
         }),
     );
@@ -91,6 +126,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     // Register Task Provider
     context.subscriptions.push(
         vscode.tasks.registerTaskProvider('iris', new IrisTaskProvider(getIrisExe)),
+        new IrisTestController(getIrisExe, outputChannel),
     );
 
     // Format on save
@@ -103,36 +139,28 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         }),
     );
 
-    // Respond to inlayHint setting changes
+    // Settings that are only read at server startup need a restart to apply:
+    // the executable choice, and the inlay-hint flags sent as
+    // initializationOptions.
     context.subscriptions.push(
-        vscode.workspace.onDidChangeConfiguration(e => {
-            if (e.affectsConfiguration('iris.inlayHints.enabled')) {
-                // Settings handler if needed in future
+        vscode.workspace.onDidChangeConfiguration(async e => {
+            if (e.affectsConfiguration('iris.executablePath')) {
+                resetIrisExeCache();
+                await restartLsp(context, getIrisExe, serverOutputChannel);
+            } else if (
+                e.affectsConfiguration('iris.inlayHints.enabled') ||
+                e.affectsConfiguration('iris.inlayHints.typeHints') ||
+                e.affectsConfiguration('iris.format.indentSize') ||
+                e.affectsConfiguration('iris.format.maxLineWidth') ||
+                e.affectsConfiguration('iris.maxNumberOfProblems')
+            ) {
+                await restartLsp(context, getIrisExe, serverOutputChannel);
             }
         }),
     );
 
     // Start LSP Client
     await startLspClient(context, getIrisExe, serverOutputChannel);
-}
-
-export function getIrisExe(): string {
-    const cfg = vscode.workspace.getConfiguration('iris').get<string>('executablePath', '');
-    if (cfg && fs.existsSync(cfg)) {
-        return cfg;
-    }
-    const candidates = [
-        path.join(process.env.USERPROFILE || '', '.cargo', 'bin', 'iris.exe'),
-        path.join(process.env.USERPROFILE || '', '.iris', 'bin', 'iris.exe'),
-        'C:\\Program Files\\IRIS\\iris.exe',
-        'C:\\Users\\' + (process.env.USERNAME || '') + '\\.cargo\\bin\\iris.exe',
-        'iris',
-    ];
-    for (const c of candidates) {
-        if (c === 'iris') { return c; }
-        if (fs.existsSync(c)) { return c; }
-    }
-    return 'iris';
 }
 
 export function deactivate(): Thenable<void> | undefined {

@@ -1,0 +1,60 @@
+// Phase 91: Trait Objects (dyn Trait)
+
+record Cat {
+    name: str,
+    lives: i64,
+}
+
+record Dog {
+    name: str,
+    tricks: i64,
+}
+
+trait Pet {
+    def speak(self) -> str
+    def name(self) -> str
+}
+
+impl Pet for Cat {
+    def speak(self) -> str {
+        "meow"
+    }
+    def name(self) -> str {
+        self.name
+    }
+}
+
+impl Pet for Dog {
+    def speak(self) -> str {
+        "woof"
+    }
+    def name(self) -> str {
+        self.name
+    }
+}
+
+// Pass a `dyn Pet` value through a function — verify virtual dispatch.
+def through_pet(p: dyn Pet) -> str {
+    p.speak() + " " + p.name()
+}
+
+// Box two different concrete types as dyn Pet and dispatch through them.
+// Returns 0 on success, non-zero indicates which branch failed.
+def main() -> i64 {
+    // A concrete value coerced to `dyn Pet` must keep its own vtable, through
+    // a binding and through a function taking `dyn Pet`.
+    val c: Cat = Cat { name: "Whiskers", lives: 9 };
+    val d: dyn Pet = c;
+    assert(d.speak() == "meow");
+    assert(d.name() == "Whiskers");
+    assert(through_pet(d) == "meow Whiskers");
+
+    // A second implementing type, so one vtable cannot be serving both.
+    val dog: Dog = Dog { name: "Rex", tricks: 5 };
+    val dp: dyn Pet = dog;
+    assert(dp.speak() == "woof");
+    assert(dp.name() == "Rex");
+    assert(through_pet(dp) == "woof Rex");
+    println("trait objects ok");
+    0
+}

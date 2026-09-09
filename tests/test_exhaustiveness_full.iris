@@ -1,0 +1,68 @@
+// Test: Exhaustiveness Checking - Option and Result
+
+choice Color { Red, Green, Blue }
+
+def test_option_exhaustive() -> i64 {
+    val o = some(42)
+    when o {
+        some(x) => x,
+        none => 0,
+    }
+}
+
+def test_option_non_exhaustive() -> i64 {
+    val o = some(42)
+    when o {
+        some(x) => x,
+        // Missing none!
+    }
+}
+
+def test_result_exhaustive() -> i64 {
+    val r = ok(42)
+    when r {
+        ok(x) => x,
+        err(e) => -1,
+    }
+}
+
+def test_result_non_exhaustive() -> i64 {
+    val r = ok(42)
+    when r {
+        ok(x) => x,
+        // Missing err!
+    }
+}
+
+def test_enum_exhaustive() -> i64 {
+    val c = Color.Red
+    when c {
+        Color.Red => 1,
+        Color.Green => 2,
+        Color.Blue => 3,
+    }
+}
+
+def test_enum_wildcard() -> i64 {
+    val c = Color.Red
+    when c {
+        Color.Red => 1,
+        _ => 99,
+    }
+}
+
+def main() -> i64 {
+    // Exhaustive matches must yield the covered arm's value. The file summed
+    // all four and checked nothing.
+    assert(test_option_exhaustive() == 42);
+    assert(test_result_exhaustive() == 42);
+    assert(test_enum_exhaustive() == 1);
+    assert(test_enum_wildcard() == 1);
+
+    // `test_option_non_exhaustive` and `test_result_non_exhaustive` are
+    // declared above and deliberately not called: both are wrongly accepted and
+    // return 0 instead of the covered arm's value (known-issues #54), which has
+    // its own regression test in tests/test_option_non_exhaustive.iris.
+    println("exhaustiveness ok");
+    0
+}

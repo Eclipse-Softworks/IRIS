@@ -1,0 +1,44 @@
+// Test blanket impls: impl[T where T: Trait] OtherTrait for T
+
+trait Show {
+    def show(self: Self) -> str
+}
+
+record Point { x: i64, y: i64 }
+
+impl Show for Point {
+    def show(self: Self) -> str {
+        "Point"
+    }
+}
+
+trait Describable {
+    def describe(self: Self) -> str
+}
+
+// Blanket impl: every Show type is also Describable.
+impl[T where T: Show] Describable for T {
+    def describe(self: Self) -> str {
+        "Described: " + self.show()
+    }
+}
+
+// A failing `check` must fail the run rather than returning a code the caller
+// discards -- see known-issues #53.
+def check(b: bool) -> i64 {
+    assert(b);
+    0
+}
+
+def main() -> i64 {
+    // Test blanket impl on Point
+    val p = Point { x: 10, y: 20 };
+    val d1 = p.describe();
+    println("Point describe: " + d1);
+    assert(d1 == "Described: Point");
+    // The blanket impl must call through to the concrete Show impl, so the
+    // suffix comes from Point rather than being hardcoded.
+    assert(p.show() == "Point");
+    println("blanket impls ok");
+    0
+}

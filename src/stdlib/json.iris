@@ -10,14 +10,21 @@
 
 // ── Native serialisation / deserialisation ───────────────────────────────────
 
-// Serialise any IRIS value to a JSON string using the C runtime (serde-backed).
-pub def json_stringify(v: str) -> str {
-    json_stringify(v)
-}
+// Note: json_stringify is a builtin function available without `bring std.json`.
+extern def iris_json_query(json: str, path: str) -> str effect alloc
 
-// Encode a flat-pair list<str> as a JSON object string.
-// E.g. ["name","Alice","age","30"] → {"name":"Alice","age":"30"}
-pub def json_encode(pairs: list<str>) -> str {
+/// Query nested JSON through a dot-separated object/array path, for example
+/// `choices.0.message.content`. Strings are returned without JSON quotes;
+/// structured values remain JSON encoded. Missing paths return an empty string.
+pub def json_query(json: str, path: str) -> str effect alloc {
+    return iris_json_query(json, path)
+}
+/// Encode a flat-pair list<str> as a JSON object string.
+/// E.g. ["name","Alice","age","30"] → {"name":"Alice","age":"30"}
+
+/// Encode a flat-pair list<str> as a JSON object string.
+/// E.g. ["name","Alice","age","30"] → {"name":"Alice","age":"30"}
+pub def json_encode(pairs: list<str>) -> str effect alloc, io {
     val n = list_len(pairs)
     var parts: list<str> = list()
     var i = 0
@@ -30,20 +37,18 @@ pub def json_encode(pairs: list<str>) -> str {
     concat(concat("{", join(parts, ",")), "}")
 }
 
-// ── Emitter ──────────────────────────────────────────────────────────────────
-
-// Wrap a string in JSON double-quotes.
-pub def json_str(s: str) -> str {
+/// Wrap a string in JSON double-quotes.
+pub def json_str(s: str) -> str effect alloc, io {
     concat(concat("\"", s), "\"")
 }
 
-// Build a JSON array from a list<str> of already-encoded values.
-pub def json_arr(items: list<str>) -> str {
+/// Build a JSON array from a list<str> of already-encoded values.
+pub def json_arr(items: list<str>) -> str effect alloc, io {
     concat(concat("[", join(items, ",")), "]")
 }
 
-// Build a JSON object from parallel key/value lists (values already encoded).
-pub def json_obj(keys: list<str>, vals: list<str>) -> str {
+/// Build a JSON object from parallel key/value lists (values already encoded).
+pub def json_obj(keys: list<str>, vals: list<str>) -> str effect alloc, io {
     var parts: list<str> = list()
     var i = 0
     val n = list_len(keys)
@@ -56,17 +61,14 @@ pub def json_obj(keys: list<str>, vals: list<str>) -> str {
     concat(concat("{", join(parts, ",")), "}")
 }
 
-// ── Flat-pair object representation ─────────────────────────────────────────
-//
-// A parsed object is list<str> [k0, v0, k1, v1, ...].
-
-pub def json_new() -> list<str> {
+/// Create a new empty flat-pair JSON object.
+pub def json_new() -> list<str> effect alloc {
     val empty: list<str> = list()
     empty
 }
 
-// Returns the value for key, or "" if not found.
-pub def json_get(pairs: list<str>, key: str) -> str {
+/// Returns the value for key, or "" if not found.
+pub def json_get(pairs: list<str>, key: str) -> str effect alloc {
     val n = list_len(pairs)
     var result = ""
     var i = 0
@@ -78,8 +80,8 @@ pub def json_get(pairs: list<str>, key: str) -> str {
     result
 }
 
-// Adds or updates a key/value pair (string value). Returns new pairs list.
-pub def json_set(pairs: list<str>, key: str, val_str: str) -> list<str> {
+/// Adds or updates a key/value pair (string value). Returns new pairs list.
+pub def json_set(pairs: list<str>, key: str, val_str: str) -> list<str> effect alloc, throw {
     var new_pairs: list<str> = list()
     var found = 0
     var i = 0
@@ -97,12 +99,7 @@ pub def json_set(pairs: list<str>, key: str, val_str: str) -> list<str> {
     new_pairs
 }
 
-// ── Simple parser ────────────────────────────────────────────────────────────
-//
-// Parses a flat JSON object like: {"key":"value","k2":"v2"}
-// Returns flat pairs list<str>.
-
-// Strip surrounding double-quotes from a JSON string token.
+/// Strip surrounding double-quotes from a JSON string token.
 pub def strip_json_quotes(s: str) -> str {
     val n = len(s)
     if n >= 2 {
@@ -112,8 +109,9 @@ pub def strip_json_quotes(s: str) -> str {
     }
 }
 
-// Parse {"k":"v",...} into flat pairs list<str>.
-pub def json_parse(text: str) -> list<str> {
+/// Parse {"k":"v",...} into flat pairs list<str>.
+/// Supports simple flat JSON objects with string keys and values.
+pub def json_parse(text: str) -> list<str> effect alloc, throw {
     val n = len(text)
     // Remove outer braces: { ... }
     val inner = if n >= 2 { slice(text, 1, n - 1) } else { text }

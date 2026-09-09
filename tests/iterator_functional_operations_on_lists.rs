@@ -160,3 +160,21 @@ def f() -> i64 {
     let result = compile(src, "test", EmitKind::Eval).unwrap();
     assert_eq!(result.trim(), "10");
 }
+
+// ---------------------------------------------------------------------------
+// 9. Lambda lifting captures only variables referenced by the body
+// ---------------------------------------------------------------------------
+#[test]
+fn test_list_lambda_does_not_capture_unused_receiver() {
+    let src = r#"
+def f() -> i64 {
+    val xs = list()
+    push(xs, 1);
+    val ys = xs.map(|x: i64| x * 2)
+    list_get(ys, 0)
+}
+"#;
+    let ir = compile(src, "test", EmitKind::Ir).unwrap();
+    assert!(ir.contains("make_closure @__lambda_0 []"), "{ir}");
+    assert!(ir.contains("def __lambda_0(x: i64) -> i64"), "{ir}");
+}

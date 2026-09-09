@@ -1,0 +1,13 @@
+// Selective import: `bring std.math.{gcd, lcm}` must bind exactly those names.
+bring std.math.{gcd, lcm}
+
+def main() -> i64 {
+    assert(gcd(12, 8) == 4);
+    assert(lcm(12, 8) == 24);
+    // Arguments that make a swapped or constant implementation visible.
+    assert(gcd(17, 5) == 1);
+    assert(gcd(9, 0) == 9);
+    assert(lcm(4, 6) == 12);
+    println("selective imports ok");
+    0
+}

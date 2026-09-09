@@ -1,0 +1,18 @@
+// Effect mask isolation: `with pure { ... }` evaluates its body in an isolated
+// effect row and yields the body's value.
+def compute(x: i64) -> i64 {
+    val result = with pure {
+        x * 2 + 10
+    };
+    result
+}
+
+def main() -> i64 {
+    println(to_str(compute(15)));
+    // 15 * 2 + 10
+    assert(compute(15) == 40);
+    // A second input, so a mask that returned a constant could not pass both.
+    assert(compute(0) == 10);
+    assert(compute(0 - 5) == 0);
+    0
+}

@@ -1,0 +1,43 @@
+// Weak references and GC statistics.
+//
+// This file used to pass while proving nothing: the only thing it did with the
+// upgraded object was hand it to `type_of` and print the result. Reading the
+// payload turned out to be broken four layers deep (known-issues #55) --
+// the interpreter dropped its strong owner immediately, the referent's type was
+// never carried through `weak_upgrade`, codegen passed an unboxed container to
+// a runtime function expecting a boxed value, and the boxed value was not
+// refcount-tracked so the weak reference was dead on arrival.
+//
+// LIMIT: the referent's type must be known. `val t = list()` leaves it `Infer`,
+// and the payload comes back as an integer -- the same inference gap as #14.
+// The annotations below are load-bearing.
+def main() -> i64 {
+    val target: list<i64> = list();
+    list_push(target, 42);
+    list_push(target, 100);
+
+    val w = weak_ref(target);
+    assert(weak_alive(w));
+
+    val up = weak_upgrade(w);
+    assert(is_some(up));
+
+    // The payload must be the object itself, readable and correct -- this is
+    // the assertion the file could not previously make.
+    val obj: list<i64> = unwrap(up);
+    assert(list_len(obj) == 2);
+    assert(list_get(obj, 0) == 42);
+    assert(list_get(obj, 1) == 100);
+
+    // The original handle is unaffected by being weakly referenced.
+    assert(list_len(target) == 2);
+    list_push(target, 7);
+    assert(list_len(target) == 3);
+    assert(weak_alive(w));
+
+    val stats = gc_stats();
+    println("gc stats entries = " + to_str(map_len(stats)));
+    assert(map_len(stats) >= 4);
+    println("weak refs ok");
+    0
+}

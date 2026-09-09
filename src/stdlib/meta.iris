@@ -1,0 +1,44 @@
+/// Typed metaprogramming backed by the host IRIS compiler.
+///
+/// Native programs can feature-detect compiler hosting with
+/// `meta_available()`. The compiler service uses the same parser, type checker,
+/// effect checker, optimizer, ABI fingerprinting and IR emitter as normal
+/// builds; IRIS does not carry a second or self-hosted compiler.
+
+pub record MetaProgram {
+    source: str,
+}
+
+pub record MetaEdit {
+    start_byte: i64,
+    end_byte: i64,
+    replacement: str,
+}
+
+extern def iris_meta_analyze(source: str) -> result<str, str> effect reflect, alloc
+extern def iris_meta_emit_ir(source: str) -> result<str, str> effect reflect, alloc
+extern def iris_meta_apply_edit(source: str, start_byte: i64, end_byte: i64, replacement: str) -> result<str, str> effect reflect, alloc
+
+pub def meta_available() -> bool {
+    return iris_reflection_available()
+}
+
+pub def meta_program(source: str) -> MetaProgram {
+    return MetaProgram { source: source }
+}
+
+/// Return an `iris-meta-analysis/1` JSON document containing typed functions,
+/// effect rows, ABI hashes, CFG sizes, records and choices.
+pub def meta_analyze(program: MetaProgram) -> result<str, str> effect reflect, alloc {
+    return iris_meta_analyze(program.source)
+}
+
+pub def meta_emit_ir(program: MetaProgram) -> result<str, str> effect reflect, alloc {
+    return iris_meta_emit_ir(program.source)
+}
+
+/// Apply a byte-span edit transactionally. The host returns new source only
+/// after the complete compiler pipeline accepts it.
+pub def meta_apply(program: MetaProgram, edit: MetaEdit) -> result<str, str> effect reflect, alloc {
+    return iris_meta_apply_edit(program.source, edit.start_byte, edit.end_byte, edit.replacement)
+}

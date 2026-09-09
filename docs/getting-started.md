@@ -1,255 +1,85 @@
-# Getting Started with IRIS
+# Getting started with IRIS RC1
 
-## Installation
+## Build or install
 
-IRIS ships as a single binary. Copy it to a directory on your `PATH`:
+Build the compiler with Rust and Cargo:
 
-```bash
-# Windows (MSYS2 / Git Bash)
-cp iris.exe /c/msys64/ucrt64/bin/
-
-# macOS / Linux
-cp iris /usr/local/bin/
+```text
+git clone https://github.com/Eclipse-Softworks/IRIS.git
+cd IRIS
+cargo build --release --locked
 ```
 
-Verify the installation:
+The executable is `target/release/iris.exe` on Windows or
+`target/release/iris` elsewhere. Keep it in a stable directory on PATH.
+On Windows the recommended per-user location is
+`$env:USERPROFILE\.iris\bin\iris.exe`. Restart existing terminals after
+changing the user PATH.
 
-```bash
-iris --version
-```
+Compiler/LSP startup needs the executable and its OS runtime. Native builds also
+need a loadable LLVM-C library, a linker, and target system libraries.
+On Windows install LLVM and a MinGW UCRT64 sysroot. See
+[requirements](REQUIREMENTS.md) for discovery settings and platform dependencies.
 
----
-
-## Your First Program
-
-Create `hello.iris`:
+## First program
 
 ```iris
 def main() -> i64 {
-    print("Hello, IRIS!");
-    0
+    val answer: i64 = 42;
+    assert(answer == 42);
+    println(f"answer = {answer}");
+    return 0
 }
 ```
 
-Run it:
+Save as `hello.iris`, then use:
 
-```bash
+```text
 iris run hello.iris
+iris build hello.iris -o hello
+iris fmt hello.iris
 ```
 
----
+On Windows execute the output as `.\hello.exe`; on Unix use `./hello`.
+`return` exits the current function. Expression tails remain valid, especially
+inside `if`, `when`, and lambda bodies.
 
-## Variables and Types
+## Guided progression
 
-```iris
-def main() -> i64 {
-    val name = "Alice"       // immutable string
-    var count = 0            // mutable integer
-    val pi: f64 = 3.14159
+Begin with [01_basics](../examples/01_basics/), then follow
+[the catalog](../examples/README.md). Start complete programs with
+[the ledger](../projects/ledger/), then progress to
+[neural training](../projects/learning_service/) and
+[the evolution lab](../projects/autonomous_evolution_lab/).
 
-    count = count + 1
-    print(concat("Hello, ", name));
-    print(count);
-    0
-}
+The collection includes standalone examples, reusable project modules,
+compiler-host examples, and board/service integrations.
+The [manifest](../examples/catalog.json) records which execution path applies.
+
+## Editor and tests
+
+Install [the VS Code extension](../vscode-iris/README.md).
+Set `iris.executablePath` to your installed copy. Avoid pointing a running
+language server at a Cargo build output that is being relinked.
+
+Use Format Document for `iris fmt` formatting, hover for types/docs/effects,
+and Test Explorer for zero-argument `test_*` functions. For example:
+
+```text
+iris test projects/ledger/main.iris --no-color
+iris --strict-effects --emit ir examples/04_safety/effects.iris
 ```
 
----
+DAP debugging is interpreter trace-based. It does not attach to native processes.
 
-## Functions
+## Reproduce the learning checks
 
-```iris
-def factorial(n: i64) -> i64 {
-    if n <= 1 { 1 } else { n * factorial(n - 1) }
-}
-
-def main() -> i64 {
-    print(factorial(10));
-    0
-}
+```text
+python tools/verify_learning.py --iris target/release/iris.exe
+cargo test --test examples_showcase
 ```
 
----
-
-## Lists and Iteration
-
-```iris
-def main() -> i64 {
-    val nums = list()
-    push(nums, 10);
-    push(nums, 20);
-    push(nums, 30);
-
-    var i = 0
-    while i < list_len(nums) {
-        print(list_get(nums, i));
-        i = i + 1
-    }
-    0
-}
-```
-
-Or with a range loop:
-
-```iris
-for i in 0..10 {
-    print(i);
-}
-```
-
----
-
-## Using the Standard Library
-
-```iris
-bring std.math
-bring std.string
-bring std.time
-
-def main() -> i64 {
-    val t0  = stopwatch_start()
-    val g   = gcd(48, 18)
-    val dur = stopwatch_stop(t0)
-
-    print(concat("GCD = ", to_str(g)));
-    print(concat("Took: ", format_duration(dur)));
-    0
-}
-```
-
----
-
-## Records (Structs)
-
-```iris
-record Person {
-    name: str,
-    age:  i64
-}
-
-def greet(p: Person) -> str {
-    concat("Hello, ", concat(p.name, "!"))
-}
-
-def main() -> i64 {
-    val alice = Person { name: "Alice", age: 30 }
-    print(greet(alice));
-    0
-}
-```
-
----
-
-## Pattern Matching
-
-```iris
-choice Shape { Circle, Square, Triangle }
-
-def describe(s: Shape) -> str {
-    when s {
-        Shape.Circle   => "round",
-        Shape.Square   => "four sides",
-        Shape.Triangle => "three sides"
-    }
-}
-```
-
----
-
-## Writing Tests
-
-Create `my_tests.iris`:
-
-```iris
-bring std.testing
-
-def test_addition() -> bool {
-    assert_eq(1 + 1, 2, "1+1=2")
-}
-
-def test_strings() -> bool {
-    assert_str_eq(concat("a", "b"), "ab", "concat")
-}
-```
-
-Run tests:
-
-```bash
-iris test my_tests.iris
-```
-
-Output:
-
-```
-running tests in my_tests.iris
-
-  test test_addition ... PASS (0.05ms)
-  test test_strings  ... PASS (0.02ms)
-
-test result: ok. 2 passed; 0 failed; 0 ignored
-```
-
----
-
-## Reading and Writing Files
-
-```iris
-bring std.fs
-
-def main() -> i64 {
-    val ok = write_text("output.txt", "Hello from IRIS!\n")
-    val content = read_text("output.txt")
-    print(content);
-    0
-}
-```
-
----
-
-## Compiling to Native Binary
-
-```bash
-iris build program.iris -o program
-./program
-```
-
-Requires LLVM (`clang`) on your PATH.
-
----
-
-## VS Code Extension
-
-1. Open VS Code.
-2. Install the **IRIS Language** extension from the Extensions panel (or `.vsix` file).
-3. Open any `.iris` file to get syntax highlighting, completions, error diagnostics, and go-to-definition.
-
----
-
-## Project Layout (iris.toml)
-
-For multi-file projects, create an `iris.toml`:
-
-```toml
-[package]
-name    = "my-project"
-version = "0.1.0"
-
-[dependencies]
-# local path dependency
-# my-lib = { path = "../my-lib" }
-```
-
-```bash
-iris pkg init           # create iris.toml
-iris pkg install        # install deps
-iris pkg build          # build project
-iris pkg run            # run main
-```
-
----
-
-## Next Steps
-
-- [Language Reference](language-reference.md) — complete syntax and type system
-- [Standard Library Reference](stdlib-reference.md) — all stdlib modules
-- [Examples](../examples/) — sample programs
+Use `--iris target/release/iris` on Unix. The runner uses temporary working
+directories and a per-program timeout. Compiler-host examples run with
+`IRIS_FORCE_INTERP=1`; hardware and live-service programs have separate commands
+and are never counted as a successful hardware/service test merely for compiling.

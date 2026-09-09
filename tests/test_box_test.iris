@@ -1,0 +1,45 @@
+// Generic return types resolved from a binding annotation.
+//
+// This file was called a "Full HKT test" and claimed `F[_]` inference from
+// argument types. That does not work: `container_count[F[_], T](c: F<T>)`
+// called with a `list<i64>` fails with "cannot infer type parameter T -- no
+// argument mentions it", even though the parameter type `F<T>` mentions it.
+// HKT parameters cannot be inferred from an argument at all; only explicit
+// instantiation works, as in test_hkt.iris. See known-issues #36.
+//
+// What remains here is the part that does work, asserted.
+
+record Box[T] {
+    item: T,
+}
+
+// An ordinary generic whose return type is resolved from the binding.
+def wrap_in[T](x: T) -> Box<T> {
+    Box { item: x }
+}
+
+def unwrap_box[T](b: Box<T>) -> T {
+    b.item
+}
+
+def main() -> i64 {
+    val b: Box<i64> = wrap_in(7);
+    assert(b.item == 7);
+    assert(unwrap_box(b) == 7);
+
+    val bs: Box<str> = wrap_in("z");
+    assert(bs.item == "z");
+    assert(unwrap_box(bs) == "z");
+    // The earlier instantiation is undisturbed by the later one.
+    assert(b.item == 7);
+
+    // A nested `Box<Box<i64>>` belongs here and is deliberately omitted: a
+    // generic instantiated at a generic type is still non-deterministic
+    // (known-issues #21), so including it would make this file pass about
+    // eight times in ten. A flaky test is worse than no test -- it teaches
+    // readers to ignore red. `tests/conformance/c21_loop_carried_type.iris`
+    // and the #21 entry carry the reproduction instead.
+
+    println("test_box_test ok");
+    0
+}

@@ -41,6 +41,9 @@ fn onnx_op(iris_op: &str) -> &str {
 /// Format an `IrType` as a compact ONNX type string.
 fn fmt_onnx_type(ty: &IrType) -> String {
     match ty {
+        // Not representable in ONNX: autodiff tape handles are a host-runtime
+        // concept and never appear in an exported graph's signature.
+        IrType::TapeRef => "tape_ref".to_owned(),
         IrType::Tensor { dtype, shape } => {
             let elem = dtype_to_onnx_elem(*dtype);
             let dims: Vec<String> = shape
@@ -78,6 +81,9 @@ fn fmt_onnx_type(ty: &IrType) -> String {
         IrType::List(inner) => format!("unknown_type {{ // list<{}> }}", inner),
         IrType::Map(k, v) => format!("unknown_type {{ // map<{}, {}> }}", k, v),
         IrType::Infer | IrType::Fn { .. } => "unknown_type {}".to_owned(),
+        IrType::TaskGroup => "unknown_type { // task_group }".to_owned(),
+        IrType::WeakRef(inner) => format!("unknown_type {{ // weak_ref<{}> }}", inner),
+        IrType::TraitObject { name, .. } => format!("unknown_type {{ // dyn {} }}", name),
     }
 }
 

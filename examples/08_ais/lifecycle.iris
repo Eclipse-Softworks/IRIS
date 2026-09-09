@@ -1,0 +1,18 @@
+bring std.ml
+bring std.ais
+def main() -> i64 {
+    var health = model_health_new();
+    health = model_health_observe(health, true, 12, "", 3);
+    health = model_health_observe(health, false, 20, "timeout", 3);
+    assert(health.requests == 2);
+    assert(model_health_error_rate(health) == 0.5);
+    var registry = model_registry_new();
+    registry = model_registry_add(registry, "classifier", "1.0.0", "iris", "local-weights");
+    assert(model_registry_find(registry, "classifier", "1.0.0") == 0);
+    var agent = agent_runtime_new(2);
+    agent = agent_record_outcome(agent, 1.0, - 1.0, false);
+    agent = agent_record_outcome(agent, 1.0, - 1.0, false);
+    assert(agent.state == "degraded");
+    println("lifecycle: ok");
+    return 0
+}

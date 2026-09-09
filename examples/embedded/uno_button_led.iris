@@ -1,0 +1,17 @@
+// Board-only entry: the allocation-free profile uses status returns, not assert.
+// D2: button to 5V, 10k pull-down to GND. D13: built-in L LED.
+// The board support package repeatedly invokes main; the AVR entry has no loop.
+extern "C" def iris_embedded_gpio_read(pin : i64) -> i64 effect io
+extern "C" def iris_embedded_gpio_write(pin : i64, value : i64) -> i64 effect io
+
+def main() -> i64 effect io {
+    val pressed = iris_embedded_gpio_read(2);
+    if pressed == 1 {
+        iris_embedded_gpio_write(13, 1);
+
+    } else {
+        iris_embedded_gpio_write(13, 0);
+
+    };
+    return 0
+}

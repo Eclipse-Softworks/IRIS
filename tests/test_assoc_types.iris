@@ -1,0 +1,37 @@
+// Associated types: `type Item` on a trait, bound to a concrete type by the
+// impl, and used in the method's return type.
+trait Iterator {
+    type Item
+    def next(self) -> option<Self::Item>
+}
+
+record MyInt {
+    value: i64
+}
+
+impl Iterator for MyInt {
+    type Item = str
+    def next(self) -> option<str> {
+        if self.value > 0 {
+            some(to_str(self.value))
+        } else {
+            none()
+        }
+    }
+}
+
+def main() -> i64 {
+    val x = MyInt { value: 42 }
+    val result = Iterator__MyInt__next(x);
+    assert(is_some(result));
+    // Item is bound to `str`, so the payload is "42" rather than 42.
+    assert(unwrap(result) == "42");
+
+    // The `none` path must be reachable too, or the method is returning some(..)
+    // unconditionally.
+    val z = MyInt { value: 0 }
+    val empty = Iterator__MyInt__next(z);
+    assert(is_some(empty) == false);
+    println("assoc types ok");
+    0
+}

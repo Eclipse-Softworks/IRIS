@@ -35,19 +35,26 @@ pub mod compiler;
 pub mod dap;
 pub mod debugger;
 pub mod diagnostics;
+pub mod docs;
 pub mod error;
+pub mod evolution;
 pub mod explain;
+pub mod formatter;
 pub mod interp;
 pub mod ir;
 pub mod lower;
 pub mod lsp;
+pub mod meta;
+pub mod package_manager;
 pub mod parser;
 pub mod pass;
 pub mod pkg;
+pub mod preprocessor;
 pub mod profiler;
 pub mod proto;
 pub mod repl;
 pub mod runtime_bindings;
+pub mod sandbox;
 pub mod security;
 pub mod setup;
 pub mod stdlib;
@@ -89,6 +96,7 @@ pub fn compile_with_recovery(
             // Lexer error — return empty module + the lex error.
             (
                 crate::parser::ast::AstModule {
+                    private_items: std::collections::HashSet::new(),
                     enums: vec![],
                     structs: vec![],
                     functions: vec![],
@@ -97,8 +105,11 @@ pub fn compile_with_recovery(
                     type_aliases: vec![],
                     traits: vec![],
                     impls: vec![],
+                    effects: vec![],
                     brings: vec![],
                     extern_fns: vec![],
+                    modules: vec![],
+                    macros: vec![],
                 },
                 vec![e],
             )
@@ -152,8 +163,8 @@ pub fn compile_multi(
     main_module: &str,
     emit: EmitKind,
 ) -> Result<String, Error> {
-    let main_ast = compile_multi_to_ast(sources, main_module)?;
-    compile_ast(&main_ast, main_module, emit, 1_000_000, 500, None)
+    let mut main_ast = compile_multi_to_ast(sources, main_module)?;
+    compile_ast(&mut main_ast, main_module, emit, 1_000_000, 0, None)
 }
 
 /// Internal: parse+merge all brought modules into a single merged `AstModule`.
@@ -219,6 +230,7 @@ pub fn compile_multi_to_ast(
                 }
             }
             // Merge all functions (including internal ones) and other definitions
+            main_ast.private_items.extend(dep.private_items);
             main_ast.extern_fns.extend(dep.extern_fns);
             main_ast.functions.extend(dep.functions);
             main_ast.structs.extend(dep.structs);
@@ -246,22 +258,132 @@ fn bring_key(path: &crate::parser::ast::BringPath) -> String {
     }
 }
 
+/// Process-wide flag for strict effect checking.
+///
+/// Set by `--strict-effects` on the CLI (via [`set_strict_effects`]) or by the
+/// `IRIS_STRICT_EFFECTS` environment variable. A static is used rather than a
+/// parameter because `compile_ast` has many call sites across the CLI, REPL,
+/// LSP and test harness, and the flag is a whole-process compilation mode.
+static STRICT_EFFECTS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Enable strict effect checking for this process. Called by the CLI when
+/// `--strict-effects` is passed.
+pub fn set_strict_effects(on: bool) {
+    STRICT_EFFECTS.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// True when strict effect checking is on, from either the flag or the env var.
+pub fn strict_effects_enabled() -> bool {
+    if STRICT_EFFECTS.load(std::sync::atomic::Ordering::Relaxed) {
+        return true;
+    }
+    std::env::var("IRIS_STRICT_EFFECTS")
+        .map(|v| v == "1" || v.to_lowercase() == "true")
+        .unwrap_or(false)
+}
+
+/// In strict mode, an effect violation fails the build.
+///
+/// Effect diagnostics were previously printed to stderr and then ignored, so a
+/// violating program still compiled and exited 0. A safety property that does
+/// not fail the build cannot gate CI and cannot be cited as a guarantee, which
+/// is the entire point of having it. Warnings (which do not start with
+/// `error[`) remain advisory.
+fn check_effect_gate(strict: bool, errors: &[String]) -> Result<(), Error> {
+    if !strict {
+        return Ok(());
+    }
+    let hard = errors.iter().filter(|e| e.starts_with("error[")).count();
+    if hard == 0 {
+        return Ok(());
+    }
+    Err(Error::Pass(crate::error::PassError::TypeError {
+        func: "<effect checking>".into(),
+        detail: format!(
+            "{} effect violation{} found (strict mode)",
+            hard,
+            if hard == 1 { "" } else { "s" }
+        ),
+    }))
+}
+
 /// Internal: compile a pre-built `AstModule` through the full pipeline to an `IrModule`.
 /// Used when building native binaries so we can pass the module to `build_binary`.
 pub fn compile_ast_to_module(
-    ast_module: &crate::parser::ast::AstModule,
+    ast_module: &mut crate::parser::ast::AstModule,
     module_name: &str,
     dump_ir_after: Option<&str>,
 ) -> Result<IrModule, Error> {
+    compile_ast_to_module_with_effect_mode(
+        ast_module,
+        module_name,
+        dump_ir_after,
+        strict_effects_enabled(),
+    )
+}
+
+/// Compile a pre-built AST with an explicit effect policy.
+///
+/// Unlike [`set_strict_effects`], this does not mutate process-global state.
+/// Promotion authorities and language servers can therefore compile untrusted
+/// candidates concurrently without one request weakening another request's
+/// effect checks.
+pub fn compile_ast_to_module_with_effect_mode(
+    ast_module: &mut crate::parser::ast::AstModule,
+    module_name: &str,
+    dump_ir_after: Option<&str>,
+    strict_effects: bool,
+) -> Result<IrModule, Error> {
     use crate::lower::{lower, lower_graph_to_ir, lower_model};
+    use crate::pass::ast_exhaustive::AstExhaustivenessPass;
     use crate::pass::infer_shapes;
-    use crate::pass::type_infer::TypeInferPass;
-    use crate::pass::validate::ValidatePass;
-    use crate::pass::{
-        ConstFoldPass, CopyPropPass, CsePass, DcePass, ExhaustivePass, GcAnnotatePass,
-        HmTypeInferPass, InlinePass, LicmPass, LoopUnrollPass, OpExpandPass, PassManager,
-        ShapeCheckPass, StrengthReducePass,
-    };
+    use crate::pass::variance_checker::VarianceChecker;
+
+    // Flatten inline modules before passes.
+    crate::compiler::flatten_inline_modules(ast_module);
+
+    // Inject default method bodies from trait definitions into impls.
+    crate::compiler::inject_default_impl_methods(ast_module);
+
+    // Desugar yield into list accumulator pattern before passes.
+    crate::compiler::desugar_yield(ast_module);
+
+    // Expand macro calls before any passes or lowering.
+    crate::compiler::expand_macros(ast_module);
+
+    // AST-level exhaustiveness checking before lowering.
+    AstExhaustivenessPass::new()
+        .run(ast_module)
+        .map_err(Error::Pass)?;
+    VarianceChecker::new()
+        .run(ast_module)
+        .map_err(Error::Pass)?;
+
+    // Borrow checker: validate reference safety at compile time.
+    {
+        let mut checker = crate::pass::borrow_checker::BorrowChecker::new();
+        checker.check_module(ast_module);
+        if checker.has_errors() {
+            checker.print_errors();
+            return Err(Error::Pass(crate::error::PassError::TypeError {
+                func: "<borrow checking>".into(),
+                detail: format!("{} borrow error(s) found", checker.errors().len()),
+            }));
+        }
+    }
+
+    // Effect checker (non-strict by default; emits warnings only).
+    // `--strict-effects` / IRIS_STRICT_EFFECTS=1 requires explicit `effect`
+    // clauses on effectful functions AND that each clause covers what the body
+    // actually does — and makes a violation fail the build.
+    {
+        let mut effect_checker = crate::pass::effect_checker::EffectChecker::new(strict_effects);
+        effect_checker.run(ast_module);
+        for err in &effect_checker.errors {
+            eprintln!("{}", err);
+        }
+        check_effect_gate(strict_effects, &effect_checker.errors)?;
+    }
 
     let mut ir_module = lower(ast_module, module_name)?;
     for model in &ast_module.models {
@@ -275,22 +397,7 @@ pub fn compile_ast_to_module(
                 span: model.name.span,
             })?;
     }
-    let mut pm = PassManager::new();
-    pm.add_pass(HmTypeInferPass);
-    pm.add_pass(ValidatePass);
-    pm.add_pass(TypeInferPass);
-    pm.add_pass(ConstFoldPass);
-    pm.add_pass(StrengthReducePass);
-    pm.add_pass(CopyPropPass);
-    pm.add_pass(OpExpandPass);
-    pm.add_pass(LicmPass);
-    pm.add_pass(InlinePass::default());
-    pm.add_pass(LoopUnrollPass::default());
-    pm.add_pass(ExhaustivePass);
-    pm.add_pass(DcePass);
-    pm.add_pass(CsePass);
-    pm.add_pass(ShapeCheckPass);
-    pm.add_pass(GcAnnotatePass);
+    let mut pm = crate::pass::build_standard_pipeline();
     if let Some(pass_name) = dump_ir_after {
         pm.set_dump_after(pass_name);
     }
@@ -299,12 +406,76 @@ pub fn compile_ast_to_module(
 }
 
 /// Internal: compile a pre-built `AstModule` through the full pipeline.
+/// Size of the stack the compiler pipeline runs on.
+///
+/// 64 MiB. Lowering, monomorphisation and the AST passes all recurse over
+/// program structure, and on real inputs that goes deeper than a small stack
+/// allows. The effect was that the *same program* compiled from the CLI, whose
+/// main thread gets 8 MiB, and crashed with STATUS_STACK_OVERFLOW inside a Rust
+/// test thread, whose default is far smaller — so a defect appeared or vanished
+/// depending on who called the compiler. Anyone embedding `iris::compile` from a
+/// worker thread hit the same cliff.
+const COMPILER_STACK_BYTES: usize = 64 * 1024 * 1024;
+
+/// Default interpreter call-depth limit.
+///
+/// Empirical: a tail-recursive `sum_to` survives 300 frames and overflows
+/// between 300 and 400 on a 64 MiB stack. Set below that so the guard produces
+/// a diagnostic rather than letting the process die.
+const INTERP_DEFAULT_MAX_DEPTH: usize = 250;
+
+/// Runs the compiler pipeline on a thread with a guaranteed stack.
+///
+/// rustc does the same thing for the same reason. This makes available stack
+/// depth a property of the compiler rather than of the caller; reducing the
+/// recursion itself is still worthwhile, but no longer load-bearing for
+/// correctness.
+///
+/// A scoped thread is used so the closure can borrow its arguments, and a panic
+/// is re-raised on the calling thread so behaviour is unchanged.
+fn with_compiler_stack<T: Send>(f: impl FnOnce() -> T + Send) -> T {
+    std::thread::scope(|scope| {
+        // `spawn_scoped` consumes the closure, so a failed spawn leaves no way to
+        // run it inline. Spawning a thread only fails when the OS is out of
+        // resources, which nothing here could recover from anyway.
+        let handle = std::thread::Builder::new()
+            .stack_size(COMPILER_STACK_BYTES)
+            .name("iris-compile".to_owned())
+            .spawn_scoped(scope, f)
+            .expect("iris: could not spawn the compiler thread");
+        match handle.join() {
+            Ok(value) => value,
+            Err(panic) => std::panic::resume_unwind(panic),
+        }
+    })
+}
+
 fn compile_ast(
-    ast_module: &crate::parser::ast::AstModule,
+    ast_module: &mut crate::parser::ast::AstModule,
     module_name: &str,
     emit: EmitKind,
-    _max_steps: usize,
-    _max_depth: usize,
+    max_steps: usize,
+    max_depth: usize,
+    dump_ir_after: Option<&str>,
+) -> Result<String, Error> {
+    with_compiler_stack(|| {
+        compile_ast_inner(
+            ast_module,
+            module_name,
+            emit,
+            max_steps,
+            max_depth,
+            dump_ir_after,
+        )
+    })
+}
+
+fn compile_ast_inner(
+    ast_module: &mut crate::parser::ast::AstModule,
+    module_name: &str,
+    emit: EmitKind,
+    max_steps: usize,
+    max_depth: usize,
     dump_ir_after: Option<&str>,
 ) -> Result<String, Error> {
     use crate::codegen::cuda::emit_cuda;
@@ -318,13 +489,19 @@ fn compile_ast(
     use crate::codegen::simd::emit_simd;
     use crate::lower::{lower, lower_graph_to_ir, lower_model};
     use crate::pass::infer_shapes;
-    use crate::pass::type_infer::TypeInferPass;
-    use crate::pass::validate::ValidatePass;
-    use crate::pass::{
-        ConstFoldPass, CopyPropPass, CsePass, DcePass, DeadNodePass, ExhaustivePass,
-        GcAnnotatePass, GraphPassManager, HmTypeInferPass, InlinePass, LicmPass, LoopUnrollPass,
-        OpExpandPass, PassManager, ShapeCheckPass, StrengthReducePass,
-    };
+    use crate::pass::{DeadNodePass, GraphPassManager};
+
+    // Flatten inline modules before any processing.
+    crate::compiler::flatten_inline_modules(ast_module);
+
+    // Inject default method bodies from trait definitions into impls.
+    crate::compiler::inject_default_impl_methods(ast_module);
+
+    // Desugar yield into list accumulator pattern before passes.
+    crate::compiler::desugar_yield(ast_module);
+
+    // Expand macro calls before any passes or lowering.
+    crate::compiler::expand_macros(ast_module);
 
     if emit == EmitKind::Graph {
         let mut out = String::new();
@@ -354,7 +531,43 @@ fn compile_ast(
         return Ok(out);
     }
 
-    let mut ir_module = lower(ast_module, module_name)?;
+    let mut ir_module = {
+        // AST-level exhaustiveness checking before lowering
+        use crate::pass::ast_exhaustive::AstExhaustivenessPass;
+        use crate::pass::variance_checker::VarianceChecker;
+        AstExhaustivenessPass::new()
+            .run(ast_module)
+            .map_err(Error::Pass)?;
+        VarianceChecker::new()
+            .run(ast_module)
+            .map_err(Error::Pass)?;
+
+        // Borrow checker: validate reference safety at compile time.
+        {
+            let mut checker = crate::pass::borrow_checker::BorrowChecker::new();
+            checker.check_module(ast_module);
+            if checker.has_errors() {
+                checker.print_errors();
+                return Err(Error::Pass(crate::error::PassError::TypeError {
+                    func: "<borrow checking>".into(),
+                    detail: format!("{} borrow error(s) found", checker.errors().len()),
+                }));
+            }
+        }
+
+        // Effect checker — see the note at the other call site.
+        let strict_effects = strict_effects_enabled();
+        {
+            let mut effect_checker =
+                crate::pass::effect_checker::EffectChecker::new(strict_effects);
+            effect_checker.run(ast_module);
+            for err in &effect_checker.errors {
+                eprintln!("{}", err);
+            }
+            check_effect_gate(strict_effects, &effect_checker.errors)?;
+        }
+        lower(ast_module, module_name)?
+    };
 
     for model in &ast_module.models {
         let graph = lower_model(model)?;
@@ -368,22 +581,7 @@ fn compile_ast(
             })?;
     }
 
-    let mut pm = PassManager::new();
-    pm.add_pass(HmTypeInferPass);
-    pm.add_pass(ValidatePass);
-    pm.add_pass(TypeInferPass);
-    pm.add_pass(ConstFoldPass);
-    pm.add_pass(StrengthReducePass);
-    pm.add_pass(CopyPropPass);
-    pm.add_pass(OpExpandPass);
-    pm.add_pass(LicmPass);
-    pm.add_pass(InlinePass::default());
-    pm.add_pass(LoopUnrollPass::default());
-    pm.add_pass(ExhaustivePass);
-    pm.add_pass(DcePass);
-    pm.add_pass(CsePass);
-    pm.add_pass(ShapeCheckPass);
-    pm.add_pass(GcAnnotatePass);
+    let mut pm = crate::pass::build_standard_pipeline();
     if let Some(pass_name) = dump_ir_after {
         pm.set_dump_after(pass_name);
     }
@@ -399,7 +597,7 @@ fn compile_ast(
         EmitKind::PgoInstrument => Ok(emit_pgo_instrument(&ir_module)?),
         EmitKind::PgoOptimize => Ok(emit_pgo_optimize(&ir_module, "")?),
         EmitKind::Graph | EmitKind::Onnx | EmitKind::OnnxBinary => unreachable!(),
-        EmitKind::Eval => eval_ir_module_internal(&ir_module),
+        EmitKind::Eval => eval_ir_module_internal(&ir_module, max_steps, max_depth),
         EmitKind::TensorRt => Ok(crate::codegen::tensorrt::emit_tensorrt(&ir_module)?),
     }
 }
@@ -409,35 +607,15 @@ fn compile_ast(
 /// Runs all standard passes (validate, type-infer, const-fold, strength-reduce,
 /// op-expand, DCE, CSE, shape-check).  Useful before calling `serialize_module`.
 pub fn compile_to_module(source: &str, module_name: &str) -> Result<IrModule, Error> {
-    let ast_module = parse_recovering(source)?;
-    let ir = crate::lower::lower(&ast_module, module_name)?;
-    // Run passes identical to compile_ast.
-    use crate::pass::type_infer::TypeInferPass;
-    use crate::pass::validate::ValidatePass;
-    use crate::pass::{
-        ConstFoldPass, CopyPropPass, CsePass, DcePass, ExhaustivePass, GcAnnotatePass,
-        HmTypeInferPass, InlinePass, LicmPass, LoopUnrollPass, OpExpandPass, PassManager,
-        ShapeCheckPass, StrengthReducePass,
-    };
-    let mut pm = PassManager::new();
-    pm.add_pass(HmTypeInferPass);
-    pm.add_pass(ValidatePass);
-    pm.add_pass(TypeInferPass);
-    pm.add_pass(ConstFoldPass);
-    pm.add_pass(StrengthReducePass);
-    pm.add_pass(CopyPropPass);
-    pm.add_pass(OpExpandPass);
-    pm.add_pass(LicmPass);
-    pm.add_pass(InlinePass::default());
-    pm.add_pass(LoopUnrollPass::default());
-    pm.add_pass(ExhaustivePass);
-    pm.add_pass(DcePass);
-    pm.add_pass(CsePass);
-    pm.add_pass(ShapeCheckPass);
-    pm.add_pass(GcAnnotatePass);
-    let mut ir = ir;
-    pm.run(&mut ir).map_err(|(_, e)| Error::Pass(e))?;
-    Ok(ir)
+    let mut ast_module = parse_recovering(source)?;
+    compile_ast_to_module(&mut ast_module, module_name, None)
+}
+
+/// Compile source through the complete pipeline while enforcing explicit
+/// effect declarations, without changing the process-wide CLI setting.
+pub fn compile_to_module_strict(source: &str, module_name: &str) -> Result<IrModule, Error> {
+    let mut ast_module = parse_recovering(source)?;
+    compile_ast_to_module_with_effect_mode(&mut ast_module, module_name, None, true)
 }
 
 /// Compiles an IRIS source string to a `IrModule` suitable for debugging.
@@ -461,6 +639,9 @@ pub fn compile_to_module_debug(source: &str, module_name: &str) -> Result<IrModu
     pm.add_pass(StrengthReducePass);
     pm.add_pass(CopyPropPass);
     pm.add_pass(OpExpandPass);
+    // Tail-call elimination before LICM, so a self-recursive function has
+    // become a loop by the time loop-invariant motion runs on it.
+    pm.add_pass(crate::pass::tail_call::TailCallPass);
     pm.add_pass(LicmPass);
     pm.add_pass(ExhaustivePass);
     pm.add_pass(ShapeCheckPass);
@@ -475,10 +656,22 @@ pub fn compile_to_module_debug(source: &str, module_name: &str) -> Result<IrModu
 /// Finds the first zero-argument function and executes it via the native LLVM
 /// pipeline, capturing stdout.
 pub fn eval_ir_module(module: &IrModule) -> Result<String, Error> {
-    eval_ir_module_internal(module)
+    eval_ir_module_internal(module, 0, 0)
 }
 
-fn eval_ir_module_internal(module: &IrModule) -> Result<String, Error> {
+/// `max_steps` / `max_depth` of 0 mean "use the defaults".
+fn eval_ir_module_internal(
+    module: &IrModule,
+    max_steps: usize,
+    max_depth: usize,
+) -> Result<String, Error> {
+    // Opt-in shortcut: skip building a native binary altogether. Compiling and
+    // linking one program per evaluation dominates test-suite runtime, and the
+    // interpreter produces the same answer, so a suite can trade native coverage
+    // for a very large speedup.
+    if codegen::build::force_interpreter() {
+        return interpret_module_for_eval(module, max_steps, max_depth);
+    }
     match codegen::execute_binary_for_eval(module) {
         Ok(s) => Ok(s),
         Err(e) => {
@@ -490,29 +683,7 @@ fn eval_ir_module_internal(module: &IrModule) -> Result<String, Error> {
                 crate::error::CodegenError::Unsupported { backend, .. }
                     if backend == "native" || backend == "binary" =>
                 {
-                    let func = module
-                        .functions()
-                        .iter()
-                        .find(|f| f.name == "main" && f.params.is_empty())
-                        .or_else(|| module.functions().iter().find(|f| f.params.is_empty()))
-                        .ok_or_else(|| {
-                            Error::Codegen(crate::error::CodegenError::Unsupported {
-                                backend: "native".into(),
-                                detail: "no zero-argument function found for eval".into(),
-                            })
-                        })?;
-                    let opts = crate::interp::InterpOptions {
-                        max_steps: 10_000_000,
-                        max_depth: 5_000,
-                    };
-                    match crate::interp::eval_function_in_module_opts(module, func, &[], opts) {
-                        Ok(vals) => Ok(vals
-                            .into_iter()
-                            .map(|v| format!("{}", v))
-                            .collect::<Vec<_>>()
-                            .join("\n")),
-                        Err(ie) => Err(Error::Interp(ie)),
-                    }
+                    interpret_module_for_eval(module, max_steps, max_depth)
                 }
                 other => Err(Error::Codegen(other)),
             }
@@ -520,12 +691,97 @@ fn eval_ir_module_internal(module: &IrModule) -> Result<String, Error> {
     }
 }
 
+/// Interpret a module's entry function for `--emit eval`.
+///
+/// Reproduces the native path's output shape exactly — printed lines first, then
+/// the returned value(s) — so callers cannot tell which path ran. Previously this
+/// returned only the return value, silently discarding everything the program
+/// printed.
+fn interpret_module_for_eval(
+    module: &IrModule,
+    max_steps: usize,
+    max_depth: usize,
+) -> Result<String, Error> {
+    let func = module
+        .functions()
+        .iter()
+        .find(|f| f.name == "main" && f.params.is_empty())
+        .or_else(|| module.functions().iter().find(|f| f.params.is_empty()))
+        .ok_or_else(|| {
+            Error::Codegen(crate::error::CodegenError::Unsupported {
+                backend: "native".into(),
+                detail: "no zero-argument function found for eval".into(),
+            })
+        })?;
+    let opts = crate::interp::InterpOptions {
+        max_steps: if max_steps == 0 {
+            10_000_000
+        } else {
+            max_steps
+        },
+        // Honour the caller's limit, and default it to something the stack can
+        // actually take.
+        //
+        // This was hardcoded to 5_000 while the interpreter overflows its
+        // 64 MiB stack at roughly 350 frames — about 190 KB of Rust stack per
+        // IRIS call. The guard could therefore never fire: deep recursion
+        // aborted the whole process with STATUS_STACK_OVERFLOW instead of
+        // returning the "call depth exceeded" error that exists for exactly
+        // this case. A crash where a diagnostic was already written.
+        //
+        // The safe depth depends on how much state each frame holds, so no
+        // constant is right for every program; this is deliberately
+        // conservative and `--max-depth` raises it. The real fix is to stop
+        // consuming a Rust frame per IRIS frame — see known-issues #25.
+        max_depth: if max_depth == 0 {
+            INTERP_DEFAULT_MAX_DEPTH
+        } else {
+            max_depth
+        },
+    };
+    let (result, printed) =
+        crate::interp::eval_function_in_module_opts_capturing(module, func, &[], opts);
+    let vals = result.map_err(Error::Interp)?;
+    // `printed` already ends each line with a newline, so the return value lands
+    // on its own line, matching the native binary's stdout.
+    let mut out = printed;
+    out.push_str(
+        &vals
+            .into_iter()
+            .map(|v| match v {
+                // Render a returned string bare, exactly as `print` does. The
+                // `Display` impl quotes strings, and a native binary never emits
+                // those quotes, so using it here made every str-returning
+                // program disagree between the two paths.
+                crate::interp::IrValue::Str(s) => s,
+                other => format!("{}", other),
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+    );
+    // Terminate the last line. A native binary's final `print` emits its own
+    // newline, so its stdout always ends with one; this path did not, and the
+    // two therefore differed by a single byte on *every* program that returns a
+    // value. The backend-agreement gate reported the whole corpus as divergent
+    // for that reason -- the same shape of finding as the `iris_codegen:` lines
+    // on stdout (#62), and the reason this function's contract is "callers
+    // cannot tell which path ran".
+    if !out.is_empty() && !out.ends_with('\n') {
+        out.push('\n');
+    }
+    Ok(out)
+}
+
 /// Parse source text with full error recovery, printing all errors to stderr
 /// and returning the first as `Error::Parse`. Used by all in-memory compile paths.
 fn parse_recovering(source: &str) -> Result<crate::parser::ast::AstModule, Error> {
     use crate::parser::lexer::Lexer;
     use crate::parser::parse::Parser;
-    let tokens = Lexer::new(source).tokenize()?;
+    let pp = crate::preprocessor::Preprocessor::new();
+    let source = pp
+        .process(source, "<source>")
+        .map_err(Error::Preprocessor)?;
+    let tokens = Lexer::new(&source).tokenize()?;
     let mut parser = Parser::new(&tokens);
     let (module, errors) = parser.parse_module_recovering();
     if errors.is_empty() {
@@ -553,8 +809,8 @@ fn parse_recovering(source: &str) -> Result<crate::parser::ast::AstModule, Error
 /// Returns the emitted output as a `String`, or an `Error` if any
 /// stage fails. The pipeline aborts at the first error.
 pub fn compile(source: &str, module_name: &str, emit: EmitKind) -> Result<String, Error> {
-    let ast_module = parse_recovering(source)?;
-    compile_ast(&ast_module, module_name, emit, 1_000_000, 500, None)
+    let mut ast_module = parse_recovering(source)?;
+    compile_ast(&mut ast_module, module_name, emit, 1_000_000, 0, None)
 }
 
 /// Compiles an IRIS source string and also returns dead-variable warnings.
@@ -565,9 +821,9 @@ pub fn compile_with_warnings(
     module_name: &str,
     emit: EmitKind,
 ) -> Result<(String, Vec<IrWarning>), Error> {
-    let ast_module = parse_recovering(source)?;
+    let mut ast_module = parse_recovering(source)?;
     let warnings = pass::find_unused_vars(&ast_module);
-    let output = compile_ast(&ast_module, module_name, emit, 1_000_000, 500, None)?;
+    let output = compile_ast(&mut ast_module, module_name, emit, 1_000_000, 0, None)?;
     Ok((output, warnings))
 }
 
@@ -580,8 +836,15 @@ pub fn compile_with_opts(
     max_steps: usize,
     max_depth: usize,
 ) -> Result<String, Error> {
-    let ast_module = parse_recovering(source)?;
-    compile_ast(&ast_module, module_name, emit, max_steps, max_depth, None)
+    let mut ast_module = parse_recovering(source)?;
+    compile_ast(
+        &mut ast_module,
+        module_name,
+        emit,
+        max_steps,
+        max_depth,
+        None,
+    )
 }
 
 /// Compiles an IRIS source string and on error returns a human-readable
@@ -602,9 +865,9 @@ pub fn compile_with_diagnostics(
 ///
 /// Uses `FileCompiler` from `src/compiler.rs` internally.
 pub fn compile_file(path: &std::path::Path, emit: EmitKind) -> Result<String, Error> {
-    let main_ast = compiler::FileCompiler::new().compile_file_to_ast(path, &[])?;
+    let mut main_ast = compiler::FileCompiler::new().compile_file_to_ast(path, &[])?;
     let module_name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("main");
-    compile_ast(&main_ast, module_name, emit, 1_000_000, 500, None)
+    compile_ast(&mut main_ast, module_name, emit, 1_000_000, 0, None)
 }
 
 /// Compiles an `.iris` file with bring resolution, using the provided `source`
@@ -615,20 +878,29 @@ pub fn compile_file_text(
     file_path: &std::path::Path,
     emit: EmitKind,
 ) -> Result<String, Error> {
-    let main_ast =
+    let mut main_ast =
         compiler::FileCompiler::new().compile_file_to_ast_with_text(file_path, source, &[])?;
     let module_name = file_path
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("main");
-    compile_ast(&main_ast, module_name, emit, 1_000_000, 500, None)
+    compile_ast(&mut main_ast, module_name, emit, 1_000_000, 0, None)
 }
 
 /// Like [`compile_file`] but returns the merged `IrModule` for further processing.
 pub fn compile_file_to_module(path: &std::path::Path) -> Result<IrModule, Error> {
-    let main_ast = compiler::FileCompiler::new().compile_file_to_ast(path, &[])?;
+    let mut main_ast = compiler::FileCompiler::new().compile_file_to_ast(path, &[])?;
     let module_name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("main");
-    compile_ast_to_module(&main_ast, module_name, None)
+    compile_ast_to_module(&mut main_ast, module_name, None)
+}
+
+/// Compile an `.iris` file with bring resolution and request-local strict
+/// effect checking. This is the file-based entry point used by governed
+/// evolution so imported AIS/ML code is checked under the same policy.
+pub fn compile_file_to_module_strict(path: &std::path::Path) -> Result<IrModule, Error> {
+    let mut main_ast = compiler::FileCompiler::new().compile_file_to_ast(path, &[])?;
+    let module_name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("main");
+    compile_ast_to_module_with_effect_mode(&mut main_ast, module_name, None, true)
 }
 
 /// Like [`compile_file`] but passes through all options including `dump_ir_after`.
@@ -639,10 +911,10 @@ pub fn compile_file_with_full_opts(
     max_depth: usize,
     dump_ir_after: Option<&str>,
 ) -> Result<String, Error> {
-    let main_ast = compiler::FileCompiler::new().compile_file_to_ast(path, &[])?;
+    let mut main_ast = compiler::FileCompiler::new().compile_file_to_ast(path, &[])?;
     let module_name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("main");
     compile_ast(
-        &main_ast,
+        &mut main_ast,
         module_name,
         emit,
         max_steps,
@@ -656,9 +928,9 @@ pub fn compile_file_to_module_with_opts(
     path: &std::path::Path,
     dump_ir_after: Option<&str>,
 ) -> Result<IrModule, Error> {
-    let main_ast = compiler::FileCompiler::new().compile_file_to_ast(path, &[])?;
+    let mut main_ast = compiler::FileCompiler::new().compile_file_to_ast(path, &[])?;
     let module_name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("main");
-    compile_ast_to_module(&main_ast, module_name, dump_ir_after)
+    compile_ast_to_module(&mut main_ast, module_name, dump_ir_after)
 }
 
 /// Like [`compile_with_opts`] but also supports `--dump-ir-after`.
@@ -670,9 +942,9 @@ pub fn compile_with_full_opts(
     max_depth: usize,
     dump_ir_after: Option<&str>,
 ) -> Result<String, Error> {
-    let ast_module = parse_recovering(source)?;
+    let mut ast_module = parse_recovering(source)?;
     compile_ast(
-        &ast_module,
+        &mut ast_module,
         module_name,
         emit,
         max_steps,

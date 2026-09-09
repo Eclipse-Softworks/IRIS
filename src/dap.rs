@@ -37,6 +37,7 @@ pub fn run_dap_server() -> std::io::Result<()> {
     let mut source_path = String::new();
     let mut source_content = String::new();
     let mut stop_on_entry = false;
+    let mut entry_function: Option<String> = None;
 
     loop {
         // Read Content-Length header.
@@ -45,7 +46,17 @@ pub fn run_dap_server() -> std::io::Result<()> {
             let mut byte = [0u8];
             let mut chars = String::new();
             loop {
-                reader.read_exact(&mut byte)?;
+                match reader.read_exact(&mut byte) {
+                    Ok(()) => {}
+                    // A closed stdin ends the session. Propagating the EOF made
+                    // `main` print an error and exit 1, which a debug adapter
+                    // client reads as a crash. Same defect as the LSP server had
+                    // -- see known-issues #58.
+                    Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                        return Ok(());
+                    }
+                    Err(e) => return Err(e),
+                }
                 if byte[0] == b'\r' {
                     continue;
                 }
@@ -67,7 +78,11 @@ pub fn run_dap_server() -> std::io::Result<()> {
         }
 
         let mut body = vec![0u8; content_length];
-        reader.read_exact(&mut body)?;
+        match reader.read_exact(&mut body) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(()),
+            Err(e) => return Err(e),
+        }
         let body_str = String::from_utf8_lossy(&body);
 
         let msg: serde_json::Value = match serde_json::from_str(&body_str) {
@@ -137,10 +152,13 @@ pub fn run_dap_server() -> std::io::Result<()> {
             "launch" => {
                 source_path = arguments["program"].as_str().unwrap_or("").to_owned();
                 stop_on_entry = arguments["stopOnEntry"].as_bool().unwrap_or(false);
+                entry_function = arguments["entryFunction"].as_str().map(str::to_owned);
+                session.set_entry_function(entry_function.as_deref());
                 if !source_path.is_empty() {
                     if let Ok(src) = std::fs::read_to_string(&source_path) {
                         source_content = src.clone();
                         session.set_source(&src);
+                        session.set_entry_function(entry_function.as_deref());
                     }
                 }
                 send(serde_json::json!({
@@ -167,6 +185,7 @@ pub fn run_dap_server() -> std::io::Result<()> {
                     session = DebugSession::new();
                     if !old_source.is_empty() {
                         session.set_source(&old_source);
+                        session.set_entry_function(entry_function.as_deref());
                     }
                 } else {
                     session.clear_breakpoints();
@@ -608,6 +627,7 @@ pub fn run_dap_server() -> std::io::Result<()> {
                     if let Ok(src) = std::fs::read_to_string(&source_path) {
                         source_content = src.clone();
                         session.set_source(&src);
+                        session.set_entry_function(entry_function.as_deref());
                     }
                 }
                 send(serde_json::json!({

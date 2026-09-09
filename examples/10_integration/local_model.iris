@@ -1,0 +1,19 @@
+bring std.llm
+bring std.ml /// SDK integration: provide a compatible ONNX model and its runtime libraries.
+
+def main() -> i64 {
+    val path = env_get("IRIS_ONNX_MODEL");
+    assert(len(path)>0);
+    val loaded = local_onnx_model(path);
+    if is_err(loaded) {
+        println(unwrap_err(loaded));
+        return 1
+    };
+
+    val session = unwrap(loaded);
+    assert(session.handle != 0);
+    assert(session.backend == "onnx");
+    onnx_free(session.handle);
+    println("local model: loaded and closed");
+    return 0
+}

@@ -5,8 +5,10 @@
   "fileTypes": ["iris"],
   "patterns": [
     { "include": "#comments" },
-    { "include": "#strings" },
     { "include": "#fstrings" },
+    { "include": "#strings" },
+    { "include": "#attributes" },
+    { "include": "#labels" },
     { "include": "#keywords" },
     { "include": "#declarations" },
     { "include": "#types" },
@@ -20,6 +22,10 @@
   "repository": {
     "comments": {
       "patterns": [
+        {
+          "name": "comment.line.documentation.iris",
+          "match": "///.*$"
+        },
         {
           "name": "comment.line.double-slash.iris",
           "match": "//.*$"
@@ -61,23 +67,63 @@
         }
       ]
     },
+    "labels": {
+      "comment": "Loop labels. IRIS writes the label after the keyword with no sigil — `for outer i in 0..n { break outer; }` — so only the break/continue form can be matched unambiguously; `for outer i` is indistinguishable from an ordinary loop variable without a parser.",
+      "patterns": [
+        {
+          "match": "\\b(break|continue)\\s+([a-z_][a-zA-Z0-9_]*)\\b",
+          "captures": {
+            "1": { "name": "keyword.control.flow.iris" },
+            "2": { "name": "entity.name.label.iris" }
+          }
+        }
+      ]
+    },
+    "attributes": {
+      "patterns": [
+        {
+          "name": "meta.annotation.iris",
+          "match": "@([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": { "name": "entity.name.function.decorator.iris" }
+          }
+        }
+      ]
+    },
     "keywords": {
+      "comment": "Mirrors the reserved words in src/parser/lexer.rs. Primitive type names and true/false are handled by #types and #constants. Note that `layer`, `input` and `output` are deliberately absent: they are contextual identifiers inside model blocks, not reserved words, so highlighting them globally mis-colours ordinary variables.",
       "patterns": [
         {
           "name": "keyword.control.flow.iris",
-          "match": "\\b(if|else|when|for|while|loop|break|continue|return|in)\\b"
+          "match": "\\b(if|else|when|match|for|while|loop|break|continue|return|in|by)\\b"
         },
         {
-          "name": "keyword.control.iris",
-          "match": "\\b(val|var|bring|pub)\\b"
+          "name": "keyword.control.exception.iris",
+          "match": "\\b(try|catch|raise|defer)\\b"
+        },
+        {
+          "name": "keyword.control.effect.iris",
+          "match": "\\b(effect|handle|resume|with|yield|mask|pure)\\b"
+        },
+        {
+          "name": "keyword.control.concurrent.iris",
+          "match": "\\b(spawn|par|async|await|select)\\b"
+        },
+        {
+          "name": "storage.modifier.iris",
+          "match": "\\b(pub|extern|unsafe|move|dyn)\\b"
         },
         {
           "name": "keyword.declaration.iris",
-          "match": "\\b(def|record|choice|model|layer|input|output|type|const|extern|trait|impl|async|await|spawn|par|where)\\b"
+          "match": "\\b(def|record|choice|model|trait|impl|type|const|defmacro)\\b"
         },
         {
-          "name": "keyword.operator.iris",
-          "match": "\\b(to|and|or|not)\\b"
+          "name": "keyword.other.iris",
+          "match": "\\b(val|var|let|bring|mod)\\b"
+        },
+        {
+          "name": "keyword.operator.cast.iris",
+          "match": "\\b(to)\\b"
         }
       ]
     },
@@ -121,11 +167,11 @@
       "patterns": [
         {
           "name": "support.type.primitive.iris",
-          "match": "\\b(i64|i32|i8|u8|u32|u64|usize|f64|f32|bool|str)\\b"
+          "match": "\\b(i64|i32|i8|u8|u32|u64|usize|f64|f32|bool|str|unit)\\b"
         },
         {
           "name": "support.type.iris",
-          "match": "\\b(option|result|list|map|tensor|tuple|chan|atomic|grad|sparse|deque|bitset|mutex)\\b"
+          "match": "\\b(option|result|list|map|tensor|tuple|chan|atomic|grad|sparse|deque|bitset|mutex|task_group|weak_ref|Dual|Cell|Tensor|DiffTensor|MLTensor|LlmClient|LlmMessage|LlmResponse|MetaProgram|MetaEdit)\\b"
         }
       ]
     },
@@ -196,14 +242,19 @@
           "match": "\\b(cell|cell_get|cell_set)\\b"
         },
         {
-          "comment": "Tensor / linear algebra builtins",
+          "comment": "Autodiff and gradient builtins",
           "name": "support.function.builtin.iris",
-          "match": "\\b(zeros|ones|fill|linspace|grad|grad_of|sparsify|densify|einsum)\\b"
+          "match": "\\b(tape|backward|grad|grad_t|primal|tangent|dual|zeros|ones|fill|linspace|sparsify|densify|einsum)\\b"
+        },
+        {
+          "comment": "ROS 2 autonomy builtins",
+          "name": "support.function.builtin.iris",
+          "match": "\\b(rcl_init|rcl_ok|node_create|publisher_create|subscription_create|publish|take|publish_float64|publish_int64|publish_str|take_float64|take_int64|take_str)\\b"
         },
         {
           "comment": "Concurrency builtins",
           "name": "support.function.builtin.iris",
-          "match": "\\b(atomic|atomic_load|atomic_store|atomic_add|channel|send|recv|chan_try_recv|chan_len|select|timeout|thread_count)\\b"
+          "match": "\\b(atomic|atomic_load|atomic_store|atomic_add|atomic_cas|mutex_new|mutex_lock|mutex_unlock|channel|send|recv|chan_try_recv|chan_len|select|timeout|thread_count|par_for|par_map|par_reduce|task_group_new|task_group_spawn|task_group_join|task_group_cancel|task_group_cancelled|cancellation_requested|async_worker_count|async_queued_tasks)\\b"
         },
         {
           "comment": "Deque builtins",
@@ -284,6 +335,21 @@
           "comment": "NN stdlib: MLP",
           "name": "support.function.stdlib.iris",
           "match": "\\b(mlp_create|mlp_forward|mlp_backward|mlp_train_step|mlp_train|mlp_predict|mlp_predict_class|mlp_eval_loss|encode_shape|shape_n_in|shape_n_out|layer_weight_offset|layer_bias_offset)\\b"
+        },
+        {
+          "comment": "AIS stdlib: homeostasis, active inference, meta-cognition, MAPE-K",
+          "name": "support.function.stdlib.iris",
+          "match": "\\b(homeostasis_init|homeostasis_step|homeostasis_drive|active_inf_init|active_inf_step|run_statistics_init|run_stats_update|run_stats_mean|run_stats_variance|neuroevo_init|neuroevo_mutate|neuroevo_select|ewc_init|ewc_compute_fisher|ewc_penalty|decision_argmax|decision_epsilon_greedy|decision_softmax|decision_boltzmann|decision_ucb|reward_discount|reward_gae|perception_normalize|perception_clip|world_model_init|world_model_update|world_model_predict|safety_constitution_init|safety_check|epistemic_novelty|epistemic_curiosity|multi_agent_consensus|meta_cognition_init|meta_cognition_update|mapek_agent_init|mapek_step|mapek_run)\\b"
+        },
+        {
+          "comment": "Differentiable tensor runtime",
+          "name": "support.function.stdlib.iris",
+          "match": "\\b(tensor_ad_from_data|tensor_ad_parameter|tensor_ad_add|tensor_ad_sub|tensor_ad_mul|tensor_ad_div|tensor_ad_matmul|tensor_ad_relu|tensor_ad_sigmoid|tensor_ad_tanh|tensor_ad_sum|tensor_ad_backward|tensor_ad_grad|tensor_ad_item|tensor_ad_data)\\b"
+        },
+        {
+          "comment": "LLM, typed metaprogramming, and checked networking",
+          "name": "support.function.stdlib.iris",
+          "match": "\\b(llm_client|llm_message|llm_chat|llm_chat_with_tools|llm_embed|local_onnx_model|local_model_run|meta_available|meta_program|meta_analyze|meta_emit_ir|meta_apply|tcp_connect_checked|tcp_listen_checked|tcp_accept_checked|tcp_write_all_checked|tcp_read_bounded|tcp_shutdown_checked|tcp_close_checked)\\b"
         }
       ]
     },
@@ -291,7 +357,7 @@
       "patterns": [
         {
           "name": "keyword.operator.arithmetic.iris",
-          "match": "(\\+|-|\\*|/|%)"
+          "match": "(\\+|(?!->)-|\\*|/|%)"
         },
         {
           "name": "keyword.operator.comparison.iris",
@@ -299,7 +365,7 @@
         },
         {
           "name": "keyword.operator.logical.iris",
-          "match": "(&&|\\|\\||!)"
+          "match": "(&&|\\|\\||(?!=)!)"
         },
         {
           "name": "keyword.operator.assignment.iris",

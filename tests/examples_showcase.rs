@@ -1,163 +1,108 @@
-//! End-to-end example coverage for the IRIS examples folder.
+//! Public learning material is an executable, classified release contract.
+#[path = "support/learning.rs"]
+mod learning;
 
-use iris::{compile_file, EmitKind};
-use std::path::{Path, PathBuf};
+use serde_json::Value;
+use std::collections::BTreeSet;
+use std::path::Path;
 
-fn example_path(name: &str) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("examples")
-        .join(name)
+fn catalog() -> Vec<Value> {
+    serde_json::from_str::<Value>(include_str!("../examples/catalog.json"))
+        .expect("valid learning catalog")["entries"]
+        .as_array()
+        .unwrap()
+        .clone()
+}
+
+fn iris_files(dir: &Path, root: &Path, found: &mut BTreeSet<String>) {
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            iris_files(&path, root, found);
+        } else if path.extension().is_some_and(|ext| ext == "iris") {
+            found.insert(
+                path.strip_prefix(root)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/"),
+            );
+        }
+    }
 }
 
 #[test]
-fn arrays_example_runs() {
-    let out = compile_file(&example_path("01_basics/arrays.iris"), EmitKind::Eval).unwrap();
-    assert!(out.contains("sum = 150"), "output was:\n{}", out);
-    assert!(out.contains("last = 9"), "output was:\n{}", out);
-}
-
-#[test]
-fn concurrency_example_runs() {
-    let out = compile_file(&example_path("05_systems/concurrency.iris"), EmitKind::Eval).unwrap();
-    assert!(
-        out.contains("messages received = 5") || out.trim() == "0",
-        "output was:\n{}",
-        out
-    );
-    assert!(
-        out.contains("message total = 15") || out.trim() == "0",
-        "output was:\n{}",
-        out
-    );
-    assert!(
-        out.contains("atomic counter = 5") || out.trim() == "0",
-        "output was:\n{}",
-        out
-    );
-}
-
-#[test]
-fn ffi_example_runs() {
-    let out = compile_file(&example_path("05_systems/ffi.iris"), EmitKind::Eval).unwrap();
-    assert!(out.contains("ffi = ffi"), "output was:\n{}", out);
-}
-
-#[test]
-fn loops_example_runs() {
-    let out = compile_file(&example_path("01_basics/loops.iris"), EmitKind::Eval).unwrap();
-    assert!(out.contains("sum_to(10) = 55"), "output was:\n{}", out);
-    assert!(out.contains("sum_odds(10) = 25"), "output was:\n{}", out);
-    assert!(
-        out.contains("first_even_after(7) = 8"),
-        "output was:\n{}",
-        out
-    );
-    assert!(
-        out.contains("count_pairs(3, 2) = 6"),
-        "output was:\n{}",
-        out
-    );
-}
-
-#[test]
-fn neural_net_example_runs() {
-    let out = compile_file(
-        &example_path("06_machine_learning/neural_net.iris"),
-        EmitKind::Eval,
-    )
-    .unwrap();
-    assert!(out.contains("pred(0,0) = "), "output was:\n{}", out);
-    assert!(out.contains("pred(1,1) = "), "output was:\n{}", out);
-    assert!(out.contains("xor loss = "), "output was:\n{}", out);
-}
-
-#[test]
-fn ml_full_pipeline_example_runs() {
-    let out = compile_file(
-        &example_path("06_machine_learning/ml_full_pipeline.iris"),
-        EmitKind::Eval,
-    )
-    .unwrap();
-    assert!(out.contains("ingested rows = 8"), "output was:\n{}", out);
-    assert!(out.contains("updated accuracy = "), "output was:\n{}", out);
-    assert!(
-        out.contains("expected output = approve"),
-        "output was:\n{}",
-        out
-    );
-    assert!(out.contains("torch hook = ready"), "output was:\n{}", out);
-    assert!(
-        out.contains("tensorflow hook = ready"),
-        "output was:\n{}",
-        out
+fn every_public_source_has_an_explicit_execution_contract() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let entries = catalog();
+    let mut actual = BTreeSet::new();
+    iris_files(&root.join("examples"), root, &mut actual);
+    iris_files(&root.join("projects"), root, &mut actual);
+    let mut indexed = BTreeSet::new();
+    for entry in entries {
+        let path = entry["path"].as_str().unwrap();
+        assert!(
+            indexed.insert(path.to_owned()),
+            "duplicate catalog path: {path}"
+        );
+        let mode = entry["mode"].as_str().unwrap();
+        assert!(
+            ["dual", "native", "host", "module", "embedded", "manual", "graph"].contains(&mode)
+        );
+        let source = std::fs::read_to_string(root.join(path)).unwrap();
+        if ["dual", "native", "host", "manual"].contains(&mode) {
+            assert!(source.contains("assert("), "{path} has no assertions");
+            assert!(
+                source.contains("return 0"),
+                "{path} has no explicit success return"
+            );
+        }
+    }
+    assert_eq!(
+        actual, indexed,
+        "catalog must classify every public IRIS source"
     );
 }
 
 #[test]
-fn networking_example_runs() {
-    let out = compile_file(&example_path("05_systems/networking.iris"), EmitKind::Eval).unwrap();
-    assert!(out.contains("preview status = 200"), "output was:\n{}", out);
-    assert!(
-        out.contains("preview body = echo: hello"),
-        "output was:\n{}",
-        out
-    );
-    assert!(out.contains("status = 200"), "output was:\n{}", out);
-    assert!(out.contains("body = ready"), "output was:\n{}", out);
+fn public_programs_run_natively_without_interpreter_fallback() {
+    for entry in catalog() {
+        if ["dual", "native"].contains(&entry["mode"].as_str().unwrap()) {
+            learning::run(
+                entry["path"].as_str().unwrap(),
+                "native",
+                entry["expected"].as_str().unwrap(),
+            );
+        } else if entry["mode"] == "graph" {
+            learning::run(
+                entry["path"].as_str().unwrap(),
+                "graph",
+                entry["expected"].as_str().unwrap(),
+            );
+        }
+    }
 }
 
 #[test]
-fn backend_example_runs() {
-    let out = compile_file(&example_path("05_systems/backend.iris"), EmitKind::Eval).unwrap();
-    assert!(out.contains("routes = 6"), "output was:\n{}", out);
-    assert!(
-        out.contains("health = {\"status\":\"ok\"}"),
-        "output was:\n{}",
-        out
-    );
-    assert!(
-        out.contains("echo = {\"echo\":\"hello\"}"),
-        "output was:\n{}",
-        out
-    );
+fn public_programs_and_host_tools_run_in_the_interpreter() {
+    for entry in catalog() {
+        if ["dual", "host"].contains(&entry["mode"].as_str().unwrap()) {
+            learning::run(
+                entry["path"].as_str().unwrap(),
+                "interpreter",
+                entry["expected"].as_str().unwrap(),
+            );
+        }
+    }
 }
 
 #[test]
-fn database_example_runs() {
-    let out = compile_file(&example_path("05_systems/database.iris"), EmitKind::Eval).unwrap();
-    assert!(
-        out.contains("rows = 2") || out.trim() == "0",
-        "output was:\n{}",
-        out
-    );
-    assert!(
-        out.contains("first = Write docs") || out.trim() == "0",
-        "output was:\n{}",
-        out
-    );
-    assert!(
-        out.contains("second = Ship release") || out.trim() == "0",
-        "output was:\n{}",
-        out
-    );
-}
-
-#[test]
-fn sql_params_example_runs() {
-    let out = compile_file(&example_path("05_systems/sql_params.iris"), EmitKind::Eval).unwrap();
-    assert!(
-        out.contains("Query result:") || out.trim() == "0",
-        "output was:\n{}",
-        out
-    );
-    assert!(
-        out.contains("Bob, 25") || out.trim() == "0",
-        "output was:\n{}",
-        out
-    );
-    assert!(
-        out.contains("matched rows = 1") || out.trim() == "0",
-        "output was:\n{}",
-        out
-    );
+fn service_and_sdk_entries_are_compile_checked() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    for entry in catalog() {
+        if entry["mode"] == "manual" {
+            let path = entry["path"].as_str().unwrap();
+            iris::compile_file_to_module(&root.join(path))
+                .unwrap_or_else(|error| panic!("{path}: {error}"));
+        }
+    }
 }

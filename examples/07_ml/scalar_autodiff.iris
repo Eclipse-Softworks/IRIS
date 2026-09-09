@@ -1,0 +1,17 @@
+def squared_prediction(weight : f64, input : f64) -> f64 {
+    val prediction = weight * input;
+    return prediction * prediction
+}
+def main() -> i64 {
+    val weight = tape(1.0);
+    var loss = tape(0.0);
+
+    for sample in 1 .. 5 {
+        loss = loss + squared_prediction(weight, to_f64(sample));
+    };
+
+    backward(loss);
+    assert(grad(weight) == 60.0);
+    println("scalar autodiff: ok");
+    return 0
+}

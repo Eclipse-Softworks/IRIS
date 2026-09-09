@@ -1,0 +1,17 @@
+// Test Issue 9: pub bring re-exporting record and choice types
+bring "issue9_mid.iris"
+
+def check_health(d: Device) -> i64 {
+    when d.health {
+        Health.Nominal => 1,
+        Health.Degraded => 2,
+    }
+}
+
+def test_pub_bring_types() -> i64 {
+    val d: Device = Device { name: "sensor1", health: Health.Nominal };
+    assert(check_health(d) == 1);
+    val d2 = nominal_device("sensor2");
+    assert(check_health(d2) == 1);
+    0
+}

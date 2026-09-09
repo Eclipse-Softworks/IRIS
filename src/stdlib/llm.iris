@@ -1,0 +1,188 @@
+bring std.http
+bring std.json
+bring std.os
+bring std.ml
+
+/// Provider-neutral LLM and local-model integration.
+
+pub record LlmClient {
+    chat_url: str,
+    embeddings_url: str,
+    model_name: str,
+    api_key_env: str,
+    timeout_ms: i64,
+}
+
+pub record LlmMessage {
+    role: str,
+    content: str,
+}
+
+pub record LlmTool {
+    name: str,
+    description: str,
+    parameters_json: str,
+}
+
+pub record LlmResponse {
+    status: i64,
+    content: str,
+    tool_calls_json: str,
+    raw_json: str,
+}
+
+pub record EmbeddingResponse {
+    status: i64,
+    vector_json: str,
+    raw_json: str,
+}
+
+pub record LocalModel {
+    handle: i64,
+    backend: str,
+}
+
+pub def llm_client(chat_url: str, embeddings_url: str, model_name: str, api_key_env: str, timeout_ms: i64) -> LlmClient {
+    return LlmClient {
+        chat_url: chat_url,
+        embeddings_url: embeddings_url,
+        model_name: model_name,
+        api_key_env: api_key_env,
+        timeout_ms: timeout_ms,
+    }
+}
+
+pub def llm_message(role: str, content: str) -> LlmMessage {
+    return LlmMessage { role: role, content: content }
+}
+
+pub def llm_message_json(message: LlmMessage) -> str effect alloc, io {
+    return concat(concat(concat(concat("{\"role\":", json_stringify(message.role)), ",\"content\":"), json_stringify(message.content)), "}")
+}
+
+pub def llm_messages_json(messages: list<LlmMessage>) -> str effect alloc, io {
+    val encoded: list<str> = list()
+    for i in 0..list_len(messages) {
+        list_push(encoded, llm_message_json(list_get(messages, i)));
+    }
+    return concat(concat("[", join(encoded, ",")), "]")
+}
+
+pub def llm_tool_json(tool: LlmTool) -> str effect alloc, io {
+    return concat(concat(concat(concat(concat(concat(
+        "{\"type\":\"function\",\"function\":{\"name\":",
+        json_stringify(tool.name)),
+        ",\"description\":"),
+        json_stringify(tool.description)),
+        ",\"parameters\":"),
+        tool.parameters_json),
+        "}}")
+}
+
+pub def llm_tools_json(tools: list<LlmTool>) -> str effect alloc, io {
+    val encoded: list<str> = list()
+    for i in 0..list_len(tools) {
+        list_push(encoded, llm_tool_json(list_get(tools, i)));
+    }
+    return concat(concat("[", join(encoded, ",")), "]")
+}
+
+pub def llm_authorization_headers(client: LlmClient) -> result<str, str> effect env, alloc, io {
+    if client.api_key_env == "" {
+        return ok("Accept: application/json\r\n")
+    }
+    val key = getenv(client.api_key_env)
+    if key == "" {
+        return err(concat("missing LLM API key environment variable: ", client.api_key_env))
+    }
+    return ok(concat(concat("Authorization: Bearer ", key), "\r\nAccept: application/json\r\n"))
+}
+
+pub def llm_request_json(client: LlmClient, messages: list<LlmMessage>, temperature: f64, max_tokens: i64, tools_json: str) -> str effect alloc, io {
+    val tools = if tools_json == "" { "" } else { concat(",\"tools\":", tools_json) }
+    return concat(concat(concat(concat(concat(concat(concat(concat(concat(
+        "{\"model\":", json_stringify(client.model_name)),
+        ",\"messages\":"), llm_messages_json(messages)),
+        ",\"temperature\":"), to_str(temperature)),
+        ",\"max_tokens\":"), to_str(max_tokens)),
+        tools), "}")
+}
+
+pub def llm_response_from_json(status: i64, raw_json: str) -> result<LlmResponse, str> effect alloc, io {
+    if status < 200 || status >= 300 {
+        return err(concat(concat("LLM provider returned HTTP ", to_str(status)), concat(": ", raw_json)))
+    }
+    val primary = json_query(raw_json, "choices.0.message.content")
+    val content = if primary == "" { json_query(raw_json, "content") } else { primary }
+    val tool_calls = json_query(raw_json, "choices.0.message.tool_calls")
+    if content == "" && tool_calls == "" {
+        return err("LLM response contained neither message content nor tool calls")
+    }
+    return ok(LlmResponse { status: status, content: content, tool_calls_json: tool_calls, raw_json: raw_json })
+}
+
+pub def llm_chat_with_tools(client: LlmClient, messages: list<LlmMessage>, temperature: f64, max_tokens: i64, tools_json: str) -> result<LlmResponse, str> effect net, env, alloc, io, throw {
+    val headers = llm_authorization_headers(client)
+    if is_err(headers) { return err(unwrap_err(headers)) }
+    val request = HttpRequest {
+        method: "POST",
+        url: client.chat_url,
+        headers: unwrap(headers),
+        body: llm_request_json(client, messages, temperature, max_tokens, tools_json),
+        timeout_ms: client.timeout_ms,
+    }
+    val response = http_send(request)
+    if is_err(response) { return err(unwrap_err(response)) }
+    val value = unwrap(response)
+    return llm_response_from_json(value.status, value.body)
+}
+
+pub def llm_chat(client: LlmClient, messages: list<LlmMessage>, temperature: f64, max_tokens: i64) -> result<LlmResponse, str> effect net, env, alloc, io, throw {
+    return llm_chat_with_tools(client, messages, temperature, max_tokens, "")
+}
+
+pub def llm_embed(client: LlmClient, input: str) -> result<EmbeddingResponse, str> effect net, env, alloc, io, throw {
+    val headers = llm_authorization_headers(client)
+    if is_err(headers) { return err(unwrap_err(headers)) }
+    val body = concat(concat(concat(concat("{\"model\":", json_stringify(client.model_name)), ",\"input\":"), json_stringify(input)), "}")
+    val response = http_send(HttpRequest {
+        method: "POST",
+        url: client.embeddings_url,
+        headers: unwrap(headers),
+        body: body,
+        timeout_ms: client.timeout_ms,
+    })
+    if is_err(response) { return err(unwrap_err(response)) }
+    val value = unwrap(response)
+    if value.status < 200 || value.status >= 300 {
+        return err(concat("embedding provider HTTP error: ", to_str(value.status)))
+    }
+    val vector = json_query(value.body, "data.0.embedding")
+    if vector == "" { return err("embedding response has no data.0.embedding") }
+    return ok(EmbeddingResponse { status: value.status, vector_json: vector, raw_json: value.body })
+}
+
+/// Load a custom local model through a backend already supported by std.ml.
+pub def local_onnx_model(path: str) -> result<LocalModel, str> effect ffi, fs, alloc {
+    val handle = onnx_load(path)
+    if handle == 0 { return err("failed to load local ONNX model") }
+    return ok(LocalModel { handle: handle, backend: "onnx" })
+}
+
+pub def local_model_run(local: LocalModel, input: MLTensor) -> result<MLTensor, str> effect ffi, alloc, io {
+    if local.backend == "onnx" {
+        return ok(onnx_run(local.handle, input))
+    }
+    if local.backend == "pytorch" {
+        return ok(pytorch_run(local.handle, input))
+    }
+    if local.backend == "tensorflow" {
+        return ok(tensorflow_run(local.handle, input))
+    }
+    return err(concat("unsupported local model backend: ", local.backend))
+}
+
+pub def local_pytorch_train_step(local: LocalModel, inputs: list<MLTensor>, targets: list<MLTensor>, learning_rate: f64) -> result<f64, str> effect ffi, alloc {
+    if local.backend != "pytorch" { return err("training requires a PyTorch local model") }
+    return ok(pytorch_train_step(local.handle, inputs, targets, learning_rate))
+}

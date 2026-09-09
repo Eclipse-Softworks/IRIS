@@ -1,0 +1,4 @@
+/// Stable scalar ABI. The baseline is intentionally less fit on the target cases.
+def policy(input : i64) -> i64 {
+    return input * 2
+}

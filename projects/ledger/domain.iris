@@ -1,0 +1,29 @@
+pub
+record Entry {
+    label : str, cents : i64
+}
+pub def balance(entries : list<Entry>) -> i64 {
+    var total = 0;
+    for index in 0 .. list_len(entries) {
+        total = total + list_get(entries, index).cents;
+
+    }
+    ;
+    return total
+}
+pub def debit(entries : list<Entry>, label : str, cents : i64) -> result<i64,
+str> {
+    if cents <= 0 {
+        return err("amount must be positive")
+    }
+    ;
+    if balance(entries)<cents {
+        return err("insufficient funds")
+    }
+    ;
+    list_push(entries, Entry {
+        label : label, cents : - cents
+    }
+   );
+    return ok(balance(entries))
+}

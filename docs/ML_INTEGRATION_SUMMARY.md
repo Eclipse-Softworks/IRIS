@@ -2,7 +2,10 @@
 
 ## Status: ✅ Bridge Architecture Complete & Validated
 
-The ML integration bridge is now production-ready for real model execution. All structural components have been implemented and tested.
+The ML integration bridge architecture is implemented for real model execution.
+Backend readiness remains SDK-, ABI-, target-, and model-dependent; use the
+backend-specific tests and requirements below rather than treating this document
+as a general production certification.
 
 ## What Was Implemented
 
@@ -160,7 +163,7 @@ When ONNX Runtime SDK is installed and environment configured:
 ✅ **Memory Safe**: Proper cleanup of ORT resources
 ✅ **Graceful Fallback**: Works without ONNX Runtime via stubs
 ✅ **Platform Agnostic**: Compiles on Windows/Linux/macOS
-✅ **Production Ready**: Error handling, null checks, logging
+✅ **Implemented bridge safeguards**: Error handling, null checks, logging
 
 ## Known Limitations
 
@@ -171,7 +174,10 @@ When ONNX Runtime SDK is installed and environment configured:
 
 ## LibTorch & TensorFlow SavedModel Integrations Completely Hardened
 
-Both the PyTorch (LibTorch) and TensorFlow SavedModel backend engines are now fully integrated and production-ready in the IRIS C runtime shims, mapping to type-safe and robust data-flow representations.
+PyTorch (LibTorch) and TensorFlow SavedModel bridge engines are integrated in
+the IRIS C runtime shims. Deployment support depends on a compatible vendor SDK
+and ABI; LibTorch's MSVC C++ ABI is intentionally excluded from MinGW native
+links.
 
 1. **PyTorch (LibTorch) C++ Engine (`src/runtime/pytorch_shim.cpp`)**
    - **TorchScript Support**: Compiles under `LIBTORCH_ENABLED` to load compiled `.pt` scripted models.
@@ -233,7 +239,7 @@ typedef struct {
 
 ## Ready for Production Use
 
-The ML integration bridge is **production-ready** for:
+The ML integration bridge is implemented and testable for:
 
 - ONNX model inference on Windows/Linux/macOS
 - Real tensor round-tripping with shape preservation

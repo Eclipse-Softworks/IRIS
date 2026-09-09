@@ -4,56 +4,87 @@
 // built-in C runtime over TCP.  The message helpers below build/parse
 // raw HTTP/1.1 strings for use with tcp_connect/tcp_read/tcp_write.
 
-// ── HTTP Client ───────────────────────────────────────────────────────────────
+// -- HTTP Client --------------------------------------------------------------
 
-// Perform a GET request. Returns the response body as a string.
-pub def http_get(url: str) -> str {
-    http_get(url)
+pub record HttpRequest {
+    method: str,
+    url: str,
+    headers: str,
+    body: str,
+    timeout_ms: i64,
 }
 
-// Perform a POST request with a plain-text body. Returns the response body.
-pub def http_post(url: str, body: str) -> str {
-    http_post(url, body)
+pub record HttpResponse {
+    status: i64,
+    body: str,
 }
 
-// Perform an HTTP request with explicit method, url, and body.
-// method is "GET", "POST", "PUT", "DELETE", etc.
-pub def http_request(method: str, url: str, body: str) -> str {
-    http_request(method, url, body)
+extern def iris_http_request_headers(method: str, url: str, body: str, headers: str, timeout_ms: i64) -> str effect net, alloc
+extern def iris_http_last_status() -> i64 effect net
+extern def iris_http_tls_available() -> i64 effect pure
+
+pub def http_tls_available() -> bool {
+    return iris_http_tls_available() == 1
 }
 
-// Perform a POST request with a JSON body (sets Content-Type: application/json).
-pub def http_post_json(url: str, json_body: str) -> str {
-    http_post_json(url, json_body)
+/// Send an HTTP request with caller-supplied headers, a bounded timeout and an
+/// explicit status-bearing response. Header lines must end in `\r\n`.
+pub def http_send(request: HttpRequest) -> result<HttpResponse, str> effect net, alloc {
+    if request.timeout_ms <= 0 {
+        return err("HTTP timeout must be positive")
+    }
+    if starts_with(request.url, "https://") && http_tls_available() == false {
+        return err("HTTPS is unavailable on this runtime")
+    }
+    val body = iris_http_request_headers(request.method, request.url, request.body, request.headers, request.timeout_ms)
+    val status = iris_http_last_status()
+    if status <= 0 {
+        return err("HTTP transport failed before a response status was received")
+    }
+    return ok(HttpResponse { status: status, body: body })
 }
+//
+// `http_get`, `http_post`, `http_request` and `http_post_json` are **builtins**,
+// provided by the C runtime over TCP. They are available to anything that
+// brings this module and need no wrapper here.
+//
+// Four wrappers used to sit at this point, each of the form
+//
+//     pub def http_get(url: str) -> str effect net { http_get(url) }
+//
+// which is a self-call, not a forward. They worked only because a builtin
+// silently won over a same-named user function; once that was fixed
+// (known-issues #15) they became unbounded recursion, and any program calling
+// http_get stopped with "call depth exceeded 250". Deleting them restores the
+// builtin at the same name. See known-issues #42.
 
 // ── HTTP Request building ────────────────────────────────────────────────────
 
-// Build a minimal GET request string.
-pub def http_get_request(host: str, path: str) -> str {
+/// Build a minimal GET request string for raw TCP usage.
+pub def http_get_request(host: str, path: str) -> str effect alloc, io {
     concat(concat(concat(concat("GET ", path), " HTTP/1.1\r\nHost: "), host), "\r\n\r\n")
 }
 
-// Build a minimal POST request string.
-pub def http_post_request(host: str, path: str, body: str) -> str {
+/// Build a minimal POST request string for raw TCP usage.
+pub def http_post_request(host: str, path: str, body: str) -> str effect alloc, io {
     val body_len = to_str(len(body))
     concat(concat(concat(concat(concat(concat(concat(
         "POST ", path), " HTTP/1.1\r\nHost: "), host),
         "\r\nContent-Length: "), body_len), "\r\n\r\n"), body)
 }
 
-// Build an HTTP/1.1 response string.
-pub def http_response(status: i64, status_text: str, body: str) -> str {
+/// Build an HTTP/1.1 response string with status, status text, and body.
+pub def http_response(status: i64, status_text: str, body: str) -> str effect alloc, io {
     val body_len = to_str(len(body))
     val line1 = concat(concat(concat(concat("HTTP/1.1 ", to_str(status)), " "), status_text), "\r\n")
     val headers = concat("Content-Length: ", concat(body_len, "\r\n"))
     concat(concat(concat(line1, headers), "\r\n"), body)
 }
 
-// ── HTTP Request parsing ─────────────────────────────────────────────────────
+// ── HTTP Request parsing ────────────────────────────────────────────────────
 
-// Extract the method from a raw HTTP request ("GET", "POST", etc.).
-pub def http_request_method(raw: str) -> str {
+/// Extract the HTTP method from a raw request ("GET", "POST", etc.).
+pub def http_request_method(raw: str) -> str effect throw {
     val first_space = find(raw, " ")
     if is_some(first_space) {
         slice(raw, 0, unwrap(first_space))
@@ -62,8 +93,8 @@ pub def http_request_method(raw: str) -> str {
     }
 }
 
-// Extract the path from a raw HTTP request.
-pub def http_request_path(raw: str) -> str {
+/// Extract the request path from a raw HTTP request.
+pub def http_request_path(raw: str) -> str effect throw {
     val first_space = find(raw, " ")
     if is_some(first_space) {
         val after_method = slice(raw, unwrap(first_space) + 1, len(raw))
@@ -78,8 +109,8 @@ pub def http_request_path(raw: str) -> str {
     }
 }
 
-// Extract the body from a raw HTTP message (after "\r\n\r\n").
-pub def http_body(raw: str) -> str {
+/// Extract the body from a raw HTTP message (after "\r\n\r\n").
+pub def http_body(raw: str) -> str effect throw {
     val sep = find(raw, "\r\n\r\n")
     if is_some(sep) {
         slice(raw, unwrap(sep) + 4, len(raw))
@@ -90,9 +121,9 @@ pub def http_body(raw: str) -> str {
 
 // ── HTTP Response parsing ────────────────────────────────────────────────────
 
-// Extract the status code (as i64) from a raw HTTP response.
-pub def http_status_code(raw: str) -> i64 {
-    // Format: "HTTP/1.1 200 OK\r\n..."
+/// Extract the status code (as i64) from a raw HTTP response.
+/// Format: "HTTP/1.1 200 OK\r\n..."
+pub def http_status_code(raw: str) -> i64 effect throw {
     val space1 = find(raw, " ")
     if is_some(space1) {
         val after_version = slice(raw, unwrap(space1) + 1, len(raw))
@@ -109,8 +140,9 @@ pub def http_status_code(raw: str) -> i64 {
     }
 }
 
-// Extract a named header value from a raw HTTP message.
-pub def http_header(raw: str, name: str) -> str {
+/// Extract a named header value from a raw HTTP message.
+/// Returns empty string if header not found.
+pub def http_header(raw: str, name: str) -> str effect alloc, io, throw {
     val header_search = concat(name, ": ")
     // Split headers section (before \r\n\r\n)
     val body_sep = find(raw, "\r\n\r\n")

@@ -1,0 +1,12 @@
+bring std.ffi /// A checked lifetime around a manually managed FFI output buffer.
+def main() -> i64 {
+    val cell = out_i64_cell(2);
+    assert(cell != 0);
+    out_set_i64(cell, 0, 42);
+    out_set_i64(cell, 1, 100);
+    assert(out_i64(cell, 0) == 42);
+    assert(out_i64(cell, 1) == 100);
+    out_free(cell);
+    println("ffi cells: ok");
+    return 0
+}

@@ -1,10 +1,11 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::ir::block::{BlockId, IrBlock};
 use crate::ir::function::{FunctionId, IrFunction, Param, SpanTable};
 use crate::ir::instr::{InstrId, IrInstr};
-use crate::ir::types::IrType;
+use crate::ir::types::{IrType, TraitMethodSig};
 use crate::ir::value::{BlockParam, ValueDef, ValueId};
+use crate::parser::ast::AstExpr;
 
 /// The top-level IR container.
 ///
@@ -20,6 +21,8 @@ pub struct IrExternFn {
     pub name: String,
     pub param_types: Vec<IrType>,
     pub ret_ty: IrType,
+    pub abi: Option<String>,      // e.g. Some("C") for C calling convention
+    pub link_lib: Option<String>, // e.g. Some("m") for -lm
 }
 
 #[derive(Debug, Default, Clone)]
@@ -36,6 +39,18 @@ pub struct IrModule {
     pub(crate) type_aliases: HashMap<String, IrType>,
     /// Extern function declarations: name → signature.
     pub extern_fns: Vec<IrExternFn>,
+    /// Trait definitions: trait_name → list of method signatures (no `self`).
+    /// Used to resolve `dyn Trait` IR types and to lay out vtables at codegen.
+    pub(crate) trait_defs: HashMap<String, Vec<TraitMethodSig>>,
+    /// Impl method mangled names: trait_name → (concrete_struct_name, method_name, mangled_fn).
+    /// Populated when `impl Trait for Type` is processed so codegen can build
+    /// the per-concrete-type vtable global.
+    pub(crate) trait_impl_methods: HashMap<String, Vec<(String, String, String)>>,
+    /// Default values for struct fields: struct_name → Vec<default_expr_or_none>.
+    /// Indexed in parallel with `struct_defs[name]`.
+    pub(crate) struct_defaults: HashMap<String, Vec<Option<AstExpr>>>,
+    /// Names of generic struct templates that require monomorphization.
+    pub(crate) generic_struct_names: HashSet<String>,
 }
 
 impl IrModule {
@@ -48,6 +63,10 @@ impl IrModule {
             enum_defs: HashMap::new(),
             type_aliases: HashMap::new(),
             extern_fns: Vec::new(),
+            trait_defs: HashMap::new(),
+            trait_impl_methods: HashMap::new(),
+            struct_defaults: HashMap::new(),
+            generic_struct_names: HashSet::new(),
         }
     }
 
@@ -68,6 +87,11 @@ impl IrModule {
     /// Looks up a struct definition by name.
     pub fn struct_def(&self, name: &str) -> Option<&Vec<(String, IrType)>> {
         self.struct_defs.get(name)
+    }
+
+    /// Looks up default values for struct fields by name.
+    pub fn struct_defaults(&self, name: &str) -> Option<&Vec<Option<AstExpr>>> {
+        self.struct_defaults.get(name)
     }
 
     /// Registers an enum definition. Returns `Err` if the name already exists.
@@ -108,6 +132,40 @@ impl IrModule {
     /// Looks up a type alias by name.
     pub fn type_alias(&self, name: &str) -> Option<&IrType> {
         self.type_aliases.get(name)
+    }
+
+    /// Registers a trait definition (method signatures only — bodies live in impl fns).
+    pub fn add_trait_def(&mut self, name: impl Into<String>, methods: Vec<TraitMethodSig>) {
+        self.trait_defs.insert(name.into(), methods);
+    }
+
+    /// Returns the trait definition (ordered method signatures) for `name`.
+    pub fn trait_def(&self, name: &str) -> Option<&Vec<TraitMethodSig>> {
+        self.trait_defs.get(name)
+    }
+
+    /// All trait definitions. Used at codegen to lay out vtables.
+    pub fn trait_defs(&self) -> &HashMap<String, Vec<TraitMethodSig>> {
+        &self.trait_defs
+    }
+
+    /// Records an impl method entry: `(concrete_struct, method_name, mangled_fn)`.
+    pub fn add_trait_impl_method(
+        &mut self,
+        trait_name: impl Into<String>,
+        concrete: impl Into<String>,
+        method: impl Into<String>,
+        mangled: impl Into<String>,
+    ) {
+        self.trait_impl_methods
+            .entry(trait_name.into())
+            .or_default()
+            .push((concrete.into(), method.into(), mangled.into()));
+    }
+
+    /// All impl-method entries vtable-table for codegen consumption.
+    pub fn trait_impl_methods(&self) -> &HashMap<String, Vec<(String, String, String)>> {
+        &self.trait_impl_methods
     }
 
     pub fn function(&self, id: FunctionId) -> Option<&IrFunction> {
@@ -169,12 +227,17 @@ impl IrFunctionBuilder {
             attrs: Vec::new(),
             span_table: SpanTable::default(),
             capture_count: 0,
+            is_const: false,
         };
         Self {
             func,
             current_block: None,
             current_span: None,
         }
+    }
+
+    pub fn func_name(&self) -> &str {
+        &self.func.name
     }
 
     /// Records the source byte offset of the statement currently being lowered.
@@ -262,13 +325,46 @@ impl IrFunctionBuilder {
                 .span_table
                 .entries
                 .insert((block_id.0, instr_idx), byte);
+            if let Some(res_id) = result {
+                self.func.span_table.value_spans.insert(res_id, byte);
+            }
         }
 
         self.func.blocks[block_id.0 as usize].instrs.push(instr);
         result
     }
 
+    /// Returns the first block param of the current block, if any.
+    /// Useful when a block has no tail expression but has an incoming value
+    /// (e.g. from `?` unwrapping).
+    pub fn current_block_first_param(&self) -> Option<(ValueId, IrType)> {
+        let block_id = self.current_block?;
+        self.func.blocks[block_id.0 as usize]
+            .params
+            .first()
+            .map(|p| (p.id, p.ty.clone()))
+    }
+
     /// Returns true if the current block already ends with a terminator.
+    /// Appends an argument to the `Br` terminating `block`, when it targets
+    /// `target`. Returns whether it did.
+    ///
+    /// Needed because a branch's arguments are emitted before its sibling has
+    /// been lowered, so whether a value carries an autodiff tape handle is not
+    /// known until both arms exist. See known-issues #50.
+    pub(crate) fn append_br_arg(&mut self, block: BlockId, target: BlockId, arg: ValueId) -> bool {
+        let Some(b) = self.func.blocks.get_mut(block.0 as usize) else {
+            return false;
+        };
+        match b.instrs.last_mut() {
+            Some(IrInstr::Br { target: t, args }) if *t == target => {
+                args.push(arg);
+                true
+            }
+            _ => false,
+        }
+    }
+
     pub fn is_current_block_terminated(&self) -> bool {
         if let Some(block_id) = self.current_block {
             self.func.blocks[block_id.0 as usize].is_sealed()

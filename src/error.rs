@@ -9,11 +9,23 @@ fn format_undef(name: &str, suggestion: Option<&str>) -> String {
         name
     );
     if let Some(s) = suggestion {
-        format!(
-            "{}
+        // A single-word suggestion is a name the user probably meant to type,
+        // so "did you mean 'foo'?" fits. Anything longer is already a sentence
+        // (e.g. the `pub` visibility hint) and reads as nonsense inside that
+        // template, so it is emitted as a plain help line.
+        if s.contains(' ') {
+            format!(
+                "{}
+  help: {}",
+                base, s
+            )
+        } else {
+            format!(
+                "{}
   help: did you mean '{}'?",
-            base, s
-        )
+                base, s
+            )
+        }
     } else {
         base
     }
@@ -39,6 +51,9 @@ pub enum Error {
 
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
+
+    #[error("{}", format_error_pretty("preprocessor error", _0))]
+    Preprocessor(String),
 }
 
 /// Formats a compiler error in a human-friendly style.
@@ -115,6 +130,14 @@ pub enum LowerError {
 
     #[error("unsupported expression — {detail}. This construct is not yet supported by the IRIS compiler")]
     Unsupported { detail: String, span: Span },
+
+    /// Valid syntax that the language deliberately does not permit.
+    ///
+    /// Distinct from `Unsupported`, whose message promises the construct may
+    /// arrive later. A concurrency violation is not a missing feature and
+    /// telling the programmer to wait for it would be wrong.
+    #[error("{detail}")]
+    Rejected { detail: String, span: Span },
 
     #[error("cannot find layer or input '{name}' — make sure it is defined earlier in the model")]
     UndefinedLayer { name: String, span: Span },
@@ -244,6 +267,7 @@ impl Error {
                 LowerError::TypeMismatch { .. } => "E0101",
                 LowerError::DuplicateFunction { .. } => "E0102",
                 LowerError::Unsupported { .. } => "E0103",
+                LowerError::Rejected { .. } => "E0108",
                 LowerError::UndefinedLayer { .. } => "E0104",
                 LowerError::DuplicateNode { .. } => "E0105",
                 LowerError::InvalidLayerParam { .. } => "E0106",
@@ -276,6 +300,7 @@ impl Error {
                 }
             }
             Error::Io(_) => "E0500",
+            Error::Preprocessor(_) => "E0501",
         }
     }
 }

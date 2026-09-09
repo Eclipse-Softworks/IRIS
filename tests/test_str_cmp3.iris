@@ -1,0 +1,25 @@
+// String comparison must give the same answers for a value read out of a list
+// as for the equivalent literal.
+def main() -> i64 {
+    var lst: list<str> = list()
+    push(lst, "cherry");
+    push(lst, "x");
+    val c = list_get(lst, 0)
+    val d = list_get(lst, 1)
+
+    assert(c == "cherry");
+    assert((c == "x") == false);
+
+    // "cherry" < "x": 'c' precedes 'x'.
+    assert(c < d);
+    assert(c < "z");
+    assert("cherry" < "z");
+
+    // Not less than itself.
+    assert((c < "cherry") == false);
+    // And the ordering is not symmetric, which a comparison stuck at `true`
+    // would fail.
+    assert((d < c) == false);
+    println("str cmp3 ok");
+    0
+}

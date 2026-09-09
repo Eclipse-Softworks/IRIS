@@ -1,0 +1,266 @@
+bring std.fmt
+def checked(x : i64) -> result<i64, str> {
+    if x >= 0 {
+        ok(x)
+    }
+    else {
+        err("negative")
+    }
+
+}
+def add_one(v : i64) -> result<i64, str> {
+    val x = checked(v)?;
+    return ok(x + 1)
+}
+def test_try_ok() -> i64 {
+    val r = add_one(5);
+    if is_ok(r) {
+        val v = unwrap(r);
+        if v == 6 {
+            print("PASS: test_try_ok returned 6");
+            return 1
+        }
+        else {
+            print(concat("FAIL: test_try_ok expected 6 got ", to_str(v)));
+            return 0
+        }
+
+    }
+    else {
+        print("FAIL: test_try_ok expected Ok got Err");
+        return 0
+    }
+
+}
+def test_try_err() -> i64 {
+    val r = add_one( - 3);
+    if is_err(r) {
+        val v = unwrap_err(r);
+        if v == "negative" {
+            print("PASS: test_try_err propagated 'negative'");
+            return 1
+        }
+        else {
+            print(concat("FAIL: test_try_err expected 'negative' got ", v));
+            return 0
+        }
+
+    }
+    else {
+        print("FAIL: test_try_err expected Err got Ok");
+        return 0
+    }
+
+}
+def inner(x : i64) -> result<i64, str> {
+    if x == 0 {
+        err("zero")
+    }
+    else {
+        ok(x * 2)
+    }
+
+}
+def outer(x : i64) -> result<i64, str> {
+    val a = inner(x)?;
+    val b = inner(a)?;
+    return ok(b);
+
+}
+def test_nested_chain() -> i64 {
+    val r1 = outer(3);
+    if is_ok(r1) {
+        val v = unwrap(r1);
+        if v == 12 {
+            print("PASS: test_nested_chain ok 12");
+
+        }
+        else {
+            print(concat("FAIL: test_nested_chain expected 12 got ", to_str(v)));
+            return 0;
+
+        }
+
+    }
+    else {
+        print("FAIL: test_nested_chain expected Ok");
+        return 0;
+
+    }
+    val r2 = outer(0);
+    if is_err(r2) {
+        val v = unwrap_err(r2);
+        if v == "zero" {
+            print("PASS: test_nested_chain err 'zero'");
+            return 1
+        }
+        else {
+            print(concat("FAIL: test_nested_chain expected 'zero' got ", v));
+            return 0
+        }
+
+    }
+    else {
+        print("FAIL: test_nested_chain expected Err");
+        return 0
+    }
+
+}
+def fallible(cond : i64) -> result<i64, str> {
+    if cond>0 {
+        val x = checked(cond)?;
+        ok(x * 10)
+    }
+    else {
+        ok(0)
+    }
+
+}
+def test_try_in_if() -> i64 {
+    val r = fallible(7);
+    if is_ok(r) {
+        val v = unwrap(r);
+        if v == 70 {
+            print("PASS: test_try_in_if returned 70");
+            return 1
+        }
+        else {
+            print(concat("FAIL: test_try_in_if expected 70 got ", to_str(v)));
+            return 0
+        }
+
+    }
+    else {
+        print("FAIL: test_try_in_if expected Ok");
+        return 0
+    }
+
+}
+def read_env(key : str) -> result<str, str> {
+    val v = env_var(key);
+    if is_some(v) {
+        ok(unwrap(v))
+    }
+    else {
+        err(concat("not found: ", key))
+    }
+
+}
+def get_or_default(key : str) -> result<str, str> {
+    val v = read_env(key)?;
+    return ok(v);
+
+}
+def test_try_str() -> i64 {
+    val r = read_env("PATH");
+    if is_ok(r) {
+        val v = unwrap(r);
+        print(concat("PASS: test_try_str PATH found (len=", concat(to_str(len(v)), ")")));
+        return 1
+    }
+    else {
+        val e = unwrap_err(r);
+        print(concat("FAIL: test_try_str PATH not found: ", e));
+        return 0
+    }
+
+}
+def try_get(x : i64) -> option<i64> {
+    if x >= 0 {
+        some(x)
+    }
+    else {
+        none()
+    }
+
+}
+def try_get_double(x : i64) -> option<i64> {
+    val a = try_get(x)?;
+    val b = try_get(a * 2)?;
+    return some(b);
+
+}
+def test_option_some_path() -> i64 {
+    val r = try_get_double(5);
+    if is_some(r) {
+        val v = unwrap(r);
+        if v == 10 {
+            print("PASS: test_option_some_path returned 10");
+            return 1
+        }
+        else {
+            print(concat("FAIL: test_option_some_path expected 10 got ", to_str(v)));
+            return 0
+        }
+
+    }
+    else {
+        print("FAIL: test_option_some_path expected Some got None");
+        return 0
+    }
+
+}
+def test_option_none_path() -> i64 {
+    val r = try_get_double( - 1);
+    if is_none(r) {
+        print("PASS: test_option_none_path propagated None");
+        return 1
+    }
+    else {
+        print("FAIL: test_option_none_path expected None got Some");
+        return 0
+    }
+
+}
+def try_map_get(m : map<i64, str>, key : i64) -> option<str> {
+    val v = map_get(m, key)?;
+    some(v)
+}
+def test_option_map_lookup() -> i64 {
+    val m : map<i64, str> = map();
+    map_set(m, 1, "one");
+    map_set(m, 2, "two");
+    val r1 = try_map_get(m, 1);
+    if is_some(r1) {
+        val v = unwrap(r1);
+        if v == "one" {
+            print("PASS: test_option_map_lookup found 'one'");
+
+        }
+        else {
+            print(concat("FAIL: test_option_map_lookup expected 'one' got ", v));
+            return 0;
+
+        }
+
+    }
+    else {
+        print("FAIL: test_option_map_lookup expected Some");
+        return 0;
+
+    }
+    val r2 = try_map_get(m, 99);
+    if is_none(r2) {
+        print("PASS: test_option_map_lookup None for missing key");
+        return 1;
+
+    }
+    else {
+        print("FAIL: test_option_map_lookup expected None for missing key");
+        return 0;
+
+    }
+
+}
+def main() -> i64 {
+    assert(test_try_ok() == 1);
+    assert(test_try_err() == 1);
+    assert(test_nested_chain() == 1);
+    assert(test_try_in_if() == 1);
+    assert(test_try_str() == 1);
+    assert(test_option_some_path() == 1);
+    assert(test_option_none_path() == 1);
+    assert(test_option_map_lookup() == 1);
+    return 0;
+
+}

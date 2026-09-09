@@ -1,0 +1,61 @@
+def main() -> i64 {
+    // Every branch below records into a counter, so "the branch ran" is
+    // observable. The file previously printed and asserted nothing, and would
+    // have passed if no branch had run at all.
+    var taken = 0;
+
+    // if let with some: the `then` branch runs and binds the payload.
+    val x = some(42);
+    var bound = 0;
+    if let some(v) = x {
+        bound = v;
+        taken = taken + 1
+    } else {
+        taken = taken + 100
+    };
+    assert(bound == 42);
+    assert(taken == 1);
+
+    // if let with none: the `else` branch runs instead.
+    val y: option<i64> = none();
+    if let some(v) = y {
+        taken = taken + 100
+    } else {
+        taken = taken + 10
+    };
+    assert(taken == 11);
+
+    // if let without else, matching.
+    val z = some(99);
+    var seen = 0;
+    if let some(v) = z {
+        seen = v
+    };
+    assert(seen == 99);
+
+    // if let without else, not matching: the body must not run.
+    val w: option<i64> = none();
+    var untouched = 5;
+    if let some(v) = w {
+        untouched = 0
+    };
+    assert(untouched == 5);
+
+    // while let drains the option.
+    var counter = some(3);
+    var iterations = 0;
+    var total = 0;
+    while let some(v) = counter {
+        iterations = iterations + 1;
+        total = total + v;
+        if v == 1 {
+            counter = none()
+        } else {
+            counter = some(v - 1)
+        }
+    };
+    assert(iterations == 3);
+    assert(total == 6);
+    println("if let ok");
+    0
+}

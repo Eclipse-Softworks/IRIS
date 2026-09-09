@@ -1,0 +1,84 @@
+// Feature 1: Binding patterns (x @ pattern)
+
+choice Shape {
+    Circle(f64),
+    Rect(f64, f64),
+}
+
+def test_binding_pattern_enum() -> i64 {
+    val s = Shape.Circle(3.0)
+    when s {
+        c @ Shape.Circle(r) => {
+            // r is bound to the inner field, c is bound to the whole value
+            1
+        }
+        _ => 0,
+    }
+}
+
+def test_binding_pattern_literal() -> i64 {
+    val x = 3
+    when x {
+        n @ 1..=5 => {
+            // n should be 3, matches the range
+            1
+        }
+        _ => 0,
+    }
+}
+
+def test_binding_pattern_option() -> i64 {
+    val x: option<i64> = some(42)
+    when x {
+        v @ some(n) => {
+            // v binds to the whole option, n binds to the inner value
+            1
+        }
+        _ => 0,
+    }
+}
+
+// Feature 2: Glob imports
+bring std.math.*
+
+def test_glob_import() -> i64 {
+    val r = abs(-5)
+    r
+}
+
+// Feature 3: Unsafe blocks
+def test_unsafe_block() -> i64 {
+    val result = unsafe {
+        val x = 10
+        val y = 20
+        x + y
+    }
+    result
+}
+
+def test_unsafe_nested() -> i64 {
+    val x = unsafe {
+        val a = 5
+        unsafe {
+            a + a
+        }
+    }
+    x
+}
+
+def main() -> i64 {
+    // Each helper has its own expected value; the original main tallied how
+    // many matched into `total` and returned it, which `--emit eval` discards
+    // (known-issues #53), so a run where all six were wrong still exited 0.
+    assert(test_binding_pattern_enum() == 1);
+    assert(test_binding_pattern_literal() == 1);
+    assert(test_binding_pattern_option() == 1);
+    // `unsafe { 10 + 20 }` yields its block value.
+    assert(test_unsafe_block() == 30);
+    // Nested unsafe: 5 + 5.
+    assert(test_unsafe_nested() == 10);
+    // Glob-imported `abs(-5)`.
+    assert(test_glob_import() == 5);
+    println("tier4 features ok: 6/6");
+    0
+}

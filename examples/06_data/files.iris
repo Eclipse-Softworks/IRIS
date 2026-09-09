@@ -1,0 +1,10 @@
+bring std.fs /// Run in a scratch working directory: writes only iris-example-note.txt.
+def main() -> i64 {
+    val path = "iris-example-note.txt";
+    assert(is_ok(write_text(path, "IRIS\n")));
+    assert(is_ok(append_text(path, "checked\n")));
+    assert(unwrap(read_text(path)) == "IRIS\nchecked\n");
+    assert(path_exists(path));
+    println("files: ok");
+    return 0
+}
