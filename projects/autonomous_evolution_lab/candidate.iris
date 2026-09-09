@@ -1,0 +1,21 @@
+/// This generation keeps the published policy(i64) -> i64 ABI.
+def policy(input : i64) -> i64 {
+    return input * 3
+}
+def test_policy() -> i64 effect throw {
+    assert(policy( - 3) == - 9);
+    assert(policy(0) == 0);
+    assert(policy(4) == 12);
+    return 0
+}
+def test_transaction_rollback() -> i64 effect alloc, transaction,
+throw {
+    val state : list<i64> = list(10);
+    transaction_begin();
+    list_push(state, 99);
+    transaction_rollback();
+    assert(transaction_depth() == 0);
+    assert(list_len(state) == 1);
+    assert(list_get(state, 0) == 10);
+    return 0
+}

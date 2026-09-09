@@ -1,0 +1,11 @@
+bring std.json bring std.csv
+def main() -> i64 {
+    val row = csv_parse_row("sensor,21,ready");
+    assert(list_get(row, 0) == "sensor");
+    assert(list_get(row, 1) == "21");
+    val encoded = json_obj(list("name", "count"), list(json_str("IRIS"), "3"));
+    assert(json_query(encoded, "name") == "IRIS");
+    assert(json_query(encoded, "count") == "3");
+    println("json and csv: ok");
+    return 0
+}

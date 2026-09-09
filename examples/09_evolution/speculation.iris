@@ -1,0 +1,12 @@
+bring std.speculation
+def main() -> i64 {
+    val candidate = || 500;
+    val fallback = || 10;
+    val valid = |value : i64 |value >= 0 && value<100;
+    val selected : i64 = speculate_with_fallback(candidate, fallback, valid);
+    assert(selected == 10);
+    val accepted : option<i64> = speculate( || 42, valid);
+    assert(unwrap(accepted) == 42);
+    println("speculation: ok");
+    return 0
+}

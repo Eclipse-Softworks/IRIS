@@ -1,0 +1,11 @@
+defmacro twice(value) => value * 2
+
+const def square(value : i64) -> i64 {
+    return value * value
+}
+def main() -> i64 {
+    assert(twice !(21) == 42);
+    assert(square(9) == 81);
+    println("macros: ok");
+    return 0
+}

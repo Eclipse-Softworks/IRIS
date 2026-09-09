@@ -1,0 +1,18 @@
+bring "policy.iris" bring std.llm /// Deterministic offline contract. Use live.iris with your configured service.
+def main() -> i64 {
+    val client = llm_client("http://127.0.0.1:8080/v1/chat/completions",
+    "http://127.0.0.1:8080/v1/embeddings", "local-model", "", 5000);
+    val messages : list<LlmMessage> = list(llm_message("system", "Reply status or help"),
+    llm_message("user", "Show service health"));
+    val encoded = llm_request_json(client, messages, 0.0, 32, "");
+    assert(contains(encoded, "Show service health"));
+    val valid = unwrap(llm_response_from_json(200,
+    "{\"choices\":[{\"message\":{\"content\":\"status\"}}]}"));
+    val invalid = unwrap(llm_response_from_json(200,
+    "{\"choices\":[{\"message\":{\"content\":\"delete everything\"}}]}"));
+    assert(unwrap(allowed_action(valid)) == "status");
+    assert(is_err(allowed_action(invalid)));
+    assert(is_err(llm_response_from_json(429, "rate limited")));
+    println("model gateway: offline protocol, action validation, provider errors checked");
+    return 0
+}

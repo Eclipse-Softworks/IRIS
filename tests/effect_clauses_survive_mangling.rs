@@ -16,10 +16,38 @@
 //! `("container", "Sized", "list__size")`, matched no impl, and the declared
 //! effects were never read: every trait method in a brought module was `pure`.
 //!
-//! Under `--strict-effects` those were build failures, which made this a
-//! blocker for the single claim the effect system exists to support — that a
-//! control path can be proven to allocate nothing. Any trait method failed that
-//! proof regardless of what it did.
+
+#[test]
+fn strict_mode_requires_extern_effect_contracts() {
+    let source = r#"
+extern def host_clock() -> i64
+def main() -> i64 effect ffi { host_clock() }
+"#;
+    let error = iris::compile_to_module_strict(source, "missing_extern_contract").unwrap_err();
+    assert!(error.to_string().contains("effect violation"), "{error}");
+}
+
+#[test]
+fn extern_effect_contract_propagates_to_callers() {
+    let source = r#"
+extern def host_clock() -> i64 effect ffi
+def main() -> i64 effect ffi { host_clock() }
+"#;
+    iris::compile_to_module_strict(source, "extern_contract").unwrap();
+}
+
+#[test]
+fn explicitly_pure_extern_is_distinct_from_a_missing_contract() {
+    let source = r#"
+extern def host_constant() -> i64 effect pure
+def main() -> i64 { host_constant() }
+"#;
+    iris::compile_to_module_strict(source, "pure_extern_contract").unwrap();
+}
+// Under `--strict-effects` those were build failures, which made this a
+// blocker for the single claim the effect system exists to support: that a
+// control path can be proven to allocate nothing. Any trait method failed that
+// proof regardless of what it did.
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -175,10 +203,13 @@ def main() -> i64 effect io, alloc, throw {
 
     // ... and declaring it must be enough to compile. A checker that rejects
     // everything is not a fix.
-    let (ok, text) = strict_compile("hole_ok", &src_no_clause.replace(
-        "def sneaky(xs: list<i64>) -> i64 {",
-        "def sneaky(xs: list<i64>) -> i64 effect alloc {",
-    ));
+    let (ok, text) = strict_compile(
+        "hole_ok",
+        &src_no_clause.replace(
+            "def sneaky(xs: list<i64>) -> i64 {",
+            "def sneaky(xs: list<i64>) -> i64 effect alloc {",
+        ),
+    );
     assert!(
         ok,
         "declaring the effect should satisfy the checker:\n{}",
@@ -237,8 +268,12 @@ fn closures_and_dyn_dispatch_carry_their_effects() {
 def main() -> i64 effect io { val r = hidden(); 0 }
 "#,
     );
-    assert!(!ok, "a closure's io escaped its caller's effect row:
-{}", text);
+    assert!(
+        !ok,
+        "a closure's io escaped its caller's effect row:
+{}",
+        text
+    );
 
     let (ok, text) = strict_compile(
         "dyn",
@@ -253,24 +288,16 @@ def main() -> i64 effect io {
 }
 "#,
     );
-    assert!(!ok, "dyn dispatch escaped its caller's effect row:
-{}", text);
+    assert!(
+        !ok,
+        "dyn dispatch escaped its caller's effect row:
+{}",
+        text
+    );
 }
 
-/// KNOWN-WRONG, pinned deliberately. See known-issues #65.
-///
-/// An effect reached through a *function-valued parameter* is still invisible:
-/// `hidden` declares nothing, calls its own parameter, and performs whatever
-/// that parameter performs. `f` is a parameter, not a function name, so the
-/// callee collector has no name to record — unlike #64 this cannot be fixed by
-/// recording one. It needs the callee's effects to be part of the parameter's
-/// type (effect polymorphism), which is a language-surface change.
-///
-/// Asserted as-is so that closing the hole fails this test and forces the
-/// assertion to be updated, rather than the gap surviving another release
-/// unnoticed — the same device that made #34's fabricated metrics surface.
 #[test]
-fn a_function_valued_parameter_still_hides_its_effects() {
+fn a_function_valued_parameter_cannot_hide_its_effects() {
     let (ok, text) = strict_compile(
         "higher_order",
         r#"def noisy(x: i64) -> i64 effect io { println("noisy"); x }
@@ -283,9 +310,81 @@ def main() -> i64 effect io {
 "#,
     );
     assert!(
-        ok,
-        "#65 appears to be FIXED -- a function-valued parameter now carries its          effects. Good. Update this test to assert rejection, and mark #65 fixed          in docs/known-issues.md, CLAUDE.md and the iris-claims skill, all three          of which state this as the one remaining bound on the          allocation-freedom claim.
+        !ok,
+        "an io callback was accepted by a pure function parameter (#65):
 {}",
+        text
+    );
+    assert!(
+        text.contains("E0304"),
+        "expected callback-contract diagnostic:\n{}",
+        text
+    );
+}
+
+#[test]
+fn callback_effect_variables_are_bound_at_the_call_site() {
+    let (ok, text) = strict_compile(
+        "higher_order_poly",
+        r#"def noisy(x: i64) -> i64 effect io { println("noisy"); x }
+def apply(f: |i64| -> i64 effect E) -> i64 effect E { f(1) }
+def main() -> i64 effect io {
+    val g = |x: i64| noisy(x);
+    val r = apply(g);
+    if r == 1 { 0 } else { 1 }
+}
+"#,
+    );
+    assert!(
+        ok,
+        "a correctly declared row-polymorphic callback failed:\n{}",
+        text
+    );
+
+    let (ok, text) = strict_compile(
+        "higher_order_poly_pure_caller",
+        r#"def noisy(x: i64) -> i64 effect io { println("noisy"); x }
+def apply(f: |i64| -> i64 effect E) -> i64 effect E { f(1) }
+def main() -> i64 {
+    val g = |x: i64| noisy(x);
+    val r = apply(g);
+    if r == 1 { 0 } else { 1 }
+}
+"#,
+    );
+    assert!(
+        !ok,
+        "an io callback escaped a pure caller through effect E:\n{}",
+        text
+    );
+    assert!(
+        text.contains("E0302") || text.contains("E0301"),
+        "expected effect diagnostic:\n{}",
+        text
+    );
+}
+
+#[test]
+fn speculation_rejects_effectful_candidates_even_when_the_caller_allows_io() {
+    let (ok, text) = strict_compile(
+        "speculation_callback_contract",
+        r#"bring std.speculation
+def main() -> i64 effect io, alloc {
+    val candidate = || { println("must not run speculatively"); 42 };
+    val validator = |x: i64| x == 42;
+    val result: option<i64> = speculate(candidate, validator);
+    0
+}
+"#,
+    );
+    assert!(
+        !ok,
+        "an effectful speculative candidate was accepted:\n{}",
+        text
+    );
+    assert!(
+        text.contains("E0304"),
+        "expected callback-contract diagnostic:\n{}",
         text
     );
 }

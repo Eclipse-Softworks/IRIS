@@ -51,11 +51,7 @@ impl Preprocessor {
         }
         // WASM detection: only check the local target triple to avoid spurious warnings.
         // The compiler may target wasm32-wasip1/wasm32-wasip2 even when the host is x86_64.
-        let _ = (
-            "wasm32-wasip1",
-            "wasm32-wasip2",
-            "wasm32-unknown-unknown",
-        );
+        let _ = ("wasm32-wasip1", "wasm32-wasip2", "wasm32-unknown-unknown");
         defines.insert("WASM".into());
 
         // Build profile
@@ -120,13 +116,12 @@ impl Preprocessor {
             let had_newline = raw_with_term.ends_with('\n');
             let line = raw_line.trim_start();
 
-            if line.starts_with('#') {
-                let directive_end = line[1..]
-                    .find(|c: char| c == ' ' || c == '\t' || c == '\r' || c == '\n' || c == '\t')
-                    .map(|i| i + 1)
-                    .unwrap_or(line.len());
-                let directive = &line[1..directive_end].trim().to_uppercase();
-                let rest = line[directive_end..].trim();
+            if let Some(directive_text) = line.strip_prefix('#') {
+                let directive_end = directive_text
+                    .find([' ', '\t', '\r', '\n'])
+                    .unwrap_or(directive_text.len());
+                let directive = &directive_text[..directive_end].trim().to_uppercase();
+                let rest = directive_text[directive_end..].trim();
 
                 match directive.as_str() {
                     "DEFINE" => {
@@ -160,7 +155,7 @@ impl Preprocessor {
                         continue;
                     }
                     "IF" => {
-                        let cond = self.eval_condition(rest, &defines)?;
+                        let cond = Self::eval_condition(rest, &defines)?;
                         taken_stack.push(cond);
                         if !cond {
                             skip_depth += 1;
@@ -177,7 +172,7 @@ impl Preprocessor {
                         }
                         let already_taken = *taken_stack.last().unwrap();
                         if !already_taken && skip_depth == 1 {
-                            let cond = self.eval_condition(rest, &defines)?;
+                            let cond = Self::eval_condition(rest, &defines)?;
                             if cond {
                                 *taken_stack.last_mut().unwrap() = true;
                                 skip_depth -= 1;
@@ -212,9 +207,7 @@ impl Preprocessor {
                                 "#endif without matching #if",
                             ));
                         }
-                        if skip_depth > 0 {
-                            skip_depth -= 1;
-                        }
+                        skip_depth = skip_depth.saturating_sub(1);
                         taken_stack.pop();
                         continue;
                     }
@@ -286,24 +279,26 @@ impl Preprocessor {
         Ok(())
     }
 
-    fn eval_condition(
-        &self,
-        expr: &str,
-        defines: &HashSet<String>,
-    ) -> Result<bool, String> {
+    fn eval_condition(expr: &str, defines: &HashSet<String>) -> Result<bool, String> {
         let expr = expr.trim();
         // supported: `defined(NAME)`, `!defined(NAME)`, `NAME`, `NAME == "value"`, `&&`, `||`
-        if let Some(inner) = expr.strip_prefix("defined(").and_then(|s| s.strip_suffix(')')) {
+        if let Some(inner) = expr
+            .strip_prefix("defined(")
+            .and_then(|s| s.strip_suffix(')'))
+        {
             return Ok(defines.contains(inner.trim()));
         }
-        if let Some(inner) = expr.strip_prefix("!defined(").and_then(|s| s.strip_suffix(')')) {
+        if let Some(inner) = expr
+            .strip_prefix("!defined(")
+            .and_then(|s| s.strip_suffix(')'))
+        {
             return Ok(!defines.contains(inner.trim()));
         }
         if expr.contains("&&") {
             let parts: Vec<&str> = expr.split("&&").collect();
             let mut result = true;
             for p in &parts {
-                result = result && self.eval_condition(p.trim(), defines)?;
+                result = result && Self::eval_condition(p.trim(), defines)?;
             }
             return Ok(result);
         }
@@ -311,7 +306,7 @@ impl Preprocessor {
             let parts: Vec<&str> = expr.split("||").collect();
             let mut result = false;
             for p in &parts {
-                result = result || self.eval_condition(p.trim(), defines)?;
+                result = result || Self::eval_condition(p.trim(), defines)?;
             }
             return Ok(result);
         }

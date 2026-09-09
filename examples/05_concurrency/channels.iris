@@ -1,0 +1,11 @@
+def main() -> i64 {
+    val results : chan<i64> = channel();
+    spawn {
+        send(results, 21 * 2);
+    };
+
+    val answer = recv(results);
+    assert(answer == 42);
+    println("channels: ok");
+    return 0
+}

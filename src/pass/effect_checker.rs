@@ -8,9 +8,9 @@
 // auto-promoted to their inferred effect row (no error). Strict mode
 // (`--strict-effects`) requires explicit clauses on effectful functions.
 
+use super::effect_registry::{EffectRegistry, EffectRow};
 use crate::parser::ast::*;
 use std::collections::{HashMap, HashSet};
-use super::effect_registry::{EffectRegistry, EffectRow};
 
 pub struct EffectChecker {
     pub registry: EffectRegistry,
@@ -31,6 +31,7 @@ impl EffectChecker {
 
     /// Run the pass on an AST module. Collects errors instead of returning early.
     pub fn run(&mut self, ast: &AstModule) {
+        self.register_extern_contracts(ast);
         let call_graph = self.build_call_graph(ast);
         let order = self.topological_sort(&call_graph);
 
@@ -53,6 +54,65 @@ impl EffectChecker {
             for method in &impl_def.methods {
                 let mangled = Self::mangle(impl_def, method);
                 self.verify_call_sites(&mangled, &method.body);
+            }
+        }
+
+        // Calls through function-valued parameters need the callback's effect
+        // row, not a (non-existent) call-graph node named after the parameter.
+        // Keep this as a strict-mode proof pass: default mode remains
+        // backwards-compatible, while --strict-effects rejects any callback
+        // whose effects cannot be proved to satisfy its declared contract.
+        if self.strict {
+            for func in &ast.functions {
+                self.verify_higher_order_function(ast, func, &func.name.name);
+            }
+            for impl_def in &ast.impls {
+                for method in &impl_def.methods {
+                    let mangled = Self::mangle(impl_def, method);
+                    self.verify_higher_order_function(ast, method, &mangled);
+                }
+            }
+        }
+        self.errors.sort();
+        self.errors.dedup();
+    }
+
+    fn register_extern_contracts(&mut self, ast: &AstModule) {
+        for external in &ast.extern_fns {
+            match &external.effects {
+                Some(effects) => {
+                    let mut vars = Vec::new();
+                    let mut concrete = Vec::new();
+                    for effect in effects {
+                        if effect
+                            .chars()
+                            .all(|ch| ch.is_ascii_uppercase() || ch == '_' || ch.is_ascii_digit())
+                        {
+                            vars.push(effect.clone());
+                        } else {
+                            concrete.push(effect.clone());
+                        }
+                    }
+                    let row = EffectRow::from_parts(concrete, vars);
+                    self.registry
+                        .builtins
+                        .insert(external.name.name.clone(), row.clone());
+                    self.inferred.insert(external.name.name.clone(), row);
+                }
+                None if self.strict => {
+                    self.errors.push(format!(
+                        "error[E0306]: [effect check] extern function `{}` has no explicit effect contract (strict mode)",
+                        external.name.name
+                    ));
+                    // Continue checking callers conservatively after reporting
+                    // the missing contract; an unknown host call is never pure.
+                    let row = EffectRow::from_strs(&["ffi"]);
+                    self.registry
+                        .builtins
+                        .insert(external.name.name.clone(), row.clone());
+                    self.inferred.insert(external.name.name.clone(), row);
+                }
+                None => {}
             }
         }
     }
@@ -89,13 +149,37 @@ impl EffectChecker {
                 if !top_level.contains(&method.name.name) {
                     method_impls
                         .entry(method.name.name.clone())
-                        .or_insert_with(HashSet::new)
+                        .or_default()
                         .insert(mangled);
                 }
             }
         }
         for (bare, impls) in method_impls {
             graph.insert(bare, impls);
+        }
+
+        // Brought public functions keep a qualified name in the merged AST,
+        // while calls in the importing module use the short name. Model that
+        // spelling difference as an alias edge so topological inference visits
+        // the imported body before its callers. Without the edge, a short-name
+        // call could be inferred before the qualified function and appear pure
+        // depending on HashMap traversal order.
+        let mut imported_aliases: HashMap<String, HashSet<String>> = HashMap::new();
+        for func in &ast.functions {
+            if ast.private_items.contains(&func.name.name) {
+                continue;
+            }
+            if let Some((_, short)) = func.name.name.rsplit_once("__") {
+                if !top_level.contains(short) {
+                    imported_aliases
+                        .entry(short.to_string())
+                        .or_default()
+                        .insert(func.name.name.clone());
+                }
+            }
+        }
+        for (short, qualified) in imported_aliases {
+            graph.entry(short).or_default().extend(qualified);
         }
         graph
     }
@@ -119,7 +203,9 @@ impl EffectChecker {
             }
             AstStmt::Loop { body, .. } => self.collect_callees_block(body, callees),
             AstStmt::Break { .. } | AstStmt::Continue { .. } => {}
-            AstStmt::ForRange { start, end, body, .. } => {
+            AstStmt::ForRange {
+                start, end, body, ..
+            } => {
                 self.collect_callees_expr(start, callees);
                 self.collect_callees_expr(end, callees);
                 self.collect_callees_block(body, callees);
@@ -149,7 +235,9 @@ impl EffectChecker {
                     self.collect_callees_expr(&arm.body, callees);
                 }
             }
-            AstStmt::ParFor { start, end, body, .. } => {
+            AstStmt::ParFor {
+                start, end, body, ..
+            } => {
                 self.collect_callees_expr(start, callees);
                 self.collect_callees_expr(end, callees);
                 self.collect_callees_block(body, callees);
@@ -176,7 +264,9 @@ impl EffectChecker {
                     self.collect_callees_expr(a, callees);
                 }
             }
-            AstExpr::MethodCall { base, method, args, .. } => {
+            AstExpr::MethodCall {
+                base, method, args, ..
+            } => {
                 // Record the method itself. This walked into the receiver and
                 // the arguments and then dropped the call on the floor, so
                 // `xs.size()` contributed *nothing* to the call graph: a
@@ -201,7 +291,12 @@ impl EffectChecker {
                 self.collect_callees_expr(rhs, callees);
             }
             AstExpr::UnaryOp { expr, .. } => self.collect_callees_expr(expr, callees),
-            AstExpr::If { cond, then_block, else_block, .. } => {
+            AstExpr::If {
+                cond,
+                then_block,
+                else_block,
+                ..
+            } => {
                 self.collect_callees_expr(cond, callees);
                 self.collect_callees_block(then_block, callees);
                 if let Some(eb) = else_block {
@@ -234,7 +329,9 @@ impl EffectChecker {
                     self.collect_callees_expr(i, callees);
                 }
             }
-            AstExpr::When { scrutinee, arms, .. } => {
+            AstExpr::When {
+                scrutinee, arms, ..
+            } => {
                 self.collect_callees_expr(scrutinee, callees);
                 for arm in arms {
                     if let Some(g) = &arm.guard {
@@ -254,9 +351,12 @@ impl EffectChecker {
             }
             AstExpr::Try { expr, .. } => self.collect_callees_expr(expr, callees),
             AstExpr::Await { expr, .. } => self.collect_callees_expr(expr, callees),
-            AstExpr::Ident(_) | AstExpr::IntLit { .. } | AstExpr::FloatLit { .. } |
-            AstExpr::BoolLit { .. } | AstExpr::StringLit { .. } |
-            AstExpr::TupleIndex { .. } => {}
+            AstExpr::Ident(_)
+            | AstExpr::IntLit { .. }
+            | AstExpr::FloatLit { .. }
+            | AstExpr::BoolLit { .. }
+            | AstExpr::StringLit { .. }
+            | AstExpr::TupleIndex { .. } => {}
             AstExpr::NullCoal { expr, default, .. } => {
                 self.collect_callees_expr(expr, callees);
                 self.collect_callees_expr(default, callees);
@@ -279,7 +379,9 @@ impl EffectChecker {
             AstExpr::Splat { expr, .. } => {
                 self.collect_callees_expr(expr, callees);
             }
-            AstExpr::TryCatch { body, catch_body, .. } => {
+            AstExpr::TryCatch {
+                body, catch_body, ..
+            } => {
                 self.collect_callees_expr(body, callees);
                 self.collect_callees_expr(catch_body, callees);
             }
@@ -303,13 +405,12 @@ impl EffectChecker {
         let mut stack: HashSet<String> = HashSet::new();
         let mut order: Vec<String> = Vec::new();
         for name in graph.keys() {
-            self.dfs_postorder(name, graph, &mut visited, &mut stack, &mut order);
+            Self::dfs_postorder(name, graph, &mut visited, &mut stack, &mut order);
         }
         order
     }
 
     fn dfs_postorder(
-        &self,
         name: &str,
         graph: &HashMap<String, HashSet<String>>,
         visited: &mut HashSet<String>,
@@ -322,7 +423,7 @@ impl EffectChecker {
         stack.insert(name.to_string());
         if let Some(callees) = graph.get(name) {
             for c in callees {
-                self.dfs_postorder(c, graph, visited, stack, order);
+                Self::dfs_postorder(c, graph, visited, stack, order);
             }
         }
         stack.remove(name);
@@ -340,11 +441,19 @@ impl EffectChecker {
         let func = self.find_function(ast, name);
 
         if let Some(func) = func {
+            // Bundled standard-library bodies are part of the compiler trust
+            // base and are checked by inferred, transitive effect summaries.
+            // User and package code still require source-level clauses. This
+            // avoids duplicating hundreds of mechanically identical clauses
+            // while preserving the actual graph used at every call site.
+            let inferred_stdlib_contract = is_inferred_stdlib_contract(&func.name.name);
             // Parse declared effects: support `effect E` for effect vars.
             let mut effect_vars: Vec<String> = Vec::new();
             let mut concrete_effects: Vec<String> = Vec::new();
             for e in &func.effects {
-                if e.chars().all(|c| c.is_ascii_uppercase() || c == '_' || c.is_ascii_digit()) {
+                if e.chars()
+                    .all(|c| c.is_ascii_uppercase() || c == '_' || c.is_ascii_digit())
+                {
                     effect_vars.push(e.clone());
                 } else {
                     concrete_effects.push(e.clone());
@@ -359,9 +468,20 @@ impl EffectChecker {
             // subsumption violation could ever be detected.
             let mut from_callees = EffectRow::pure();
             let mut inferred = EffectRow::from_parts(concrete_effects.clone(), effect_vars.clone());
-            if let Some(callees) = call_graph.get(name) {
+            let callback_params = Self::function_param_rows(func);
+            // Imported public functions are called by their short source name
+            // but retain a module-qualified name in the merged AST/call graph.
+            // Once `find_function` resolves that alias, inspect the canonical
+            // body node rather than treating the imported function as empty.
+            let callees = call_graph
+                .get(name)
+                .or_else(|| call_graph.get(&func.name.name));
+            if let Some(callees) = callees {
                 for callee in callees {
-                    if let Some(row) = self.registry.lookup(callee) {
+                    if let Some(row) = callback_params.get(callee) {
+                        from_callees = from_callees.union(row);
+                        inferred = inferred.union(row);
+                    } else if let Some(row) = self.registry.lookup(callee) {
                         // Instantiate callee's effect vars with the current context.
                         let row = row.instantiate(&declared);
                         from_callees = from_callees.union(&row);
@@ -380,7 +500,7 @@ impl EffectChecker {
             // `from_callees`, not `inferred` — the latter contains the declared
             // row itself, so this warning could never fire. Strict mode only, to
             // keep default output unchanged.
-            if self.strict && !concrete_effects.is_empty() {
+            if self.strict && !inferred_stdlib_contract && !concrete_effects.is_empty() {
                 let unused: Vec<String> = concrete_effects
                     .iter()
                     .filter(|e| !from_callees.effects.contains(*e))
@@ -397,7 +517,11 @@ impl EffectChecker {
             }
 
             // Strict mode: require explicit clause on effectful functions.
-            if self.strict && func.effects.is_empty() && !inferred.is_pure() {
+            if self.strict
+                && !inferred_stdlib_contract
+                && func.effects.is_empty()
+                && !inferred.is_pure()
+            {
                 self.errors.push(format!(
                     "error[E0301]: [effect check] function `{}` has effect{} `{}` from callees but no explicit `effect` clause (strict mode)",
                     name,
@@ -413,7 +537,11 @@ impl EffectChecker {
             // while declaring only `throw`, and used to pass silently. A row
             // variable (`effect E`) is row-polymorphic and absorbs anything, so
             // it is exempt.
-            if self.strict && !func.effects.is_empty() && declared.vars.is_empty() {
+            if self.strict
+                && !inferred_stdlib_contract
+                && !func.effects.is_empty()
+                && declared.vars.is_empty()
+            {
                 let missing: Vec<String> = from_callees
                     .effects
                     .iter()
@@ -483,6 +611,31 @@ impl EffectChecker {
         if let Some(f) = ast.functions.iter().find(|f| f.name.name == name) {
             return Some(f);
         }
+        // Public brought functions retain their module prefix in the merged
+        // AST while source call sites keep the imported short name. Resolve a
+        // unique public suffix here, just as lowering does later; otherwise a
+        // higher-order contract in `std.speculation` is invisible to the AST
+        // effect checker.
+        let suffix = format!("__{}", name);
+        let mut brought: Vec<&AstFunction> = ast
+            .functions
+            .iter()
+            .filter(|function| {
+                function.name.name.ends_with(&suffix)
+                    && !ast.private_items.contains(&function.name.name)
+            })
+            .collect();
+        brought.sort_by(|left, right| {
+            right
+                .name
+                .name
+                .len()
+                .cmp(&left.name.name.len())
+                .then_with(|| left.name.name.cmp(&right.name.name))
+        });
+        if let Some(function) = brought.first() {
+            return Some(*function);
+        }
         for impl_def in &ast.impls {
             for method in &impl_def.methods {
                 if Self::mangle(impl_def, method) == name {
@@ -491,6 +644,429 @@ impl EffectChecker {
             }
         }
         None
+    }
+
+    fn effect_row(names: &[String]) -> EffectRow {
+        let mut vars = Vec::new();
+        let mut effects = Vec::new();
+        for name in names {
+            if name
+                .chars()
+                .all(|c| c.is_ascii_uppercase() || c == '_' || c.is_ascii_digit())
+            {
+                vars.push(name.clone());
+            } else {
+                effects.push(name.clone());
+            }
+        }
+        EffectRow::from_parts(effects, vars)
+    }
+
+    fn function_param_rows(func: &AstFunction) -> HashMap<String, EffectRow> {
+        func.params
+            .iter()
+            .filter_map(|param| match &param.ty {
+                AstType::Fn { effects, .. } => {
+                    Some((param.name.name.clone(), Self::effect_row(effects)))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn verify_higher_order_function(
+        &mut self,
+        ast: &AstModule,
+        func: &AstFunction,
+        caller_name: &str,
+    ) {
+        let caller_row = self
+            .inferred
+            .get(caller_name)
+            .cloned()
+            .unwrap_or_else(EffectRow::pure);
+        let mut callables = Self::function_param_rows(func);
+        self.verify_higher_order_block(ast, caller_name, &caller_row, &func.body, &mut callables);
+    }
+
+    fn verify_higher_order_block(
+        &mut self,
+        ast: &AstModule,
+        caller: &str,
+        caller_row: &EffectRow,
+        block: &AstBlock,
+        callables: &mut HashMap<String, EffectRow>,
+    ) {
+        for stmt in &block.stmts {
+            self.verify_higher_order_stmt(ast, caller, caller_row, stmt, callables);
+        }
+        if let Some(tail) = &block.tail {
+            self.verify_higher_order_expr(ast, caller, caller_row, tail, callables);
+        }
+    }
+
+    fn verify_higher_order_stmt(
+        &mut self,
+        ast: &AstModule,
+        caller: &str,
+        caller_row: &EffectRow,
+        stmt: &AstStmt,
+        callables: &mut HashMap<String, EffectRow>,
+    ) {
+        match stmt {
+            AstStmt::Let { name, ty, init, .. } => {
+                self.verify_higher_order_expr(ast, caller, caller_row, init, callables);
+                let row = ty
+                    .as_ref()
+                    .and_then(|ty| match ty {
+                        AstType::Fn { effects, .. } => Some(Self::effect_row(effects)),
+                        _ => None,
+                    })
+                    .or_else(|| self.callable_expr_row(ast, init, callables));
+                if let Some(row) = row {
+                    callables.insert(name.name.clone(), row);
+                }
+            }
+            AstStmt::Expr(expr) | AstStmt::Defer { expr, .. } | AstStmt::Yield { expr, .. } => {
+                self.verify_higher_order_expr(ast, caller, caller_row, expr, callables)
+            }
+            AstStmt::While { cond, body, .. } => {
+                self.verify_higher_order_expr(ast, caller, caller_row, cond, callables);
+                let mut nested = callables.clone();
+                self.verify_higher_order_block(ast, caller, caller_row, body, &mut nested);
+            }
+            AstStmt::Loop { body, .. } => {
+                let mut nested = callables.clone();
+                self.verify_higher_order_block(ast, caller, caller_row, body, &mut nested);
+            }
+            AstStmt::ForRange {
+                start, end, body, ..
+            }
+            | AstStmt::ParFor {
+                start, end, body, ..
+            } => {
+                self.verify_higher_order_expr(ast, caller, caller_row, start, callables);
+                self.verify_higher_order_expr(ast, caller, caller_row, end, callables);
+                let mut nested = callables.clone();
+                self.verify_higher_order_block(ast, caller, caller_row, body, &mut nested);
+            }
+            AstStmt::ForEach { iter, body, .. } => {
+                self.verify_higher_order_expr(ast, caller, caller_row, iter, callables);
+                let mut nested = callables.clone();
+                self.verify_higher_order_block(ast, caller, caller_row, body, &mut nested);
+            }
+            AstStmt::Assign { target, value, .. } => {
+                self.verify_higher_order_expr(ast, caller, caller_row, value, callables);
+                if let AstExpr::Ident(ident) = target.as_ref() {
+                    if let Some(row) = self.callable_expr_row(ast, value, callables) {
+                        callables.insert(ident.name.clone(), row);
+                    }
+                }
+            }
+            AstStmt::LetTuple { init, .. } => {
+                self.verify_higher_order_expr(ast, caller, caller_row, init, callables)
+            }
+            AstStmt::Return { value, .. } => {
+                if let Some(value) = value {
+                    self.verify_higher_order_expr(ast, caller, caller_row, value, callables);
+                }
+            }
+            AstStmt::Spawn { body, group, .. } => {
+                if let Some(group) = group {
+                    self.verify_higher_order_expr(ast, caller, caller_row, group, callables);
+                }
+                let mut nested = callables.clone();
+                for stmt in body {
+                    self.verify_higher_order_stmt(ast, caller, caller_row, stmt, &mut nested);
+                }
+            }
+            AstStmt::MaskStmt { effects, body, .. } => {
+                let inner = caller_row.intersect(&EffectRow::new(effects.clone()));
+                let mut nested = callables.clone();
+                self.verify_higher_order_block(ast, caller, &inner, body, &mut nested);
+            }
+            AstStmt::HandleStmt { expr, arms, .. } => {
+                self.verify_higher_order_expr(ast, caller, caller_row, expr, callables);
+                for arm in arms {
+                    self.verify_higher_order_expr(ast, caller, caller_row, &arm.body, callables);
+                }
+            }
+            AstStmt::Select { arms, default, .. } => {
+                for arm in arms {
+                    self.verify_higher_order_expr(ast, caller, caller_row, &arm.channel, callables);
+                    let mut nested = callables.clone();
+                    self.verify_higher_order_block(ast, caller, caller_row, &arm.body, &mut nested);
+                }
+                if let Some(default) = default {
+                    let mut nested = callables.clone();
+                    self.verify_higher_order_block(ast, caller, caller_row, default, &mut nested);
+                }
+            }
+            AstStmt::Break { .. } | AstStmt::Continue { .. } => {}
+        }
+    }
+
+    fn verify_higher_order_expr(
+        &mut self,
+        ast: &AstModule,
+        caller: &str,
+        caller_row: &EffectRow,
+        expr: &AstExpr,
+        callables: &mut HashMap<String, EffectRow>,
+    ) {
+        match expr {
+            AstExpr::Call { callee, args, .. } => {
+                if let Some(row) = callables.get(&callee.name) {
+                    let required = row.instantiate(caller_row);
+                    self.require_effect_subset(&callee.name, caller, caller_row, &required);
+                } else if let Some(target) = self.find_function(ast, &callee.name) {
+                    let mut substitutions: HashMap<String, EffectRow> = HashMap::new();
+                    for (param, arg) in target.params.iter().zip(args.iter()) {
+                        let AstType::Fn { effects, .. } = &param.ty else {
+                            continue;
+                        };
+                        let expected = Self::effect_row(effects);
+                        let Some(actual) = self.callable_expr_row(ast, arg, callables) else {
+                            self.errors.push(format!(
+                                "error[E0305]: [effect check] cannot prove the effects of callback argument `{}` passed to `{}` in `{}` (strict mode)",
+                                param.name.name, callee.name, caller
+                            ));
+                            continue;
+                        };
+                        if expected.vars.is_empty() && !actual.subset(&expected) {
+                            let extra: Vec<String> = actual
+                                .effects
+                                .iter()
+                                .filter(|effect| !expected.effects.contains(*effect))
+                                .cloned()
+                                .collect();
+                            self.errors.push(format!(
+                                "error[E0304]: [effect check] callback `{}` passed to `{}` performs effect{} `{}` outside the parameter contract `{}` (strict mode)",
+                                param.name.name,
+                                callee.name,
+                                if extra.len() == 1 { "" } else { "s" },
+                                extra.join(", "),
+                                expected.display()
+                            ));
+                        }
+                        for var in &expected.vars {
+                            substitutions
+                                .entry(var.clone())
+                                .and_modify(|row| *row = row.union(&actual))
+                                .or_insert_with(|| actual.clone());
+                        }
+                    }
+
+                    let declared = self
+                        .inferred
+                        .get(&target.name.name)
+                        .cloned()
+                        .unwrap_or_else(EffectRow::pure);
+                    let mut required = EffectRow::new(declared.effects.clone());
+                    for var in &declared.vars {
+                        if let Some(bound) = substitutions.get(var) {
+                            required = required.union(bound);
+                        } else {
+                            // Preserve the pre-existing row-polymorphic
+                            // behaviour for variables not tied to callbacks.
+                            required = required.union(caller_row);
+                        }
+                    }
+                    self.require_effect_subset(&callee.name, caller, caller_row, &required);
+                }
+                for arg in args {
+                    self.verify_higher_order_expr(ast, caller, caller_row, arg, callables);
+                }
+            }
+            AstExpr::MethodCall { base, args, .. } => {
+                self.verify_higher_order_expr(ast, caller, caller_row, base, callables);
+                for arg in args {
+                    self.verify_higher_order_expr(ast, caller, caller_row, arg, callables);
+                }
+            }
+            AstExpr::BinOp { lhs, rhs, .. } => {
+                self.verify_higher_order_expr(ast, caller, caller_row, lhs, callables);
+                self.verify_higher_order_expr(ast, caller, caller_row, rhs, callables);
+            }
+            AstExpr::UnaryOp { expr, .. }
+            | AstExpr::Try { expr, .. }
+            | AstExpr::Await { expr, .. }
+            | AstExpr::Cast { expr, .. }
+            | AstExpr::Ref { expr, .. }
+            | AstExpr::RefMut { expr, .. }
+            | AstExpr::Deref { expr, .. }
+            | AstExpr::Move { expr, .. }
+            | AstExpr::Splat { expr, .. } => {
+                self.verify_higher_order_expr(ast, caller, caller_row, expr, callables)
+            }
+            AstExpr::If {
+                cond,
+                then_block,
+                else_block,
+                ..
+            } => {
+                self.verify_higher_order_expr(ast, caller, caller_row, cond, callables);
+                let mut then_env = callables.clone();
+                self.verify_higher_order_block(ast, caller, caller_row, then_block, &mut then_env);
+                if let Some(else_block) = else_block {
+                    let mut else_env = callables.clone();
+                    self.verify_higher_order_block(
+                        ast,
+                        caller,
+                        caller_row,
+                        else_block,
+                        &mut else_env,
+                    );
+                }
+            }
+            AstExpr::Block(block) => {
+                let mut nested = callables.clone();
+                self.verify_higher_order_block(ast, caller, caller_row, block, &mut nested);
+            }
+            AstExpr::Mask { effects, body, .. } => {
+                let inner = caller_row.intersect(&EffectRow::new(effects.clone()));
+                let mut nested = callables.clone();
+                self.verify_higher_order_block(ast, caller, &inner, body, &mut nested);
+            }
+            AstExpr::Handle { expr, arms, .. } => {
+                self.verify_higher_order_expr(ast, caller, caller_row, expr, callables);
+                for arm in arms {
+                    self.verify_higher_order_expr(ast, caller, caller_row, &arm.body, callables);
+                }
+            }
+            AstExpr::Lambda { body, .. } | AstExpr::Unsafe { body, .. } => {
+                self.verify_higher_order_expr(ast, caller, caller_row, body, callables)
+            }
+            AstExpr::Tuple { elements, .. } => {
+                for element in elements {
+                    self.verify_higher_order_expr(ast, caller, caller_row, element, callables);
+                }
+            }
+            AstExpr::ArrayLit { elems, .. } => {
+                for element in elems {
+                    self.verify_higher_order_expr(ast, caller, caller_row, element, callables);
+                }
+            }
+            AstExpr::FieldAccess { base, .. } | AstExpr::TupleIndex { base, .. } => {
+                self.verify_higher_order_expr(ast, caller, caller_row, base, callables)
+            }
+            AstExpr::Index { base, indices, .. } => {
+                self.verify_higher_order_expr(ast, caller, caller_row, base, callables);
+                for index in indices {
+                    self.verify_higher_order_expr(ast, caller, caller_row, index, callables);
+                }
+            }
+            AstExpr::When {
+                scrutinee, arms, ..
+            } => {
+                self.verify_higher_order_expr(ast, caller, caller_row, scrutinee, callables);
+                for arm in arms {
+                    if let Some(guard) = &arm.guard {
+                        self.verify_higher_order_expr(ast, caller, caller_row, guard, callables);
+                    }
+                    self.verify_higher_order_expr(ast, caller, caller_row, &arm.body, callables);
+                }
+            }
+            AstExpr::StructLit { fields, spread, .. } => {
+                for (_, value) in fields {
+                    self.verify_higher_order_expr(ast, caller, caller_row, value, callables);
+                }
+                if let Some(spread) = spread {
+                    self.verify_higher_order_expr(ast, caller, caller_row, spread, callables);
+                }
+            }
+            AstExpr::TryCatch {
+                body, catch_body, ..
+            } => {
+                self.verify_higher_order_expr(ast, caller, caller_row, body, callables);
+                self.verify_higher_order_expr(ast, caller, caller_row, catch_body, callables);
+            }
+            AstExpr::NullCoal { expr, default, .. } => {
+                self.verify_higher_order_expr(ast, caller, caller_row, expr, callables);
+                self.verify_higher_order_expr(ast, caller, caller_row, default, callables);
+            }
+            AstExpr::MapLiteral { entries, .. } => {
+                for (key, value) in entries {
+                    self.verify_higher_order_expr(ast, caller, caller_row, key, callables);
+                    self.verify_higher_order_expr(ast, caller, caller_row, value, callables);
+                }
+            }
+            AstExpr::Raise { args, .. } | AstExpr::MacroCall { args, .. } => {
+                for arg in args {
+                    self.verify_higher_order_expr(ast, caller, caller_row, arg, callables);
+                }
+            }
+            AstExpr::Ident(_)
+            | AstExpr::IntLit { .. }
+            | AstExpr::FloatLit { .. }
+            | AstExpr::BoolLit { .. }
+            | AstExpr::StringLit { .. } => {}
+        }
+    }
+
+    fn callable_expr_row(
+        &self,
+        ast: &AstModule,
+        expr: &AstExpr,
+        callables: &HashMap<String, EffectRow>,
+    ) -> Option<EffectRow> {
+        match expr {
+            AstExpr::Ident(ident) => callables
+                .get(&ident.name)
+                .cloned()
+                .or_else(|| self.inferred.get(&ident.name).cloned())
+                .or_else(|| self.registry.lookup(&ident.name).cloned()),
+            AstExpr::Lambda { body, .. } => {
+                let mut names = HashSet::new();
+                self.collect_callees_expr(body, &mut names);
+                let mut row = EffectRow::pure();
+                for name in names {
+                    let callee_row = callables
+                        .get(&name)
+                        .cloned()
+                        .or_else(|| self.inferred.get(&name).cloned())
+                        .or_else(|| self.registry.lookup(&name).cloned())?;
+                    row = row.union(&callee_row);
+                }
+                Some(row)
+            }
+            AstExpr::Call { callee, .. } => {
+                self.find_function(ast, &callee.name).and_then(|func| {
+                    if let AstType::Fn { effects, .. } = &func.return_ty {
+                        Some(Self::effect_row(effects))
+                    } else {
+                        None
+                    }
+                })
+            }
+            _ => None,
+        }
+    }
+
+    fn require_effect_subset(
+        &mut self,
+        callee: &str,
+        caller: &str,
+        caller_row: &EffectRow,
+        required: &EffectRow,
+    ) {
+        if required.subset(caller_row) {
+            return;
+        }
+        let missing: Vec<String> = required
+            .effects
+            .iter()
+            .filter(|effect| !caller_row.contains(effect))
+            .cloned()
+            .collect();
+        self.errors.push(format!(
+            "error[E0302]: [effect check] function `{}` requires effect{} `{}` through a callback but caller `{}` has effects `{}`",
+            callee,
+            if missing.len() == 1 { "" } else { "s" },
+            missing.join(", "),
+            caller,
+            caller_row.display()
+        ));
     }
 
     fn verify_call_sites(&mut self, caller_name: &str, body: &AstBlock) {
@@ -517,7 +1093,9 @@ impl EffectChecker {
             }
             AstStmt::Loop { body, .. } => self.verify_call_sites(caller, body),
             AstStmt::Break { .. } | AstStmt::Continue { .. } => {}
-            AstStmt::ForRange { start, end, body, .. } => {
+            AstStmt::ForRange {
+                start, end, body, ..
+            } => {
                 self.verify_expr(caller, caller_row, start);
                 self.verify_expr(caller, caller_row, end);
                 self.verify_call_sites(caller, body);
@@ -538,7 +1116,9 @@ impl EffectChecker {
                     self.verify_stmt(caller, caller_row, s);
                 }
             }
-            AstStmt::ParFor { start, end, body, .. } => {
+            AstStmt::ParFor {
+                start, end, body, ..
+            } => {
                 self.verify_expr(caller, caller_row, start);
                 self.verify_expr(caller, caller_row, end);
                 self.verify_call_sites(caller, body);
@@ -554,7 +1134,8 @@ impl EffectChecker {
                 }
             }
             AstStmt::HandleStmt { expr, arms, .. } => {
-                let handled_effects: Vec<String> = arms.iter().map(|a| a.effect_name.clone()).collect();
+                let handled_effects: Vec<String> =
+                    arms.iter().map(|a| a.effect_name.clone()).collect();
                 let inner_row = caller_row.union(&EffectRow::new(handled_effects));
                 self.verify_expr(caller, &inner_row, expr);
                 for arm in arms {
@@ -627,7 +1208,12 @@ impl EffectChecker {
                 self.verify_expr(caller, caller_row, rhs);
             }
             AstExpr::UnaryOp { expr, .. } => self.verify_expr(caller, caller_row, expr),
-            AstExpr::If { cond, then_block, else_block, .. } => {
+            AstExpr::If {
+                cond,
+                then_block,
+                else_block,
+                ..
+            } => {
                 self.verify_expr(caller, caller_row, cond);
                 self.verify_call_sites(caller, then_block);
                 if let Some(eb) = else_block {
@@ -653,7 +1239,9 @@ impl EffectChecker {
                     self.verify_expr(caller, caller_row, i);
                 }
             }
-            AstExpr::When { scrutinee, arms, .. } => {
+            AstExpr::When {
+                scrutinee, arms, ..
+            } => {
                 self.verify_expr(caller, caller_row, scrutinee);
                 for arm in arms {
                     if let Some(g) = &arm.guard {
@@ -674,8 +1262,11 @@ impl EffectChecker {
             AstExpr::Try { expr, .. } => self.verify_expr(caller, caller_row, expr),
             AstExpr::Await { expr, .. } => self.verify_expr(caller, caller_row, expr),
             AstExpr::TupleIndex { base, .. } => self.verify_expr(caller, caller_row, base),
-            AstExpr::Ident(_) | AstExpr::IntLit { .. } | AstExpr::FloatLit { .. } |
-            AstExpr::BoolLit { .. } | AstExpr::StringLit { .. } => {}
+            AstExpr::Ident(_)
+            | AstExpr::IntLit { .. }
+            | AstExpr::FloatLit { .. }
+            | AstExpr::BoolLit { .. }
+            | AstExpr::StringLit { .. } => {}
             AstExpr::Mask { effects, body, .. } => {
                 let masked_row = EffectRow::new(effects.clone());
                 let inner_row = caller_row.intersect(&masked_row);
@@ -687,7 +1278,8 @@ impl EffectChecker {
                 }
             }
             AstExpr::Handle { expr, arms, .. } => {
-                let handled_effects: Vec<String> = arms.iter().map(|a| a.effect_name.clone()).collect();
+                let handled_effects: Vec<String> =
+                    arms.iter().map(|a| a.effect_name.clone()).collect();
                 let inner_row = caller_row.union(&EffectRow::new(handled_effects));
                 self.verify_expr(caller, &inner_row, expr);
                 for arm in arms {
@@ -716,7 +1308,9 @@ impl EffectChecker {
             AstExpr::Splat { expr, .. } => {
                 self.verify_expr(caller, caller_row, expr);
             }
-            AstExpr::TryCatch { body, catch_body, .. } => {
+            AstExpr::TryCatch {
+                body, catch_body, ..
+            } => {
                 self.verify_expr(caller, caller_row, body);
                 self.verify_expr(caller, caller_row, catch_body);
             }
@@ -732,4 +1326,10 @@ impl EffectChecker {
             }
         }
     }
+}
+
+fn is_inferred_stdlib_contract(name: &str) -> bool {
+    ["ais__", "tensor__", "tensorx__", "nn__", "ml__"]
+        .iter()
+        .any(|prefix| name.starts_with(prefix))
 }

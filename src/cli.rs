@@ -130,6 +130,71 @@ pub enum Command {
         /// Input file
         file: Option<PathBuf>,
     },
+    /// Build an allocation-free bare-metal component bundle
+    Embedded {
+        /// Input file
+        file: PathBuf,
+        /// Hardware profile: arduino-uno, cortex-m4f, cortex-m33, esp32-c3, or esp32
+        #[arg(long)]
+        target: String,
+        /// Output directory (defaults beside the input file)
+        #[arg(short = 'o', long = "output")]
+        output: Option<PathBuf>,
+        /// Zero-argument i64 entry function used by the board harness
+        #[arg(long, default_value = "main")]
+        entry: String,
+    },
+    /// Evaluate and hot-swap an evolved `(i64) -> i64` policy through seven gates
+    Evolve {
+        /// Trusted baseline IRIS source
+        #[arg(long)]
+        baseline: PathBuf,
+        /// Candidate IRIS source to validate and promote
+        #[arg(long)]
+        candidate: PathBuf,
+        /// JSON array of `{ "input": i64, "expected": i64 }` canary cases
+        #[arg(long)]
+        cases: PathBuf,
+        /// Trusted constitution text whose hash is pinned below
+        #[arg(long)]
+        constitution: PathBuf,
+        /// Expected lowercase SHA-256 of the constitution file
+        #[arg(long = "constitution-sha256")]
+        constitution_sha256: String,
+        /// Append-only JSONL decision log
+        #[arg(long)]
+        audit: PathBuf,
+        /// Independently protected audit-head checkpoint (required)
+        #[arg(long = "audit-head")]
+        audit_head: PathBuf,
+        /// Lowest constitution-approved output
+        #[arg(long = "min-output", default_value_t = i64::MIN)]
+        min_output: i64,
+        /// Highest constitution-approved output
+        #[arg(long = "max-output", default_value_t = i64::MAX)]
+        max_output: i64,
+    },
+    /// Compile and atomically activate a whole program without behavioral gates
+    #[command(name = "evolve-unrestricted")]
+    EvolveUnrestricted {
+        /// Candidate IRIS source
+        #[arg(long)]
+        candidate: PathBuf,
+        /// `iris-evolution-program/2` manifest JSON
+        #[arg(long)]
+        manifest: PathBuf,
+        /// Exact acknowledgement phrase printed in the command help
+        #[arg(long = "acknowledge-unsafe")]
+        acknowledge_unsafe: String,
+    },
+    /// Inspect source through the compiler-hosted typed metaprogramming API
+    Meta {
+        /// Input IRIS source
+        file: PathBuf,
+        /// Emit optimized IR instead of the typed JSON analysis
+        #[arg(long = "emit-ir")]
+        emit_ir: bool,
+    },
     /// Start an interactive REPL session
     Repl,
     /// Start the LSP server (JSON-RPC on stdin/stdout)
@@ -247,6 +312,32 @@ pub enum ParseArgsResult {
     Repl,
     Lsp,
     Dap,
+    Embedded {
+        file: PathBuf,
+        target: String,
+        output: Option<PathBuf>,
+        entry: String,
+    },
+    Evolve {
+        baseline: PathBuf,
+        candidate: PathBuf,
+        cases: PathBuf,
+        constitution: PathBuf,
+        constitution_sha256: String,
+        audit: PathBuf,
+        audit_head: PathBuf,
+        min_output: i64,
+        max_output: i64,
+    },
+    EvolveUnrestricted {
+        candidate: PathBuf,
+        manifest: PathBuf,
+        acknowledge_unsafe: String,
+    },
+    Meta {
+        file: PathBuf,
+        emit_ir: bool,
+    },
     Pkg {
         /// Raw arguments after `pkg` subcommand
         args: Vec<String>,
@@ -262,8 +353,14 @@ pub enum ParseArgsResult {
         no_color: bool,
     },
     Explain(Option<String>),
-    Upgrade { check: bool, yes: bool, force: bool },
-    Install { url: Option<String> },
+    Upgrade {
+        check: bool,
+        yes: bool,
+        force: bool,
+    },
+    Install {
+        url: Option<String>,
+    },
     Setup,
     Fmt {
         file: Option<PathBuf>,
@@ -295,7 +392,9 @@ pub fn parse_args(args: &[String]) -> Result<ParseArgsResult, String> {
 
     match cli.command {
         Some(Command::Build { file }) => {
-            let path = file.or(cli.file).ok_or_else(|| "no input file specified".to_owned())?;
+            let path = file
+                .or(cli.file)
+                .ok_or_else(|| "no input file specified".to_owned())?;
             Ok(ParseArgsResult::Args(CliArgs {
                 emit: EmitKind::Binary,
                 path,
@@ -311,7 +410,9 @@ pub fn parse_args(args: &[String]) -> Result<ParseArgsResult, String> {
             }))
         }
         Some(Command::Run { file }) => {
-            let path = file.or(cli.file).ok_or_else(|| "no input file specified".to_owned())?;
+            let path = file
+                .or(cli.file)
+                .ok_or_else(|| "no input file specified".to_owned())?;
             Ok(ParseArgsResult::Args(CliArgs {
                 emit: EmitKind::Binary,
                 path,
@@ -326,14 +427,55 @@ pub fn parse_args(args: &[String]) -> Result<ParseArgsResult, String> {
                 strict_effects: cli.strict_effects,
             }))
         }
+        Some(Command::Embedded {
+            file,
+            target,
+            output,
+            entry,
+        }) => Ok(ParseArgsResult::Embedded {
+            file,
+            target,
+            output,
+            entry,
+        }),
+        Some(Command::Evolve {
+            baseline,
+            candidate,
+            cases,
+            constitution,
+            constitution_sha256,
+            audit,
+            audit_head,
+            min_output,
+            max_output,
+        }) => Ok(ParseArgsResult::Evolve {
+            baseline,
+            candidate,
+            cases,
+            constitution,
+            constitution_sha256,
+            audit,
+            audit_head,
+            min_output,
+            max_output,
+        }),
+        Some(Command::EvolveUnrestricted {
+            candidate,
+            manifest,
+            acknowledge_unsafe,
+        }) => Ok(ParseArgsResult::EvolveUnrestricted {
+            candidate,
+            manifest,
+            acknowledge_unsafe,
+        }),
+        Some(Command::Meta { file, emit_ir }) => Ok(ParseArgsResult::Meta { file, emit_ir }),
         Some(Command::Repl) => Ok(ParseArgsResult::Repl),
         Some(Command::Lsp { .. }) => Ok(ParseArgsResult::Lsp),
         Some(Command::Dap { .. }) => Ok(ParseArgsResult::Dap),
         Some(Command::Pkg { args }) => Ok(ParseArgsResult::Pkg { args }),
         Some(Command::Bench { file }) => {
-            if file.is_some() {
+            if let Some(path) = file {
                 // bench <file.iris> — treat as a compilation request
-                let path = file.unwrap();
                 Ok(ParseArgsResult::Args(CliArgs {
                     emit: EmitKind::Eval,
                     path,
@@ -352,8 +494,7 @@ pub fn parse_args(args: &[String]) -> Result<ParseArgsResult, String> {
             }
         }
         Some(Command::Profile { file }) => {
-            if file.is_some() {
-                let path = file.unwrap();
+            if let Some(path) = file {
                 Ok(ParseArgsResult::Args(CliArgs {
                     emit: EmitKind::Eval,
                     path,
@@ -371,9 +512,15 @@ pub fn parse_args(args: &[String]) -> Result<ParseArgsResult, String> {
                 Ok(ParseArgsResult::Profile)
             }
         }
-        Some(Command::Test { file, filter, no_color }) => {
-            Ok(ParseArgsResult::Test { file, filter, no_color })
-        }
+        Some(Command::Test {
+            file,
+            filter,
+            no_color,
+        }) => Ok(ParseArgsResult::Test {
+            file,
+            filter,
+            no_color,
+        }),
         Some(Command::Explain { code }) => Ok(ParseArgsResult::Explain(code)),
         Some(Command::Upgrade { check, yes, force }) => {
             Ok(ParseArgsResult::Upgrade { check, yes, force })
@@ -384,7 +531,9 @@ pub fn parse_args(args: &[String]) -> Result<ParseArgsResult, String> {
         Some(Command::Docs { file, output }) => Ok(ParseArgsResult::Docs { file, output }),
         None => {
             // No subcommand — treat as direct compilation request
-            let path = cli.file.ok_or_else(|| "no input file specified".to_owned())?;
+            let path = cli
+                .file
+                .ok_or_else(|| "no input file specified".to_owned())?;
             Ok(ParseArgsResult::Args(CliArgs {
                 path,
                 emit: cli.emit.into(),
@@ -477,6 +626,8 @@ pub fn help_text() -> &'static str {
      Subcommands:\n\
        build                 Build native binary (same as --emit binary)\n\
        run                   Build and run the binary\n\
+       embedded             Build an allocation-free bare-metal component bundle\n\
+       evolve               Validate and hot-swap a governed `(i64) -> i64` policy\n\
        test [file.iris]      Discover and run test_ functions (--filter <substr> --no-color)\n\
        install [url]         Install dependencies or a package from a Git URL\n\
        fmt [file.iris]       Format source files (--check to verify without modifying)\n\

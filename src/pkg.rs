@@ -112,7 +112,12 @@ impl fmt::Display for Dep {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Dep::Path(p) => write!(f, "{{ path = \"{}\" }}", p),
-            Dep::Git { url, branch, tag, rev } => {
+            Dep::Git {
+                url,
+                branch,
+                tag,
+                rev,
+            } => {
                 write!(f, "{{ git = \"{}\"", url)?;
                 if let Some(b) = branch {
                     write!(f, ", branch = \"{}\"", b)?;
@@ -125,8 +130,15 @@ impl fmt::Display for Dep {
                 }
                 write!(f, " }}")
             }
-            Dep::Registry { package, version_req } => {
-                write!(f, "{{ registry = \"{}\", version = \"{}\" }}", package, version_req)
+            Dep::Registry {
+                package,
+                version_req,
+            } => {
+                write!(
+                    f,
+                    "{{ registry = \"{}\", version = \"{}\" }}",
+                    package, version_req
+                )
             }
         }
     }
@@ -196,7 +208,12 @@ impl Manifest {
                         || s.starts_with("https://")
                         || s.starts_with("git@")
                     {
-                        Dep::Git { url: s, branch: None, tag: None, rev: None }
+                        Dep::Git {
+                            url: s,
+                            branch: None,
+                            tag: None,
+                            rev: None,
+                        }
                     } else {
                         Dep::Path(s)
                     }
@@ -205,7 +222,12 @@ impl Manifest {
                     if let Some(p) = d.path {
                         Dep::Path(p)
                     } else if let Some(git) = d.git {
-                        Dep::Git { url: git, branch: d.branch, tag: d.tag, rev: d.rev }
+                        Dep::Git {
+                            url: git,
+                            branch: d.branch,
+                            tag: d.tag,
+                            rev: d.rev,
+                        }
                     } else if let Some(pkg) = d.registry {
                         Dep::Registry {
                             package: pkg,
@@ -243,7 +265,12 @@ impl Manifest {
                     path: Some(p.clone()),
                     ..Default::default()
                 }),
-                Dep::Git { url, branch, tag, rev } => TomlDep::Detailed(DetailedDep {
+                Dep::Git {
+                    url,
+                    branch,
+                    tag,
+                    rev,
+                } => TomlDep::Detailed(DetailedDep {
                     path: None,
                     git: Some(url.clone()),
                     branch: branch.clone(),
@@ -251,7 +278,10 @@ impl Manifest {
                     rev: rev.clone(),
                     ..Default::default()
                 }),
-                Dep::Registry { package, version_req } => TomlDep::Detailed(DetailedDep {
+                Dep::Registry {
+                    package,
+                    version_req,
+                } => TomlDep::Detailed(DetailedDep {
                     registry: Some(package.clone()),
                     version: Some(version_req.clone()),
                     ..Default::default()
@@ -265,9 +295,21 @@ impl Manifest {
                 name: self.name.clone(),
                 version: self.version.clone(),
                 entry: self.entry.clone(),
-                description: if self.description.is_empty() { None } else { Some(self.description.clone()) },
-                license: if self.license.is_empty() { None } else { Some(self.license.clone()) },
-                repository: if self.repository.is_empty() { None } else { Some(self.repository.clone()) },
+                description: if self.description.is_empty() {
+                    None
+                } else {
+                    Some(self.description.clone())
+                },
+                license: if self.license.is_empty() {
+                    None
+                } else {
+                    Some(self.license.clone())
+                },
+                repository: if self.repository.is_empty() {
+                    None
+                } else {
+                    Some(self.repository.clone())
+                },
                 registry: self.registry.clone(),
             },
             dependencies: toml_deps,
@@ -379,7 +421,8 @@ fn load_manifest() -> Result<(PathBuf, Manifest), String> {
     let cwd = std::env::current_dir().map_err(|e| format!("cannot read cwd: {}", e))?;
     let path = find_manifest(&cwd)
         .ok_or_else(|| "no iris.toml found (run `iris pkg init` to create one)".to_string())?;
-    let text = fs::read_to_string(&path).map_err(|e| format!("cannot read {}: {}", path.display(), e))?;
+    let text =
+        fs::read_to_string(&path).map_err(|e| format!("cannot read {}: {}", path.display(), e))?;
     let manifest = Manifest::parse(&text)?;
     Ok((path, manifest))
 }
@@ -395,7 +438,9 @@ fn lock_path(manifest_path: &Path) -> PathBuf {
 
 fn load_lock(manifest_path: &Path) -> LockFile {
     let lp = lock_path(manifest_path);
-    fs::read_to_string(&lp).map(|s| LockFile::parse(&s)).unwrap_or_default()
+    fs::read_to_string(&lp)
+        .map(|s| LockFile::parse(&s))
+        .unwrap_or_default()
 }
 
 fn save_lock(manifest_path: &Path, lock: &LockFile) -> Result<(), String> {
@@ -419,9 +464,9 @@ fn dir_checksum(dir: &Path) -> Option<String> {
         let abs = dir.join(rel);
         if let Ok(data) = fs::read(&abs) {
             hasher.update(rel.to_string_lossy().as_bytes());
-            hasher.update(&[0u8; 1]);
+            hasher.update([0u8; 1]);
             hasher.update(&data);
-            hasher.update(&[0u8; 1]);
+            hasher.update([0u8; 1]);
         }
     }
     Some(hex_encode(&hasher.finalize()))
@@ -468,8 +513,10 @@ fn resolve_registry_dep(
 
     // Fetch the registry index.
     let index_url = format!("{}/index.json", registry_url.trim_end_matches('/'));
-    let resp = ureq_get(&index_url).map_err(|e| format!("failed to fetch registry index: {}", e))?;
-    let text = String::from_utf8(resp).map_err(|e| format!("invalid UTF-8 in registry index: {}", e))?;
+    let resp =
+        ureq_get(&index_url).map_err(|e| format!("failed to fetch registry index: {}", e))?;
+    let text =
+        String::from_utf8(resp).map_err(|e| format!("invalid UTF-8 in registry index: {}", e))?;
     let index: RegistryIndex =
         serde_json::from_str(&text).map_err(|e| format!("invalid registry index: {}", e))?;
 
@@ -525,7 +572,12 @@ struct RegistryVersionEntry {
 }
 
 /// Download a tarball from `url`, verify its checksum, and extract into `target`.
-fn download_and_extract(url: &str, expected_checksum: &str, target: &Path, name: &str) -> Result<(), String> {
+fn download_and_extract(
+    url: &str,
+    expected_checksum: &str,
+    target: &Path,
+    name: &str,
+) -> Result<(), String> {
     eprintln!("  {} — downloading {} ...", name, url);
     let data = ureq_get(url).map_err(|e| format!("failed to download {}: {}", url, e))?;
 
@@ -545,7 +597,8 @@ fn download_and_extract(url: &str, expected_checksum: &str, target: &Path, name:
     let decoder = flate2::read::GzDecoder::new(&data[..]);
     let mut archive = tar::Archive::new(decoder);
     if target.exists() {
-        fs::remove_dir_all(target).map_err(|e| format!("cannot remove {}: {}", target.display(), e))?;
+        fs::remove_dir_all(target)
+            .map_err(|e| format!("cannot remove {}: {}", target.display(), e))?;
     }
     fs::create_dir_all(target).map_err(|e| format!("cannot create {}: {}", target.display(), e))?;
     archive
@@ -612,7 +665,11 @@ pub fn cmd_init() -> Result<(), String> {
 
     fs::create_dir_all(cwd.join(".iris")).map_err(|e| format!("cannot create .iris/: {}", e))?;
 
-    eprintln!("initialized IRIS project '{}' in {}", dir_name, cwd.display());
+    eprintln!(
+        "initialized IRIS project '{}' in {}",
+        dir_name,
+        cwd.display()
+    );
     Ok(())
 }
 
@@ -649,11 +706,13 @@ pub fn cmd_list() -> Result<(), String> {
             let pin = match locked {
                 Some(e) if e.commit.is_some() => format!(
                     " [{}]",
-                    &e.commit.as_deref().unwrap_or("")[..8.min(e.commit.as_deref().unwrap_or("").len())]
+                    &e.commit.as_deref().unwrap_or("")
+                        [..8.min(e.commit.as_deref().unwrap_or("").len())]
                 ),
                 Some(e) if e.checksum.is_some() => format!(
                     " [{}]",
-                    &e.checksum.as_deref().unwrap_or("")[..12.min(e.checksum.as_deref().unwrap_or("").len())]
+                    &e.checksum.as_deref().unwrap_or("")
+                        [..12.min(e.checksum.as_deref().unwrap_or("").len())]
                 ),
                 _ => String::new(),
             };
@@ -665,7 +724,9 @@ pub fn cmd_list() -> Result<(), String> {
 
 pub fn cmd_check() -> Result<(), String> {
     let (manifest_path, manifest) = load_manifest()?;
-    let project_dir = manifest_path.parent().ok_or("cannot determine project directory")?;
+    let project_dir = manifest_path
+        .parent()
+        .ok_or("cannot determine project directory")?;
     let deps_dir = project_dir.join(".iris").join("deps");
     let mut missing = Vec::new();
     for name in manifest.deps.keys() {
@@ -681,14 +742,19 @@ pub fn cmd_check() -> Result<(), String> {
         for m in &missing {
             eprintln!("  missing: {}", m);
         }
-        Err(format!("{} dependency/ies missing — run `iris pkg install`", missing.len()))
+        Err(format!(
+            "{} dependency/ies missing — run `iris pkg install`",
+            missing.len()
+        ))
     }
 }
 
 /// `iris pkg install [--offline]`
 pub fn cmd_install(offline: bool) -> Result<(), String> {
     let (manifest_path, manifest) = load_manifest()?;
-    let project_dir = manifest_path.parent().ok_or("cannot determine project directory")?;
+    let project_dir = manifest_path
+        .parent()
+        .ok_or("cannot determine project directory")?;
     let deps_dir = project_dir.join(".iris").join("deps");
 
     fs::create_dir_all(&deps_dir).map_err(|e| format!("cannot create .iris/deps/: {}", e))?;
@@ -737,8 +803,20 @@ pub fn cmd_install(offline: bool) -> Result<(), String> {
                 };
                 (entry, source.clone())
             }
-            Dep::Git { url, branch, tag, rev } => {
-                let commit = install_git_dep(url, branch.as_deref(), tag.as_deref(), rev.as_deref(), &target, &name)?;
+            Dep::Git {
+                url,
+                branch,
+                tag,
+                rev,
+            } => {
+                let commit = install_git_dep(
+                    url,
+                    branch.as_deref(),
+                    tag.as_deref(),
+                    rev.as_deref(),
+                    &target,
+                    &name,
+                )?;
                 let cs = dir_checksum(&target);
                 let entry = LockEntry {
                     kind: "git".into(),
@@ -748,9 +826,13 @@ pub fn cmd_install(offline: bool) -> Result<(), String> {
                 };
                 (entry, target.clone())
             }
-            Dep::Registry { package, version_req } => {
+            Dep::Registry {
+                package,
+                version_req,
+            } => {
                 let registry_url = effective_registry(manifest.registry.as_deref());
-                let (version, url, checksum) = resolve_registry_dep(&registry_url, package, version_req, offline)?;
+                let (version, url, checksum) =
+                    resolve_registry_dep(&registry_url, package, version_req, offline)?;
                 download_and_extract(&url, &checksum, &target, &name)?;
                 let cs = dir_checksum(&target);
                 let entry = LockEntry {
@@ -788,7 +870,9 @@ pub fn cmd_install(offline: bool) -> Result<(), String> {
 /// `iris pkg update [name]`.
 pub fn cmd_update(only: Option<&str>) -> Result<(), String> {
     let (manifest_path, manifest) = load_manifest()?;
-    let project_dir = manifest_path.parent().ok_or("cannot determine project directory")?;
+    let project_dir = manifest_path
+        .parent()
+        .ok_or("cannot determine project directory")?;
     let deps_dir = project_dir.join(".iris").join("deps");
     let mut lock = load_lock(&manifest_path);
     let mut updated = 0usize;
@@ -800,14 +884,29 @@ pub fn cmd_update(only: Option<&str>) -> Result<(), String> {
             }
         }
         match dep {
-            Dep::Git { url, branch, tag, rev } => {
+            Dep::Git {
+                url,
+                branch,
+                tag,
+                rev,
+            } => {
                 let target = deps_dir.join(name);
                 if !target.exists() {
-                    eprintln!("  {} — not installed, skipping (run `iris pkg install`)", name);
+                    eprintln!(
+                        "  {} — not installed, skipping (run `iris pkg install`)",
+                        name
+                    );
                     continue;
                 }
                 eprintln!("  {} — updating {}", name, url);
-                let commit = git_pull_or_fetch(&target, url, branch.as_deref(), tag.as_deref(), rev.as_deref(), name)?;
+                let commit = git_pull_or_fetch(
+                    &target,
+                    url,
+                    branch.as_deref(),
+                    tag.as_deref(),
+                    rev.as_deref(),
+                    name,
+                )?;
                 let cs = dir_checksum(&target);
                 lock.entries.insert(
                     name.clone(),
@@ -823,7 +922,10 @@ pub fn cmd_update(only: Option<&str>) -> Result<(), String> {
             Dep::Path(_) => {
                 eprintln!("  {} — path dep, nothing to update", name);
             }
-            Dep::Registry { package, version_req } => {
+            Dep::Registry {
+                package,
+                version_req,
+            } => {
                 let registry_url = effective_registry(manifest.registry.as_deref());
                 let target = deps_dir.join(name);
                 if target.exists() {
@@ -856,7 +958,9 @@ pub fn cmd_update(only: Option<&str>) -> Result<(), String> {
 /// `iris pkg vendor` — download all deps into `.iris/vendor/` for offline builds.
 pub fn cmd_vendor() -> Result<(), String> {
     let (manifest_path, manifest) = load_manifest()?;
-    let project_dir = manifest_path.parent().ok_or("cannot determine project directory")?;
+    let project_dir = manifest_path
+        .parent()
+        .ok_or("cannot determine project directory")?;
     let vendor_dir = project_dir.join(VENDOR_DIR);
     let deps_dir = project_dir.join(".iris").join("deps");
 
@@ -869,7 +973,12 @@ pub fn cmd_vendor() -> Result<(), String> {
     }
 
     // Ensure deps are installed first.
-    if !deps_dir.exists() || deps_dir.read_dir().map(|mut i| i.next().is_none()).unwrap_or(true) {
+    if !deps_dir.exists()
+        || deps_dir
+            .read_dir()
+            .map(|mut i| i.next().is_none())
+            .unwrap_or(true)
+    {
         eprintln!("no installed deps found — running install first ...");
         cmd_install(false)?;
     }
@@ -885,13 +994,16 @@ pub fn cmd_vendor() -> Result<(), String> {
         if dst.exists() {
             remove_dir_all_safe(&dst)?;
         }
-        copy_dir_recursive(&src, &dst)
-            .map_err(|e| format!("cannot copy {}: {}", name, e))?;
+        copy_dir_recursive(&src, &dst).map_err(|e| format!("cannot copy {}: {}", name, e))?;
         eprintln!("  {} → {}", name, dst.display());
         vendored += 1;
     }
 
-    eprintln!("vendored {} dependencies into {}", vendored, vendor_dir.display());
+    eprintln!(
+        "vendored {} dependencies into {}",
+        vendored,
+        vendor_dir.display()
+    );
     Ok(())
 }
 
@@ -995,7 +1107,13 @@ fn git_pull_or_fetch(
         git_checkout(target, r, name)?;
     } else if let Some(t) = tag {
         let _ = Command::new("git")
-            .args(["fetch", "--depth", "1", "origin", &format!("refs/tags/{}", t)])
+            .args([
+                "fetch",
+                "--depth",
+                "1",
+                "origin",
+                &format!("refs/tags/{}", t),
+            ])
             .current_dir(target)
             .status();
         git_checkout(target, t, name)?;
@@ -1024,7 +1142,10 @@ fn git_checkout(target: &Path, git_ref: &str, name: &str) -> Result<(), String> 
         .status()
         .map_err(|e| format!("dependency '{}': git checkout failed: {}", name, e))?;
     if !status.success() {
-        return Err(format!("dependency '{}': git checkout '{}' failed", name, git_ref));
+        return Err(format!(
+            "dependency '{}': git checkout '{}' failed",
+            name, git_ref
+        ));
     }
     Ok(())
 }
@@ -1066,7 +1187,9 @@ fn remove_dir_all_safe(path: &Path) -> Result<(), String> {
 
 pub fn cmd_build(run_after: bool, offline: bool) -> Result<(), String> {
     let (manifest_path, manifest) = load_manifest()?;
-    let project_dir = manifest_path.parent().ok_or("cannot determine project directory")?;
+    let project_dir = manifest_path
+        .parent()
+        .ok_or("cannot determine project directory")?;
 
     cmd_install(offline)?;
 
@@ -1158,13 +1281,34 @@ pub fn run_pkg_command(args: &[String]) -> Result<(), String> {
             let mut i = 2usize;
             while i < args.len() {
                 match args[i].as_str() {
-                    "--path" => { i += 1; path_val = args.get(i).cloned(); }
-                    "--git" => { i += 1; git_val = args.get(i).cloned(); }
-                    "--tag" => { i += 1; tag_val = args.get(i).cloned(); }
-                    "--rev" => { i += 1; rev_val = args.get(i).cloned(); }
-                    "--branch" => { i += 1; branch_val = args.get(i).cloned(); }
-                    "--registry" => { i += 1; registry_val = args.get(i).cloned(); }
-                    "--version" => { i += 1; version_val = args.get(i).cloned(); }
+                    "--path" => {
+                        i += 1;
+                        path_val = args.get(i).cloned();
+                    }
+                    "--git" => {
+                        i += 1;
+                        git_val = args.get(i).cloned();
+                    }
+                    "--tag" => {
+                        i += 1;
+                        tag_val = args.get(i).cloned();
+                    }
+                    "--rev" => {
+                        i += 1;
+                        rev_val = args.get(i).cloned();
+                    }
+                    "--branch" => {
+                        i += 1;
+                        branch_val = args.get(i).cloned();
+                    }
+                    "--registry" => {
+                        i += 1;
+                        registry_val = args.get(i).cloned();
+                    }
+                    "--version" => {
+                        i += 1;
+                        version_val = args.get(i).cloned();
+                    }
                     other => return Err(format!("unknown flag: {}", other)),
                 }
                 i += 1;
@@ -1173,7 +1317,12 @@ pub fn run_pkg_command(args: &[String]) -> Result<(), String> {
             let dep = if let Some(p) = path_val {
                 Dep::Path(p)
             } else if let Some(url) = git_val {
-                Dep::Git { url, branch: branch_val, tag: tag_val, rev: rev_val }
+                Dep::Git {
+                    url,
+                    branch: branch_val,
+                    tag: tag_val,
+                    rev: rev_val,
+                }
             } else if let Some(pkg) = registry_val {
                 Dep::Registry {
                     package: pkg,

@@ -17,14 +17,20 @@ pub struct EffectRow {
 
 impl EffectRow {
     pub fn pure() -> Self {
-        Self { effects: vec![], vars: vec![] }
+        Self {
+            effects: vec![],
+            vars: vec![],
+        }
     }
 
     pub fn new(effects: Vec<String>) -> Self {
         let mut s = effects;
         s.sort();
         s.dedup();
-        Self { effects: s, vars: vec![] }
+        Self {
+            effects: s,
+            vars: vec![],
+        }
     }
 
     pub fn from_strs(effects: &[&str]) -> Self {
@@ -61,7 +67,10 @@ impl EffectRow {
         vcombined.extend(other.vars.clone());
         vcombined.sort();
         vcombined.dedup();
-        Self { effects: Self::new(combined).effects, vars: vcombined }
+        Self {
+            effects: Self::new(combined).effects,
+            vars: vcombined,
+        }
     }
 
     /// Set intersection of two effect rows.
@@ -72,7 +81,10 @@ impl EffectRow {
             .filter(|e| other.effects.contains(e))
             .cloned()
             .collect();
-        Self { effects: Self::new(combined).effects, vars: vec![] }
+        Self {
+            effects: Self::new(combined).effects,
+            vars: vec![],
+        }
     }
 
     /// Instantiate effect variables by substituting them with a concrete row.
@@ -88,13 +100,19 @@ impl EffectRow {
     }
 
     pub fn display(&self) -> String {
-        let parts: Vec<String> = self.effects.iter().cloned().collect();
+        let parts = self.effects.to_vec();
         let mut s = parts.join(", ");
         if !self.vars.is_empty() {
-            if !s.is_empty() { s.push_str(", "); }
+            if !s.is_empty() {
+                s.push_str(", ");
+            }
             s.push_str(&self.vars.join(", "));
         }
-        if s.is_empty() { "pure".to_string() } else { s }
+        if s.is_empty() {
+            "pure".to_string()
+        } else {
+            s
+        }
     }
 }
 
@@ -203,6 +221,24 @@ impl EffectRegistry {
                 "none",
                 "ok",
                 "err",
+                "dtensor",
+                "dtensor_tape",
+                "dtensor_add",
+                "dtensor_sub",
+                "dtensor_mul",
+                "dtensor_div",
+                "dtensor_matmul",
+                "dtensor_relu",
+                "dtensor_sigmoid",
+                "dtensor_tanh",
+                "dtensor_sum",
+                "dtensor_backward",
+                "dtensor_grad",
+                "dtensor_to_list",
+                // Collection/string joining allocates its result.  Keep this
+                // separate from task_group_join below: the surface spelling
+                // `join(parts, separator)` is the string/list intrinsic.
+                "join",
             ],
             EffectRow::from_strs(&["alloc"]),
         );
@@ -276,7 +312,9 @@ impl EffectRegistry {
             EffectRow::from_strs(&["net", "alloc"]),
         );
 
-        // === spawn (concurrency) ===
+        // === thread (concurrency) ===
+        // `spawn` is a language keyword and therefore cannot be written in an
+        // effect clause.  The public effect name for concurrency is `thread`.
         self.reg(
             &[
                 "spawn",
@@ -298,10 +336,9 @@ impl EffectRegistry {
                 "std.async.task_group_spawn",
                 "std.async.task_group_join",
                 "std.async.task_group_cancel",
-                "join",
                 "cancel",
             ],
-            EffectRow::from_strs(&["spawn", "alloc"]),
+            EffectRow::from_strs(&["thread", "alloc"]),
         );
 
         // === throw (exceptions/panics) ===
@@ -423,6 +460,33 @@ impl EffectRegistry {
             EffectRow::from_strs(&["sys", "alloc"]),
         );
 
+        // === reflect (dynamic parsing, verification and evaluation) ===
+        // Dynamic source evaluation is never pure merely because the source is
+        // supplied as a string. Track it explicitly so strict mode cannot hide
+        // reflective execution behind an otherwise pure wrapper.
+        self.reg(
+            &[
+                "iris_validate",
+                "reflect_validate",
+                "iris_eval",
+                "reflect_eval",
+                "iris_eval_i64",
+                "reflect_eval_i64",
+            ],
+            EffectRow::from_strs(&["reflect", "alloc"]),
+        );
+
+        // === transaction (speculative state and staged filesystem writes) ===
+        self.reg(
+            &[
+                "transaction_begin",
+                "transaction_commit",
+                "transaction_rollback",
+                "transaction_depth",
+            ],
+            EffectRow::from_strs(&["transaction"]),
+        );
+
         // === math (math library, pure but tracked for FP exceptions) ===
         // Pure math functions: sqrt, sin, cos, log, exp, etc.
         // Not annotated — default to pure.
@@ -432,5 +496,29 @@ impl EffectRegistry {
 impl Default for EffectRegistry {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::EffectRegistry;
+
+    #[test]
+    fn collection_join_is_not_a_thread_effect() {
+        let registry = EffectRegistry::new();
+        let join = registry.lookup("join").expect("join must be registered");
+        assert!(join.contains("alloc"));
+        assert!(!join.contains("thread"));
+        assert!(!join.contains("spawn"));
+    }
+
+    #[test]
+    fn task_join_uses_the_spellable_thread_effect() {
+        let registry = EffectRegistry::new();
+        let join = registry
+            .lookup("task_group_join")
+            .expect("task_group_join must be registered");
+        assert!(join.contains("thread"));
+        assert!(!join.contains("spawn"));
     }
 }

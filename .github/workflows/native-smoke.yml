@@ -99,15 +99,22 @@ jobs:
           $proc = Start-Process -FilePath cargo -ArgumentList @('test', '--test', 'native_only_execution_http_server_stdlib_regex', 'native_returned_', '--', '--nocapture') -PassThru -NoNewWindow -Wait
           if ($proc.ExitCode -ne 0) { throw "native_only_execution_http_server_stdlib_regex failed with exit code $($proc.ExitCode)" }
 
+      - name: Direct MinGW ld.lld smoke (Windows)
+        if: matrix.shell_family == 'windows'
+        shell: powershell
+        run: |
+          $env:IRIS_REQUIRE_DIRECT_LLD = '1'
+          cargo test --test direct_mingw_lld_link -- --nocapture
+
       - name: Native example smoke (Unix)
         if: matrix.shell_family == 'unix'
         run: |
-          ${{ matrix.timeout_cmd }} 120s ./target/debug/iris run examples/03_data_structures_algorithms/algorithms.iris
-          ${{ matrix.timeout_cmd }} 120s ./target/debug/iris run examples/02_functions/closures_functional.iris
-          ${{ matrix.timeout_cmd }} 120s ./target/debug/iris run examples/06_machine_learning/matrix_ops.iris
-          ${{ matrix.timeout_cmd }} 120s ./target/debug/iris run examples/05_systems/concurrency.iris || echo "warning: concurrency smoke is flaky on this runner; continuing"
-          ${{ matrix.timeout_cmd }} 120s ./target/debug/iris run examples/05_systems/http_server_smoke.iris || echo "warning: http_server smoke is flaky on this runner; continuing"
-          IRIS_SOAK_DURATION_MS=5000 IRIS_SOAK_REPORT_MS=1000 ${{ matrix.timeout_cmd }} 60s ./target/debug/iris run examples/07_applications/runtime_soak.iris
+          ${{ matrix.timeout_cmd }} 120s ./target/debug/iris run examples/01_basics/control_flow.iris
+          ${{ matrix.timeout_cmd }} 120s ./target/debug/iris run examples/02_functions/closures.iris
+          ${{ matrix.timeout_cmd }} 120s ./target/debug/iris run examples/07_ml/neural_layer.iris
+          ${{ matrix.timeout_cmd }} 120s ./target/debug/iris run examples/05_concurrency/task_groups.iris
+          ${{ matrix.timeout_cmd }} 120s ./target/debug/iris run projects/model_gateway/main.iris
+          IRIS_SOAK_DURATION_MS=5000 IRIS_SOAK_REPORT_MS=1000 ${{ matrix.timeout_cmd }} 60s ./target/debug/iris run examples/05_concurrency/runtime_soak.iris
 
       - name: Native example smoke (Windows)
         if: matrix.shell_family == 'windows'
@@ -148,20 +155,12 @@ jobs:
             }
           }
 
-          Invoke-IrisRun -Example 'examples/03_data_structures_algorithms/algorithms.iris'
-          Invoke-IrisRun -Example 'examples/02_functions/closures_functional.iris'
-          Invoke-IrisRun -Example 'examples/06_machine_learning/matrix_ops.iris'
-          try {
-            Invoke-IrisRun -Example 'examples/05_systems/concurrency.iris'
-          } catch {
-            Write-Warning "concurrency smoke is flaky on this runner; continuing"
-          }
-          try {
-            Invoke-IrisRun -Example 'examples/05_systems/http_server_smoke.iris'
-          } catch {
-            Write-Warning "http_server smoke is flaky on this runner; continuing"
-          }
-          Invoke-IrisRun -Example 'examples/07_applications/runtime_soak.iris' -TimeoutMs 60000 -ExtraEnv @{
+          Invoke-IrisRun -Example 'examples/01_basics/control_flow.iris'
+          Invoke-IrisRun -Example 'examples/02_functions/closures.iris'
+          Invoke-IrisRun -Example 'examples/07_ml/neural_layer.iris'
+          Invoke-IrisRun -Example 'examples/05_concurrency/task_groups.iris'
+          Invoke-IrisRun -Example 'projects/model_gateway/main.iris'
+          Invoke-IrisRun -Example 'examples/05_concurrency/runtime_soak.iris' -TimeoutMs 60000 -ExtraEnv @{
             IRIS_SOAK_DURATION_MS = '5000'
             IRIS_SOAK_REPORT_MS = '1000'
           }

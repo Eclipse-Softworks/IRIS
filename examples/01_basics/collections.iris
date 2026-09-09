@@ -1,0 +1,16 @@
+def main() -> i64 {
+    var fixed = [2, 4, 6];
+    fixed[1] = 8;
+    val values : list<i64> = list(10, 20);
+    list_push(values, 30);
+    val scores : map<str, i64> = map();
+    map_set(scores, "iris", 42);
+    val pair = ("ready", 3);
+    assert(fixed[1] == 8);
+    assert(list_len(values) == 3);
+    assert(list_get(values, 2) == 30);
+    assert(unwrap(map_get(scores, "iris")) == 42);
+    assert(pair.0 == "ready");
+    println("collections: ok");
+    return 0
+}

@@ -397,6 +397,19 @@ export async function runFileTests(getIrisExe: () => string): Promise<void> {
     runInTerminal('IRIS Tests', getIrisExe(), ['test', filePath], path.dirname(filePath));
 }
 
+/** Run all tests in the workspace (`iris test`). */
+export function runWorkspaceTests(getIrisExe: () => string): void {
+    const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    runInTerminal('IRIS Test Suite', getIrisExe(), ['test'], cwd);
+}
+
+/** Format all .iris files in the workspace (`iris fmt`). */
+export function fmtWorkspace(getIrisExe: () => string): void {
+    const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    runInTerminal('IRIS Formatter', getIrisExe(), ['fmt'], cwd);
+}
+
+
 /** Run benchmarks in the active file. */
 export async function runBenchmarks(getIrisExe: () => string): Promise<void> {
     const filePath = await activeIrisFile();

@@ -1,0 +1,68 @@
+/// Standard Library: Speculative Execution and Invariant Sandboxing
+///
+/// Provides both result-level speculation for pure functions and transactional
+/// speculation for reversible allocation/state plus staged whole-file writes.
+/// Compile safety-critical callers with `--strict-effects`: the transactional
+/// callback contract rejects terminal I/O, networking, FFI, spawning, process
+/// control, clocks and randomness before execution.
+///
+/// Transactions are thread-local and nestable. Mutable lists, maps and atomics
+/// are restored on rollback. `file_write_all` is staged until the outer commit,
+/// and `file_read_all` observes the innermost staged value. External services,
+/// open file streams and hardware actuator calls are intentionally not admitted
+/// by the callback effect row and are not claimed to be reversible.
+
+pub record SpeculationOutcome[T] {
+    success: bool,
+    value: option<T>,
+    reason: str
+}
+
+/// Execute a candidate function. If the validator passes on the result, returns some(value).
+/// If the validator fails, returns none(), discarding the candidate value.
+pub def speculate[T](candidate: || -> T, validator: |T| -> bool) -> option<T> effect alloc {
+    val res = candidate()
+    if validator(res) {
+        some(res)
+    } else {
+        none()
+    }
+}
+
+/// Run a reversible candidate and publish its effects only when validation
+/// succeeds. A failed outer file commit also restores the in-memory snapshots.
+pub def speculate_transactional[T](validator: |T| -> bool, candidate: || -> T effect alloc, fs) -> option<T> effect transaction, alloc, fs {
+    transaction_begin();
+    val res = candidate()
+    if validator(res) {
+        if transaction_commit() == 1 {
+            some(res)
+        } else {
+            none()
+        }
+    } else {
+        transaction_rollback();
+        none()
+    }
+}
+
+/// Execute a candidate function with an automatic fallback if validation fails.
+pub def speculate_with_fallback[T](candidate: || -> T, fallback: || -> T, validator: |T| -> bool) -> T {
+    val res = candidate()
+    if validator(res) {
+        res
+    } else {
+        fallback()
+    }
+}
+
+/// Speculatively run a numerical candidate and ensure its scalar metric remains within [lower_bound, upper_bound].
+pub def speculate_envelope[T](candidate: || -> T, lower_bound: f64, upper_bound: f64, extractor: |T| -> f64) -> option<T> effect alloc {
+    val res = candidate()
+    val metric = extractor(res)
+    if metric >= lower_bound && metric <= upper_bound {
+        some(res)
+    } else {
+        none()
+    }
+}

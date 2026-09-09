@@ -44,8 +44,9 @@ Desktop.ini
 /temp_*
 
 # Generated project outputs
-projects/taskman/*.exe
-projects/taskman/.taskman.db
+# Release bundles and learning-program output (sources remain tracked).
+/dist/
+/iris-example-note.txt
 examples/*.exe
 installer/*.exe
 *.db
@@ -111,6 +112,12 @@ tests/_all_tests.txt
 
 # Scratch directory for one-off reproductions.
 /tmp/
+
+# Generated IDE and example runtime state. These files were previously tracked,
+# but are host/user-specific outputs and must not ship in source releases.
+/compile_flags.txt
+/kv.auth
+/kv.dat
 
 # ────────────────────────────────────────────────────────────
 # Local build configuration

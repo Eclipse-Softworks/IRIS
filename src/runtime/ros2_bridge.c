@@ -9,6 +9,8 @@
 #include <rcl/publisher.h>
 #include <rcl/subscription.h>
 #include <rcl/wait.h>
+#include <rmw/qos_profiles.h>
+#include <rmw/types.h>
 
 #include <std_msgs/msg/float64.h>
 #include <std_msgs/msg/int64.h>
@@ -143,6 +145,20 @@ static const rosidl_message_type_support_t* resolve_type_support(const char* typ
     return NULL;
 }
 
+static int valid_qos_policy_values(
+    int64_t history, int64_t depth, int64_t reliability, int64_t durability)
+{
+    if (history < RMW_QOS_POLICY_HISTORY_SYSTEM_DEFAULT ||
+        history > RMW_QOS_POLICY_HISTORY_KEEP_ALL) return 0;
+    if (reliability < RMW_QOS_POLICY_RELIABILITY_SYSTEM_DEFAULT ||
+        reliability > RMW_QOS_POLICY_RELIABILITY_BEST_EFFORT) return 0;
+    if (durability < RMW_QOS_POLICY_DURABILITY_SYSTEM_DEFAULT ||
+        durability > RMW_QOS_POLICY_DURABILITY_VOLATILE) return 0;
+    if (depth < 0) return 0;
+    if (history == RMW_QOS_POLICY_HISTORY_KEEP_LAST && depth == 0) return 0;
+    return 1;
+}
+
 /* ========================================================================== */
 /* Dynamic Context API                                                        */
 /* ========================================================================== */
@@ -218,6 +234,32 @@ __declspec(dllexport) int64_t iris_rcl_publisher_create(int64_t node_handle, con
     return (int64_t)(intptr_t)pub;
 }
 
+__declspec(dllexport) int64_t iris_rcl_publisher_create_qos(
+    int64_t node_handle, const char* topic, const char* msg_type,
+    int64_t history, int64_t depth, int64_t reliability, int64_t durability)
+{
+    rcl_node_t* node = (rcl_node_t*)(intptr_t)node_handle;
+    if (!node || !valid_qos_policy_values(history, depth, reliability, durability)) return 0;
+    const rosidl_message_type_support_t* ts = resolve_type_support(msg_type);
+    if (!ts) return 0;
+    rcl_publisher_t* pub = (rcl_publisher_t*)malloc(sizeof(rcl_publisher_t));
+    if (!pub) return 0;
+    *pub = rcl_get_zero_initialized_publisher();
+    rcl_publisher_options_t opts = rcl_publisher_get_default_options();
+    opts.qos = rmw_qos_profile_default;
+    opts.qos.history = (rmw_qos_history_policy_t)history;
+    opts.qos.depth = (size_t)depth;
+    opts.qos.reliability = (rmw_qos_reliability_policy_t)reliability;
+    opts.qos.durability = (rmw_qos_durability_policy_t)durability;
+    rcl_ret_t rc = rcl_publisher_init(pub, node, ts, topic, &opts);
+    if (rc != RCL_RET_OK) {
+        fprintf(stderr, "[ros2_bridge] publisher_create_qos failed on '%s': %d\n", topic, rc);
+        free(pub);
+        return 0;
+    }
+    return (int64_t)(intptr_t)pub;
+}
+
 __declspec(dllexport) int64_t iris_rcl_publisher_destroy(int64_t pub_handle, int64_t node_handle) {
     rcl_publisher_t* pub = (rcl_publisher_t*)(intptr_t)pub_handle;
     rcl_node_t* node = (rcl_node_t*)(intptr_t)node_handle;
@@ -246,6 +288,32 @@ __declspec(dllexport) int64_t iris_rcl_subscription_create(int64_t node_handle, 
         return 0;
     }
     fprintf(stderr, "[ros2_bridge] subscription '%s' [%s] created: %p\n", topic, msg_type, (void*)sub);
+    return (int64_t)(intptr_t)sub;
+}
+
+__declspec(dllexport) int64_t iris_rcl_subscription_create_qos(
+    int64_t node_handle, const char* topic, const char* msg_type,
+    int64_t history, int64_t depth, int64_t reliability, int64_t durability)
+{
+    rcl_node_t* node = (rcl_node_t*)(intptr_t)node_handle;
+    if (!node || !valid_qos_policy_values(history, depth, reliability, durability)) return 0;
+    const rosidl_message_type_support_t* ts = resolve_type_support(msg_type);
+    if (!ts) return 0;
+    rcl_subscription_t* sub = (rcl_subscription_t*)malloc(sizeof(rcl_subscription_t));
+    if (!sub) return 0;
+    *sub = rcl_get_zero_initialized_subscription();
+    rcl_subscription_options_t opts = rcl_subscription_get_default_options();
+    opts.qos = rmw_qos_profile_default;
+    opts.qos.history = (rmw_qos_history_policy_t)history;
+    opts.qos.depth = (size_t)depth;
+    opts.qos.reliability = (rmw_qos_reliability_policy_t)reliability;
+    opts.qos.durability = (rmw_qos_durability_policy_t)durability;
+    rcl_ret_t rc = rcl_subscription_init(sub, node, ts, topic, &opts);
+    if (rc != RCL_RET_OK) {
+        fprintf(stderr, "[ros2_bridge] subscription_create_qos failed on '%s': %d\n", topic, rc);
+        free(sub);
+        return 0;
+    }
     return (int64_t)(intptr_t)sub;
 }
 
@@ -309,43 +377,54 @@ __declspec(dllexport) int64_t iris_rcl_publish_string(int64_t pub_handle, const 
     return rc == RCL_RET_OK ? 0 : -1;
 }
 
-__declspec(dllexport) int64_t iris_rcl_publish_vector3(int64_t pub_handle, double x, double y, double z) {
+__declspec(dllexport) int64_t iris_rcl_publish_vector3(
+    int64_t pub_handle, int64_t x_scaled, int64_t y_scaled, int64_t z_scaled) {
     rcl_publisher_t* pub = (rcl_publisher_t*)(intptr_t)pub_handle;
     if (!pub) return -1;
     geometry_msgs__msg__Vector3 msg;
     geometry_msgs__msg__Vector3__init(&msg);
-    msg.x = x; msg.y = y; msg.z = z;
+    msg.x = (double)x_scaled / 100000000.0;
+    msg.y = (double)y_scaled / 100000000.0;
+    msg.z = (double)z_scaled / 100000000.0;
     rcl_ret_t rc = rcl_publish(pub, &msg, NULL);
     geometry_msgs__msg__Vector3__fini(&msg);
     return rc == RCL_RET_OK ? 0 : -1;
 }
 
 __declspec(dllexport) int64_t iris_rcl_publish_twist(int64_t pub_handle,
-    double lx, double ly, double lz,
-    double ax, double ay, double az)
+    int64_t lx_scaled, int64_t ly_scaled, int64_t lz_scaled,
+    int64_t ax_scaled, int64_t ay_scaled, int64_t az_scaled)
 {
     rcl_publisher_t* pub = (rcl_publisher_t*)(intptr_t)pub_handle;
     if (!pub) return -1;
     geometry_msgs__msg__Twist msg;
     geometry_msgs__msg__Twist__init(&msg);
-    msg.linear.x = lx; msg.linear.y = ly; msg.linear.z = lz;
-    msg.angular.x = ax; msg.angular.y = ay; msg.angular.z = az;
+    msg.linear.x = (double)lx_scaled / 100000000.0;
+    msg.linear.y = (double)ly_scaled / 100000000.0;
+    msg.linear.z = (double)lz_scaled / 100000000.0;
+    msg.angular.x = (double)ax_scaled / 100000000.0;
+    msg.angular.y = (double)ay_scaled / 100000000.0;
+    msg.angular.z = (double)az_scaled / 100000000.0;
     rcl_ret_t rc = rcl_publish(pub, &msg, NULL);
     geometry_msgs__msg__Twist__fini(&msg);
     return rc == RCL_RET_OK ? 0 : -1;
 }
 
 __declspec(dllexport) int64_t iris_rcl_publish_pose(int64_t pub_handle,
-    double px, double py, double pz,
-    double ox, double oy, double oz, double ow)
+    int64_t px_scaled, int64_t py_scaled, int64_t pz_scaled,
+    int64_t ox_scaled, int64_t oy_scaled, int64_t oz_scaled, int64_t ow_scaled)
 {
     rcl_publisher_t* pub = (rcl_publisher_t*)(intptr_t)pub_handle;
     if (!pub) return -1;
     geometry_msgs__msg__Pose msg;
     geometry_msgs__msg__Pose__init(&msg);
-    msg.position.x = px; msg.position.y = py; msg.position.z = pz;
-    msg.orientation.x = ox; msg.orientation.y = oy;
-    msg.orientation.z = oz; msg.orientation.w = ow;
+    msg.position.x = (double)px_scaled / 100000000.0;
+    msg.position.y = (double)py_scaled / 100000000.0;
+    msg.position.z = (double)pz_scaled / 100000000.0;
+    msg.orientation.x = (double)ox_scaled / 100000000.0;
+    msg.orientation.y = (double)oy_scaled / 100000000.0;
+    msg.orientation.z = (double)oz_scaled / 100000000.0;
+    msg.orientation.w = (double)ow_scaled / 100000000.0;
     rcl_ret_t rc = rcl_publish(pub, &msg, NULL);
     geometry_msgs__msg__Pose__fini(&msg);
     return rc == RCL_RET_OK ? 0 : -1;

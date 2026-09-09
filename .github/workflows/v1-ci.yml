@@ -30,8 +30,8 @@ jobs:
         run: |
           python3 tools/iris_diff_runner.py \
             examples/01_basics/hello.iris \
-            examples/02_functions/factorial.iris \
-            projects/showcase/mathlab.iris \
+            examples/02_functions/functions.iris \
+            examples/03_types/generics.iris \
             --iris target/debug/iris
 
       - name: Run perf gate (requires baseline committed)

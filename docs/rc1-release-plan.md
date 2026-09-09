@@ -1,5 +1,16 @@
 # v1.0.0-rc1 Release Plan
 
+> **Historical planning snapshot.** The task descriptions below record the
+> state observed on 2026-08-05 and must not be read as current defects. As of
+> 2026-09-01, direct MinGW `ld.lld` linking, LLVM-C object emission, the checked-in
+> runtime object, ORC JIT/hot swap, transactional rollback, assertion-backed
+> corpus checks, the seven-gate evolution coordinator, unrestricted activation,
+> typed metaprogramming/networking/LLM APIs, and production AIS/ML lifecycle are
+> implemented. See
+> [current-language-lock.md](current-language-lock.md) and
+> [known-issues.md](known-issues.md) for the current contract and open limits.
+> The tables in this file are retained only as historical rationale.
+
 **Date**: 2026-08-05
 **Basis**: findings from [AUDIT.md](../AUDIT.md) and [known-issues.md](known-issues.md)
 

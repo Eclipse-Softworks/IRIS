@@ -66,10 +66,21 @@ pub struct CompletionItem {
 }
 
 /// Persistent LSP server state: one entry per open document.
-#[derive(Default)]
 pub struct LspState {
     /// URI → source text.
     documents: HashMap<String, String>,
+    format_options: crate::formatter::FormatOptions,
+    max_diagnostics: usize,
+}
+
+impl Default for LspState {
+    fn default() -> Self {
+        Self {
+            documents: HashMap::new(),
+            format_options: crate::formatter::FormatOptions::default(),
+            max_diagnostics: 100,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -385,8 +396,7 @@ fn detect_completion_context(source: &str, line: usize, character: usize) -> Com
     let trimmed = before_cursor.trim_end();
 
     // 1. Dot access: line ends with `.`
-    if trimmed.ends_with('.') {
-        let without_dot = &trimmed[..trimmed.len() - 1];
+    if let Some(without_dot) = trimmed.strip_suffix('.') {
         let ident_end = without_dot.len();
         let ident_start = without_dot
             .rfind(|c: char| !c.is_alphanumeric() && c != '_')
@@ -400,10 +410,10 @@ fn detect_completion_context(source: &str, line: usize, character: usize) -> Com
 
     // 2. Bring context: after `bring ` with no dot yet
     let stripped = trimmed.trim_start();
-    if stripped.starts_with("bring") {
-        let after = &stripped["bring".len()..];
+    if let Some(after) = stripped.strip_prefix("bring") {
         let after = after.trim_start();
-        if after.is_empty() || (!after.contains('.') && !after.contains('{') && !after.contains(';'))
+        if after.is_empty()
+            || (!after.contains('.') && !after.contains('{') && !after.contains(';'))
         {
             return CompletionContext::Bring;
         }
@@ -588,8 +598,7 @@ fn find_type_in_block_for_completion(
             AstStmt::LetTuple { names, init, .. } => {
                 for (i, n) in names.iter().enumerate() {
                     if n.name == target {
-                        if let crate::parser::ast::AstExpr::Tuple { elements, .. } = init.as_ref()
-                        {
+                        if let crate::parser::ast::AstExpr::Tuple { elements, .. } = init.as_ref() {
                             if let Some(el) = elements.get(i) {
                                 return infer_ast_expr_type(el);
                             }
@@ -635,16 +644,15 @@ fn find_type_in_block_for_completion(
 
 /// Collects stdlib module names for the `bring` context.
 fn collect_bring_completions(items: &mut Vec<CompletionItem>) {
-    for &label in STATIC_COMPLETIONS {
-        if label.starts_with("std.") {
-            items.push(CompletionItem {
-                label: label.to_owned(),
-                kind: 9,
-                detail: completion_detail_for(label).map(str::to_owned),
-                filter_text: None,
-                sort_text: Some(format!("0_{}", label)),
-            });
-        }
+    for module in crate::stdlib::STDLIB_MODULE_NAMES {
+        let label = format!("std.{}", module);
+        items.push(CompletionItem {
+            label: label.clone(),
+            kind: 9,
+            detail: Some(format!("IRIS standard library module `{}`", label)),
+            filter_text: Some((*module).to_owned()),
+            sort_text: Some(format!("0_{}", label)),
+        });
     }
 }
 
@@ -654,8 +662,29 @@ fn collect_type_completions(
     items: &mut Vec<CompletionItem>,
 ) {
     let type_names = [
-        "i64", "i32", "i8", "u8", "u32", "u64", "usize", "f64", "f32", "bool", "str", "list",
-        "map", "option", "result", "chan", "tensor", "atomic", "mutex", "grad", "sparse",
+        "i64",
+        "i32",
+        "i8",
+        "u8",
+        "u32",
+        "u64",
+        "usize",
+        "f64",
+        "f32",
+        "bool",
+        "str",
+        "list",
+        "map",
+        "option",
+        "result",
+        "chan",
+        "tensor",
+        "atomic",
+        "mutex",
+        "grad",
+        "sparse",
+        "task_group",
+        "weak_ref",
     ];
     for ty in &type_names {
         items.push(CompletionItem {
@@ -740,6 +769,17 @@ fn collect_default_completions(
         });
     }
 
+    for module in crate::stdlib::STDLIB_MODULE_NAMES {
+        let label = format!("std.{}", module);
+        items.push(CompletionItem {
+            label: label.clone(),
+            kind: 9,
+            detail: Some("IRIS standard library module".to_owned()),
+            filter_text: Some((*module).to_owned()),
+            sort_text: Some(format!("3_{}", label)),
+        });
+    }
+
     if let Some(ast) = ast {
         collect_completion_items_from_ast(ast, items, None);
     }
@@ -795,23 +835,19 @@ impl LspState {
 
         // 1. Try AST-based lookup (works even when lowering / type-check fails)
         if let Some(ast) = parse_source(source) {
+            let mut effect_checker = crate::pass::effect_checker::EffectChecker::new(false);
+            effect_checker.run(&ast);
+            let source_warnings = crate::pass::find_source_warnings(&ast);
+
             // User-defined functions
             for func in &ast.functions {
                 if func.name.name == ident {
-                    let params: Vec<String> = func
-                        .params
-                        .iter()
-                        .map(|p| format!("{}: {}", p.name.name, ast_type_str(&p.ty)))
-                        .collect();
-                    let ret = ast_type_str(&func.return_ty);
-                    let vis = if func.is_pub { "pub " } else { "" };
-                    return Some(format!(
-                        "```iris\n{}def {}({}) -> {}\n```",
-                        vis,
-                        ident,
-                        params.join(", "),
-                        ret
-                    ));
+                    let inferred = effect_checker.inferred.get(&func.name.name);
+                    let contains_unsafe = source_warnings.iter().any(|warning| {
+                        warning.func == func.name.name
+                            && warning.message.starts_with("unsafe block")
+                    });
+                    return Some(format_function_hover(func, inferred, contains_unsafe));
                 }
             }
 
@@ -871,6 +907,58 @@ impl LspState {
                             ));
                         }
                     }
+                }
+            }
+
+            // Trait definitions and their effect contracts.
+            for trait_def in &ast.traits {
+                if trait_def.name.name == ident {
+                    return Some(format_trait_hover(trait_def));
+                }
+                if let Some(method) = trait_def.methods.iter().find(|m| m.name.name == ident) {
+                    let params = method
+                        .params
+                        .iter()
+                        .map(|p| format!("{}: {}", p.name.name, ast_type_str(&p.ty)))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    let effects = format_effect_clause(&method.effects);
+                    return Some(format!(
+                        "```iris\ndef {}({}) -> {}{}\n```\n\nTrait method of `{}`.",
+                        method.name.name,
+                        params,
+                        ast_type_str(&method.return_ty),
+                        effects,
+                        trait_def.name.name
+                    ));
+                }
+            }
+
+            // Algebraic effects and operations.
+            for effect in &ast.effects {
+                if effect.name.name == ident {
+                    let operations = effect
+                        .operations
+                        .iter()
+                        .map(|op| format!("    {}", format_effect_operation(op)))
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    let docs = effect
+                        .doc_comment
+                        .as_deref()
+                        .map(|doc| format!("\n\n{}", doc))
+                        .unwrap_or_default();
+                    return Some(format!(
+                        "```iris\neffect {} {{\n{}\n}}\n```{}",
+                        effect.name.name, operations, docs
+                    ));
+                }
+                if let Some(operation) = effect.operations.iter().find(|op| op.name.name == ident) {
+                    return Some(format!(
+                        "```iris\n{}\n```\n\nOperation of effect `{}`.",
+                        format_effect_operation(operation),
+                        effect.name.name
+                    ));
                 }
             }
 
@@ -946,6 +1034,10 @@ impl LspState {
                     }
                 }
             }
+
+            if let Some(info) = hover_brought_stdlib_symbol(&ast, ident) {
+                return Some(info);
+            }
         }
 
         // 2. Try IR-based lookup (if file compiles successfully, gives richer type info)
@@ -998,7 +1090,12 @@ impl LspState {
     }
 
     /// Returns rich completion candidates for the given document and position.
-    pub fn completion_items(&self, uri: &str, line: usize, character: usize) -> Vec<CompletionItem> {
+    pub fn completion_items(
+        &self,
+        uri: &str,
+        line: usize,
+        character: usize,
+    ) -> Vec<CompletionItem> {
         let Some(source) = self.documents.get(uri) else {
             return Vec::new();
         };
@@ -1219,11 +1316,15 @@ impl LspState {
     /// Returns a formatted version of the document source.
     pub fn format(&self, uri: &str) -> Option<String> {
         let source = self.documents.get(uri)?;
-        Some(crate::formatter::format_source(
-            source,
-            &crate::formatter::FormatOptions::default(),
+        Some(
+            crate::formatter::format_source(source, &self.format_options)
+                .unwrap_or_else(|_| source.to_owned()),
         )
-        .unwrap_or_else(|_| source.to_owned()))
+    }
+
+    fn configure_formatter(&mut self, indent: usize, max_line_width: usize) {
+        self.format_options.indent = indent.clamp(1, 16);
+        self.format_options.max_line_width = max_line_width.clamp(40, 240);
     }
 
     // ------------------------------------------------------------------
@@ -1268,7 +1369,7 @@ impl LspState {
             }
 
             // Quick fix: remove unused variable
-            if diag.severity == 2 && diag.message.contains("unused") {
+            if diag.code.as_deref() == Some("W0001") {
                 if let Some(name) = extract_quoted_name(&diag.message) {
                     actions.push(CodeAction {
                         title: format!("Prefix with underscore: _{}", name),
@@ -1517,7 +1618,7 @@ impl LspState {
                                     for block in func.blocks() {
                                         for (idx, instr) in block.instrs.iter().enumerate() {
                                             if let Some(span_byte) =
-                                                func.span_table.get(block.id.0, idx)
+                                                func.get_instr_span(block.id.0, idx)
                                             {
                                                 if span_byte == byte_offset {
                                                     if let Some(res_vid) = instr.result() {
@@ -1700,21 +1801,28 @@ impl LspState {
         // Collect dead-variable warnings directly from the single-file AST.
         // This works even when bring resolution fails (warnings are per-file).
         if let Some(ast) = parse_source(source) {
-            for w in crate::pass::find_unused_vars(&ast) {
-                let (line, character) = if let Some(sp) = w.span {
+            for w in crate::pass::find_source_warnings(&ast) {
+                let (line, character, end_line, end_character) = if let Some(sp) = w.span {
                     let (l, c) = byte_to_line_col(source, sp.start.0);
-                    (l.saturating_sub(1), c.saturating_sub(1))
+                    let (el, ec) = byte_to_line_col(source, sp.end.0);
+                    (
+                        l.saturating_sub(1),
+                        c.saturating_sub(1),
+                        el.saturating_sub(1),
+                        ec.saturating_sub(1).max(c),
+                    )
                 } else {
-                    (0u32, 0u32)
+                    (0u32, 0u32, 0u32, 1u32)
                 };
+                let (severity, code) = source_warning_metadata(&w.message);
                 diags.push(LspDiagnostic {
                     line,
                     character,
-                    end_line: line,
-                    end_character: character + 1,
+                    end_line,
+                    end_character,
                     message: w.message,
-                    severity: 2,
-                    code: Some("W0001".to_owned()),
+                    severity,
+                    code: Some(code.to_owned()),
                 });
             }
 
@@ -1847,6 +1955,7 @@ impl LspState {
             }
         }
 
+        diags.truncate(self.max_diagnostics);
         diags
     }
 
@@ -1868,10 +1977,20 @@ impl LspState {
         let mut model_names = std::collections::HashSet::new();
         let mut trait_names = std::collections::HashSet::new();
         let mut const_names = std::collections::HashSet::new();
+        let mut parameter_names = std::collections::HashSet::new();
+        let mut async_function_names = std::collections::HashSet::new();
+        let mut unnecessary_spans = Vec::new();
+        let mut unsafe_spans = Vec::new();
 
         if let Some(ast) = parse_source(source) {
             for func in &ast.functions {
                 function_names.insert(func.name.name.clone());
+                if func.is_async {
+                    async_function_names.insert(func.name.name.clone());
+                }
+                for param in &func.params {
+                    parameter_names.insert(param.name.name.clone());
+                }
             }
             for ef in &ast.extern_fns {
                 function_names.insert(ef.name.name.clone());
@@ -1891,6 +2010,17 @@ impl LspState {
             for c in &ast.consts {
                 const_names.insert(c.name.name.clone());
             }
+            for warning in crate::pass::find_source_warnings(&ast) {
+                if let Some(span) = warning.span {
+                    if warning.message.starts_with("unsafe block") {
+                        unsafe_spans.push(span);
+                    } else if warning.message.contains("never used")
+                        || warning.message.starts_with("unreachable code")
+                    {
+                        unnecessary_spans.push(span);
+                    }
+                }
+            }
         }
 
         let mut raw_tokens = Vec::new();
@@ -1905,12 +2035,15 @@ impl LspState {
             let length = end_byte - start_byte;
             let (line, col) = byte_to_lsp_pos(source, start_byte);
 
-            let (token_type, token_modifiers) = match tok {
+            let (token_type, mut token_modifiers) = match tok {
                 Token::Def
+                | Token::DefMacro
                 | Token::Val
                 | Token::Var
+                | Token::Let
                 | Token::If
                 | Token::Else
+                | Token::Match
                 | Token::When
                 | Token::For
                 | Token::While
@@ -1934,12 +2067,33 @@ impl LspState {
                 | Token::Spawn
                 | Token::Par
                 | Token::In
-                | Token::To => (0, 0),
+                | Token::To
+                | Token::Layer
+                | Token::Input
+                | Token::Output
+                | Token::Effect
+                | Token::With
+                | Token::Yield
+                | Token::Dyn
+                | Token::Resume
+                | Token::By
+                | Token::Defer
+                | Token::Try
+                | Token::Catch
+                | Token::Raise
+                | Token::Move
+                | Token::Unsafe
+                | Token::Select => (0, 0),
 
                 Token::BoolLit(_) => (0, 0),
 
                 Token::I64
                 | Token::I32
+                | Token::I8
+                | Token::U8
+                | Token::U32
+                | Token::U64
+                | Token::Usize
                 | Token::F64
                 | Token::F32
                 | Token::Bool
@@ -1986,8 +2140,17 @@ impl LspState {
                         (2, 0)
                     } else if trait_names.contains(s) {
                         (5, 0)
+                    } else if parameter_names.contains(s) {
+                        (7, 0)
                     } else if function_names.contains(s) {
-                        (6, 0)
+                        (
+                            6,
+                            if async_function_names.contains(s) {
+                                1 << 5
+                            } else {
+                                0
+                            },
+                        )
                     } else if const_names.contains(s) {
                         (8, 4) // readonly = 4
                     } else if STATIC_COMPLETIONS.contains(&s.as_str()) {
@@ -2000,8 +2163,22 @@ impl LspState {
                         (8, 0)
                     }
                 }
+                Token::DocComment(_) => (11, 0),
                 _ => continue,
             };
+
+            if unnecessary_spans
+                .iter()
+                .any(|span| start_byte < span.end.0 && end_byte > span.start.0)
+            {
+                token_modifiers |= 1 << 3;
+            }
+            if unsafe_spans
+                .iter()
+                .any(|span| start_byte < span.end.0 && end_byte > span.start.0)
+            {
+                token_modifiers |= 1 << 4;
+            }
 
             raw_tokens.push((line, col, length, token_type, token_modifiers));
         }
@@ -2081,6 +2258,42 @@ mod tests {
     }
 
     #[test]
+    fn source_warnings_classify_dead_unreachable_and_unsafe_code() {
+        let src = "def unused_helper(unused_parameter: i64) -> i64 {\n    val nested_dead = if true { val branch_dead = 1; 2 } else { 3 };\n    return 0;\n    print(\"unreachable\");\n}\ndef main() -> i64 {\n    val answer = unsafe { 42 };\n    assert(answer == 42);\n    return 0\n}\n";
+        let s = state_with(src);
+        let diags = s.diagnose(URI);
+
+        assert!(diags
+            .iter()
+            .any(|d| d.code.as_deref() == Some("W0001") && d.message.contains("unused_parameter")));
+        assert!(diags
+            .iter()
+            .any(|d| d.code.as_deref() == Some("W0001") && d.message.contains("branch_dead")));
+        assert!(diags.iter().any(|d| d.code.as_deref() == Some("W0002")));
+        assert!(diags
+            .iter()
+            .any(|d| d.code.as_deref() == Some("W0003") && d.severity == 2));
+
+        let payload = make_diagnostics_notification(URI, &diags);
+        let json: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        let published = json["params"]["diagnostics"].as_array().unwrap();
+        assert!(published.iter().any(|diag| {
+            diag["code"] == "W0001" && diag["tags"].as_array().is_some_and(|tags| tags.len() == 1)
+        }));
+    }
+
+    #[test]
+    fn diagnostics_respect_the_configured_problem_limit() {
+        let mut s = LspState::new();
+        s.max_diagnostics = 1;
+        let diags = s.open_document(
+            URI,
+            "def unused_one(a: i64) -> i64 { return 0 }\ndef unused_two(b: i64) -> i64 { return 0 }\ndef main() -> i64 { return 0 }",
+        );
+        assert_eq!(diags.len(), 1);
+    }
+
+    #[test]
     fn bp001_hint_for_long_function() {
         // Build a function longer than 50 lines.
         let mut body = String::from("def long_fn() -> i64 {\n");
@@ -2146,6 +2359,40 @@ mod tests {
     }
 
     #[test]
+    fn hover_function_includes_docs_effects_and_safety() {
+        let src = "/// Performs a checked operation.\nasync def checked(x: i64) -> i64 {\n    val value = unsafe { x };\n    return value\n}\ndef main() -> i64 { 0 }\n";
+        let s = state_with(src);
+        let text = s.hover(URI, 1, 10).expect("function hover");
+        assert!(
+            text.contains("async def checked(x: i64) -> i64"),
+            "{}",
+            text
+        );
+        assert!(text.contains("Performs a checked operation"), "{}", text);
+        assert!(text.contains("**Effects:**"), "{}", text);
+        assert!(
+            text.contains("contains an explicitly marked `unsafe` region"),
+            "{}",
+            text
+        );
+    }
+
+    #[test]
+    fn hover_imported_stdlib_function_uses_real_signature_and_effects() {
+        let src =
+            "bring std.llm\ndef main() -> i64 { llm_chat(client, messages, 0.2, 32); return 0 }\n";
+        let s = state_with(src);
+        let text = s.hover(URI, 1, 22).expect("stdlib function hover");
+        assert!(text.contains("std.llm"), "{}", text);
+        assert!(text.contains("def llm_chat("), "{}", text);
+        assert!(
+            text.contains("effect net, env, alloc, io, throw"),
+            "{}",
+            text
+        );
+    }
+
+    #[test]
     fn hover_keyword_def() {
         let s = state_with("def main() -> i64 { 0 }");
         let result = s.hover(URI, 0, 0); // cursor on 'def'
@@ -2198,6 +2445,11 @@ mod tests {
         );
         assert!(items.iter().any(|i| i.label == "std.math"));
         assert!(items.iter().any(|i| i.label == "std.string"));
+        assert!(items.iter().any(|i| i.label == "std.ais"));
+        assert!(items.iter().any(|i| i.label == "std.llm"));
+        assert!(items.iter().any(|i| i.label == "std.meta"));
+        assert!(items.iter().any(|i| i.label == "std.ros2"));
+        assert!(items.iter().any(|i| i.label == "std.tensor"));
     }
 
     #[test]
@@ -2205,11 +2457,11 @@ mod tests {
         let s = state_with("def main() -> i64 {\n    val x: \n}");
         let items = s.completion_items(URI, 1, 10);
         assert!(
-            items.iter().all(|i| i.kind == 7 || i.kind == 22 || i.kind == 13),
+            items
+                .iter()
+                .all(|i| i.kind == 7 || i.kind == 22 || i.kind == 13),
             "type context should return types/structs/enums, got: {:?}",
-            items.iter()
-                .map(|i| (&i.label, i.kind))
-                .collect::<Vec<_>>()
+            items.iter().map(|i| (&i.label, i.kind)).collect::<Vec<_>>()
         );
         assert!(items.iter().any(|i| i.label == "i64"));
         assert!(items.iter().any(|i| i.label == "str"));
@@ -2240,9 +2492,7 @@ mod tests {
 
     #[test]
     fn completions_dyn_keyword_returns_traits() {
-        let s = state_with(
-            "trait Show { }\ndef main() -> i64 {\n    val x: dyn \n    0\n}",
-        );
+        let s = state_with("trait Show { }\ndef main() -> i64 {\n    val x: dyn \n    0\n}");
         let items = s.completion_items(URI, 2, 14);
         assert!(
             items.iter().any(|i| i.label == "Show"),
@@ -2426,6 +2676,16 @@ mod tests {
             "expected placeholder quickfix, got: {:?}",
             actions.iter().map(|a| &a.title).collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn code_action_can_mark_an_unused_binding_intentional() {
+        let src = "def main() -> i64 { val temporary = 1; return 0 }";
+        let s = state_with(src);
+        let actions = s.code_actions(URI, 0, 24, 0, 33);
+        assert!(actions.iter().any(|action| {
+            action.title.contains("_temporary") && action.new_text == "_temporary"
+        }));
     }
 
     // ── close document ────────────────────────────────────────────────────────
@@ -2911,10 +3171,7 @@ fn find_param_definition(ast: &crate::parser::ast::AstModule, name: &str) -> Opt
 /// Recursively search statements for a local variable binding matching `name`.
 /// Returns `(start_byte, end_byte)` of the binding name if found.
 /// Depth-first search so innermost (most recently shadowed) binding wins.
-fn find_local_in_stmts(
-    stmts: &[crate::parser::ast::AstStmt],
-    name: &str,
-) -> Option<(u32, u32)> {
+fn find_local_in_stmts(stmts: &[crate::parser::ast::AstStmt], name: &str) -> Option<(u32, u32)> {
     use crate::parser::ast::AstStmt;
     for stmt in stmts {
         match stmt {
@@ -2939,10 +3196,18 @@ fn find_local_in_stmts(
                 }
             }
             AstStmt::ForRange {
-                var, start, end, body, ..
+                var,
+                start,
+                end,
+                body,
+                ..
             }
             | AstStmt::ParFor {
-                var, start, end, body, ..
+                var,
+                start,
+                end,
+                body,
+                ..
             } => {
                 if var.name == name {
                     return Some((var.span.start.0, var.span.end.0));
@@ -2957,7 +3222,9 @@ fn find_local_in_stmts(
                     return Some(found);
                 }
             }
-            AstStmt::ForEach { var, iter, body, .. } => {
+            AstStmt::ForEach {
+                var, iter, body, ..
+            } => {
                 if var.name == name {
                     return Some((var.span.start.0, var.span.end.0));
                 }
@@ -3046,10 +3313,7 @@ fn find_local_in_stmts(
 }
 
 /// Recursively search expressions for local variable bindings (e.g. in if/block expressions).
-fn find_local_in_expr(
-    expr: &crate::parser::ast::AstExpr,
-    name: &str,
-) -> Option<(u32, u32)> {
+fn find_local_in_expr(expr: &crate::parser::ast::AstExpr, name: &str) -> Option<(u32, u32)> {
     use crate::parser::ast::AstExpr;
     match expr {
         AstExpr::Block(block) => find_local_in_stmts(&block.stmts, name),
@@ -3080,7 +3344,9 @@ fn find_local_in_expr(
             }
             find_local_in_expr(body, name)
         }
-        AstExpr::When { scrutinee, arms, .. } => {
+        AstExpr::When {
+            scrutinee, arms, ..
+        } => {
             if let Some(found) = find_local_in_expr(scrutinee, name) {
                 return Some(found);
             }
@@ -3336,6 +3602,253 @@ fn byte_to_lsp_pos(source: &str, byte: u32) -> (u32, u32) {
     (line, col)
 }
 
+fn format_effect_clause(effects: &[String]) -> String {
+    if effects.is_empty() {
+        String::new()
+    } else {
+        format!(" effect {}", effects.join(", "))
+    }
+}
+
+fn format_generic_param(param: &crate::parser::ast::AstGenericParam) -> String {
+    use crate::parser::ast::{AstGenericParam, Variance};
+    let variance = |variance: Variance| match variance {
+        Variance::Covariant => "+",
+        Variance::Contravariant => "-",
+        Variance::Invariant => "",
+    };
+    match param {
+        AstGenericParam::Type(name, bounds, v) => {
+            let mut text = format!("{}{}", variance(*v), name);
+            if !bounds.is_empty() {
+                text.push_str(": ");
+                text.push_str(&bounds.join(" + "));
+            }
+            text
+        }
+        AstGenericParam::Hkt(name, nested, bounds, v) => {
+            let nested = nested
+                .iter()
+                .map(format_generic_param)
+                .collect::<Vec<_>>()
+                .join(", ");
+            let mut text = format!("{}{}[{}]", variance(*v), name, nested);
+            if !bounds.is_empty() {
+                text.push_str(": ");
+                text.push_str(&bounds.join(" + "));
+            }
+            text
+        }
+        AstGenericParam::Const { name, kind } => {
+            format!("const {}: {}", name, ast_type_str(kind))
+        }
+    }
+}
+
+fn format_function_hover(
+    func: &crate::parser::ast::AstFunction,
+    inferred: Option<&crate::pass::effect_registry::EffectRow>,
+    contains_unsafe: bool,
+) -> String {
+    let params = func
+        .params
+        .iter()
+        .map(|p| format!("{}: {}", p.name.name, ast_type_str(&p.ty)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let generics = if func.type_params.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "[{}]",
+            func.type_params
+                .iter()
+                .map(format_generic_param)
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    };
+    let mut modifiers = String::new();
+    for attr in &func.attrs {
+        modifiers.push_str(&format!("@{} ", attr.name));
+    }
+    if func.is_pub {
+        modifiers.push_str("pub ");
+    }
+    if func.is_const {
+        modifiers.push_str("const ");
+    }
+    if func.is_async {
+        modifiers.push_str("async ");
+    }
+    let signature = format!(
+        "{}def {}{}({}) -> {}{}",
+        modifiers,
+        func.name.name,
+        generics,
+        params,
+        ast_type_str(&func.return_ty),
+        format_effect_clause(&func.effects)
+    );
+    let declared = if func.effects.is_empty() {
+        "inferred".to_owned()
+    } else {
+        func.effects.join(", ")
+    };
+    let inferred = inferred
+        .map(|row| row.display())
+        .unwrap_or_else(|| "unknown".to_owned());
+    let mut sections = vec![format!("```iris\n{}\n```", signature)];
+    if let Some(docs) = func.doc_comment.as_deref() {
+        if !docs.trim().is_empty() {
+            sections.push(docs.trim().to_owned());
+        }
+    }
+    sections.push(format!(
+        "**Effects:** declared `{}`; inferred `{}`",
+        declared, inferred
+    ));
+    sections.push(if contains_unsafe {
+        "**Safety:** contains an explicitly marked `unsafe` region; review its operations and invariants."
+            .to_owned()
+    } else {
+        "**Safety:** no explicit `unsafe` region.".to_owned()
+    });
+    sections.join("\n\n")
+}
+
+fn format_trait_hover(trait_def: &crate::parser::ast::AstTraitDef) -> String {
+    let generics = if trait_def.type_params.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "[{}]",
+            trait_def
+                .type_params
+                .iter()
+                .map(format_generic_param)
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    };
+    let mut members = trait_def
+        .assoc_types
+        .iter()
+        .map(|assoc| format!("    type {}", assoc.name.name))
+        .collect::<Vec<_>>();
+    members.extend(trait_def.methods.iter().map(|method| {
+        let params = method
+            .params
+            .iter()
+            .map(|p| format!("{}: {}", p.name.name, ast_type_str(&p.ty)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!(
+            "    def {}({}) -> {}{}",
+            method.name.name,
+            params,
+            ast_type_str(&method.return_ty),
+            format_effect_clause(&method.effects)
+        )
+    }));
+    let docs = trait_def
+        .doc_comment
+        .as_deref()
+        .map(|doc| format!("\n\n{}", doc.trim()))
+        .unwrap_or_default();
+    format!(
+        "```iris\ntrait {}{} {{\n{}\n}}\n```{}",
+        trait_def.name.name,
+        generics,
+        members.join("\n"),
+        docs
+    )
+}
+
+fn format_effect_operation(operation: &crate::parser::ast::AstEffectOperation) -> String {
+    let params = operation
+        .params
+        .iter()
+        .map(|p| format!("{}: {}", p.name.name, ast_type_str(&p.ty)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "def {}({}) -> {}",
+        operation.name.name,
+        params,
+        ast_type_str(&operation.ret_ty)
+    )
+}
+
+fn hover_brought_stdlib_symbol(
+    module: &crate::parser::ast::AstModule,
+    ident: &str,
+) -> Option<String> {
+    use crate::parser::ast::BringPath;
+
+    for bring in &module.brings {
+        let BringPath::Stdlib(module_name) = &bring.path else {
+            continue;
+        };
+        if bring
+            .items
+            .as_ref()
+            .is_some_and(|items| !items.iter().any(|item| item == ident))
+        {
+            continue;
+        }
+        let source = crate::stdlib::stdlib_source(module_name)?;
+        let stdlib = parse_source(source)?;
+        if let Some(function) = stdlib.functions.iter().find(|func| func.name.name == ident) {
+            let mut checker = crate::pass::effect_checker::EffectChecker::new(false);
+            checker.run(&stdlib);
+            let warnings = crate::pass::find_source_warnings(&stdlib);
+            let contains_unsafe = warnings.iter().any(|warning| {
+                warning.func == function.name.name && warning.message.starts_with("unsafe block")
+            });
+            let details = format_function_hover(
+                function,
+                checker.inferred.get(&function.name.name),
+                contains_unsafe,
+            );
+            return Some(format!("**`std.{}`**\n\n{}", module_name, details));
+        }
+        if let Some(record) = stdlib
+            .structs
+            .iter()
+            .find(|record| record.name.name == ident)
+        {
+            let fields = record
+                .fields
+                .iter()
+                .map(|field| format!("    {}: {}", field.name.name, ast_type_str(&field.ty)))
+                .collect::<Vec<_>>()
+                .join(",\n");
+            let docs = record
+                .doc_comment
+                .as_deref()
+                .map(|doc| format!("\n\n{}", doc.trim()))
+                .unwrap_or_default();
+            return Some(format!(
+                "**`std.{}`**\n\n```iris\nrecord {} {{\n{}\n}}\n```{}",
+                module_name, record.name.name, fields, docs
+            ));
+        }
+        if let Some(trait_def) = stdlib
+            .traits
+            .iter()
+            .find(|trait_def| trait_def.name.name == ident)
+        {
+            return Some(format!(
+                "**`std.{}`**\n\n{}",
+                module_name,
+                format_trait_hover(trait_def)
+            ));
+        }
+    }
+    None
+}
+
 /// Converts an AstType to a display string.
 fn ast_type_str(ty: &crate::parser::ast::AstType) -> String {
     use crate::parser::ast::{AstScalarKind, AstType};
@@ -3390,16 +3903,33 @@ fn ast_type_str(ty: &crate::parser::ast::AstType) -> String {
         AstType::Mutex(t, _) => format!("mutex<{}>", ast_type_str(t)),
         AstType::Grad(t, _) => format!("grad<{}>", ast_type_str(t)),
         AstType::Sparse(t, _) => format!("sparse<{}>", ast_type_str(t)),
-        AstType::Fn { params, ret, .. } => {
+        AstType::Fn {
+            params,
+            ret,
+            effects,
+            ..
+        } => {
             let ps: Vec<String> = params.iter().map(ast_type_str).collect();
-            format!("({}) -> {}", ps.join(", "), ast_type_str(ret))
+            let effect_clause = if effects.is_empty() {
+                String::new()
+            } else {
+                format!(" effect {}", effects.join(", "))
+            };
+            format!(
+                "({}) -> {}{}",
+                ps.join(", "),
+                ast_type_str(ret),
+                effect_clause
+            )
         }
         AstType::Generic { name, args, .. } => {
             let inner: Vec<String> = args.iter().map(ast_type_str).collect();
             format!("{}<{}>", name, inner.join(", "))
         }
         AstType::ConstInt(v, _) => v.to_string(),
-        AstType::AssocType { base, assoc_name, .. } => format!("{}::{}", base, assoc_name),
+        AstType::AssocType {
+            base, assoc_name, ..
+        } => format!("{}::{}", base, assoc_name),
         AstType::WeakRef(t, _) => format!("weak_ref<{}>", ast_type_str(t)),
         AstType::DynTrait { trait_name, .. } => format!("dyn {}", trait_name),
         AstType::MaskEffectType { effects, .. } => format!("with {}", effects.join(", ")),
@@ -3499,7 +4029,7 @@ fn resolve_local_var_type(
     if found_ty.is_none() {
         for block in func.blocks() {
             for (idx, instr) in block.instrs.iter().enumerate() {
-                if let Some(span_byte) = func.span_table.get(block.id.0, idx) {
+                if let Some(span_byte) = func.get_instr_span(block.id.0, idx) {
                     if span_byte == def_byte_offset {
                         if let Some(t_idx) = tuple_index {
                             if let crate::ir::instr::IrInstr::GetElement { result, index, .. } =
@@ -3985,8 +4515,6 @@ fn keyword_hover(name: &str) -> Option<String> {
     Some(info.to_owned())
 }
 
-
-
 // ---------------------------------------------------------------------------
 // LSP protocol server (JSON-RPC over stdin/stdout)
 // ---------------------------------------------------------------------------
@@ -4072,6 +4600,15 @@ pub fn run_lsp_server() -> std::io::Result<()> {
 
         match method {
             "initialize" => {
+                let initialization = &params["initializationOptions"];
+                let indent = initialization["formatIndentSize"].as_u64().unwrap_or(4) as usize;
+                let max_line_width =
+                    initialization["formatMaxLineWidth"].as_u64().unwrap_or(100) as usize;
+                state.configure_formatter(indent, max_line_width);
+                state.max_diagnostics = initialization["maxNumberOfProblems"]
+                    .as_u64()
+                    .unwrap_or(100)
+                    .clamp(1, 10_000) as usize;
                 let resp = make_response(
                     request_id.clone(),
                     serde_json::json!({
@@ -4110,7 +4647,10 @@ pub fn run_lsp_server() -> std::io::Result<()> {
                                     "tokenModifiers": [
                                         "declaration",
                                         "definition",
-                                        "readonly"
+                                        "readonly",
+                                        "unnecessary",
+                                        "unsafe",
+                                        "async"
                                     ]
                                 },
                                 "range": false,
@@ -4811,11 +5351,18 @@ pub fn run_lsp_server() -> std::io::Result<()> {
                                     AstExpr::Splat { expr, .. } => {
                                         collect_all_calls_in_expr(expr, calls, source);
                                     }
-                                    AstExpr::TryCatch { body, catch_body, .. } => {
+                                    AstExpr::TryCatch {
+                                        body, catch_body, ..
+                                    } => {
                                         collect_all_calls_in_expr(body, calls, source);
                                         collect_all_calls_in_expr(catch_body, calls, source);
                                     }
-                                    AstExpr::Raise { effect_name, args, span, .. } => {
+                                    AstExpr::Raise {
+                                        effect_name,
+                                        args,
+                                        span,
+                                        ..
+                                    } => {
                                         let (sl, sc) = byte_to_lsp_pos(source, span.start.0);
                                         let (el, ec) = byte_to_lsp_pos(source, span.end.0);
                                         calls
@@ -5033,10 +5580,7 @@ fn is_ident_char_byte(c: u8) -> bool {
 
 /// Attempt to resolve the type name of an identifier by searching the AST for
 /// `val name: Type` or `val name = StructLit { ... }` bindings.
-fn resolve_ident_type(
-    ast: &crate::parser::ast::AstModule,
-    name: &str,
-) -> Option<String> {
+fn resolve_ident_type(ast: &crate::parser::ast::AstModule, name: &str) -> Option<String> {
     for func in &ast.functions {
         if let Some(ty) = resolve_ident_in_block(&func.body, name) {
             return Some(ty);
@@ -5045,14 +5589,14 @@ fn resolve_ident_type(
     None
 }
 
-fn resolve_ident_in_block(
-    block: &crate::parser::ast::AstBlock,
-    name: &str,
-) -> Option<String> {
+fn resolve_ident_in_block(block: &crate::parser::ast::AstBlock, name: &str) -> Option<String> {
     for stmt in &block.stmts {
         match stmt {
             crate::parser::ast::AstStmt::Let {
-                name: binding, ty, init, ..
+                name: binding,
+                ty,
+                init,
+                ..
             } => {
                 if binding.name == name {
                     if let Some(annotated) = ty {
@@ -5084,25 +5628,23 @@ fn resolve_ident_in_block(
     None
 }
 
-fn resolve_ident_in_expr(
-    expr: &crate::parser::ast::AstExpr,
-    name: &str,
-) -> Option<String> {
+fn resolve_ident_in_expr(expr: &crate::parser::ast::AstExpr, name: &str) -> Option<String> {
     match expr {
         crate::parser::ast::AstExpr::Block(block) => {
             for stmt in &block.stmts {
-                match stmt {
-                    crate::parser::ast::AstStmt::Let {
-                        name: binding, ty, init, ..
-                    } => {
-                        if binding.name == name {
-                            if let Some(annotated) = ty {
-                                return Some(ast_type_str(&annotated));
-                            }
-                            return infer_ast_expr_type(&init);
+                if let crate::parser::ast::AstStmt::Let {
+                    name: binding,
+                    ty,
+                    init,
+                    ..
+                } = stmt
+                {
+                    if binding.name == name {
+                        if let Some(annotated) = ty {
+                            return Some(ast_type_str(annotated));
                         }
+                        return infer_ast_expr_type(init);
                     }
-                    _ => {}
                 }
             }
             if let Some(tail) = &block.tail {
@@ -5167,7 +5709,10 @@ fn hover_field_access(
     let struct_def = ast.structs.iter().find(|s| s.name.name == obj_type)?;
 
     // Find the field within the struct.
-    let field_def = struct_def.fields.iter().find(|f| f.name.name == field_name)?;
+    let field_def = struct_def
+        .fields
+        .iter()
+        .find(|f| f.name.name == field_name)?;
     let field_type = ast_type_str(&field_def.ty);
 
     Some(format!(
@@ -5193,6 +5738,20 @@ fn make_response(id: Option<serde_json::Value>, result: serde_json::Value) -> St
     .unwrap_or_default()
 }
 
+fn source_warning_metadata(message: &str) -> (u8, &'static str) {
+    if message.starts_with("unsafe block") {
+        (2, "W0003")
+    } else if message.starts_with("unreachable code") {
+        (4, "W0002")
+    } else if message.contains("never used") {
+        (4, "W0001")
+    } else if message.starts_with("possible infinite loop") {
+        (2, "W0004")
+    } else {
+        (2, "W0000")
+    }
+}
+
 fn make_diagnostics_notification(uri: &str, diags: &[LspDiagnostic]) -> String {
     let json_diags: Vec<serde_json::Value> = diags
         .iter()
@@ -5208,6 +5767,11 @@ fn make_diagnostics_notification(uri: &str, diags: &[LspDiagnostic]) -> String {
             });
             if let Some(code) = &d.code {
                 diag["code"] = serde_json::json!(code);
+                if code == "W0001" || code == "W0002" {
+                    // LSP DiagnosticTag.Unnecessary: VS Code fades the exact
+                    // source range while retaining the diagnostic and fix.
+                    diag["tags"] = serde_json::json!([1]);
+                }
             }
             diag
         })
@@ -5651,11 +6215,17 @@ fn find_calls_in_expr(
         AstExpr::Splat { expr, .. } => {
             find_calls_in_expr(expr, target_name, ranges, source);
         }
-        AstExpr::TryCatch { body, catch_body, .. } => {
+        AstExpr::TryCatch {
+            body, catch_body, ..
+        } => {
             find_calls_in_expr(body, target_name, ranges, source);
             find_calls_in_expr(catch_body, target_name, ranges, source);
         }
-        AstExpr::Raise { effect_name: _, args, .. } => {
+        AstExpr::Raise {
+            effect_name: _,
+            args,
+            ..
+        } => {
             for a in args {
                 find_calls_in_expr(a, target_name, ranges, source);
             }

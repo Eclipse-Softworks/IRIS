@@ -862,7 +862,11 @@ impl Writer {
                 self.u8(OP_TASK_GROUP_NEW);
                 self.vid(*result);
             }
-            IrInstr::TaskGroupSpawn { group, body_fn, args } => {
+            IrInstr::TaskGroupSpawn {
+                group,
+                body_fn,
+                args,
+            } => {
                 self.u8(OP_TASK_GROUP_SPAWN);
                 self.vid(*group);
                 self.str(body_fn);
@@ -1516,7 +1520,11 @@ impl Writer {
             IrInstr::PopHandler => {
                 self.u8(OP_POP_HANDLER);
             }
-            IrInstr::ResumeCont { cont, value, result } => {
+            IrInstr::ResumeCont {
+                cont,
+                value,
+                result,
+            } => {
                 self.u8(OP_RESUME_CONT);
                 self.vid(*cont);
                 self.vid(*value);
@@ -2190,7 +2198,11 @@ impl<'a> Reader<'a> {
                 let result = self.vid()?;
                 let elem_ty = self.ty()?;
                 let capacity = self.vid()?;
-                IrInstr::ChanNew { result, elem_ty, capacity }
+                IrInstr::ChanNew {
+                    result,
+                    elem_ty,
+                    capacity,
+                }
             }
             OP_CHAN_SEND => {
                 let chan = self.vid()?;
@@ -2220,7 +2232,11 @@ impl<'a> Reader<'a> {
                 let group = self.vid()?;
                 let body_fn = self.str()?;
                 let args = self.vids()?;
-                IrInstr::TaskGroupSpawn { group, body_fn, args }
+                IrInstr::TaskGroupSpawn {
+                    group,
+                    body_fn,
+                    args,
+                }
             }
             OP_TASK_GROUP_JOIN => {
                 let group = self.vid()?;
@@ -2266,7 +2282,11 @@ impl<'a> Reader<'a> {
                 let cont = self.vid()?;
                 let value = self.vid()?;
                 let result = self.vid()?;
-                IrInstr::ResumeCont { cont, value, result }
+                IrInstr::ResumeCont {
+                    cont,
+                    value,
+                    result,
+                }
             }
             OP_PUSH_HANDLER => {
                 let narms = self.u8()? as usize;
@@ -2495,7 +2515,10 @@ impl<'a> Reader<'a> {
                 let msg = self.vid()?;
                 // The serial format carries no source position; a deserialised
                 // panic falls back to the span table.
-                IrInstr::Panic { msg, span_byte: None }
+                IrInstr::Panic {
+                    msg,
+                    span_byte: None,
+                }
             }
             OP_VALUE_TO_STR => {
                 let result = self.vid()?;

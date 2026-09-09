@@ -37,6 +37,7 @@ pub fn run_dap_server() -> std::io::Result<()> {
     let mut source_path = String::new();
     let mut source_content = String::new();
     let mut stop_on_entry = false;
+    let mut entry_function: Option<String> = None;
 
     loop {
         // Read Content-Length header.
@@ -151,10 +152,13 @@ pub fn run_dap_server() -> std::io::Result<()> {
             "launch" => {
                 source_path = arguments["program"].as_str().unwrap_or("").to_owned();
                 stop_on_entry = arguments["stopOnEntry"].as_bool().unwrap_or(false);
+                entry_function = arguments["entryFunction"].as_str().map(str::to_owned);
+                session.set_entry_function(entry_function.as_deref());
                 if !source_path.is_empty() {
                     if let Ok(src) = std::fs::read_to_string(&source_path) {
                         source_content = src.clone();
                         session.set_source(&src);
+                        session.set_entry_function(entry_function.as_deref());
                     }
                 }
                 send(serde_json::json!({
@@ -181,6 +185,7 @@ pub fn run_dap_server() -> std::io::Result<()> {
                     session = DebugSession::new();
                     if !old_source.is_empty() {
                         session.set_source(&old_source);
+                        session.set_entry_function(entry_function.as_deref());
                     }
                 } else {
                     session.clear_breakpoints();
@@ -622,6 +627,7 @@ pub fn run_dap_server() -> std::io::Result<()> {
                     if let Ok(src) = std::fs::read_to_string(&source_path) {
                         source_content = src.clone();
                         session.set_source(&src);
+                        session.set_entry_function(entry_function.as_deref());
                     }
                 }
                 send(serde_json::json!({

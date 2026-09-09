@@ -1,5 +1,5 @@
-use crate::parser::lexer::Span;
 use crate::ir::instr::BinOp;
+use crate::parser::lexer::Span;
 
 /// A macro definition: `defmacro name(params) => body_expr`
 #[derive(Debug, Clone)]
@@ -16,7 +16,7 @@ pub struct AstMacroDef {
 #[derive(Debug, Clone)]
 pub struct AstAttribute {
     pub name: String,
-    pub args: Vec<AstExpr>,  // Positional and named arguments
+    pub args: Vec<AstExpr>, // Positional and named arguments
     pub span: Span,
 }
 
@@ -92,10 +92,16 @@ pub enum AstType {
     Map(Box<AstType>, Box<AstType>, Span),
     /// `weak_ref<T>` weak reference type.
     WeakRef(Box<AstType>, Span),
-    /// Function type, e.g. `(i64, bool) -> i64`.
+    /// Function type, e.g. `(i64, bool) -> i64 effect io`.
+    ///
+    /// An empty effect row means the function value is pure. Upper-case names
+    /// are row variables and are bound when the function value is supplied to
+    /// a higher-order call (for example `effect E`). Effect metadata is erased
+    /// during IR lowering, but retained in the AST for strict effect checking.
     Fn {
         params: Vec<AstType>,
         ret: Box<AstType>,
+        effects: Vec<String>,
         span: Span,
     },
     /// Generic type application, e.g. `Box<i64>`, `Pair<str, f64>`, `Array<i64, 16>`.
@@ -132,14 +138,33 @@ impl PartialEq for AstType {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (AstType::Scalar(k1, _), AstType::Scalar(k2, _)) => k1 == k2,
-            (AstType::Tensor { dtype: dt1, dims: d1, .. }, AstType::Tensor { dtype: dt2, dims: d2, .. }) => {
+            (
+                AstType::Tensor {
+                    dtype: dt1,
+                    dims: d1,
+                    ..
+                },
+                AstType::Tensor {
+                    dtype: dt2,
+                    dims: d2,
+                    ..
+                },
+            ) => {
                 if dt1 != dt2 || d1.len() != d2.len() {
                     return false;
                 }
                 for (x, y) in d1.iter().zip(d2.iter()) {
                     match (x, y) {
-                        (AstDim::Literal(l1), AstDim::Literal(l2)) => if l1 != l2 { return false; },
-                        (AstDim::Symbol(i1), AstDim::Symbol(i2)) => if i1.name != i2.name { return false; },
+                        (AstDim::Literal(l1), AstDim::Literal(l2)) => {
+                            if l1 != l2 {
+                                return false;
+                            }
+                        }
+                        (AstDim::Symbol(i1), AstDim::Symbol(i2)) => {
+                            if i1.name != i2.name {
+                                return false;
+                            }
+                        }
                         _ => return false,
                     }
                 }
@@ -147,9 +172,18 @@ impl PartialEq for AstType {
             }
             (AstType::Named(n1, _), AstType::Named(n2, _)) => n1 == n2,
             (AstType::Tuple(e1, _), AstType::Tuple(e2, _)) => e1 == e2,
-            (AstType::Array { elem: el1, len: l1, .. }, AstType::Array { elem: el2, len: l2, .. }) => el1 == el2 && l1 == l2,
+            (
+                AstType::Array {
+                    elem: el1, len: l1, ..
+                },
+                AstType::Array {
+                    elem: el2, len: l2, ..
+                },
+            ) => el1 == el2 && l1 == l2,
             (AstType::Option(i1, _), AstType::Option(i2, _)) => i1 == i2,
-            (AstType::Result(ok1, err1, _), AstType::Result(ok2, err2, _)) => ok1 == ok2 && err1 == err2,
+            (AstType::Result(ok1, err1, _), AstType::Result(ok2, err2, _)) => {
+                ok1 == ok2 && err1 == err2
+            }
             (AstType::Chan(i1, _), AstType::Chan(i2, _)) => i1 == i2,
             (AstType::Atomic(i1, _), AstType::Atomic(i2, _)) => i1 == i2,
             (AstType::Mutex(i1, _), AstType::Mutex(i2, _)) => i1 == i2,
@@ -158,12 +192,49 @@ impl PartialEq for AstType {
             (AstType::List(i1, _), AstType::List(i2, _)) => i1 == i2,
             (AstType::Map(k1, v1, _), AstType::Map(k2, v2, _)) => k1 == k2 && v1 == v2,
             (AstType::WeakRef(i1, _), AstType::WeakRef(i2, _)) => i1 == i2,
-            (AstType::Fn { params: p1, ret: r1, .. }, AstType::Fn { params: p2, ret: r2, .. }) => p1 == p2 && r1 == r2,
-            (AstType::Generic { name: n1, args: a1, .. }, AstType::Generic { name: n2, args: a2, .. }) => n1 == n2 && a1 == a2,
+            (
+                AstType::Fn {
+                    params: p1,
+                    ret: r1,
+                    effects: e1,
+                    ..
+                },
+                AstType::Fn {
+                    params: p2,
+                    ret: r2,
+                    effects: e2,
+                    ..
+                },
+            ) => p1 == p2 && r1 == r2 && e1 == e2,
+            (
+                AstType::Generic {
+                    name: n1, args: a1, ..
+                },
+                AstType::Generic {
+                    name: n2, args: a2, ..
+                },
+            ) => n1 == n2 && a1 == a2,
             (AstType::ConstInt(v1, _), AstType::ConstInt(v2, _)) => v1 == v2,
-            (AstType::AssocType { base: b1, assoc_name: a1, .. }, AstType::AssocType { base: b2, assoc_name: a2, .. }) => b1 == b2 && a1 == a2,
-            (AstType::DynTrait { trait_name: t1, .. }, AstType::DynTrait { trait_name: t2, .. }) => t1 == t2,
-            (AstType::MaskEffectType { effects: e1, .. }, AstType::MaskEffectType { effects: e2, .. }) => e1 == e2,
+            (
+                AstType::AssocType {
+                    base: b1,
+                    assoc_name: a1,
+                    ..
+                },
+                AstType::AssocType {
+                    base: b2,
+                    assoc_name: a2,
+                    ..
+                },
+            ) => b1 == b2 && a1 == a2,
+            (
+                AstType::DynTrait { trait_name: t1, .. },
+                AstType::DynTrait { trait_name: t2, .. },
+            ) => t1 == t2,
+            (
+                AstType::MaskEffectType { effects: e1, .. },
+                AstType::MaskEffectType { effects: e2, .. },
+            ) => e1 == e2,
             (AstType::Ref(i1, _), AstType::Ref(i2, _)) => i1 == i2,
             (AstType::RefMut(i1, _), AstType::RefMut(i2, _)) => i1 == i2,
             _ => false,
@@ -217,16 +288,24 @@ impl std::hash::Hash for AstType {
                 v.hash(state);
             }
             AstType::WeakRef(inner, _) => inner.hash(state),
-            AstType::Fn { params, ret, .. } => {
+            AstType::Fn {
+                params,
+                ret,
+                effects,
+                ..
+            } => {
                 params.hash(state);
                 ret.hash(state);
+                effects.hash(state);
             }
             AstType::Generic { name, args, .. } => {
                 name.hash(state);
                 args.hash(state);
             }
             AstType::ConstInt(v, _) => v.hash(state),
-            AstType::AssocType { base, assoc_name, .. } => {
+            AstType::AssocType {
+                base, assoc_name, ..
+            } => {
                 base.hash(state);
                 assoc_name.hash(state);
             }
@@ -292,7 +371,10 @@ pub enum AstGenericParam {
     Type(String, Vec<String>, Variance),
     /// Higher-kinded type parameter: name, nested type parameters (e.g. `[T]`), bounds, variance
     Hkt(String, Vec<AstGenericParam>, Vec<String>, Variance),
-    Const { name: String, kind: Box<AstType> },
+    Const {
+        name: String,
+        kind: Box<AstType>,
+    },
 }
 
 /// A function definition.
@@ -1025,8 +1107,11 @@ pub struct AstExternFn {
     pub name: Ident,
     pub params: Vec<AstParam>,
     pub ret_ty: AstType,
-    pub abi: Option<String>,    // e.g. Some("C") or None for default
+    pub abi: Option<String>,      // e.g. Some("C") or None for default
     pub link_lib: Option<String>, // e.g. Some("m") for -lm
+    /// Explicit host-call effect contract. `None` means no contract was
+    /// written; `Some([])` is an explicitly pure extern (`effect pure`).
+    pub effects: Option<Vec<String>>,
     pub span: Span,
     /// Doc comment (`/// ...`) preceding this item, if any.
     pub doc_comment: Option<String>,

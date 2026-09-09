@@ -1,0 +1,8 @@
+pub def test_spans_and_assertions() -> i64 {
+    val a = 10;
+    val b = 20;
+    val c = a + b;
+    assert(c == 30);
+    assert(a * 2 == b);
+    0
+}

@@ -13,6 +13,8 @@ import {
     explainErrorCode,
     checkFormatting,
     runFileTests,
+    runWorkspaceTests,
+    fmtWorkspace,
     runBenchmarks,
     generateDocs,
     pkgCommand,
@@ -22,6 +24,7 @@ import {
 import { IrisDebugAdapterFactory } from './debugAdapter';
 import { IrisCodeLensProvider } from './codelens';
 import { IrisTaskProvider } from './tasks';
+import { IrisTestController } from './testController';
 
 let outputChannel: vscode.OutputChannel;
 let serverOutputChannel: vscode.OutputChannel;
@@ -53,6 +56,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         vscode.commands.registerCommand('iris.explainError', () => explainErrorCode(getIrisExe, outputChannel)),
         vscode.commands.registerCommand('iris.checkFormat', () => checkFormatting(getIrisExe, outputChannel)),
         vscode.commands.registerCommand('iris.runTests',    () => runFileTests(getIrisExe)),
+        vscode.commands.registerCommand('iris.runWorkspaceTests', () => runWorkspaceTests(getIrisExe)),
+        vscode.commands.registerCommand('iris.fmtWorkspace', () => fmtWorkspace(getIrisExe)),
         vscode.commands.registerCommand('iris.runBench',    () => runBenchmarks(getIrisExe)),
         vscode.commands.registerCommand('iris.generateDocs', () => generateDocs(getIrisExe)),
         vscode.commands.registerCommand('iris.pkg',         () => pkgCommand(getIrisExe)),
@@ -94,6 +99,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
                 request: 'launch',
                 name: `Debug Test ${fnName}`,
                 program: filePath,
+                entryFunction: fnName,
+                stopOnEntry: true,
             });
         }),
     );
@@ -119,6 +126,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     // Register Task Provider
     context.subscriptions.push(
         vscode.tasks.registerTaskProvider('iris', new IrisTaskProvider(getIrisExe)),
+        new IrisTestController(getIrisExe, outputChannel),
     );
 
     // Format on save
@@ -141,7 +149,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
                 await restartLsp(context, getIrisExe, serverOutputChannel);
             } else if (
                 e.affectsConfiguration('iris.inlayHints.enabled') ||
-                e.affectsConfiguration('iris.inlayHints.typeHints')
+                e.affectsConfiguration('iris.inlayHints.typeHints') ||
+                e.affectsConfiguration('iris.format.indentSize') ||
+                e.affectsConfiguration('iris.format.maxLineWidth') ||
+                e.affectsConfiguration('iris.maxNumberOfProblems')
             ) {
                 await restartLsp(context, getIrisExe, serverOutputChannel);
             }

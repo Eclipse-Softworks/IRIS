@@ -167,8 +167,7 @@ fn test_autodiff_determinism_profiling() {
     }
 
     // Warm-up iteration
-    let warmup =
-        eval_function(&func, &[IrValue::F64(2.0), IrValue::F64(3.0)]).expect("warmup");
+    let warmup = eval_function(&func, &[IrValue::F64(2.0), IrValue::F64(3.0)]).expect("warmup");
     let baseline = grad_of(&warmup);
 
     let mut latencies = Vec::with_capacity(1000);

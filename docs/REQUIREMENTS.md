@@ -11,10 +11,10 @@
 # Verify installation
 iris --version
 
-# Run a program (interpreter — no dependencies beyond IRIS itself)
-iris hello.iris
+# Evaluate a program (native path with interpreter fallback)
+iris --emit eval hello.iris
 
-# Build a native binary (requires LLVM/clang)
+# Build a native binary
 iris build hello.iris
 ./hello
 ```
@@ -38,18 +38,20 @@ These are the requirements to run `iris <file.iris>` for IR analysis, or
 
 ## Native Compilation Requirements
 
-These are required for `iris build`, `iris run`, `--emit eval`, `--emit jit`,
-and `--emit binary`. IRIS compiles through LLVM IR → Clang → native binary.
+Native object emission and ORC JIT execution use a dynamically loaded LLVM-C
+library. Native binaries additionally need a target linker and compatible
+sysroot. The validated Windows MinGW path links directly with `ld.lld`; Clang is
+an optional compatibility fallback for targets without a direct linker path.
 
 | Component     | Requirement                                              |
 |---------------|----------------------------------------------------------|
-| **LLVM/Clang** | Version 17 or newer (18+ recommended)                   |
+| **LLVM-C**    | A compatible LLVM shared library with target and ORC APIs   |
 | **Linker**    | `lld` (bundled with LLVM) or system linker               |
 | **C library** | Windows: MinGW UCRT64 · Linux: glibc · macOS: system SDK |
 | **RAM**       | 512 MB minimum, 2 GB recommended for large projects      |
 | **Disk**      | 500 MB (IRIS + bundled LLVM + sysroot)                   |
 
-### Installing LLVM/Clang
+### Installing LLVM and lld
 
 **Ubuntu / Debian:**
 ```sh
@@ -124,7 +126,7 @@ iris build my_ml_program.iris    # Links against OpenBLAS
 # ONNX Runtime
 export ONNXRUNTIME_DIR=/path/to/onnxruntime
 export IRIS_NATIVE_ML_BACKENDS=1
-iris build examples/ml_full_pipeline.iris
+iris build projects/learning_service/main.iris
 
 # PyTorch (LibTorch)
 export LIBTORCH=/path/to/libtorch
@@ -137,9 +139,11 @@ export IRIS_NATIVE_ML_BACKENDS=1
 
 ---
 
-## Supported Platforms (CI-Tested)
+## Declared Platform Targets
 
-Every release is built and tested on all 6 targets via GitHub Actions.
+The repository workflows are the authority for the matrix exercised by a given
+commit. Do not infer that every installer format below was produced or physically
+run merely because a target is declared.
 
 | Platform          | Architecture | Binary | Installers                  | CI Runner          |
 |-------------------|-------------|--------|-----------------------------|-------------------|
@@ -156,7 +160,7 @@ Every release is built and tested on all 6 targets via GitHub Actions.
 
 | Variable                  | Purpose                                              | Default |
 |---------------------------|------------------------------------------------------|---------|
-| `IRIS_CLANG`              | Path to clang binary (overrides PATH lookup)         | `clang` |
+| `IRIS_CLANG`              | Optional Clang compatibility fallback override       | `clang` |
 | `IRIS_USE_BLAS`           | Enable BLAS-accelerated tensor ops (`1` to enable)   | off     |
 | `IRIS_NATIVE_ML_BACKENDS` | Link real ONNX/PyTorch/TF backends (`1` to enable)  | off     |
 | `ONNXRUNTIME_DIR`         | Path to ONNX Runtime SDK                             | —       |
@@ -204,10 +208,10 @@ echo 'def main() -> i64 { print("Hello from IRIS!"); 0 }' > hello.iris
 iris run hello.iris
 
 # Run the ML pipeline example
-iris run examples/ml_full_pipeline.iris
+iris run projects/learning_service/main.iris
 
 # Run the AIS agent example
-iris run examples/ais_agent.iris
+iris run examples/08_ais/viability.iris
 
 # Build a native binary
 iris build hello.iris

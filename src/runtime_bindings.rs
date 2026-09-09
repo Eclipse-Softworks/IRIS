@@ -356,6 +356,3 @@ mod tests {
         assert_eq!(shape, vec![2, 2]);
     }
 }
-
-
-

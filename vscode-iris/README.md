@@ -4,7 +4,8 @@ Full-featured IDE support for the [IRIS programming language](https://github.com
 
 ![VS Code](https://img.shields.io/badge/VS%20Code-1.85+-blue?logo=visualstudiocode)
 ![License](https://img.shields.io/badge/license-GPL--2.0--or--later-green)
-![Version](https://img.shields.io/badge/version-1.0.0-orange)
+![Extension](https://img.shields.io/badge/extension-1.0.5-orange)
+![Compiler](https://img.shields.io/badge/compiler-1.0.0--rc1-purple)
 
 ---
 
@@ -18,13 +19,13 @@ Rich TextMate grammar for `.iris` files — keywords, types, strings, f-strings,
 
 Powered by the IRIS compiler's built-in language server:
 
-- **Hover** — type info and doc comments on any symbol
-- **Completions** — context-aware suggestions for functions, types, builtins, and keywords
-- **Diagnostics** — real-time error and warning reporting, plus best-practice hints (long functions, missing doc comments, naming conventions)
+- **Hover** — full signatures, generic parameters, docs, declared/inferred effects, and unsafe-region status for functions, traits, effects, fields, and builtins
+- **Completions** — context-aware functions, fields, types, traits, keywords, and every registered standard-library module
+- **Diagnostics** — exact-range compiler errors plus dead/unused, unreachable, unsafe, possible-infinite-loop, and best-practice warnings; unnecessary code is faded by VS Code
 - **Go to Definition** / **Peek Definition**
 - **Document Symbols** — outline view and breadcrumbs
 - **Signature Help** — parameter hints as you type
-- **Formatting** — format on save (configurable)
+- **Formatting** — deterministic, comment/literal-preserving, parse-safe format on save with configurable indentation and line width
 - **Inlay Hints** — inline inferred binding hints on `val` / `var`
 - **Code Actions** — auto-fix missing semicolons, type casts, naming conventions, and more
 
@@ -37,6 +38,17 @@ Step-through debugging with the built-in IRIS debugger:
 - Variables inspector (locals)
 - Watch expressions
 - Debug Console evaluation and completions
+- Named-function launch, used to debug the selected `test_*` function
+
+The debugger records and replays interpreter traces. It does not currently
+attach to a native executable or expose machine instructions/registers.
+
+### Test Explorer
+
+The native VS Code Testing view discovers zero-argument `test_*` functions as
+files change. Run or debug one test, a file, or the whole workspace. Test output,
+duration, cancellation, and failures are reported through the standard Testing
+UI; CodeLens actions use the same compiler and named-entry debugger.
 
 ### Commands
 
@@ -44,7 +56,10 @@ Step-through debugging with the built-in IRIS debugger:
 |---------|------------|-------------|
 | **IRIS: Run File** | `Ctrl+F5` | Run the current `.iris` file |
 | **IRIS: Build Binary** | — | Compile to a native executable |
-| **IRIS: Debug File** | `F5` | Launch the current `.iris` file under the DAP debugger |
+| **IRIS: Debug File** | `F5` | Launch the current `.iris` file under the trace-based DAP debugger |
+| **IRIS: Run Tests in File** | — | Run every `test_*` function in the file |
+| **IRIS: Run All Workspace Tests** | — | Run the workspace test suite |
+| **IRIS: Format Workspace** | — | Format workspace `.iris` files |
 | **IRIS: Open REPL** | — | Launch an interactive IRIS session |
 | **IRIS: Restart Language Server** | — | Restart the LSP server |
 | **IRIS: Stop Language Server** | — | Stop the LSP server |
@@ -54,7 +69,10 @@ Step-through debugging with the built-in IRIS debugger:
 
 ### Snippets
 
-Quickly scaffold common patterns: `def`, `record`, `choice`, `val`, `var`, `if`, `while`, `for`, `when`, `bring`, error handling, FFI calls, and more.
+Scaffold current language patterns including ownership/borrowing, traits and
+trait objects, effects/handlers, true async and structured task groups,
+differentiable tensors, AIS, ROS 2, LLM clients, typed metaprogramming, checked
+networking, FFI, and assertion-backed tests.
 
 ### Code Lens & Status Bar
 
@@ -84,6 +102,8 @@ cargo build --release
 | `iris.executablePath` | `"iris"` | Path to the `iris` binary |
 | `iris.maxNumberOfProblems` | `100` | Maximum diagnostics shown in the Problems panel |
 | `iris.formatOnSave` | `true` | Auto-format `.iris` files on save |
+| `iris.format.indentSize` | `4` | Formatter indentation width |
+| `iris.format.maxLineWidth` | `100` | Preferred line width for safe comma-boundary wrapping |
 | `iris.trace.server` | `"off"` | Trace LSP communication (`off` / `messages` / `verbose`) |
 | `iris.inlayHints.enabled` | `true` | Enable inlay hints |
 | `iris.inlayHints.typeHints` | `true` | Show inferred binding hints on `val` / `var` bindings |
@@ -103,7 +123,7 @@ cargo build --release
 // hello.iris
 def main() -> i64 {
     print("Hello, IRIS!");
-    0
+    return 0
 }
 ```
 
@@ -132,18 +152,26 @@ def main() -> i64 {
     val r = Shape.Rect(3.0, 4.0);
     print(concat("Circle area: ", to_str(area(c))));
     print(concat("Rect area: ", to_str(area(r))));
-    0
+    return 0
 }
 ```
 
-IRIS features strong static typing, algebraic data types, closures, generics, pattern matching, multi-module projects, an LLVM-backed native compiler, and a growing standard library.
+IRIS RC1 includes strong static typing, ownership/borrowing, effect checking,
+algebraic data types, closures, traits and trait objects, generics, pattern
+matching, structured concurrency, reverse-mode autodiff/tensors, native and ORC
+JIT execution, metaprogramming, governed evolution, networking, ROS 2, AIS/ML,
+multi-module projects, and a broad standard library.
 
 ---
 
-## Known Issues
+## Known Limits
 
-- Native concurrency (`spawn` / `channel`) is under active development.
-- `iris run` uses the LLVM/native pipeline, so a working clang/sysroot setup is required.
+- DAP is an interpreter-trace debugger, not native attach/debugging.
+- Native toolchain requirements depend on the target. Supported Windows MinGW
+  builds link directly with `ld.lld`; consult the repository requirements and
+  portability documentation for other targets.
+- External ML SDKs, ROS 2 installations, and physical boards require their
+  corresponding deployment dependencies and validation.
 
 ---
 

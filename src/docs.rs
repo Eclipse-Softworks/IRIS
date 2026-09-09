@@ -61,9 +61,24 @@ fn format_type(ty: &crate::parser::ast::AstType) -> String {
         AstType::List(inner, _) => format!("list<{}>", format_type(inner)),
         AstType::Map(k, v, _) => format!("map<{}, {}>", format_type(k), format_type(v)),
         AstType::Chan(inner, _) => format!("chan<{}>", format_type(inner)),
-        AstType::Fn { params, ret, .. } => {
+        AstType::Fn {
+            params,
+            ret,
+            effects,
+            ..
+        } => {
             let p: Vec<_> = params.iter().map(format_type).collect();
-            format!("({}) -> {}", p.join(", "), format_type(ret))
+            let effect_clause = if effects.is_empty() {
+                String::new()
+            } else {
+                format!(" effect {}", effects.join(", "))
+            };
+            format!(
+                "({}) -> {}{}",
+                p.join(", "),
+                format_type(ret),
+                effect_clause
+            )
         }
         AstType::Generic { name, args, .. } => {
             let a: Vec<_> = args.iter().map(format_type).collect();
@@ -116,10 +131,9 @@ fn format_fn_signature(f: &AstFunction) -> String {
         format!(" effect {}", f.effects.join(", "))
     };
     format!(
-        "{}{}{}def {}{}({}) -> {}{}",
+        "{}{}def {}{}({}) -> {}{}",
         pub_prefix,
         async_prefix,
-        if f.is_pub || f.is_async { "" } else { "" },
         f.name.name,
         type_params,
         format_params(&f.params),
@@ -431,7 +445,11 @@ fn render_item(item: &DocItem) -> String {
                 doc_html,
             )
         }
-        DocItem::Effect { name, doc, operations } => {
+        DocItem::Effect {
+            name,
+            doc,
+            operations,
+        } => {
             let doc_html = doc
                 .as_deref()
                 .map(|d| format!("<p class=\"doc\">{}</p>", html_escape(d)))
@@ -470,44 +488,48 @@ fn render_toc(items: &[DocItem]) -> String {
         match item {
             DocItem::Function { name, .. } => {
                 let escaped = html_escape(name);
-                entries.push(format!(
-                    "<li><a href=\"#fn-{0}\">fn {0}</a></li>", escaped
-                ));
+                entries.push(format!("<li><a href=\"#fn-{0}\">fn {0}</a></li>", escaped));
             }
             DocItem::Struct { name, .. } => {
                 let escaped = html_escape(name);
                 entries.push(format!(
-                    "<li><a href=\"#record-{0}\">record {0}</a></li>", escaped
+                    "<li><a href=\"#record-{0}\">record {0}</a></li>",
+                    escaped
                 ));
             }
             DocItem::Enum { name, .. } => {
                 let escaped = html_escape(name);
                 entries.push(format!(
-                    "<li><a href=\"#choice-{0}\">choice {0}</a></li>", escaped
+                    "<li><a href=\"#choice-{0}\">choice {0}</a></li>",
+                    escaped
                 ));
             }
             DocItem::Trait { name, .. } => {
                 let escaped = html_escape(name);
                 entries.push(format!(
-                    "<li><a href=\"#trait-{0}\">trait {0}</a></li>", escaped
+                    "<li><a href=\"#trait-{0}\">trait {0}</a></li>",
+                    escaped
                 ));
             }
             DocItem::Const { name, .. } => {
                 let escaped = html_escape(name);
                 entries.push(format!(
-                    "<li><a href=\"#const-{0}\">const {0}</a></li>", escaped
+                    "<li><a href=\"#const-{0}\">const {0}</a></li>",
+                    escaped
                 ));
             }
             DocItem::TypeAlias { name, .. } => {
                 let escaped = html_escape(name);
                 entries.push(format!(
-                    "<li><a href=\"#type-{0}\">type {0}</a></li>", escaped
+                    "<li><a href=\"#type-{0}\">type {0}</a></li>",
+                    escaped
                 ));
             }
             DocItem::Effect { name, .. } => {
                 let escaped = html_escape(name);
                 entries.push(format!(
-                    "<li><a href=\"#effect-{0}\">effect {0}</a></li>", escaped
+                    "<li><a href=\"#effect-{0}\">effect {0}</a></li>",
+                    escaped
                 ));
             }
         }

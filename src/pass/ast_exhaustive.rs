@@ -6,7 +6,9 @@
 /// - For Result: both `Ok` and `Err` must be covered, or wildcard
 /// - Wildcard `_` makes any match exhaustive.
 use crate::error::PassError;
-use crate::parser::ast::{AstBlock, AstExpr, AstFunction, AstModule, AstStmt, AstWhenArm, AstWhenPattern};
+use crate::parser::ast::{
+    AstBlock, AstExpr, AstFunction, AstModule, AstStmt, AstWhenArm, AstWhenPattern,
+};
 use std::collections::HashSet;
 
 pub struct AstExhaustivenessPass;
@@ -54,7 +56,9 @@ impl AstExhaustivenessPass {
                 self.check_expr(cond, fn_name)?;
                 self.check_block(body, fn_name)
             }
-            AstStmt::ForRange { start, end, body, .. } => {
+            AstStmt::ForRange {
+                start, end, body, ..
+            } => {
                 self.check_expr(start, fn_name)?;
                 self.check_expr(end, fn_name)?;
                 self.check_block(body, fn_name)
@@ -77,7 +81,9 @@ impl AstExhaustivenessPass {
                 }
                 Ok(())
             }
-            AstStmt::ParFor { start, end, body, .. } => {
+            AstStmt::ParFor {
+                start, end, body, ..
+            } => {
                 self.check_expr(start, fn_name)?;
                 self.check_expr(end, fn_name)?;
                 self.check_block(body, fn_name)
@@ -102,12 +108,21 @@ impl AstExhaustivenessPass {
 
     fn check_expr(&self, expr: &AstExpr, fn_name: &str) -> Result<(), PassError> {
         match expr {
-            AstExpr::When { scrutinee, arms, span } => {
+            AstExpr::When {
+                scrutinee,
+                arms,
+                span,
+            } => {
                 self.check_expr(scrutinee, fn_name)?;
                 self.check_when_arms(scrutinee, arms, *span, fn_name)?;
                 Ok(())
             }
-            AstExpr::If { cond, then_block, else_block, .. } => {
+            AstExpr::If {
+                cond,
+                then_block,
+                else_block,
+                ..
+            } => {
                 self.check_expr(cond, fn_name)?;
                 self.check_block(then_block, fn_name)?;
                 if let Some(eb) = else_block {
@@ -194,12 +209,8 @@ impl AstExhaustivenessPass {
             ScrutineeType::Enum { variants } => {
                 self.check_enum_exhaustive(variants, arms, span, fn_name)
             }
-            ScrutineeType::Option => {
-                self.check_option_exhaustive(arms, span, fn_name)
-            }
-            ScrutineeType::Result => {
-                self.check_result_exhaustive(arms, span, fn_name)
-            }
+            ScrutineeType::Option => self.check_option_exhaustive(arms, span, fn_name),
+            ScrutineeType::Result => self.check_result_exhaustive(arms, span, fn_name),
             ScrutineeType::Unknown => {
                 // Can't determine type - skip check
                 Ok(())
@@ -253,7 +264,9 @@ impl AstExhaustivenessPass {
         fn_name: &str,
     ) -> Result<(), PassError> {
         // Check if there's a wildcard pattern
-        let has_wildcard = arms.iter().any(|a| matches!(a.pattern, AstWhenPattern::Wildcard));
+        let has_wildcard = arms
+            .iter()
+            .any(|a| matches!(a.pattern, AstWhenPattern::Wildcard));
         if has_wildcard {
             return Ok(());
         }
@@ -267,7 +280,8 @@ impl AstExhaustivenessPass {
         }
 
         // Check for missing variants
-        let missing: Vec<String> = variants.into_iter()
+        let missing: Vec<String> = variants
+            .into_iter()
             .filter(|v| !covered.contains(v))
             .collect();
 
@@ -290,7 +304,9 @@ impl AstExhaustivenessPass {
         _span: crate::parser::lexer::Span,
         fn_name: &str,
     ) -> Result<(), PassError> {
-        let has_wildcard = arms.iter().any(|a| matches!(a.pattern, AstWhenPattern::Wildcard));
+        let has_wildcard = arms
+            .iter()
+            .any(|a| matches!(a.pattern, AstWhenPattern::Wildcard));
         if has_wildcard {
             return Ok(());
         }
@@ -326,7 +342,9 @@ impl AstExhaustivenessPass {
         _span: crate::parser::lexer::Span,
         fn_name: &str,
     ) -> Result<(), PassError> {
-        let has_wildcard = arms.iter().any(|a| matches!(a.pattern, AstWhenPattern::Wildcard));
+        let has_wildcard = arms
+            .iter()
+            .any(|a| matches!(a.pattern, AstWhenPattern::Wildcard));
         if has_wildcard {
             return Ok(());
         }
@@ -360,7 +378,9 @@ impl AstExhaustivenessPass {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ScrutineeType {
     #[allow(dead_code)]
-    Enum { variants: Vec<String> },
+    Enum {
+        variants: Vec<String>,
+    },
     Option,
     Result,
     Unknown,

@@ -49,9 +49,7 @@ fn local_contains_infer(ty: &IrType) -> bool {
         IrType::Fn { params, ret } => {
             params.iter().any(local_contains_infer) || local_contains_infer(ret)
         }
-        IrType::TaskGroup
-        | IrType::WeakRef(_)
-        | IrType::TraitObject { .. } => false,
+        IrType::TaskGroup | IrType::WeakRef(_) | IrType::TraitObject { .. } => false,
     }
 }
 
@@ -185,7 +183,11 @@ fn structural_unify(t1: &IrType, t2: &IrType, errors: &mut Vec<String>) -> IrTyp
                 errors.push(format!("tuple length mismatch: {} vs {}", t1, t2));
                 t1.clone()
             } else {
-                let merged = elems1.iter().zip(elems2.iter()).map(|(e1, e2)| structural_unify(e1, e2, errors)).collect();
+                let merged = elems1
+                    .iter()
+                    .zip(elems2.iter())
+                    .map(|(e1, e2)| structural_unify(e1, e2, errors))
+                    .collect();
                 IrType::Tuple(merged)
             }
         }
@@ -198,17 +200,64 @@ fn structural_unify(t1: &IrType, t2: &IrType, errors: &mut Vec<String>) -> IrTyp
             let mv = structural_unify(v1, v2, errors);
             IrType::Map(Box::new(mk), Box::new(mv))
         }
-        (IrType::Fn { params: p1, ret: r1 }, IrType::Fn { params: p2, ret: r2 }) => {
+        (
+            IrType::Fn {
+                params: p1,
+                ret: r1,
+            },
+            IrType::Fn {
+                params: p2,
+                ret: r2,
+            },
+        ) => {
             if p1.len() != p2.len() {
                 errors.push(format!("fn param length mismatch: {} vs {}", t1, t2));
                 t1.clone()
             } else {
-                let mp = p1.iter().zip(p2.iter()).map(|(e1, e2)| structural_unify(e1, e2, errors)).collect();
+                let mp = p1
+                    .iter()
+                    .zip(p2.iter())
+                    .map(|(e1, e2)| structural_unify(e1, e2, errors))
+                    .collect();
                 let mr = structural_unify(r1, r2, errors);
-                IrType::Fn { params: mp, ret: Box::new(mr) }
+                IrType::Fn {
+                    params: mp,
+                    ret: Box::new(mr),
+                }
             }
         }
         (IrType::Infer, other) | (other, IrType::Infer) => other.clone(),
+        (
+            IrType::Struct {
+                name: n1,
+                fields: f1,
+            },
+            IrType::Struct {
+                name: n2,
+                fields: f2,
+            },
+        ) => {
+            if n1 != n2 {
+                errors.push(format!("type mismatch: {} vs {}", t1, t2));
+                t1.clone()
+            } else if f1.is_empty() && !f2.is_empty() {
+                t2.clone()
+            } else {
+                t1.clone()
+            }
+        }
+        (IrType::Enum { name: n1, .. }, IrType::Enum { name: n2, .. }) => {
+            if n1 != n2 {
+                errors.push(format!("type mismatch: {} vs {}", t1, t2));
+            }
+            t1.clone()
+        }
+        (IrType::TraitObject { name: n1, .. }, IrType::TraitObject { name: n2, .. }) => {
+            if n1 != n2 {
+                errors.push(format!("type mismatch: {} vs {}", t1, t2));
+            }
+            t1.clone()
+        }
         (a, b) => {
             if a != b {
                 errors.push(format!("type mismatch: {} vs {}", a, b));
@@ -424,9 +473,7 @@ fn infer_function(module: &mut IrModule, fn_idx: usize) -> Result<(), PassError>
                         } else {
                             default_infer(&ty)
                         };
-                        module.functions[fn_idx]
-                            .value_types
-                            .insert(vid, resolved);
+                        module.functions[fn_idx].value_types.insert(vid, resolved);
                     }
                 }
             }
@@ -454,9 +501,7 @@ fn infer_function(module: &mut IrModule, fn_idx: usize) -> Result<(), PassError>
         if let Some(ty) = module.functions[fn_idx].value_types.get(&vid).cloned() {
             if local_contains_infer(&ty) {
                 let new_ty = default_infer(&ty);
-                module.functions[fn_idx]
-                    .value_types
-                    .insert(vid, new_ty);
+                module.functions[fn_idx].value_types.insert(vid, new_ty);
             }
         }
     }

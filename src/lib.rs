@@ -37,21 +37,24 @@ pub mod debugger;
 pub mod diagnostics;
 pub mod docs;
 pub mod error;
+pub mod evolution;
 pub mod explain;
 pub mod formatter;
 pub mod interp;
 pub mod ir;
 pub mod lower;
 pub mod lsp;
+pub mod meta;
+pub mod package_manager;
 pub mod parser;
 pub mod pass;
 pub mod pkg;
-pub mod package_manager;
 pub mod preprocessor;
 pub mod profiler;
 pub mod proto;
 pub mod repl;
 pub mod runtime_bindings;
+pub mod sandbox;
 pub mod security;
 pub mod setup;
 pub mod stdlib;
@@ -93,7 +96,7 @@ pub fn compile_with_recovery(
             // Lexer error — return empty module + the lex error.
             (
                 crate::parser::ast::AstModule {
-            private_items: std::collections::HashSet::new(),
+                    private_items: std::collections::HashSet::new(),
                     enums: vec![],
                     structs: vec![],
                     functions: vec![],
@@ -311,9 +314,29 @@ pub fn compile_ast_to_module(
     module_name: &str,
     dump_ir_after: Option<&str>,
 ) -> Result<IrModule, Error> {
+    compile_ast_to_module_with_effect_mode(
+        ast_module,
+        module_name,
+        dump_ir_after,
+        strict_effects_enabled(),
+    )
+}
+
+/// Compile a pre-built AST with an explicit effect policy.
+///
+/// Unlike [`set_strict_effects`], this does not mutate process-global state.
+/// Promotion authorities and language servers can therefore compile untrusted
+/// candidates concurrently without one request weakening another request's
+/// effect checks.
+pub fn compile_ast_to_module_with_effect_mode(
+    ast_module: &mut crate::parser::ast::AstModule,
+    module_name: &str,
+    dump_ir_after: Option<&str>,
+    strict_effects: bool,
+) -> Result<IrModule, Error> {
     use crate::lower::{lower, lower_graph_to_ir, lower_model};
-    use crate::pass::infer_shapes;
     use crate::pass::ast_exhaustive::AstExhaustivenessPass;
+    use crate::pass::infer_shapes;
     use crate::pass::variance_checker::VarianceChecker;
 
     // Flatten inline modules before passes.
@@ -329,8 +352,12 @@ pub fn compile_ast_to_module(
     crate::compiler::expand_macros(ast_module);
 
     // AST-level exhaustiveness checking before lowering.
-    AstExhaustivenessPass::new().run(ast_module).map_err(Error::Pass)?;
-    VarianceChecker::new().run(ast_module).map_err(Error::Pass)?;
+    AstExhaustivenessPass::new()
+        .run(ast_module)
+        .map_err(Error::Pass)?;
+    VarianceChecker::new()
+        .run(ast_module)
+        .map_err(Error::Pass)?;
 
     // Borrow checker: validate reference safety at compile time.
     {
@@ -349,7 +376,6 @@ pub fn compile_ast_to_module(
     // `--strict-effects` / IRIS_STRICT_EFFECTS=1 requires explicit `effect`
     // clauses on effectful functions AND that each clause covers what the body
     // actually does — and makes a violation fail the build.
-    let strict_effects = strict_effects_enabled();
     {
         let mut effect_checker = crate::pass::effect_checker::EffectChecker::new(strict_effects);
         effect_checker.run(ast_module);
@@ -433,7 +459,14 @@ fn compile_ast(
     dump_ir_after: Option<&str>,
 ) -> Result<String, Error> {
     with_compiler_stack(|| {
-        compile_ast_inner(ast_module, module_name, emit, max_steps, max_depth, dump_ir_after)
+        compile_ast_inner(
+            ast_module,
+            module_name,
+            emit,
+            max_steps,
+            max_depth,
+            dump_ir_after,
+        )
     })
 }
 
@@ -502,8 +535,12 @@ fn compile_ast_inner(
         // AST-level exhaustiveness checking before lowering
         use crate::pass::ast_exhaustive::AstExhaustivenessPass;
         use crate::pass::variance_checker::VarianceChecker;
-        AstExhaustivenessPass::new().run(ast_module).map_err(Error::Pass)?;
-        VarianceChecker::new().run(ast_module).map_err(Error::Pass)?;
+        AstExhaustivenessPass::new()
+            .run(ast_module)
+            .map_err(Error::Pass)?;
+        VarianceChecker::new()
+            .run(ast_module)
+            .map_err(Error::Pass)?;
 
         // Borrow checker: validate reference safety at compile time.
         {
@@ -521,7 +558,8 @@ fn compile_ast_inner(
         // Effect checker — see the note at the other call site.
         let strict_effects = strict_effects_enabled();
         {
-            let mut effect_checker = crate::pass::effect_checker::EffectChecker::new(strict_effects);
+            let mut effect_checker =
+                crate::pass::effect_checker::EffectChecker::new(strict_effects);
             effect_checker.run(ast_module);
             for err in &effect_checker.errors {
                 eprintln!("{}", err);
@@ -569,13 +607,15 @@ fn compile_ast_inner(
 /// Runs all standard passes (validate, type-infer, const-fold, strength-reduce,
 /// op-expand, DCE, CSE, shape-check).  Useful before calling `serialize_module`.
 pub fn compile_to_module(source: &str, module_name: &str) -> Result<IrModule, Error> {
-    let ast_module = parse_recovering(source)?;
-    let ir = crate::lower::lower(&ast_module, module_name)?;
+    let mut ast_module = parse_recovering(source)?;
+    compile_ast_to_module(&mut ast_module, module_name, None)
+}
 
-    let mut pm = crate::pass::build_standard_pipeline();
-    let mut ir = ir;
-    pm.run(&mut ir).map_err(|(_, e)| Error::Pass(e))?;
-    Ok(ir)
+/// Compile source through the complete pipeline while enforcing explicit
+/// effect declarations, without changing the process-wide CLI setting.
+pub fn compile_to_module_strict(source: &str, module_name: &str) -> Result<IrModule, Error> {
+    let mut ast_module = parse_recovering(source)?;
+    compile_ast_to_module_with_effect_mode(&mut ast_module, module_name, None, true)
 }
 
 /// Compiles an IRIS source string to a `IrModule` suitable for debugging.
@@ -674,7 +714,11 @@ fn interpret_module_for_eval(
             })
         })?;
     let opts = crate::interp::InterpOptions {
-        max_steps: if max_steps == 0 { 10_000_000 } else { max_steps },
+        max_steps: if max_steps == 0 {
+            10_000_000
+        } else {
+            max_steps
+        },
         // Honour the caller's limit, and default it to something the stack can
         // actually take.
         //
@@ -689,7 +733,11 @@ fn interpret_module_for_eval(
         // constant is right for every program; this is deliberately
         // conservative and `--max-depth` raises it. The real fix is to stop
         // consuming a Rust frame per IRIS frame — see known-issues #25.
-        max_depth: if max_depth == 0 { INTERP_DEFAULT_MAX_DEPTH } else { max_depth },
+        max_depth: if max_depth == 0 {
+            INTERP_DEFAULT_MAX_DEPTH
+        } else {
+            max_depth
+        },
     };
     let (result, printed) =
         crate::interp::eval_function_in_module_opts_capturing(module, func, &[], opts);
@@ -730,7 +778,9 @@ fn parse_recovering(source: &str) -> Result<crate::parser::ast::AstModule, Error
     use crate::parser::lexer::Lexer;
     use crate::parser::parse::Parser;
     let pp = crate::preprocessor::Preprocessor::new();
-    let source = pp.process(source, "<source>").map_err(Error::Preprocessor)?;
+    let source = pp
+        .process(source, "<source>")
+        .map_err(Error::Preprocessor)?;
     let tokens = Lexer::new(&source).tokenize()?;
     let mut parser = Parser::new(&tokens);
     let (module, errors) = parser.parse_module_recovering();
@@ -787,7 +837,14 @@ pub fn compile_with_opts(
     max_depth: usize,
 ) -> Result<String, Error> {
     let mut ast_module = parse_recovering(source)?;
-    compile_ast(&mut ast_module, module_name, emit, max_steps, max_depth, None)
+    compile_ast(
+        &mut ast_module,
+        module_name,
+        emit,
+        max_steps,
+        max_depth,
+        None,
+    )
 }
 
 /// Compiles an IRIS source string and on error returns a human-readable
@@ -835,6 +892,15 @@ pub fn compile_file_to_module(path: &std::path::Path) -> Result<IrModule, Error>
     let mut main_ast = compiler::FileCompiler::new().compile_file_to_ast(path, &[])?;
     let module_name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("main");
     compile_ast_to_module(&mut main_ast, module_name, None)
+}
+
+/// Compile an `.iris` file with bring resolution and request-local strict
+/// effect checking. This is the file-based entry point used by governed
+/// evolution so imported AIS/ML code is checked under the same policy.
+pub fn compile_file_to_module_strict(path: &std::path::Path) -> Result<IrModule, Error> {
+    let mut main_ast = compiler::FileCompiler::new().compile_file_to_ast(path, &[])?;
+    let module_name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("main");
+    compile_ast_to_module_with_effect_mode(&mut main_ast, module_name, None, true)
 }
 
 /// Like [`compile_file`] but passes through all options including `dump_ir_after`.

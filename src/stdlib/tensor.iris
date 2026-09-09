@@ -456,8 +456,8 @@ pub def tensor_batch_matmul(a: Tensor, b: Tensor, batch: i64, m: i64, k: i64, n:
     out
 }
 
-extern def iris_tensor_pool_init(limit_bytes: i64) -> i64
-extern def iris_tensor_pool_destroy() -> i64
+extern def iris_tensor_pool_init(limit_bytes: i64) -> i64 effect ffi, alloc
+extern def iris_tensor_pool_destroy() -> i64 effect ffi
 
 pub def tensor_pool_init(limit_bytes: i64) -> i64 {
     iris_tensor_pool_init(limit_bytes)
@@ -466,3 +466,37 @@ pub def tensor_pool_init(limit_bytes: i64) -> i64 {
 pub def tensor_pool_destroy() -> i64 {
     iris_tensor_pool_destroy()
 }
+
+// ---------------------------------------------------------------------------
+// Native define-by-run differentiable tensors
+// ---------------------------------------------------------------------------
+//
+// `Tensor` above remains the portable list-backed representation. `DiffTensor`
+// uses the contiguous native tensor runtime and records the operations actually
+// executed, so data-dependent branches, loops, closures and trait methods need
+// no graph rewriting.
+
+pub type DiffTensor = tensor<f32, [N]>
+
+pub def tensor_ad_from_data(data: list<f64>, shape: list<i64>) -> DiffTensor effect alloc {
+    dtensor(data, shape)
+}
+
+pub def tensor_ad_parameter(value: DiffTensor) -> DiffTensor effect alloc {
+    dtensor_tape(value)
+}
+
+pub def tensor_ad_add(a: DiffTensor, b: DiffTensor) -> DiffTensor effect alloc { dtensor_add(a, b) }
+pub def tensor_ad_sub(a: DiffTensor, b: DiffTensor) -> DiffTensor effect alloc { dtensor_sub(a, b) }
+pub def tensor_ad_mul(a: DiffTensor, b: DiffTensor) -> DiffTensor effect alloc { dtensor_mul(a, b) }
+pub def tensor_ad_div(a: DiffTensor, b: DiffTensor) -> DiffTensor effect alloc { dtensor_div(a, b) }
+pub def tensor_ad_matmul(a: DiffTensor, b: DiffTensor) -> DiffTensor effect alloc { dtensor_matmul(a, b) }
+pub def tensor_ad_relu(x: DiffTensor) -> DiffTensor effect alloc { dtensor_relu(x) }
+pub def tensor_ad_sigmoid(x: DiffTensor) -> DiffTensor effect alloc { dtensor_sigmoid(x) }
+pub def tensor_ad_tanh(x: DiffTensor) -> DiffTensor effect alloc { dtensor_tanh(x) }
+pub def tensor_ad_sum(x: DiffTensor) -> DiffTensor effect alloc { dtensor_sum(x) }
+
+pub def tensor_ad_backward(loss: DiffTensor) -> i64 effect alloc { dtensor_backward(loss) }
+pub def tensor_ad_grad(parameter: DiffTensor) -> DiffTensor effect alloc { dtensor_grad(parameter) }
+pub def tensor_ad_item(value: DiffTensor) -> f64 { dtensor_item(value) }
+pub def tensor_ad_data(value: DiffTensor) -> list<f64> effect alloc { dtensor_to_list(value) }

@@ -386,6 +386,7 @@ fn is_heap_ty(ty: &IrType) -> bool {
             | IrType::Mutex(_)
             | IrType::Grad(_)
             | IrType::Sparse(_)
+            | IrType::TaskGroup
     )
 }
 

@@ -1020,7 +1020,6 @@ pub enum IrInstr {
     },
 
     // ---- Effect handlers ----
-
     /// Push a handler frame onto the handler stack.
     /// Intercepts extern calls matching any of the effect names.
     PushHandler {

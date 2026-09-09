@@ -44,7 +44,7 @@ pub def readdir(path: str) -> list<str> effect fs {
 }
 
 /// Check if a path (file or directory) exists.
-pub def exists(path: str) -> bool effect fs {
+pub def exists(path: str) -> bool effect fs, alloc {
     file_exists(path)
 }
 

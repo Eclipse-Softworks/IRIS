@@ -31,9 +31,9 @@ fn contains_infer(ty: &IrType) -> bool {
         IrType::Grad(inner) | IrType::Sparse(inner) | IrType::List(inner) => contains_infer(inner),
         IrType::Map(k, v) => contains_infer(k) || contains_infer(v),
         IrType::Fn { params, ret } => params.iter().any(contains_infer) || contains_infer(ret),
-        IrType::TraitObject { methods, .. } => methods.iter().any(|m| {
-            m.params.iter().any(contains_infer) || contains_infer(&m.ret)
-        }),
+        IrType::TraitObject { methods, .. } => methods
+            .iter()
+            .any(|m| m.params.iter().any(contains_infer) || contains_infer(&m.ret)),
         IrType::TaskGroup | IrType::WeakRef(_) => false,
     }
 }
@@ -136,11 +136,10 @@ impl Pass for ValidatePass {
                 // some later value, if it surfaces at all. In a
                 // block-parameter SSA IR this is the most basic invariant
                 // there is. See known-issues #27.
-                let check_args =
-                    |target, args: &[ValueId], which: &str| -> Result<(), PassError> {
-                        if let Some(want) = func.block(target).map(|b| b.params.len()) {
-                            if want != args.len() {
-                                return Err(PassError::TypeError {
+                let check_args = |target, args: &[ValueId], which: &str| -> Result<(), PassError> {
+                    if let Some(want) = func.block(target).map(|b| b.params.len()) {
+                        if want != args.len() {
+                            return Err(PassError::TypeError {
                                     func: func_name.clone(),
                                     detail: format!(
                                         "{} in block {} passes {} argument(s) to a block                                          declaring {} parameter(s)",
@@ -150,10 +149,10 @@ impl Pass for ValidatePass {
                                         want
                                     ),
                                 });
-                            }
                         }
-                        Ok(())
-                    };
+                    }
+                    Ok(())
+                };
                 match block.terminator() {
                     Some(IrInstr::Br { target, args }) => check_args(*target, args, "Br")?,
                     Some(IrInstr::CondBr {

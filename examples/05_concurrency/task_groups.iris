@@ -1,0 +1,28 @@
+bring std.async
+def main() -> i64 {
+    val completed = atomic(0);
+    val workers = new_task_group();
+    for index in 0 .. 32 {
+        spawn(workers) {
+            if !cancellation_requested() {
+                atomic_add(completed, 1);
+
+            };
+        };
+    };
+
+    task_group_join(workers);
+    assert(atomic_load(completed) == 32);
+    val cancelled = new_task_group();
+    task_group_cancel(cancelled);
+    spawn(cancelled) {
+        atomic_add(completed, 1000);
+
+    };
+
+    task_group_join(cancelled);
+    assert(task_group_cancelled(cancelled));
+    assert(atomic_load(completed) == 32);
+    println("task groups: ok");
+    return 0
+}

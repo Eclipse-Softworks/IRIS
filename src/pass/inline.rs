@@ -51,16 +51,14 @@ impl super::Pass for InlinePass {
                         )
                     })
                 });
-                !has_handler
-                    && f.blocks.len() == 1
-                    && {
-                        let non_term = f.blocks[0]
-                            .instrs
-                            .iter()
-                            .filter(|i| !i.is_terminator())
-                            .count();
-                        non_term <= threshold
-                    }
+                !has_handler && f.blocks.len() == 1 && {
+                    let non_term = f.blocks[0]
+                        .instrs
+                        .iter()
+                        .filter(|i| !i.is_terminator())
+                        .count();
+                    non_term <= threshold
+                }
             })
             .map(|(idx, f)| (f.name.clone(), idx))
             .collect();

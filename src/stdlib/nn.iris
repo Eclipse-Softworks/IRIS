@@ -6,6 +6,7 @@
 // Usage:  bring std.nn
 
 bring std.ml
+bring std.tensor
 
 // ---------------------------------------------------------------------------
 // Network architecture: a network is represented as flat lists of
@@ -411,4 +412,30 @@ pub def mlp_eval_loss(
         total_loss = total_loss + mse(pred, y)
     }
     total_loss / (n_samples to f64)
+}
+
+// ---------------------------------------------------------------------------
+// Native autodiff building blocks
+// ---------------------------------------------------------------------------
+
+/// Dense linear projection. Bias is explicitly shaped like the output; the
+/// initial native AD surface rejects implicit broadcasting.
+pub def nn_ad_linear(x: DiffTensor, weights: DiffTensor, bias: DiffTensor) -> DiffTensor effect alloc {
+    tensor_ad_add(tensor_ad_matmul(x, weights), bias)
+}
+
+pub def nn_ad_linear_relu(x: DiffTensor, weights: DiffTensor, bias: DiffTensor) -> DiffTensor effect alloc {
+    tensor_ad_relu(nn_ad_linear(x, weights, bias))
+}
+
+/// Scalar (one-element tensor) sum-of-squared-errors loss.
+pub def nn_ad_squared_error(prediction: DiffTensor, target: DiffTensor) -> DiffTensor effect alloc {
+    val delta = tensor_ad_sub(prediction, target)
+    tensor_ad_sum(tensor_ad_mul(delta, delta))
+}
+
+/// SGD with a caller-supplied learning-rate tensor of the same shape. Keeping
+/// broadcasting explicit makes both primal and gradient shape checks exact.
+pub def nn_ad_sgd(parameter: DiffTensor, gradient: DiffTensor, learning_rate: DiffTensor) -> DiffTensor effect alloc {
+    tensor_ad_sub(parameter, tensor_ad_mul(gradient, learning_rate))
 }

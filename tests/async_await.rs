@@ -1,7 +1,7 @@
 //! Phase 28 integration tests: async/await
 //!
-//! async def returns chan<T> and spawns the body on a worker thread.
-//! await expr lowers to a channel recv.
+//! `async def` returns a single-result awaitable channel. Native execution uses
+//! a fixed scheduler (not one OS thread per task); `await` receives its result.
 
 use iris::{compile, EmitKind};
 
@@ -173,4 +173,33 @@ async def step2(x: i64) -> i64 { x * 2 }
         "pipeline should return 12, got: {}",
         out.trim()
     );
+}
+
+// 9. Many outstanding async calls use the bounded native executor and all
+// complete correctly. The worker count must be independent of task count.
+#[test]
+fn test_async_uses_bounded_scheduler() {
+    let src = r#"
+extern def iris_async_worker_count() -> i64 effect thread
+
+def run() -> i64 effect thread, alloc {
+    val pending: list<chan<i64>> = list()
+    for i in 0..128 {
+        list_push(pending, square(i));
+    }
+    var total = 0
+    for i in 0..128 {
+        total = total + await list_get(pending, i)
+    }
+    val workers = iris_async_worker_count()
+    if workers < 1 || workers > 64 { return -1 }
+    return total
+}
+
+async def square(value: i64) -> i64 {
+    return value * value
+}
+"#;
+    let out = compile(src, "async_bounded", EmitKind::Eval).expect("native async eval");
+    assert_eq!(out.trim(), "690880");
 }

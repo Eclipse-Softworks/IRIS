@@ -246,6 +246,9 @@ def main() -> i64 {
 }
 "#;
     let out = compile(src, "test", EmitKind::Eval).expect("should eval");
-    assert_eq!(out.trim(), "100", "expected nested field mutation to update and return 100");
+    assert_eq!(
+        out.trim(),
+        "100",
+        "expected nested field mutation to update and return 100"
+    );
 }
-

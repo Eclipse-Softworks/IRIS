@@ -30,7 +30,7 @@ impl Pass for OptPass {
         let mut dce = DcePass;
         let mut cse = CsePass;
         let mut op_expand = OpExpandPass;
-        
+
         cse.run(module)?;
         dce.run(module)?;
         op_expand.run(module)?;

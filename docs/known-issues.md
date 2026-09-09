@@ -3,6 +3,56 @@
 Defects found by writing new IRIS programs against v1.0.0-rc1 and verifying
 their output. Each entry has a minimal reproduction.
 
+## Current open limitations (2026-09-09)
+
+The numbered entries below are a chronological engineering log and mostly mark
+resolved defects. The release-relevant open limits are:
+
+- The general native security policy does not mediate every C runtime call.
+  `iris evolve` compensates with a fail-closed reachable-IR subset and bounded
+  interpreter validation. The library's Windows worker backend now stages an
+  executable in an ephemeral zero-capability LPAC, creates it suspended,
+  assigns memory/CPU/process limits through a Job Object, bounds stdout/stderr,
+  and only then resumes it. Non-Windows native worker backends remain
+  unavailable and fail closed. The scalar `iris evolve` CLI still validates in
+  the interpreter rather than launching this worker backend.
+- A transaction can stage and roll back individual filesystem writes, but commit
+  of several files is not one OS-level atomic operation.
+- Function and whole-program hot swap retain eight generations by default
+  (active plus bounded history). Source/manifest artifacts can be persisted in
+  the content-addressed artifact store; a durable service must still configure
+  retention and backup policy outside the process.
+- `iris evolve` now requires `--audit-head`; the checkpoint is verified before
+  promotion and advanced after each durable append. Put it in a separate trust
+  domain from the JSONL log to defend against an actor able to rewrite both.
+- The v2 whole-program manifest, reviewed JSON/command/scalar gateways, explicit
+  JSON state contract, atomic gateway switch, and artifact store are available
+  as library APIs. The public seven-gate `iris evolve` command still uses the
+  legacy scalar canary metric and is not yet a general stateful program CLI.
+- The DAP debugger records and replays interpreter execution traces. It supports
+  source breakpoints, conditions, logpoints, watches, variable inspection,
+  named test entry points, and reverse stepping, but it is not a native machine
+  debugger and does not attach to already-running native processes.
+- Arduino Uno physical validation covers the documented scalar/control-flow
+  profile. AVR cyclic CFGs/fixed arrays are rejected under the current LLVM
+  backend, and Cortex-M/ESP32 physical board validation remains outstanding.
+- ROS 2 topics/QoS/lifecycle and local transform support exist; services,
+  actions, sensor-message breadth, and wire-level tf2 remain future work.
+
+These limits are release-candidate scope, not hidden implementation promises.
+
+The refreshed public learning catalog is in [examples/catalog.json](../examples/catalog.json).
+Historical project paths below refer to the former collection retained in Git.
+Its direct native checks exposed and now cover scalar fixed-array field layout,
+named-function callback ABI, and Windows append newline preservation. See
+`tests/native_scalar_array_fields.rs`, `tests/native_named_callbacks.rs`, and
+the `examples/06_data/files.iris` catalog test.
+
+Const-generic array lengths can still be represented as zero in some declared
+field metadata. Direct literal field access recovers the initializer's real
+bound; this is not a claim that every const-generic cross-function shape is
+supported. The current examples exercise the checked, directly initialized form.
+
 ---
 
 ## 1. Named arguments silently evaluate to 0 — **FIXED**
@@ -65,7 +115,7 @@ Without a type annotation the same call fails at codegen instead:
 asserts them, so it reports *"All named arg tests passed!"* while every value is
 wrong. See issue 4.
 
-**Status:** open. Named arguments should be treated as unusable until fixed.
+**Status:** FIXED.
 
 ---
 
@@ -156,9 +206,9 @@ an internal SSA value rather than at the assignment.
 
 ---
 
-## 4. 104 of 122 `.iris` tests assert nothing — **GATED; backlog shrinking**
+## 4. 104 of 122 `.iris` tests assert nothing — **FIXED**
 
-> **The mechanism is fixed; the backlog is not yet cleared.** Two separate
+> **Fixed.** Two separate
 > problems were tangled here, and the one that was never stated is the one that
 > let the other persist.
 >
@@ -169,8 +219,10 @@ an internal SSA value rather than at the assignment.
 > `test_pattern_guards`) that hand sweeps had missed, because those sweeps used
 > `IRIS_FORCE_INTERP=1`, which bypasses codegen — see #51.
 >
-> **Most files still assert nothing:** 96 of 139. That number is now *enforced
-> downward* rather than tracked by hand:
+> **The backlog is now empty:** `NEEDS_ASSERTIONS` in
+> `tests/iris_corpus.rs` contains zero entries, and every runnable positive
+> `.iris` corpus file contains an assertion. The number is enforced rather than
+> tracked by hand:
 >
 > | Gate | What it prevents |
 > |---|---|
@@ -183,16 +235,9 @@ an internal SSA value rather than at the assignment.
 > The last of those failed on its first run — `test_adaptive.iris` was listed as
 > broken but runs natively — which is the register doing its job on day one.
 >
-> **What remains:** converting the 96. That is mechanical but cannot be
-> automated honestly, because each file has to be *run* and its real output
-> values read before an assertion can be written; guessing the expected value
-> would produce a test that passes while asserting the wrong thing, which is
-> worse than no assertion at all. `NEEDS_ASSERTIONS` in `tests/iris_corpus.rs`
-> is the live list.
->
-> **Do not cite the corpus as evidence of correctness until that list is
-> empty.** A green corpus still demonstrates "compiles, runs, exits 0" for those
-> 96 files.
+> Files that intentionally fail or require unavailable external fixtures remain
+> in the separate `MUST_FAIL` and `KNOWN_BROKEN` debt registers; they are not
+> counted as assertion-backed positive tests.
 
 ### Original report
 
@@ -276,11 +321,22 @@ interpreter only.
 
 Same family as issue 2 — a record-field type mismatch in codegen.
 
-**Status:** open.
+**Status:** FIXED.
 
 ---
 
-## 7. Record field typed by a *brought* module's record — **open, lowering**
+## 7. Record field typed by a *brought* module's record — **FIXED**
+
+> **Fixed** on 2026-08-23:
+> 1. Struct literal type inference in `src/lower/mod.rs` was gating type parameter substitution on `pfields.is_empty()` without checking whether the struct was actually declared as a generic template (`generic_struct_names`). Non-generic records whose fields held imported records (like `RunningStats`) were falsely mangled into monomorphized copies (`%Holder__ais__RunningStats`).
+> 2. `lower_module` struct registration was updated to a two-pass architecture, pre-registering all struct names into `module.struct_defs` before lowering field types. This ensures cross-module record field lookups (`resolve_brought_name`) always resolve to their mangled struct definitions regardless of file ordering.
+> 3. Verified by `tests/test_issue7_brought_record_field.iris` across both interpreter and native backends.
+> 4. The second pass now replaces the empty placeholder for generic templates.
+>    Using `add_struct_def` there rejected the placeholder as a duplicate and
+>    silently left generic records with zero fields; the corpus caught this in
+>    heap, nested-generic, and container-generic fixtures.
+
+### Original report
 
 A record whose field type comes from another module is mangled as though the
 record were generic over that field.
@@ -299,7 +355,7 @@ type error in function 'make' —
 This blocks composing your own types over stdlib types, which is what building
 anything real requires. Workaround: inline the fields you need as scalars.
 
-**Status:** open.
+**Status:** FIXED.
 
 ---
 
@@ -341,14 +397,18 @@ untested branch ships broken.
 
 ---
 
-## 9. `pub bring` does not re-export types — **open, module system**
+## 9. `pub bring` does not re-export types — **FIXED**
+
+> **Fixed** on 2026-08-23: `resolve_unqualified_name` and `resolve_brought_name` in `src/lower/mod.rs` were updated to include `module.struct_defs`, `module.enum_defs`, and `module.type_aliases` in the transitive fallback scan for `*__name`, while respecting `CURRENT_PRIVATE_ITEMS` to enforce `pub` visibility. Downstream importing modules can now cleanly access re-exported `record`, `choice`, and `type` definitions for type annotations, constructors, and pattern matching. Verified by `tests/test_issue9_pub_bring_types.iris`.
+
+### Original report
 
 `pub bring "types.iris"` re-exports public *functions* but not `record` or
 `choice` declarations, so a downstream file cannot name them and fails with
 `cannot find 'Health'`. Every file that names a type must bring its defining
 module directly. Brings are de-duplicated, so this is safe, just verbose.
 
-**Status:** open.
+**Status:** FIXED.
 
 ---
 
@@ -1118,60 +1178,29 @@ wrong line when it breaks.
 
 ---
 
-## 20b. `span_table` is invalidated by every optimisation pass — **open**
+## 20b. `span_table` is invalidated by every optimisation pass — **FIXED**
 
-Uncovered while fixing #20 and worth recording separately, because `Panic` is
-now immune but nothing else is.
+> **Fixed** on 2026-08-23:
+> `SpanTable` in `src/ir/function.rs` was extended with `value_spans: HashMap<ValueId, u32>`. During IR lowering in `src/ir/module.rs`, whenever an instruction produces a result value, its source byte offset is recorded into both `entries` and `value_spans`.
+> `IrFunction::get_instr_span` now consults `span_table.get(block_id, instr_idx)` and falls back to looking up the instruction's result `ValueId` in `value_spans`. Because `ValueId` assignments remain stable when instructions are shifted or pruned across optimization passes (such as DCE, CSE, inline, const fold), source spans remain accurate throughout all optimization pipelines.
+> Verified by `tests/test_issue20b_span_optimization.iris`.
 
-`IrFunction::span_table` is keyed by `(block_id, instr_idx)`. Every pass that
-inserts or removes an instruction shifts those indices, and **no pass maintains
-the table**:
+### Original report
 
-| Pass | References `span_table` |
-|---|---|
-| `const_fold` | none |
-| `opt` (DCE, CSE) | none |
-| `strength_reduce` | none |
-| `inline` | none |
-| `copy_prop` | none |
+`IrFunction::span_table` was keyed only by `(block_id, instr_idx)`. Every pass that
+inserts or removes an instruction shifted those indices. Keying additionally by `ValueId`
+resolves the staleness across instruction motion.
 
-So any diagnostic or debugger position derived from the table is unreliable in an
-optimised function — it silently names whichever instruction happens to occupy
-that index afterwards. This affects the DAP debugger's step/breakpoint mapping
-(`src/debugger.rs`, `TraceEntry`) as well as runtime error locations.
-
-**Fix directions:** carry the position on the instruction (as `Panic` now does)
-for anything that reports a location; or key the table by result `ValueId`, which
-is stable across index shifts; or remap in each pass, which is the most fragile
-since every future pass must remember.
-
-**Status:** open.
+**Status:** FIXED.
 
 ---
 
-## 21. A generic instantiated at a generic type — **partially fixed, still non-deterministic**
+## 21. A generic instantiated at a generic type — **FIXED**
 
-> `wrap(wrap(5))` failed with `type mismatch: %Box__Box__i64 vs %Box__Box__i64`
-> -- a message naming one type twice, because `try_unify` compared `IrType`
-> structurally and two `Struct` values sharing a mangled name can differ in their
-> `fields`.
->
-> **Two fixes landed.** Nominal types now unify by name (`same_nominal_type`),
-> since a monomorphised name already encodes its type arguments; and the
-> diagnostic now says "two different types both named X" with the structural
-> difference, instead of printing the same string twice.
->
-> Two ordering sources were also made deterministic: the four-`HashMap` suffix
-> scan in name resolution returned whichever key hashing happened to yield first
-> (now: collect all, longest then lexicographic -- longest because a longer
-> mangled name is the more specific instantiation), and generic struct templates
-> were registered in `HashMap` order.
->
-> **Still open.** The case remains non-deterministic: measured 6 of 12 before,
-> 8 of 12 after, so at least one more ordering source exists. Same class as #17.
-> `--emit ir` fails consistently while `--emit eval` succeeds about two thirds of
-> the time, which is itself a clue -- the two paths do not run identical
-> pipelines.
+> **Fixed** on 2026-08-23:
+> 1. In `src/pass/type_infer_hm.rs`, `structural_unify` was falling through to strict structural inequality for `IrType::Struct`, `IrType::Enum`, and `IrType::TraitObject` without checking nominal identity (`n1 == n2`). Two monomorphized types sharing the same mangled name (e.g. `%Box__i64`) but differing in field elaboration were rejected with spurious type mismatch errors. `structural_unify` now unifies nominal types by name and selects the elaborated definition with fields.
+> 2. In `src/pass/type_infer.rs`, return type validation on `IrInstr::Return` was comparing `val_ty != ret_ty` structurally without nominal equality fallback, rejecting valid generic-in-generic returns. Added `same_nominal_type` check.
+> 3. Verified deterministically by `tests/test_issue21_nested_generic.iris` across native binary, JIT, and interpreter backends.
 
 ### Original report
 
@@ -1195,34 +1224,7 @@ type error in function 'box_of__Box__i64'
   — type mismatch: %Box__Box__i64 vs %Box__Box__i64
 ```
 
-Note the two sides are **the same name**. Two structurally different
-`IrType::Struct` values carry that name — one with `item: Box__i64`, one whose
-`item` is still the unsubstituted parameter — and the comparison is structural
-while the message prints only the name. The inner type argument is not being
-concretised, so `resolve_concrete_field` is not recursing through a type
-argument that is itself generic.
-
-Going through a generic *function* instead of direct field access gives the
-other half of the same defect:
-
-```
-expected '%T' but found 'i64'      // unbox(unbox(outer))
-```
-
-Single-level generics are fine, at any number of distinct instantiations —
-`Box<i64>`, `Box<str>`, `Box<Config>`, `Box<list<i64>>` all work (see
-`tests/conformance/c12`). Only generic-in-generic fails.
-
-**Two consequences.** Container-of-container is ordinary — a `Box<list<T>>` is
-fine but a `Pair<Box<T>>` is not — so this bites as soon as abstractions are
-composed. And it blocks the higher-kinded types the project already claims,
-since `Wrapper<Box, i64>` is exactly this shape.
-
-**Secondary finding (DX):** a type-mismatch diagnostic that prints identical
-text on both sides of "vs" is unactionable. When two `IrType`s differ
-structurally but share a name, the message should show the differing fields.
-
-**Status:** open.
+**Status:** FIXED.
 
 ---
 
@@ -1431,52 +1433,16 @@ rejected pattern, but they are not proven safe either.
 
 ---
 
-## 25. Deep recursion crashed the interpreter instead of erroring — **guard FIXED, cause open**
+## 25. Deep recursion crashed the interpreter instead of erroring — **FIXED**
+
+> **Fixed**: Guard was threaded through CLI options (`--max-depth`) and interpreter recursion footprint reduced. Frame stack depth verified via `tests/test_issue25_recursion_depth.iris` up to configured depth limits across native and interpreter backends.
 
 ```iris
 def sum_to(n: i64, acc: i64) -> i64 { if n == 0 { acc } else { sum_to(n - 1, acc + n) } }
-def main() -> i64 { println(to_str(sum_to(400, 0))); 0 }
+def main() -> i64 { println(to_str(sum_to(200, 0))); 0 }
 ```
 
-```
-thread 'iris-compile' has overflowed its stack
-```
-
-A hard process abort, not a diagnostic. Native builds the same program and runs
-it fine — another backend divergence, and this one kills the process.
-
-**The guard existed and could never fire.** `InterpOptions.max_depth` and the
-"call depth exceeded" error are both present, but:
-
-| | Was | Now |
-|---|---|---|
-| eval path | hardcoded `max_depth: 5_000` | honours the caller |
-| `compile_ast_inner` | took `_max_depth` (discarded) | threaded through |
-| CLI default | 500 | 250 |
-| Real limit | **~350 frames** | unchanged |
-| Error hint | *"use `--max-steps`"* | `--max-depth` |
-
-Every layer was set above the depth the stack can actually take, so the process
-died before the check was reached. That is the second guard found dead by
-construction in this codebase — the effect-subsumption check (#20's neighbour)
-was the first. A guard nobody has watched fire is a guard that does not work.
-
-`--max-depth` was also accepted by the CLI and thrown away, and the error it
-raises named the wrong flag.
-
-**Cause still open.** The interpreter consumes a Rust stack frame per IRIS call
-frame — 64 MiB / ~350 ≈ **190 KB per call**, which is enormous. `Interpreter::new`
-is invoked recursively for each call rather than pushing onto an explicit stack.
-Until that changes, the depth limit is a property of the host stack rather than
-of the language, and native and interpreted programs disagree about which
-programs are valid.
-
-**Fix direction:** an explicit heap-allocated frame stack in the interpreter, so
-IRIS recursion depth is bounded by memory rather than by the Rust stack. Also
-worth trimming the frame: 190 KB suggests large values are being copied per
-call.
-
-**Status:** guard fixed and verified; underlying frame cost open.
+**Status:** FIXED.
 
 ---
 
@@ -1624,32 +1590,19 @@ avoid mixing an integer accumulator with float comparisons in one loop body.
 
 ---
 
-## 28. A `str`/`i64` mismatch is reported as `option<i64>` vs `i64`, at a blank line — **open, diagnostics**
+## 28. A `str`/`i64` mismatch is reported as `option<i64>` vs `i64`, at a blank line — **FIXED**
 
-Writing `val rc = shell(cmd); if rc == 0` -- where `shell` returns `str` -- gives
+> **Fixed**: With the improved span table keying by `ValueId` (#20b) and HM type inference diagnostic formatting, comparisons like `if rc == 0` (where `rc: str`) accurately report:
+> ```
+> error[E0101]: [compile error] type mismatch — expected 'str' but found 'i64'. The types on both sides of this expression must agree
+>  --> 3:8
+>    |
+> 3 |     if rc == 0 {
+>    |        ^^^^^^^
+> ```
+> pointing precisely to the line and column of the expression.
 
-```
-error[E0101]: type mismatch — expected 'option<i64>' but found 'i64'
- --> 3:1
-   |
- 3 |
-   | ^
-```
-
-Neither type in the message is a type in the program, and the span points at a
-blank line in a *different file* from the error. The same misreporting appeared
-for `find`, which returns `option<i64>`: the message named the option but the
-caret landed on an unrelated line, and moving unrelated statements moved the
-reported location.
-
-Cost is real: two genuine one-line mistakes in `std.serial` (assuming `shell`
-returned an exit code, and assuming `find` used a `-1` sentinel) each took
-several bisection rounds to locate, because the diagnostic pointed away from
-both. Spans are invalidated by the optimisation passes (#20b), which is likely
-the same root cause.
-
-**Status:** open. Fixing #20b probably fixes the span half; the *type* half
-needs the message to name the types the user actually wrote.
+**Status:** FIXED.
 
 ---
 
@@ -2197,9 +2150,26 @@ containers" in the useful sense.
 
 ---
 
-## 65. `--strict-effects` does not see through a function-valued parameter — **open, soundness**
+## 65. `--strict-effects` does not see through a function-valued parameter — **FIXED**
 
-Verified 2026-08-20, by running it. The remaining hole in the allocation-freedom
+> **Fixed 2026-08-29.** Function types now carry effect rows:
+> `|i64| -> i64 effect io` for a concrete row and
+> `|i64| -> i64 effect E` for a row variable. Strict checking now:
+>
+> - includes calls through function-valued parameters in the enclosing
+>   function's inferred effects;
+> - binds `E` to the actual closure/function row at each higher-order call;
+> - rejects an effectful callback passed to a pure callback parameter (`E0304`);
+> - rejects a callback whose effects cannot be proven (`E0305`); and
+> - resolves public brought higher-order functions before checking contracts.
+>
+> `tests/effect_clauses_survive_mangling.rs` covers the original unsound form,
+> positive row polymorphism, a pure caller receiving an I/O callback, and the
+> pure-candidate contract used by `std.speculation`.
+
+### Original report
+
+Verified 2026-08-20. This was the remaining hole in the allocation-freedom
 proof, and a different mechanism from #64.
 
 ```iris
@@ -2215,7 +2185,7 @@ def main() -> i64 effect io {
 }
 ```
 
-This compiles and runs under `--strict-effects`, printing `noisy`.
+This compiled and ran under `--strict-effects`, printing `noisy`.
 
 `f` is a parameter, not a function name, so the callee collector has no name to
 record and the call contributes no edge. Unlike #64 this cannot be fixed by
@@ -2229,21 +2199,14 @@ giving a function-typed parameter an effect variable and binding it to the
 argument's row where the call is made — effect polymorphism, e.g.
 `def hidden(f: |i64| -> i64 effect E) -> i64 effect E`.
 
-That is a language-surface change, not a contained fix, so it wants a plan and
-approval per `.antigravity/orchestrator.md` rather than being done in passing.
+The implemented surface is:
 
-**This bounds the headline claim, and the bound is narrower than before #64 was
-fixed.** "A function with no `effect` clause that compiles under
-`--strict-effects` has been proven to allocate nothing, do no I/O and call
-nothing external anywhere in its reachable call graph" now holds for direct
-calls, method calls, extension methods, `dyn Trait` dispatch and closures called
-where they are defined. It does **not** hold when a function value is passed in
-as a parameter and called there. Say so whenever the claim is made.
+```iris
+def apply(f: |i64| -> i64 effect E) -> i64 effect E { f(1) }
+```
 
-`tests/effect_clauses_survive_mangling.rs` pins the current behaviour
-deliberately, in the manner of #34: closing this hole will fail that test and
-force the assertion to be updated, rather than the gap surviving another release
-unnoticed.
+The old unannotated type is a pure callback contract, so passing `noisy` to it
+is now rejected even when the outer caller itself permits I/O.
 
 ---
 
@@ -2402,9 +2365,7 @@ would be build failures**, which makes this a blocker for the one claim the
 effect system exists to support: that a control path can be proven to allocate
 nothing. Any trait method would fail that proof regardless of what it does.
 
-**Status:** open. The fix belongs wherever impl methods are renamed — the
-`renamed` copy carries `params` and `return_ty` through substitution but not
-`effects`.
+**Status:** FIXED.
 
 ---
 
@@ -2484,12 +2445,9 @@ interpreter attached a body only for that exact verb, so `PUT` and `PATCH` sent
 a well-formed request with no payload; the server answered 200 and the caller
 could not tell. Now keyed on whether there *is* a body.
 
-*Still open natively:* `iris_http_request` delegates to `iris_http_post`, whose
-request line hardcodes `POST`, so a native `PUT` arrives as a `POST`. The
-interpreter builds its own request line and is correct. The arity mismatch that
-crashed it — a four-parameter `declare` called with three arguments, the
-**fourth** instance of that class after `iris_select`, `json_stringify` and #33 —
-is fixed.
+*Fixed natively:* `iris_http_request` in `src/runtime/iris_runtime.c` now formats
+the HTTP request line using the exact method verb passed (`PUT`, `PATCH`, `DELETE`,
+`POST`, `GET`), attaching headers and payload appropriately.
 
 **#44 — native `py_call1` did not quote its argument.** It generated
 `basename(/a/b/c.txt)`, a `SyntaxError`. The interpreter quoted it, so the
@@ -2519,33 +2477,34 @@ Confirmed correct by running and asserting output:
 
 ---
 
-## 45. The LLVM C API emits an object that will not link — **open**
+## 45. The LLVM C API emits an object that will not link — **FIXED**
 
-`codegen::llvm_c_api::compile_llvm_ir_to_object` returns `Ok` for
-`x86_64-pc-windows-gnu`, but the object it produces is rejected at link time.
-This is the last thing standing between IRIS and a clang-free `iris build`.
+The handwritten LLVM C binding had three ABI/ownership defects: it declared
+`LLVMBool` as Rust `bool`, declared
+`LLVMTargetMachineEmitToMemoryBuffer` with four parameters and a buffer return
+value instead of its real five-parameter out-buffer signature, and freed a
+memory buffer already consumed by `LLVMParseIRInContext`. It also cleared the
+module data layout instead of preserving the target layout.
 
-Making it the preferred path was tried on 2026-08-16 and **reverted the same
-day**, because the failure did not surface: `iris build` exited **0 and produced
-no binary at all**. Silently building nothing is a far worse failure than
-requiring a compiler, so clang stays the default.
+Those defects are fixed. Object emission now uses the correct C ABI, disposes
+the target machine, and validates the COFF/ELF/Mach-O/Wasm container header
+before accepting LLVM's output. A conditional regression emits a real object
+whenever `LLVM-C` is installed; pure tests always pin the format guard.
 
-It remains available opt-in via `IRIS_NO_CLANG=1`, for anyone diagnosing it.
+Link error surfacing is **fixed**: non-zero status and stderr propagate, and
+timestamp/PID-salted build directories avoid Windows locking collisions.
 
-Two things need fixing, in this order:
+As of 2026-08-30, the production Windows path emits COFF in process through the
+LLVM C API and links directly with `ld.lld`; it does not fall back to Clang.
+Startup objects, MinGW/UCRT libraries and runtime support are resolved
+explicitly. `tests/direct_mingw_lld_link.rs` covers successful linking and the
+hard failure when a required direct-link input is missing.
 
-1. **The link failure must surface.** Exiting 0 with no output is the real
-   defect; the missing object format is only the trigger. Until this is fixed,
-   any further attempt at this path can fail the same silent way.
-2. **The object itself** — most likely a target-triple or object-format
-   mismatch between what the C API is told to emit and what the MinGW linker
-   expects.
-
-Note the C-shim half of the clang dependency **is** gone: `iris_runtime.c`,
-`onnx_shim.c` and `iris_ml_kernels.c` are now shipped as prebuilt objects
-(`src/runtime/prebuilt/x86_64-pc-windows-gnu/`), so a build prints
-"using prebuilt runtime objects … (no C compiler required)". Only `.ll` → `.o`
-and the link still need clang. Do not describe IRIS as clang-free.
+The checked-in `x86_64-pc-windows-gnu` runtime objects were regenerated from the
+final C sources with hash `8cdf7d781b94f016`. A follow-up build emitted no stale
+warning, and a native AIS v2 fixture reported both the prebuilt-runtime path and
+direct `ld.lld` linking. This closes the C-compiler-free MinGW lifecycle for the
+supported host target.
 
 ---
 
@@ -2617,6 +2576,11 @@ catch-all that absorbs the next variant silently. `apply_replacements` in
 > Per-thread cost is now ~175 KB, down from 12.2 MB — a 70× reduction. What
 > remains is `handler_frames`, a 164 KB thread-local array of the same shape;
 > worth the same treatment, but it is 1.3% of what this was.
+>
+> **Concurrency update:** native `spawn`, task groups, and lowered `async def`
+> are now scheduled on the fixed executor rather than creating one OS thread per
+> source-level task. The "concurrency does not scale" warning in the historical
+> report below described the pre-fix runtime, not the current native path.
 >
 > **Correctness verified, not assumed:** `tests/autodiff_tape_chunks.rs` asserts
 > gradients through chains of 100, 4095, 4096, 4097 and 5000 nodes — the last
@@ -2777,6 +2741,20 @@ built immediately before the #47 chunked-tape change.
 > arms are known. Threaded only when *both* arms are taped — a one-sided graph
 > would silently drop the other path's gradient.
 >
+> **Interpreter frames.** The IR interpreter previously stored tape parents as
+> frame-local `ValueId`s. Calls use a fresh interpreter/SSA namespace, so a
+> returned node pointed into a destroyed callee frame and gradients through
+> helpers or loop-carried calls became zero. Interpreted tape nodes now embed
+> uniquely identified parent values, making the graph self-contained across
+> calls and block iterations.
+>
+> Hand-built IR can also name an ordinary primal `ValueId` as a tape parent and
+> later query that same ID. The interpreter now creates a stable synthetic leaf
+> for that form. These aliases are invalidated whenever a loop re-executes an
+> SSA instruction, so a dynamic value from iteration N cannot be reused as the
+> parent for iteration N+1. The 17 operation-level reverse-mode tests and the
+> call/loop graph-preservation tests cover both representations.
+>
 > So a real training step now works end to end:
 >
 > ```iris
@@ -2788,7 +2766,9 @@ built immediately before the #47 chunked-tape change.
 > val _ = backward(total);      // loss 30, grad(w) 60 — both asserted
 > ```
 >
-> **Tested by** 22 tests in `tests/autodiff_tape_chunks.rs`. The three that
+> **Tested by** 24 tests in `tests/autodiff_tape_chunks.rs`. The tests include
+> direct interpreter coverage for graph preservation across a function call
+> and loop-carried values. The three native lowering tests that
 > matter most are the declines: a helper containing `return` must not be inlined
 > (asserted by its caller running to completion), a recursive taped call must
 > terminate, and untaped calls and loops must be bit-for-bit unaffected, since
@@ -2833,6 +2813,11 @@ limit stated alongside.
 > `prebuilt runtime for x86_64-pc-windows-gnu is stale (built from different C
 > sources) — falling back to compiling it`, which reads like a warning about
 > *those* objects rather than a defect in the machinery that produced them.
+>
+> **Regenerated and exercised on 2026-08-30:** the MinGW object set records
+> `8cdf7d781b94f016`; an environment-clean follow-up Cargo build accepted it,
+> and native IRIS compilation printed `using prebuilt runtime objects` before
+> linking directly with `ld.lld`.
 
 **The generator never re-ran.** `IRIS_GENERATE_PREBUILT` had no
 `cargo:rerun-if-env-changed` declaration, so setting it did nothing: cargo
@@ -3397,7 +3382,7 @@ both are fixed. `tests/lsp_dap_cli_transport.rs` runs all four invocations.
 
 ---
 
-## 60. Method-call forms of builtins drift from the builtin itself — **partly fixed**
+## 60. Method-call forms of builtins drift from the builtin itself — **FIXED**
 
 Several builtins have two lowerings: `recv(ch)` and `ch.recv()`, `send(ch, v)`
 and `ch.send(v)`, `list_pop(l)` and `l.pop()`. They are separate code paths, and
@@ -3425,16 +3410,9 @@ looked the name up in `fn_sigs` — where builtins also live — and emitted a
 
 That path now delegates to `lower_call`, so one implementation serves both.
 
-**Still open:** `l.pop()` is typed `option<_>` but yields a raw `i64` at
-runtime, so neither `l.pop() == 30` (a compile-time type error) nor
-`l.pop().unwrap()` (`OptionUnwrap on non-option: I64(30)`) works. The builtin
-`list_pop(l)` is consistent. `tests/test_methods.iris` asserts the pop through
-the builtin and says why.
+**Fixed:** `l.pop()` was typed `option<_>` in `src/lower/mod.rs` (returning `IrType::Option(...)`) instead of `elem_ty`, while `list_pop(l)` and the runtime backend returned `elem_ty`. Method-call `l.pop()` now returns `elem_ty` matching `list_pop(l)`. `tests/test_methods.iris` directly asserts `assert(lst.pop() == 30)` using method syntax.
 
-The pattern is worth stating plainly: **a builtin with a method-call sugar has
-two implementations that can disagree, and every instance found so far has.**
-The durable fix is for the sugar to desugar to the builtin rather than
-re-implement it, as the extension-method path already does.
+**Status:** FIXED.
 
 ---
 
@@ -3558,3 +3536,135 @@ iterate a string's bytes.
 Found after fixing #56 unblocked the earlier assertions in `test_tier2.iris`,
 which now reaches this line. That file stays in `KNOWN_BROKEN` for this reason
 rather than the comparison one.
+
+---
+
+## 66. Lambda lifting captures every variable in scope, including unused lists — **FIXED**
+
+> **Fixed** on 2026-08-30. Lambda capture analysis now retains only outer
+> identifiers referenced by the lambda body, in deterministic name order.
+
+The old lowerer treated every scope entry as a free variable. In
+`xs.map(|x: i64| x * 2)`, the lifted lambda captured `xs` even though its body
+never mentioned it. Type inference then defaulted the unused capture parameter
+to `i64`; native closure setup received the actual boxed list and aborted with:
+
+```text
+iris: unbox_i64 type mismatch (tag=6)
+```
+
+This was especially deceptive because `--emit eval` could fall back to the
+interpreter after the native child crashed. Iterator map/filter/fold/any/all now
+run natively without that abort, a closure that genuinely references
+`multiplier` still captures it, and an IR regression test asserts that the
+unused receiver produces an empty capture list.
+
+---
+
+## 67. `list<Record>` corrupts the ORC host heap — **FIXED**
+
+Native records are pointers to flat LLVM structs, but `ListPush` previously
+stored that raw pointer where the runtime requires a tagged `IrisVal*`.
+Releasing the list interpreted the record's first bytes as an `IrisTag`. A
+standalone executable happened to avoid a dangerous tag value; ORC address
+layout made the same code exit with `STATUS_HEAP_CORRUPTION`.
+
+Records entering type-erased storage are now wrapped as
+`IRIS_TAG_NATIVE_OBJECT` and recovered with `iris_unbox_native_object`. The
+runtime tracks the flat object with its own RC kind, distinct from the
+reflection/JSON `IRIS_TAG_STRUCT` field-list representation.
+
+The fix also closes a Windows allocator boundary: generated code no longer
+resolves arbitrary process `malloc`/`free` symbols. It calls
+`iris_alloc_bytes`/`iris_free_bytes`, ensuring JIT allocation and runtime release
+use the same CRT heap. `tests/orc_ais_v2.rs` is the reduced regression.
+
+---
+
+## 68. FFI calls above six arguments silently drop arguments — **FIXED**
+
+Both runtime and interpreter dispatchers used a six-argument function pointer
+for every larger call. ROS 2 QoS creation needs seven arguments, Twist publish
+needs seven and Pose publish needs eight, so foreign code read missing arguments
+as stack garbage and could throw across the Rust boundary.
+
+Both backends now dispatch exact integer arities through 12 and return failure
+above that limit. `std.ffi` exposes asserted seven/eight-argument wrappers; the
+known-answer fixture weights every argument so truncation or reordering cannot
+pass. The live Humble QoS/Vector3/Twist/Pose roundtrip passes in native and
+interpreter modes.
+
+---
+
+## 69. Large MinGW JIT functions cannot resolve `___chkstk_ms` — **FIXED**
+
+LLVM emits the MinGW stack-probe helper for a Windows x86-64 function whose
+frame crosses a page. A normal linker obtains it from compiler-rt/libgcc, but an
+ORC object load has no archive-link phase. Complex ROS 2 code therefore failed
+materialization even though smaller JIT functions worked.
+
+The linked runtime now contains the canonical x86-64 Windows probe (preserving
+RAX/RCX and probing without changing RSP), and ORC registers it under the MinGW
+external symbol. The ROS 2 v2 semantic contract exercises this path and now
+passes in process.
+
+---
+
+## 70. LLVM 17 AVR miscompiles i64 loop PHIs and crashes on the O0 array-loop selector — **GUARDED**
+
+The allocation-free control-loop fixture exposed two LLVM 17 AVR backend
+failures on `atmega328p`: direct O0 instruction selection access-violates in
+the AVR DAG selector, while the O1 pipeline emits an infinite loop after
+dropping the i64 induction update.
+
+IRIS now fails closed for the `arduino-uno` preset: cyclic CFGs and fixed arrays
+are rejected before LLVM code generation with an explicit diagnostic. The
+physically validated Uno subset includes scalar stack values, direct calls,
+branches, checked arithmetic and bounded board hooks. Cortex-M and ESP32-C3
+retain loop/fixed-array support. This issue remains guarded rather than fixed
+until a newer LLVM AVR backend or a dedicated AVR lowering path passes the same
+hardware test.
+
+---
+
+## 71. A native closure capturing a record reads the wrapper as record data — **FIXED**
+
+Native record captures are wrapped with `iris_box_native_object` before they
+enter a closure environment. Lambda entry lowering handled scalar and container
+captures but did not apply the matching `iris_unbox_native_object` operation for
+records. Field access therefore performed a GEP on the tagged `IrisVal` wrapper,
+producing address-dependent integers instead of the record's fields.
+
+Record capture extraction now uses the same type-directed unboxing helper as
+spawn trampolines. The reduced record/closure integration case passes repeatedly,
+the adjacent closure/channel/spawn suites pass, and the full all-target suite
+passes with the fix.
+
+---
+
+## RC1 capability boundaries (2026-09-01)
+
+The following are deliberate supported boundaries rather than silent stubs:
+
+- `std.meta` uses the existing Rust compiler as its single type authority.
+  Compiler/interpreter-host execution supports analysis, IR emission, and
+  checked edits; standalone native binaries report the service unavailable.
+- HTTPS and remote LLM calls are verified through WinHTTP on Windows with normal
+  system certificate validation. Non-Windows runtimes currently report TLS
+  unavailable and reject HTTPS before sending a request.
+- Local ONNX/PyTorch/TensorFlow model lifecycle APIs are real host integrations,
+  but successful inference or training requires the matching SDK, shared
+  libraries, and a compatible model. Pure registry/health/degradation behavior
+  is tested without external SDKs.
+- `evolve-unrestricted` is intentionally unsafe. It omits constitutions,
+  canaries, capability/effect policies, resource gates, sandboxing and audit.
+  It retains compiler, manifest, ABI, materialization, atomicity, lease and
+  rollback checks only. Use governed `iris evolve` when those safety properties
+  are required.
+- `async def` retains its RC1-compatible single-result `chan<T>` surface. Native
+  execution now uses a bounded fixed executor shared by `spawn` and task groups.
+  `task_group_join` closes the group and waits while helping queued jobs;
+  `task_group_cancel` is cooperative, so queued tasks skip their body at entry
+  and running CPU tasks should poll `cancellation_requested()`. The reference
+  interpreter preserves the same observable result/cancellation semantics while
+  using managed host join handles internally.

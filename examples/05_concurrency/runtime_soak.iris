@@ -1,0 +1,52 @@
+bring std.time
+
+def env_number(key : str, fallback : i64) -> i64 {
+    val parsed = parse_i64(env_get(key));
+    return if is_some(parsed) {
+        unwrap(parsed)
+    } else {
+        fallback
+    }
+}
+
+def batch(width : i64) -> i64 {
+    val values : list<i64> = list();
+    for index in 0 .. width {
+        list_push(values, index);
+    };
+
+    var sum = 0;
+    for index in 0 .. list_len(values) {
+        sum = sum + list_get(values, index);
+
+    };
+
+    assert(sum == width * (width - 1) / 2);
+    return sum
+}
+def main() -> i64 {
+    val duration = env_number("IRIS_SOAK_DURATION_MS", 1000);
+    val width = env_number("IRIS_SOAK_WIDTH", 64);
+    val report = env_number("IRIS_SOAK_REPORT_MS", 500);
+    assert(duration>0 && duration <= 7200000);
+    assert(width>0 && width <= 100000);
+    assert(report>0);
+    val start = now_ms();
+    var next_report = report;
+    var iterations = 0;
+    var checksum = 0;
+    while elapsed_ms(start)<duration {
+        checksum = batch(width);
+        iterations = iterations + 1;
+        val elapsed = elapsed_ms(start);
+        if elapsed >= next_report {
+            println(f"soak_ms={elapsed}, iterations={iterations}");
+            next_report = next_report + report;
+        };
+    };
+
+    assert(iterations>0);
+    assert(checksum == width * (width - 1) / 2);
+    println("runtime soak: ok");
+    return 0
+}

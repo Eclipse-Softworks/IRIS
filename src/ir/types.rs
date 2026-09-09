@@ -34,7 +34,16 @@ impl std::fmt::Display for DType {
 impl DType {
     /// Returns true if this is an integer type (signed or unsigned).
     pub fn is_integer(&self) -> bool {
-        matches!(self, DType::I8 | DType::U8 | DType::I32 | DType::U32 | DType::I64 | DType::U64 | DType::USize)
+        matches!(
+            self,
+            DType::I8
+                | DType::U8
+                | DType::I32
+                | DType::U32
+                | DType::I64
+                | DType::U64
+                | DType::USize
+        )
     }
 
     /// Returns true if this is a signed integer type.

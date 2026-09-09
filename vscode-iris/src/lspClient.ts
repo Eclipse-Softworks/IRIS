@@ -80,6 +80,9 @@ export async function startLspClient(
         initializationOptions: {
             inlayHintsEnabled: vscode.workspace.getConfiguration('iris').get<boolean>('inlayHints.enabled', true),
             inlayHintsTypeHints: vscode.workspace.getConfiguration('iris').get<boolean>('inlayHints.typeHints', true),
+            formatIndentSize: vscode.workspace.getConfiguration('iris').get<number>('format.indentSize', 4),
+            formatMaxLineWidth: vscode.workspace.getConfiguration('iris').get<number>('format.maxLineWidth', 100),
+            maxNumberOfProblems: vscode.workspace.getConfiguration('iris').get<number>('maxNumberOfProblems', 100),
         },
     };
 

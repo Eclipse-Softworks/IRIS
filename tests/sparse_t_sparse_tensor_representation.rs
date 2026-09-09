@@ -81,7 +81,12 @@ def f() -> i64 {
 }
 "#;
     let out = compile(src, "test", EmitKind::Eval).expect("should eval");
-    assert_eq!(out.trim(), "3", "three non-zero elements, got: {}", out.trim());
+    assert_eq!(
+        out.trim(),
+        "3",
+        "three non-zero elements, got: {}",
+        out.trim()
+    );
 }
 
 // `densify` reconstructs the dense collection, so its length is the dense
@@ -97,7 +102,12 @@ def f() -> i64 {
 }
 "#;
     let out = compile(src, "test", EmitKind::Eval).expect("should eval");
-    assert_eq!(out.trim(), "5", "densify should rebuild all 5 slots, got: {}", out.trim());
+    assert_eq!(
+        out.trim(),
+        "5",
+        "densify should rebuild all 5 slots, got: {}",
+        out.trim()
+    );
 }
 
 // ---------------------------------------------------------------------------

@@ -1,0 +1,30 @@
+bring "policy.iris" bring std.llm /// Required: IRIS_CHAT_URL, IRIS_MODEL. Optional credential: IRIS_LLM_KEY.
+def main() -> i64 {
+    val url = env_get("IRIS_CHAT_URL");
+    val model_name = env_get("IRIS_MODEL");
+    assert(len(url)>0);
+    assert(len(model_name)>0);
+    val key_env = if env_get("IRIS_LLM_KEY") == "" {
+        ""
+    } else {
+        "IRIS_LLM_KEY"
+    }
+    ;
+    val client = llm_client(url, "", model_name, key_env, 5000);
+    val messages : list<LlmMessage> = list(llm_message("system", "Reply with only status or help."),
+    llm_message("user", "Show service health."));
+    val response = llm_chat(client, messages, 0.0, 32);
+    if is_err(response) {
+        println(unwrap_err(response));
+        return 1
+    }
+    ;
+    val action = allowed_action(unwrap(response));
+    if is_err(action) {
+        println(unwrap_err(action));
+        return 2
+    }
+    ;
+    println("action=" + unwrap(action));
+    return 0
+}

@@ -1,5 +1,13 @@
 # IRIS — Master Readiness Document
 
+> **Historical audit snapshot.** The findings below describe the working tree
+> inspected on 2026-08-05. They are retained for traceability, not as a current
+> status page. The runtime object is now checked in and hash-validated; supported
+> native object emission uses LLVM-C; validated Windows MinGW builds link
+> directly with `ld.lld`; and `cargo check --all-targets` is an active gate.
+> Current limitations live in [known-issues.md](known-issues.md), while the
+> supported surface is in [current-language-lock.md](current-language-lock.md).
+
 **Date**: 2026-08-05
 **Goal**: everything to **fix**, **rebuild**, **add**, and **remove** so IRIS can
 be tested on machines other than the development box.

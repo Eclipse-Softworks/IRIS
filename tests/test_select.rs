@@ -52,10 +52,15 @@ def main() -> i64 {
     if r == 1 { 0 } else { 1 }
 }
 "#;
-    let tokens = iris::parser::lexer::Lexer::new(src).tokenize().expect("lex");
-    let mut ast = iris::parser::parse::Parser::new(&tokens).parse_module().expect("parse");
-    let module = iris::compile_ast_to_module(&mut ast, "select_native", None).expect("compile to module");
-    
+    let tokens = iris::parser::lexer::Lexer::new(src)
+        .tokenize()
+        .expect("lex");
+    let mut ast = iris::parser::parse::Parser::new(&tokens)
+        .parse_module()
+        .expect("parse");
+    let module =
+        iris::compile_ast_to_module(&mut ast, "select_native", None).expect("compile to module");
+
     let out = std::env::temp_dir().join(format!("iris_test_select_{}", std::process::id()));
     let out_path = if std::env::consts::EXE_SUFFIX.is_empty() {
         out
@@ -69,7 +74,10 @@ def main() -> i64 {
                 .status()
                 .expect("run binary");
             let _ = std::fs::remove_file(&path);
-            assert!(status.success(), "select binary should exit with code 0 (meaning select returned 1)");
+            assert!(
+                status.success(),
+                "select binary should exit with code 0 (meaning select returned 1)"
+            );
         }
         Err(e) => {
             let msg = format!("{}", e);

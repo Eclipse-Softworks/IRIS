@@ -435,8 +435,16 @@ fn emit_instr(out: &mut String, instr: &IrInstr) -> Result<(), CodegenError> {
             }
         }
 
-        IrInstr::ChanNew { result, elem_ty, capacity } => {
-            write!(out, "{} = chan_new(cap: {}) : chan<{}>", result, capacity, elem_ty)?;
+        IrInstr::ChanNew {
+            result,
+            elem_ty,
+            capacity,
+        } => {
+            write!(
+                out,
+                "{} = chan_new(cap: {}) : chan<{}>",
+                result, capacity, elem_ty
+            )?;
         }
 
         IrInstr::ChanSend { chan, value } => {
@@ -459,9 +467,19 @@ fn emit_instr(out: &mut String, instr: &IrInstr) -> Result<(), CodegenError> {
         IrInstr::TaskGroupNew { result } => {
             write!(out, "{} = task_group_new", result)?;
         }
-        IrInstr::TaskGroupSpawn { group, body_fn, args } => {
+        IrInstr::TaskGroupSpawn {
+            group,
+            body_fn,
+            args,
+        } => {
             let arg_strs: Vec<String> = args.iter().map(|v| format!("{}", v)).collect();
-            write!(out, "task_group_spawn {} @{}({})", group, body_fn, arg_strs.join(", "))?;
+            write!(
+                out,
+                "task_group_spawn {} @{}({})",
+                group,
+                body_fn,
+                arg_strs.join(", ")
+            )?;
         }
         IrInstr::TaskGroupJoin { group } => {
             write!(out, "task_group_join {}", group)?;
@@ -1026,7 +1044,7 @@ fn emit_instr(out: &mut String, instr: &IrInstr) -> Result<(), CodegenError> {
         IrInstr::SleepMs { result, ms } => {
             write!(out, "{} = sleep_ms {}", result, ms)?;
         }
-            IrInstr::BuiltinCall {
+        IrInstr::BuiltinCall {
             result,
             name,
             args,
@@ -1045,7 +1063,9 @@ fn emit_instr(out: &mut String, instr: &IrInstr) -> Result<(), CodegenError> {
         IrInstr::PushHandler { arms } => {
             write!(out, "push_handler arms=[")?;
             for (i, arm) in arms.iter().enumerate() {
-                if i > 0 { write!(out, ", ")?; }
+                if i > 0 {
+                    write!(out, ", ")?;
+                }
                 write!(out, "{} -> {}", arm.effect_name, arm.func_name)?;
             }
             writeln!(out, "]")?;
@@ -1053,8 +1073,16 @@ fn emit_instr(out: &mut String, instr: &IrInstr) -> Result<(), CodegenError> {
         IrInstr::PopHandler => {
             writeln!(out, "pop_handler")?;
         }
-        IrInstr::ResumeCont { cont, value, result } => {
-            writeln!(out, "resume_cont cont=v{} value=v{} result=v{}", cont.0, value.0, result.0)?;
+        IrInstr::ResumeCont {
+            cont,
+            value,
+            result,
+        } => {
+            writeln!(
+                out,
+                "resume_cont cont=v{} value=v{} result=v{}",
+                cont.0, value.0, result.0
+            )?;
         }
     }
     Ok(())

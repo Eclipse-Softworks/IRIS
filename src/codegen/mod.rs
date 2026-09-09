@@ -1,10 +1,13 @@
 pub mod build;
 pub mod cuda;
+pub mod embedded;
 pub mod graph_printer;
+pub mod hot_swap;
 pub mod ir_serial;
 pub mod jit;
 pub mod llvm_c_api;
 pub mod llvm_ir;
+pub mod llvm_orc;
 // `llvm_native` (inkwell in-process backend) was removed in 1.0.0-rc1.
 //
 // It was gated behind a `native-llvm` feature pinned to LLVM 14, which no CI job

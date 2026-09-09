@@ -1,0 +1,10 @@
+bring std.net
+
+def main() -> i64 effect net, alloc {
+    val invalid = TcpStream { handle: 0 - 1 }
+    val read = tcp_read_bounded(invalid, 0)
+    assert(is_err(read));
+    val connect = tcp_connect_checked("127.0.0.1", 1, 10, 10)
+    assert(is_err(connect));
+    return 0
+}

@@ -19,6 +19,21 @@ header-includes:
 
 ## A Complete Guide
 
+> **Release-candidate note (2026-08-31):** This long-form book includes
+> historical packaging examples. For current toolchain requirements and exact
+> maturity boundaries, defer to `current-language-lock.md`, `REQUIREMENTS.md`,
+> `known-issues.md`, and `governed-evolution.md`. In particular, `iris run` is a
+> native build/run command; `--emit jit` selects ORC; and the validated Windows
+> MinGW path uses LLVM-C object emission plus direct `ld.lld` linking.
+
+> **Learning collection refresh (2026-09-09):** Start with the rewritten
+> [examples](../examples/README.md) and [projects](../projects/README.md) for
+> current, executable RC1 syntax. Public functions now demonstrate explicit
+> `return`, with `return 0` at successful program exits; expression tails
+> remain valid inside blocks and closures. Historical project paths in this
+> book and engineering logs refer to the earlier collection retained in Git
+> history. Use [getting started](getting-started.md) for installation commands.
+
 \newpage
 
 ## Copyright & License
@@ -403,9 +418,9 @@ The version output shows the full compiler provenance: version, git commit hash,
 
 #### Native compilation dependencies
 
-For native binary compilation (`iris build`), IRIS requires LLVM/clang 17+ and the `lld` linker. The official release archives **bundle these tools automatically** — no additional installation is needed.
+For native binary compilation (`iris build`), IRIS requires a compatible LLVM-C shared library, the `lld` linker, and a target sysroot. Verify the contents of a specific release archive rather than assuming those components are bundled.
 
-If you installed IRIS from source or want to use your own LLVM, ensure that `clang` and `lld` are on your `PATH`:
+If you installed IRIS from source, install LLVM and `lld`. Clang is useful as a compatibility fallback but is not the normal compiler driver on the validated Windows MinGW path:
 
 | Platform | How to install LLVM |
 |----------|---------------------|
@@ -414,7 +429,7 @@ If you installed IRIS from source or want to use your own LLVM, ensure that `cla
 | macOS | `brew install llvm` (Apple's Xcode clang also works) |
 | Windows | Download from <https://releases.llvm.org/> to `C:\Program Files\LLVM` |
 
-On Windows, the linker also needs MinGW sysroot headers/libraries. Install MSYS2 and ensure the ucrt64 files are present at `C:\msys64\ucrt64`. No GCC installation is needed — IRIS uses clang for all compilation and lld for linking.
+On Windows, the linker also needs MinGW sysroot headers/libraries. Install MSYS2 and ensure the ucrt64 files are present at `C:\msys64\ucrt64`. IRIS emits objects through LLVM-C and invokes `ld.lld` directly for the validated MinGW target.
 
 ### 1.3 Hello, World
 
@@ -890,6 +905,20 @@ def main() -> i64 {
     0
 }
 ```
+
+Function types can carry an effect row. An empty row is a pure callback
+contract; a concrete row permits those effects, and an uppercase row variable
+is bound from the supplied callback:
+
+```iris
+def apply_effectful(f: |i64| -> i64 effect E, x: i64) -> i64 effect E {
+    f(x)
+}
+```
+
+With `--strict-effects`, passing an I/O closure to a plain
+`|i64| -> i64` parameter is rejected. Calling `apply_effectful` propagates the
+closure's actual effects to its caller through `E`.
 
 ### Try It Yourself
 
@@ -3259,8 +3288,8 @@ When you run `iris build`, the following steps happen:
    - `DcePass` — dead code elimination
    - `CsePass` — common subexpression elimination
 4. **LLVM IR**: The IR is translated to LLVM IR text.
-5. **Compile**: `clang` compiles the LLVM IR to an object file.
-6. **Link**: `clang` (with `lld`) links the object file with the IRIS C runtime to produce the final executable.
+5. **Compile**: the dynamically loaded LLVM-C target API compiles LLVM IR to an object.
+6. **Link**: the target linker combines the object with the hash-validated IRIS runtime object; validated Windows MinGW builds invoke `ld.lld` directly.
 
 You can inspect the IR at each stage:
 
@@ -4878,38 +4907,46 @@ def udp_demo() -> i64 {
 
 ## Chapter 21: Security & Sandboxing
 
-IRIS provides enterprise-grade runtime sandboxing capabilities to execute untrusted code safely.
+IRIS provides capability checks for interpreted/runtime operations and a
+fail-closed policy for evolved candidates. Windows also provides a separate
+native-worker boundary; the `--sandbox` flag itself remains an IRIS policy flag,
+not an alias for that process launcher.
 
 ### 21.1 The Sandbox Flag
 
-By running the compiler with the `--sandbox` flag, the IRIS C runtime restricts access to operating system capabilities:
+The global `--sandbox` flag enables default-deny checks for IRIS operations:
 
 ```bash
-iris run --sandbox untrusted_script.iris
+iris --sandbox run reviewed_script.iris
 ```
 
 ### 21.2 Restricted Operations
 
-When running in sandbox mode, the following operations are strictly blocked and cause an immediate runtime panic:
+When the operation passes through the IRIS policy layer, the following classes
+are denied:
 
-- **Filesystem**: File read/write operations outside designated whitelist directories are rejected.
-- **Networking**: Unauthorized outbound TCP/UDP connections or inbound listening sockets are denied.
+- **Filesystem**: File read/write operations are rejected.
+- **Networking**: Outbound connections and inbound listening sockets are denied.
 - **Processes**: System command execution (`exec_cmd`, `pid`) is blocked.
 - **FFI**: Foreign Function Interface modules (`std.ffi`, `ffi_open`) are disabled to prevent bypassing sandbox rules.
 
-### 21.3 Customizing Whitelists
+### 21.3 Native Boundary
 
-You can grant selective access to resources using sandbox flags:
-
-```bash
-iris run --sandbox --allow-read ./data/ --allow-net api.example.com script.iris
-```
+Native worker framing is connected to a Windows LPAC + Job Object launcher.
+The executable is copied into an ephemeral AppContainer profile with zero
+capabilities and broad application-package access disabled. It is created
+suspended, assigned CPU/memory/process limits and bounded stdout/stderr pipes,
+then resumed. Wall-time and output violations terminate the complete Job.
+Unsupported platforms fail closed. The public CLI does not expose selective
+`--allow-read` or `--allow-net` grants, and `iris evolve` continues to validate
+its scalar candidates with the bounded interpreter.
 
 ### Try It Yourself
 
 1. Write a script `test_sec.iris` that attempts to read `/etc/passwd` or `C:\\Windows\\system.ini`.
 2. Run it without flags: `iris run test_sec.iris`.
-3. Run it with the sandbox flag: `iris run --sandbox test_sec.iris` and observe the sandbox denial panic.
+3. Run it with the sandbox flag: `iris --sandbox run test_sec.iris` and observe
+   the policy denial for operations mediated by IRIS.
 
 
 
@@ -5177,7 +5214,8 @@ Specify intermediate compiler outputs:
 - **`graph`**: Generates AST or IR visual dependency dot files.
 
 ### Global Flags
-- **`--sandbox`**: Strict runtime sandboxing.
+- **`--sandbox`**: Enable default-deny IRIS capability checks; not a complete OS
+  sandbox for arbitrary native code.
 - **`--target <triple>`**: Cross-compilation target.
 - **`--no-cache`**: Disables AST and LLVM caching.
 - **`--dump-ir-after <pass>`**: Dumps compiler state after specific optimizer pass.
@@ -5204,5 +5242,5 @@ IRIS has a detailed diagnostic code system cross-referenced directly with the `i
 
 **Version**: Corresponds to IRIS compiler version 1.0.0-rc1
 **Platform**: Tested on Windows 10/11, Linux (x86_64), macOS (aarch64) with LLVM 17+ and MinGW ucrt64
-**License**: GNU General Public License v2.0 or later — see [LICENSE](LICENSE)
+**License**: GNU General Public License v2.0 or later — see [LICENSE](../LICENSE)
 **Source**: [github.com/moon9t/iris](https://github.com/moon9t/iris)

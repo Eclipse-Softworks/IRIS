@@ -1,6 +1,32 @@
 # IRIS Agent Session Log
 
+## 2026-08-30 Hardening Continuation
+
+- Reverse-mode interpreter tape graphs are self-contained across calls and
+  loops while remaining compatible with hand-built IR that queries primal
+  `ValueId`s. Synthetic leaf aliases are invalidated on dynamic SSA result
+  redefinition, preventing cross-iteration graph corruption. All 17 derivative
+  rule tests and focused call/loop graph tests pass.
+- Lambda lifting now captures only outer identifiers referenced by the body.
+  This removes the native `unbox_i64 type mismatch (tag=6)` crash caused by an
+  unused list receiver capture while preserving real closure captures.
+- The complete IRIS corpus gate passed 8/8 before these localized fixes; the
+  remaining integration-target sweep had one autodiff regression, now fixed.
+
 ## Completed
+
+### Known Compiler Issue Fixes & Hardening (Issues #7, #9, #20b, #21, #25, #28, #38, #43, #45, #60)
+- **Issue 7 (Brought record field lowering & two-pass struct registration)**: Converted `lower_module` struct registration to two passes (name registration first, field lowering second) and gated struct literal type inference on `generic_struct_names`.
+- **Issue 9 (`pub bring` type re-exporting)**: Added `struct_defs`, `enum_defs`, `type_aliases` to bring search candidates with `CURRENT_PRIVATE_ITEMS` visibility enforcement.
+- **Issue 20b (`span_table` optimization invalidation)**: Extended `SpanTable` in `src/ir/function.rs` with `value_spans: HashMap<ValueId, u32>` and added `IrFunction::get_instr_span(block_id, instr_idx)` fallback to instruction result `ValueId` for stable span locations across optimization passes.
+- **Issue 21 (Nested generic nominal unification)**: Added nominal equality arms in `structural_unify()` (`src/pass/type_infer_hm.rs`) and return-type checks (`src/pass/type_infer.rs`) so `%Box__Box__i64` and similar nested generic instances unify properly without false type mismatches.
+- **Issue 25 (Interpreter deep recursion frame footprint)**: Removed redundant per-frame `String` allocations (e.g. `trace_source`) and reduced stack frame size during interpreter function calls.
+- **Issue 28 (`str`/`i64` comparison diagnostics)**: Verified accurate caret and line/column diagnostics for type mismatches without misleading type substitutions.
+- **Issue 38 (Default trait impl effect clauses)**: Preserved `trait_method.effects.clone()` in `inject_default_impl_methods()`.
+- **Issue 43 (Native HTTP request method verbs)**: Implemented complete `iris_http_request` in `src/runtime/iris_runtime.c` supporting `PUT`, `PATCH`, `DELETE`, `POST`, `GET` verbs and body payloads.
+- **Issue 45 (Build temp directory isolation & link error surfacing)**: Added timestamp and PID salting to build directories in `src/codegen/build.rs` to prevent Windows file locking collisions (`os error 1224`), and ensured link errors and non-zero exit codes propagate cleanly with detailed stderr messages.
+- **Issue 60 (`l.pop()` return type)**: Corrected `AstExpr::MethodCall` for `"pop"` to return `elem_ty` directly.
+
 
 ### Ownership / Borrow Checking (Tier 1) — Phase 93
 - **Lexer**: Added `Token::Amp` (single `&`) with disambiguation from `Token::AmpAmp` (`&&`).

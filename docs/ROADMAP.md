@@ -1,6 +1,8 @@
 # IRIS Roadmap
 
-> **Current version: 1.0.0-rc1** — active release. Pre-1.0, evolving rapidly.
+> **Current version: 1.0.0-rc1** — release-candidate working tree. The existing
+> `v1.0.0-rc1` tag predates the hardening work listed below and will not be
+> force-moved; a later candidate must use a new tag.
 
 This document outlines the planned milestones for IRIS from the current release
 line through the stable 1.0 release and beyond.
@@ -9,16 +11,33 @@ line through the stable 1.0 release and beyond.
 
 ## Current State (v1.0.0-rc1)
 
-- Core language, interpreter, LLVM native codegen — functional
-- Closures (basic, captures, HOF) — working in native backend
-- LSP, DAP debugger, REPL — functional
-- 34 stdlib modules — registered and implemented (including std.ais, std.rl, std.ml, std.nn)
-- **1,400+ tests**, fuzz corpus expanded
-- VS Code extension v1.0.0-rc1 built (VSIX); published to marketplace
-- Installer scripts for Windows, Linux, macOS
-- Package manager: `iris pkg init/add/install/update/list/check/build/run` (local + git deps, lockfile)
-- CHANGELOG.md, ROADMAP.md, SPEC.md, docs/ — all present and current
-- Tensor/ONNX/CUDA/SIMD backends functional; security audit and profiler added
+- Core parsing, typing, ownership/borrowing, effect analysis, SSA lowering,
+  interpreter, LLVM native codegen, and ORC JIT are functional on the validated
+  host configuration.
+- Direct Windows MinGW `ld.lld` linking and the hash-validated checked-in runtime
+  object are implemented; other targets still require their documented linker
+  and sysroot validation.
+- The public examples and projects have been rebuilt as a progressive RC1
+  learning catalog. `examples/catalog.json` classifies every IRIS file;
+  `tests/examples_showcase.rs` checks native execution, interpreter execution,
+  and graph export according to that contract.
+- Assertion-backed focused suites cover transactions, ORC, verified hot swap,
+  differentiable control flow, AIS/ROS 2, embedded allocation proofs, and the
+  seven-gate evolution coordinator.
+- `std.ais`, `std.rl`, `std.ml`, `std.nn`, `std.tensor`, and ROS 2 topic/QoS
+  surfaces exist. External SDK bridges and physical targets have narrower
+  evidence documented in `known-issues.md`.
+- LSP, trace-based DAP, REPL, lossless deterministic formatter, package manager,
+  installer scripts, and VS Code extension sources are present. The extension
+  includes Test Explorer run/debug profiles, rich function/trait/effect hovers,
+  semantic highlighting, and dead/unreachable/unsafe source diagnostics;
+  publication status must still be verified against the actual release channel.
+- Compiler-hosted typed metaprogramming (`iris meta`, `std.meta`), typed bounded
+  TCP/HTTP, Windows system TLS, provider-neutral `std.llm`, and production
+  AIS/model lifecycle records are implemented and assertion-backed.
+- A separate explicitly acknowledged unrestricted whole-program activation API
+  exists for autonomous hosts. It intentionally carries no behavioral safety
+  claim; governed `iris evolve` remains the recommended public path.
 
 Note: Some items below are marked as completed on `main` but are not part of
 the latest tagged release yet.
@@ -64,7 +83,7 @@ the latest tagged release yet.
 
 **Goal:** Make the ML headline features real, not stubs.
 
-Release status: Released (May 2026)
+Release status: historical RC milestone; current hardening is ahead of the existing tag.
 
 | # | Task | Priority | Status |
 | --- | ------ | ---------- | -------- |
@@ -92,7 +111,7 @@ Release status: Released (May 2026)
 
 **Goal:** Production-grade performance and trustworthy FFI.
 
-Release status: Released (May 2026)
+Release status: historical RC milestone; current hardening is ahead of the existing tag.
 
 | # | Task | Priority | Status |
 | --- | ------ | ---------- | -------- |
@@ -124,16 +143,40 @@ Release status: Released (May 2026)
 
 ---
 
-## Post-1.0 — Future Directions
+## Post-1.0 — Future Directions & Self-Evolving Software (2026+)
 
-- **Language server v2** — semantic tokens, call hierarchy, type hierarchy
-- **Debugger enhancements** — conditional breakpoints, hot-reload
-- **Self-update CLI subsystem** — Built-in `iris upgrade` / `iris self-update` to fetch lightweight, fast compiler & stdlib binary delta updates on-demand
-- **IDE plugins** — IntelliJ, Neovim, Emacs
-- **Self-hosting** — IRIS compiler written in IRIS
-- **WebAssembly backend** — `iris build --target wasm32`
-- **Distributed compute** — multi-node tensor parallelism
+For the complete architectural design and multi-phase implementation roadmap on in-process verified reflection, speculative effect isolation, continuous-discrete neuro-symbolic algorithms, and homeostatic active inference, see:
+See the [Self-Evolving Software & AI/ML Architecture Roadmap](self-evolving-software-and-ai-roadmap.md).
+
+- **In-Process Reflection & Safe JIT** (`std.reflect`) — ✅ LLVM-C object emission, ORC execution, ABI validation, atomic whole-program gateway leases, eight-generation history, exact rollback and content-addressed artifacts
+- **Speculative Effect Isolation** (`std.speculation`) — ✅ nested transactional list/map/atomic rollback and staged filesystem commit/rollback across interpreter and native/JIT backends
+- **Differentiable Control Flow & Tensors** (`std.tensor`, `std.nn`) — ✅ end-to-end reverse-mode autodiff across closures, branches, loops, traits and neural-network helpers
+- **Autonomous Intelligent Systems v2** (`std.ais`, `std.ros2`) — ✅ viability prediction, homeostatic pre-emption, expected-free-energy policy selection, QoS endpoints, typed receive, deterministic executor, lifecycle state and tf2-compatible local transforms; services/actions and wire-level tf2 remain future work
+- **Embedded Microcontroller Targets** — ✅ allocation-free proof gate and freestanding object bundles for Cortex-M4F/M33, ESP32-C3 and Arduino Uno; ATmega328P/CH340 hardware execution verified on the BDD Ultimate Starter Kit V2 with an exact content fingerprint and zero allocation/fault counters. LLVM 17 AVR loops/fixed arrays are rejected pending an upstream-safe backend path.
+- **Governed Evolution Coordinator** — ✅ scalar `iris evolve` gates plus mandatory persisted audit-head verification; ✅ v2 JSON/command/scalar manifest and state contracts as library APIs; generalized CLI canary metrics remain open
+- **Native Candidate Sandbox** — ✅ Windows LPAC + Job Object launch is implemented and token-attested, with suspended startup, zero capabilities, bounded output, memory/CPU/process limits, and fail-closed unsupported hosts; scalar `iris evolve` remains interpreter-validated
+- **Self-Hosting Compiler** — IRIS compiler and toolchain written natively in IRIS
+- **WebAssembly & Distributed Compute** — `iris build --target wasm32` and multi-node tensor parallelism
 
 ---
 
-*Last updated: 2026-05-29*
+## RC1 capability additions completed after the original roadmap
+
+- **Unrestricted whole-program evolution:** explicit non-cloneable authority
+  token, compiler/manifest/ABI validation, ORC materialization, atomic
+  multi-gateway installation, leases and rollback. Policy, audit, sandbox and
+  resource gates are intentionally absent.
+- **Typed metaprogramming (`std.meta`, `iris meta`):** compiler-hosted
+  typed/effect/ABI/CFG inspection, IR emission and compiler-verified UTF-8 source
+  edits without a self-hosted compiler. Embedding the compiler service in
+  standalone native applications remains future work.
+- **Networking and LLMs (`std.net`, `std.http`, `std.llm`):** bounded typed TCP,
+  exact writes, timeout/shutdown, status-bearing HTTP, custom headers, JSON
+  queries, remote chat/tools/embeddings and local model wrappers. Windows system
+  TLS is verified; other system-TLS adapters remain future work.
+- **Production AIS/ML lifecycle (`std.ais`, `std.ml`):** versioned model
+  registry/session APIs, batch inference/train/close, health telemetry and
+  degraded/emergency agent behavior. Each external SDK/model combination still
+  requires deployment validation.
+
+*Last updated: 2026-09-09*

@@ -11,18 +11,61 @@
 //! The test that matters is therefore a chain long enough to span more than one
 //! chunk — if growth ever moves a node, the gradient comes back wrong.
 
-use iris::{compile, EmitKind};
+use iris::interp::{eval_function_in_module, IrValue};
+use iris::{compile, compile_to_module, EmitKind};
+
+fn eval_interpreted_f64(source: &str, function: &str) -> f64 {
+    let module = compile_to_module(source, "interp_tape").expect("compile interpreter fixture");
+    let function = module
+        .function_by_name(function)
+        .expect("fixture function exists");
+    let values = eval_function_in_module(&module, function, &[]).expect("interpret fixture");
+    match values.as_slice() {
+        [IrValue::F64(value)] => *value,
+        other => panic!("expected one f64 result, got {other:?}"),
+    }
+}
+
+#[test]
+fn interpreted_tape_graph_survives_a_function_call() {
+    let source = r#"
+def square(x: f64) -> f64 { x * x }
+def main() -> f64 {
+    val x = tape(3.0);
+    val loss = square(x);
+    val _ = backward(loss);
+    grad(x)
+}
+"#;
+    assert_eq!(eval_interpreted_f64(source, "main"), 6.0);
+}
+
+#[test]
+fn interpreted_tape_graph_survives_loop_carried_values() {
+    let source = r#"
+def main() -> f64 {
+    val x = tape(2.0);
+    var loss = tape(0.0);
+    for i in 1..4 {
+        loss = loss + x * to_f64(i);
+    };
+    val _ = backward(loss);
+    grad(x)
+}
+"#;
+    assert_eq!(eval_interpreted_f64(source, "main"), 6.0);
+}
 
 /// Builds `v1 = x + x; v2 = v1 + x; ...` so that `v_n = (n + 1) * x` and
-/// `d/dx = n + 1`. Straight-line because a tape handle does not survive being
-/// passed through a function (#49).
+/// `d/dx = n + 1`. Kept straight-line so this test isolates chunk growth from
+/// the separate call/loop graph-preservation coverage below (#49).
 fn chain_program(n: usize) -> String {
     let mut s = String::from("def f() -> f64 {\n    val x = tape(2.0);\n    val v1 = x + x;\n");
     for k in 2..=n {
         s.push_str(&format!("    val v{} = v{} + x;\n", k, k - 1));
     }
     s.push_str(&format!("    val _ = backward(v{n});\n"));
-    s.push_str(&format!("    grad(x)\n}}\n"));
+    s.push_str("    grad(x)\n}\n");
     s
 }
 
@@ -379,7 +422,29 @@ def f() -> i64 {
 }
 "#;
     let result = compile(src, "test", EmitKind::Eval).unwrap();
-    assert_eq!(result.trim(), "99", "the helper's return escaped into its caller");
+    assert_eq!(
+        result.trim(),
+        "99",
+        "the helper's return escaped into its caller"
+    );
+}
+
+/// A return in the outermost final position is safe to treat as the helper's
+/// value: the inliner lowers its expression without emitting an IR Return in
+/// the caller.
+#[test]
+fn a_helper_with_only_a_terminal_return_remains_differentiable() {
+    let src = r#"
+def square(v: f64) -> f64 { return v * v; }
+def f() -> f64 {
+    val x = tape(3.0);
+    val y = square(x);
+    val _ = backward(y);
+    grad(x)
+}
+"#;
+    let result = compile(src, "test", EmitKind::Eval).unwrap();
+    assert_eq!(result.trim(), "6");
 }
 
 /// A recursive taped call must not expand forever at lowering time.

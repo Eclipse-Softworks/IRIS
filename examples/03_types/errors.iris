@@ -1,0 +1,28 @@
+def divide(a : i64, b : i64) -> result<i64, str> {
+    if b == 0 {
+        return err("division by zero")
+    };
+    return ok(a / b)
+}
+
+def half_then_increment(value : i64) -> result<i64, str> {
+    val half = divide(value, 2)?;
+    return ok(half + 1)
+}
+def main() -> i64 {
+    assert(unwrap(half_then_increment(10)) == 6);
+    val recovered = try {
+        divide(10, 0)?
+    } catch reason {
+        assert(reason == "division by zero");
+        - 1
+    };
+    val maybe : option<i64> = some(42);
+    val selected = when maybe {
+        some(value) => value, none => 0
+    };
+    assert(recovered == - 1);
+    assert(selected == 42);
+    println("errors: ok");
+    return 0
+}

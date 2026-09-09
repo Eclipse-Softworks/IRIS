@@ -134,7 +134,11 @@ fn find_tail_sites(func: &IrFunction) -> Vec<TailSite> {
 
 /// True when branching to `target` with `value` in argument slot `slot`
 /// immediately returns that value and nothing else.
-fn block_just_returns_param(func: &crate::ir::function::IrFunction, target: BlockId, slot: usize) -> bool {
+fn block_just_returns_param(
+    func: &crate::ir::function::IrFunction,
+    target: BlockId,
+    slot: usize,
+) -> bool {
     let Some(block) = func.block(target) else {
         return false;
     };

@@ -925,3 +925,307 @@ pub def population_evolve(pop: Population, elite: i64, mut_scale: f64) -> Popula
         best_fitness: pop.best_fitness, avg_fitness: pop.avg_fitness
     }
 }
+
+// ===== Autonomous Intelligent Systems v2 ==================================
+//
+// V2 makes self-preservation and active inference explicit, composable state
+// rather than leaving them as unrelated helper functions.  A viability bound
+// distinguishes a preferred operating interval from a critical envelope.
+
+pub record ViabilityBound {
+    name: str,
+    preferred_low: f64,
+    preferred_high: f64,
+    critical_low: f64,
+    critical_high: f64,
+    weight: f64,
+    corrective_action: i64
+}
+
+pub record ViabilityAssessment {
+    safe: bool,
+    critical: bool,
+    risk: f64,
+    urgency: f64,
+    dominant_variable: i64,
+    corrective_action: i64,
+    predicted_values: list<f64>
+}
+
+pub record ExpectedFreeEnergy {
+    policy: i64,
+    pragmatic_risk: f64,
+    ambiguity: f64,
+    epistemic_value: f64,
+    total: f64
+}
+
+pub record ActiveInferenceDecision {
+    policy: i64,
+    expected_free_energy: f64,
+    confidence: f64,
+    evaluations: list<ExpectedFreeEnergy>
+}
+
+pub record AutonomyV2Decision {
+    action: i64,
+    emergency: bool,
+    viable: bool,
+    viability_risk: f64,
+    expected_free_energy: f64,
+    confidence: f64
+}
+
+pub def viability_bound_new(
+    name: str,
+    preferred_low: f64,
+    preferred_high: f64,
+    critical_low: f64,
+    critical_high: f64,
+    weight: f64,
+    corrective_action: i64
+) -> ViabilityBound {
+    ViabilityBound {
+        name: name,
+        preferred_low: preferred_low,
+        preferred_high: preferred_high,
+        critical_low: critical_low,
+        critical_high: critical_high,
+        weight: if weight < 0.0 { 0.0 } else { weight },
+        corrective_action: corrective_action
+    }
+}
+
+// Predict a bounded-horizon state under the currently measured drift.  This is
+// deliberately model-light: callers with a learned world model can pass its
+// predicted derivative instead of a finite-difference drift.
+pub def viability_predict(values: list<f64>, drift: list<f64>, horizon: f64) -> list<f64> {
+    val predicted: list<f64> = list()
+    val n = if list_len(values) < list_len(drift) { list_len(values) } else { list_len(drift) }
+    for i in 0..n {
+        list_push(predicted, list_get(values, i) + list_get(drift, i) * horizon);
+    };
+    predicted
+}
+
+pub def viability_assess(bounds: list<ViabilityBound>, predicted: list<f64>) -> ViabilityAssessment {
+    val n = if list_len(bounds) < list_len(predicted) { list_len(bounds) } else { list_len(predicted) }
+    var total_risk = 0.0
+    var max_risk = 0.0
+    var dominant = 0 - 1
+    var action = 0 - 1
+    var is_safe = true
+    var is_critical = false
+
+    for i in 0..n {
+        val bound = list_get(bounds, i)
+        val value = list_get(predicted, i)
+        val below = if value < bound.preferred_low {
+            (bound.preferred_low - value) / (bound.preferred_low - bound.critical_low + 1.0e-12)
+        } else { 0.0 }
+        val above = if value > bound.preferred_high {
+            (value - bound.preferred_high) / (bound.critical_high - bound.preferred_high + 1.0e-12)
+        } else { 0.0 }
+        val local = (below + above) * bound.weight
+        total_risk = total_risk + local
+        if local > 0.0 { is_safe = false };
+        if value <= bound.critical_low || value >= bound.critical_high { is_critical = true };
+        if local > max_risk {
+            max_risk = local
+            dominant = i
+            action = bound.corrective_action
+        };
+    };
+
+    ViabilityAssessment {
+        safe: is_safe,
+        critical: is_critical,
+        risk: total_risk,
+        urgency: clamp(max_risk, 0.0, 1.0),
+        dominant_variable: dominant,
+        corrective_action: action,
+        predicted_values: predicted
+    }
+}
+
+pub def categorical_entropy(probabilities: list<f64>) -> f64 {
+    var entropy = 0.0
+    for i in 0..list_len(probabilities) {
+        val p = list_get(probabilities, i)
+        if p > 1.0e-12 { entropy = entropy - p * log(p) };
+    };
+    entropy
+}
+
+// Expected free energy G = pragmatic risk + ambiguity - epistemic value.
+// Preferences and predicted outcomes are categorical distributions.
+pub def expected_free_energy(
+    policy: i64,
+    predicted_outcomes: list<f64>,
+    preferences: list<f64>,
+    ambiguity: f64,
+    epistemic_value: f64
+) -> ExpectedFreeEnergy {
+    val n = if list_len(predicted_outcomes) < list_len(preferences) {
+        list_len(predicted_outcomes)
+    } else { list_len(preferences) }
+    var risk = 0.0
+    for i in 0..n {
+        val q = list_get(predicted_outcomes, i)
+        val preferred = list_get(preferences, i)
+        val d = q - preferred
+        risk = risk + d * d
+    };
+    ExpectedFreeEnergy {
+        policy: policy,
+        pragmatic_risk: risk,
+        ambiguity: if ambiguity < 0.0 { 0.0 } else { ambiguity },
+        epistemic_value: if epistemic_value < 0.0 { 0.0 } else { epistemic_value },
+        total: risk + ambiguity - epistemic_value
+    }
+}
+
+pub def active_inference_select(
+    policy_outcomes: list<list<f64>>,
+    preferences: list<f64>,
+    ambiguities: list<f64>,
+    epistemic_values: list<f64>
+) -> ActiveInferenceDecision {
+    val evaluations: list<ExpectedFreeEnergy> = list()
+    var best_policy = 0 - 1
+    var best_energy = 1.0e30
+    var second_energy = 1.0e30
+    for i in 0..list_len(policy_outcomes) {
+        val ambiguity = if i < list_len(ambiguities) { list_get(ambiguities, i) } else { 0.0 }
+        val epistemic = if i < list_len(epistemic_values) { list_get(epistemic_values, i) } else { 0.0 }
+        val evaluation = expected_free_energy(i, list_get(policy_outcomes, i), preferences, ambiguity, epistemic)
+        list_push(evaluations, evaluation);
+        val becomes_best = evaluation.total < best_energy
+        if becomes_best {
+            second_energy = best_energy
+            best_energy = evaluation.total
+            best_policy = i
+        };
+        if !becomes_best && evaluation.total < second_energy { second_energy = evaluation.total };
+    };
+    val margin = if second_energy >= 1.0e29 { 0.0 } else { second_energy - best_energy }
+    ActiveInferenceDecision {
+        policy: best_policy,
+        expected_free_energy: best_energy,
+        confidence: clamp(1.0 - exp(0.0 - margin), 0.0, 1.0),
+        evaluations: evaluations
+    }
+}
+
+// One embodied-autonomy decision.  Critical or predicted non-viable states
+// pre-empt goal-seeking policies; otherwise active inference chooses the policy
+// with minimum expected free energy.
+pub def autonomy_v2_step(
+    bounds: list<ViabilityBound>,
+    values: list<f64>,
+    drift: list<f64>,
+    horizon: f64,
+    policy_outcomes: list<list<f64>>,
+    preferences: list<f64>,
+    ambiguities: list<f64>,
+    epistemic_values: list<f64>,
+    emergency_action: i64
+) -> AutonomyV2Decision {
+    val predicted = viability_predict(values, drift, horizon)
+    val viability = viability_assess(bounds, predicted)
+    val inference = active_inference_select(policy_outcomes, preferences, ambiguities, epistemic_values)
+    val preserve = viability.critical || viability.risk >= 1.0
+    val corrective = if viability.corrective_action >= 0 { viability.corrective_action } else { emergency_action }
+    AutonomyV2Decision {
+        action: if preserve { corrective } else { inference.policy },
+        emergency: preserve,
+        viable: viability.safe,
+        viability_risk: viability.risk,
+        expected_free_energy: inference.expected_free_energy,
+        confidence: if preserve { viability.urgency } else { inference.confidence }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Production autonomy lifecycle
+// ---------------------------------------------------------------------------
+
+pub record AgentRuntime {
+    cycle: i64,
+    state: str,
+    last_action: i64,
+    consecutive_failures: i64,
+    max_failures: i64,
+    observations: list<f64>,
+    rewards: list<f64>,
+}
+
+pub record AgentStep {
+    runtime: AgentRuntime,
+    decision: AutonomyV2Decision,
+    degraded: bool,
+}
+
+pub def agent_runtime_new(max_failures: i64) -> AgentRuntime {
+    val observations: list<f64> = list()
+    val rewards: list<f64> = list()
+    return AgentRuntime {
+        cycle: 0,
+        state: "ready",
+        last_action: 0 - 1,
+        consecutive_failures: 0,
+        max_failures: if max_failures < 1 { 1 } else { max_failures },
+        observations: observations,
+        rewards: rewards,
+    }
+}
+
+pub def agent_record_outcome(runtime: AgentRuntime, observation: f64, reward: f64, succeeded: bool) -> AgentRuntime {
+    list_push(runtime.observations, observation);
+    list_push(runtime.rewards, reward);
+    val failures = if succeeded { 0 } else { runtime.consecutive_failures + 1 }
+    return AgentRuntime {
+        cycle: runtime.cycle,
+        state: if failures >= runtime.max_failures { "degraded" } else { runtime.state },
+        last_action: runtime.last_action,
+        consecutive_failures: failures,
+        max_failures: runtime.max_failures,
+        observations: runtime.observations,
+        rewards: runtime.rewards,
+    }
+}
+
+pub def agent_production_step(
+    runtime: AgentRuntime,
+    bounds: list<ViabilityBound>,
+    values: list<f64>,
+    drift: list<f64>,
+    horizon: f64,
+    policy_outcomes: list<list<f64>>,
+    preferences: list<f64>,
+    ambiguities: list<f64>,
+    epistemic_values: list<f64>,
+    emergency_action: i64
+) -> AgentStep {
+    val decision = autonomy_v2_step(bounds, values, drift, horizon, policy_outcomes, preferences, ambiguities, epistemic_values, emergency_action)
+    val degraded = runtime.consecutive_failures >= runtime.max_failures
+    val selected = if degraded { emergency_action } else { decision.action }
+    val final_decision = AutonomyV2Decision {
+        action: selected,
+        emergency: decision.emergency || degraded,
+        viable: decision.viable && !degraded,
+        viability_risk: decision.viability_risk,
+        expected_free_energy: decision.expected_free_energy,
+        confidence: decision.confidence,
+    }
+    val next = AgentRuntime {
+        cycle: runtime.cycle + 1,
+        state: if final_decision.emergency { "protecting" } else { "active" },
+        last_action: final_decision.action,
+        consecutive_failures: runtime.consecutive_failures,
+        max_failures: runtime.max_failures,
+        observations: runtime.observations,
+        rewards: runtime.rewards,
+    }
+    return AgentStep { runtime: next, decision: final_decision, degraded: degraded }
+}

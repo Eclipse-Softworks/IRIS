@@ -10,6 +10,9 @@ fn main() {
     println!("cargo:rerun-if-changed=src/runtime/iris_runtime.h");
     println!("cargo:rerun-if-changed=src/runtime/onnx_shim.c");
     println!("cargo:rerun-if-changed=src/runtime/onnx_shim.h");
+    println!("cargo:rerun-if-changed=src/runtime/tf_shim.c");
+    println!("cargo:rerun-if-changed=src/runtime/iris_ml_kernels.c");
+    println!("cargo:rerun-if-changed=src/runtime/iris_ml_kernels.h");
     println!("cargo:rerun-if-env-changed=SQLITE3_DIR");
     println!("cargo:rerun-if-env-changed=IRIS_LINK_ML_SHIMS");
     println!("cargo:rerun-if-env-changed=IRIS_USE_DEFAULT_SDK_PATHS");
@@ -166,9 +169,9 @@ fn emit_prebuilt_runtime_table() {
             let mut objs = String::new();
             for obj in OBJECTS {
                 let p = dir.path().join(obj);
-                let _ = write!(
+                let _ = writeln!(
                     objs,
-                    "        ({:?}, include_bytes!({:?})),\n",
+                    "        ({:?}, include_bytes!({:?})),",
                     obj,
                     p.canonicalize().unwrap_or(p)
                 );
@@ -259,19 +262,29 @@ fn generate_prebuilt_runtime() {
         // Windows is the MSVC ABI, and the resulting objects cannot link against
         // a MinGW-targeted module.
         cmd.args(["-target", &target]);
-        cmd.args(["-O2", "-c", src, "-o"])
-            .arg(&dest)
-            .args(["-I", "src/runtime", "-I", "src/runtime/vendor", "-Wno-pragma-pack"]);
-        if target.contains("windows") && !target.contains("msvc") {
-            if std::path::Path::new(&msys2_inc).is_dir() {
-                cmd.args(["-I", &msys2_inc]);
-            }
+        cmd.args(["-O2", "-c", src, "-o"]).arg(&dest).args([
+            "-I",
+            "src/runtime",
+            "-I",
+            "src/runtime/vendor",
+            "-Wno-pragma-pack",
+        ]);
+        if target.contains("windows")
+            && !target.contains("msvc")
+            && std::path::Path::new(&msys2_inc).is_dir()
+        {
+            cmd.args(["-I", &msys2_inc]);
         }
         let status = cmd.status();
         match status {
             Ok(s) if s.success() => {}
             Ok(s) => {
-                println!("cargo:warning=prebuilt: '{}' failed on {} (exit {:?})", cc, src, s.code());
+                println!(
+                    "cargo:warning=prebuilt: '{}' failed on {} (exit {:?})",
+                    cc,
+                    src,
+                    s.code()
+                );
                 return;
             }
             Err(e) => {
@@ -285,7 +298,10 @@ fn generate_prebuilt_runtime() {
     // above leaves the directory without one and it is simply ignored.
     let hash = runtime_sources_hash();
     if let Err(e) = std::fs::write(out_dir.join("sources.hash"), &hash) {
-        println!("cargo:warning=prebuilt: failed to write sources.hash: {}", e);
+        println!(
+            "cargo:warning=prebuilt: failed to write sources.hash: {}",
+            e
+        );
         return;
     }
     println!(
@@ -383,10 +399,16 @@ fn runtime_sources_hash() -> String {
 // That invariant is what allows a single prebuilt iris_runtime.o to be shipped
 // per target triple, which in turn removes the C-compiler requirement for users.
 fn compile_c_runtime() {
+    let out_dir = std::path::PathBuf::from(
+        std::env::var("OUT_DIR").expect("Cargo must set OUT_DIR for the build script"),
+    );
+    let resolver = generate_jit_runtime_resolver(&out_dir);
     let mut build = cc::Build::new();
     build.file("src/runtime/iris_runtime.c");
     build.file("src/runtime/onnx_shim.c");
     build.file("src/runtime/tf_shim.c");
+    build.file("src/runtime/iris_ml_kernels.c");
+    build.file(&resolver);
     build.include("src/runtime");
     // Supplies the vendored onnxruntime_c_api.h that iris_ml_dynload.h includes
     // for ABI layout. Header-only: it creates no link-time dependency.
@@ -408,7 +430,118 @@ fn compile_c_runtime() {
     build.flag_if_supported("-std=gnu11");
     build.flag_if_supported("-fPIC");
     build.compile("iris_runtime_c");
+    if cfg!(windows) {
+        println!("cargo:rustc-link-lib=winhttp");
+    }
     stage_sqlite_runtime_dll();
+}
+
+/// Generate the explicit bridge between the statically linked C runtime and
+/// LLVM ORC. Windows executables do not export their internal symbols by
+/// default, so ORC's process search generator cannot see `iris_*` functions.
+fn generate_jit_runtime_resolver(out_dir: &std::path::Path) -> std::path::PathBuf {
+    let header_paths = [
+        "src/runtime/iris_runtime.h",
+        "src/runtime/onnx_shim.h",
+        "src/runtime/iris_ml_kernels.h",
+    ];
+    let source_paths = [
+        "src/runtime/iris_runtime.c",
+        "src/runtime/onnx_shim.c",
+        "src/runtime/tf_shim.c",
+        "src/runtime/iris_ml_kernels.c",
+    ];
+
+    let mut declarations = std::collections::BTreeSet::new();
+    for path in header_paths {
+        let source = std::fs::read_to_string(path)
+            .unwrap_or_else(|error| panic!("failed to read {}: {}", path, error));
+        declarations.extend(extract_iris_function_names(&source, false));
+    }
+    let mut definitions = std::collections::BTreeSet::new();
+    for path in source_paths {
+        let source = std::fs::read_to_string(path)
+            .unwrap_or_else(|error| panic!("failed to read {}: {}", path, error));
+        definitions.extend(extract_iris_function_names(&source, true));
+    }
+    let target = std::env::var("TARGET").unwrap_or_default();
+    let names: Vec<String> = declarations
+        .intersection(&definitions)
+        .filter(|name| target.starts_with("wasm32") || !name.starts_with("iris_wasm_"))
+        .cloned()
+        .collect();
+    assert!(
+        names.iter().any(|name| name == "iris_add_checked"),
+        "generated JIT runtime table omitted iris_add_checked"
+    );
+
+    let resolver_path = out_dir.join("iris_jit_runtime_resolver.c");
+    let mut c = String::from(
+        "#include <stdint.h>\n#include <stddef.h>\n#include <string.h>\n\
+         #include \"iris_runtime.h\"\n#include \"onnx_shim.h\"\n\
+         #include \"iris_ml_kernels.h\"\n\n\
+         void *iris_runtime_resolve(const char *name) {\n\
+             if (name == NULL) return NULL;\n",
+    );
+    for name in &names {
+        c.push_str(&format!(
+            "    if (strcmp(name, \"{0}\") == 0) return (void *)(uintptr_t)&{0};\n",
+            name
+        ));
+    }
+    c.push_str("    return NULL;\n}\n");
+    std::fs::write(&resolver_path, c).expect("write generated JIT runtime resolver");
+
+    let rust_path = out_dir.join("jit_runtime_symbols.rs");
+    let mut rust = String::from("pub static JIT_RUNTIME_SYMBOL_NAMES: &[&str] = &[\n");
+    for name in &names {
+        rust.push_str(&format!("    \"{}\",\n", name));
+    }
+    rust.push_str("];\n");
+    std::fs::write(rust_path, rust).expect("write generated JIT runtime symbol list");
+    resolver_path
+}
+
+fn extract_iris_function_names(source: &str, require_definition: bool) -> Vec<String> {
+    let bytes = source.as_bytes();
+    let mut names = std::collections::BTreeSet::new();
+    let mut offset = 0;
+    while let Some(relative) = source[offset..].find("iris_") {
+        let start = offset + relative;
+        let mut end = start + "iris_".len();
+        while end < bytes.len() && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_') {
+            end += 1;
+        }
+        let mut cursor = end;
+        while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
+            cursor += 1;
+        }
+        if cursor < bytes.len() && bytes[cursor] == b'(' {
+            let mut depth = 0usize;
+            while cursor < bytes.len() {
+                match bytes[cursor] {
+                    b'(' => depth += 1,
+                    b')' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            cursor += 1;
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+                cursor += 1;
+            }
+            while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
+                cursor += 1;
+            }
+            if !require_definition || (cursor < bytes.len() && bytes[cursor] == b'{') {
+                names.insert(source[start..end].to_owned());
+            }
+        }
+        offset = end;
+    }
+    names.into_iter().collect()
 }
 
 fn sdk_dir(var_name: &str, default_path: &str) -> Option<String> {
@@ -417,9 +550,14 @@ fn sdk_dir(var_name: &str, default_path: &str) -> Option<String> {
             return Some(val);
         }
     }
-    let candidate = std::path::Path::new(default_path);
-    if candidate.exists() {
-        return Some(default_path.to_owned());
+    let use_defaults = std::env::var("IRIS_USE_DEFAULT_SDK_PATHS")
+        .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    if use_defaults {
+        let candidate = std::path::Path::new(default_path);
+        if candidate.exists() {
+            return Some(default_path.to_owned());
+        }
     }
     None
 }
@@ -486,10 +624,52 @@ fn stage_runtime_dlls(lib_dir: &str) {
             let profile_target = profile_dir.join(file_name);
             let deps_target = deps_dir.join(file_name);
             let examples_target = examples_dir.join(file_name);
-            let _ = std::fs::copy(&path, profile_target);
-            let _ = std::fs::copy(&path, deps_target);
-            let _ = std::fs::copy(&path, examples_target);
+            stage_runtime_file(&path, &profile_target);
+            stage_runtime_file(&path, &deps_target);
+            stage_runtime_file(&path, &examples_target);
         }
+    }
+}
+
+/// Stage a runtime DLL without copying gigabytes on every Cargo invocation.
+///
+/// The SDKs and `target/` normally live on the same volume, so a hard link is
+/// effectively free and still behaves exactly like a DLL copied beside the
+/// executable. Fall back to a copy when the filesystem cannot create links.
+fn stage_runtime_file(source: &std::path::Path, target: &std::path::Path) {
+    let current = match (std::fs::metadata(source), std::fs::metadata(target)) {
+        (Ok(source_meta), Ok(target_meta)) if source_meta.len() == target_meta.len() => {
+            match (source_meta.modified(), target_meta.modified()) {
+                (Ok(source_time), Ok(target_time)) => target_time >= source_time,
+                _ => true,
+            }
+        }
+        _ => false,
+    };
+    if current {
+        return;
+    }
+
+    if target.exists() {
+        if let Err(error) = std::fs::remove_file(target) {
+            println!(
+                "cargo:warning=failed to replace staged runtime '{}': {}",
+                target.display(),
+                error
+            );
+            return;
+        }
+    }
+    if std::fs::hard_link(source, target).is_ok() {
+        return;
+    }
+    if let Err(error) = std::fs::copy(source, target) {
+        println!(
+            "cargo:warning=failed to stage runtime '{}' as '{}': {}",
+            source.display(),
+            target.display(),
+            error
+        );
     }
 }
 
@@ -551,9 +731,9 @@ fn stage_sqlite_runtime_dll() {
         let profile_target = profile_dir.join(file_name);
         let deps_target = deps_dir.join(file_name);
         let examples_target = examples_dir.join(file_name);
-        let _ = std::fs::copy(&source_path, profile_target);
-        let _ = std::fs::copy(&source_path, deps_target);
-        let _ = std::fs::copy(&source_path, examples_target);
+        stage_runtime_file(&source_path, &profile_target);
+        stage_runtime_file(&source_path, &deps_target);
+        stage_runtime_file(&source_path, &examples_target);
     }
 }
 

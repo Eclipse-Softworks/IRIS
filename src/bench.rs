@@ -170,7 +170,8 @@ fn run_single(source: &str, module_name: &str) -> Result<Sample, String> {
 
     // Compile (lower + passes)
     let t1 = Instant::now();
-    let ir = crate::compile_ast_to_module(&mut ast, module_name, None).map_err(|e| format!("{}", e))?;
+    let ir =
+        crate::compile_ast_to_module(&mut ast, module_name, None).map_err(|e| format!("{}", e))?;
     let t_compile = t1.elapsed();
 
     // Execute natively through the LLVM pipeline.

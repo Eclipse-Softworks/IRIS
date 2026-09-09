@@ -52,7 +52,8 @@ pub def write_text(path: str, content: str) -> result<bool, str> effect fs, io {
 
 /// Append text to a file
 pub def append_text(path: str, content: str) -> result<bool, str> effect fs, io {
-    val h = file_open_stream(path, "a");
+    // Match read_text/write_text byte preservation on Windows as well as Unix.
+    val h = file_open_stream(path, "ab");
     when h {
         ok(f) => {
             val w = file_write_stream(f, content);

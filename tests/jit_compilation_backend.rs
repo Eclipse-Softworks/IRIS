@@ -4,7 +4,7 @@
 //   - JIT plan header identifies module name and IR hash
 //   - JIT report lists available functions
 //   - Zero-argument function is identified as [ENTRY]
-//   - clang availability reported
+//   - ORC availability reported
 //   - IR hash is a valid hex string
 //   - JIT output includes the evaluation result
 //   - Cache key (module_name, function_name, ir_hash) is stable
@@ -150,4 +150,12 @@ fn test_jit_plan_has_no_fallback_language() {
         "did not expect fallback wording in JIT plan:\n{}",
         out
     );
+    for forbidden in ["clang", "subprocess", "child process", "native binary"] {
+        assert!(
+            !out.to_lowercase().contains(forbidden),
+            "in-process plan unexpectedly mentions '{}':\n{}",
+            forbidden,
+            out
+        );
+    }
 }

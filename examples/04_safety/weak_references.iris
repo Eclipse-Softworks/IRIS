@@ -1,0 +1,11 @@
+def main() -> i64 {
+    val owner : list<i64> = list(42, 100);
+    val observer = weak_ref(owner);
+    assert(weak_alive(observer));
+    val upgraded : list<i64> = unwrap(weak_upgrade(observer));
+    assert(list_get(upgraded, 0) == 42);
+    assert(list_get(upgraded, 1) == 100);
+    assert(list_len(owner) == 2);
+    println("weak references: ok");
+    return 0
+}

@@ -1,0 +1,16 @@
+/// Rollback is supported for enlisted in-memory state, not arbitrary external I/O.
+def main() -> i64 {
+    val state : list<i64> = list(10);
+    transaction_begin();
+    list_push(state, 99);
+    transaction_rollback();
+    assert(transaction_depth() == 0);
+    assert(list_len(state) == 1);
+    assert(list_get(state, 0) == 10);
+    transaction_begin();
+    list_push(state, 20);
+    transaction_commit();
+    assert(list_len(state) == 2);
+    println("transactions: ok");
+    return 0
+}

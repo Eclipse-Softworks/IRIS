@@ -30,8 +30,7 @@ fn packages_dir() -> Result<PathBuf, String> {
 pub fn install_from_url(url: &str) -> Result<Package, String> {
     let name = extract_package_name(url)?;
     let pkgs_dir = packages_dir()?;
-    fs::create_dir_all(&pkgs_dir)
-        .map_err(|e| format!("cannot create {}: {}", PACKAGES_DIR, e))?;
+    fs::create_dir_all(&pkgs_dir).map_err(|e| format!("cannot create {}: {}", PACKAGES_DIR, e))?;
 
     let target = pkgs_dir.join(&name);
 
@@ -70,8 +69,8 @@ pub fn install_all() -> Result<Vec<Package>, String> {
         return Err("no iris.toml found in current directory".into());
     }
 
-    let text = fs::read_to_string(&manifest_path)
-        .map_err(|e| format!("cannot read iris.toml: {}", e))?;
+    let text =
+        fs::read_to_string(&manifest_path).map_err(|e| format!("cannot read iris.toml: {}", e))?;
     let deps = parse_dependencies(&text)?;
 
     if deps.is_empty() {
@@ -80,8 +79,7 @@ pub fn install_all() -> Result<Vec<Package>, String> {
     }
 
     let pkgs_dir = packages_dir()?;
-    fs::create_dir_all(&pkgs_dir)
-        .map_err(|e| format!("cannot create {}: {}", PACKAGES_DIR, e))?;
+    fs::create_dir_all(&pkgs_dir).map_err(|e| format!("cannot create {}: {}", PACKAGES_DIR, e))?;
 
     let mut installed = Vec::new();
     for (dep_name, dep_url) in &deps {
@@ -100,7 +98,13 @@ pub fn install_all() -> Result<Vec<Package>, String> {
         } else {
             eprintln!("  {} — cloning {} ...", dep_name, dep_url);
             let status = Command::new("git")
-                .args(["clone", "--depth", "1", dep_url, target.to_str().unwrap_or("")])
+                .args([
+                    "clone",
+                    "--depth",
+                    "1",
+                    dep_url,
+                    target.to_str().unwrap_or(""),
+                ])
                 .status()
                 .map_err(|e| format!("git clone failed: {}", e))?;
             if !status.success() {
@@ -114,7 +118,10 @@ pub fn install_all() -> Result<Vec<Package>, String> {
                 installed.push(pkg);
             }
             Err(_) => {
-                eprintln!("  warning: no valid iris.toml in '{}', using directory name", dep_name);
+                eprintln!(
+                    "  warning: no valid iris.toml in '{}', using directory name",
+                    dep_name
+                );
                 installed.push(Package {
                     name: dep_name.clone(),
                     version: "0.0.0".into(),
@@ -289,7 +296,13 @@ fn extract_package_name(url: &str) -> Result<String, String> {
     // Sanitize: replace non-alphanumeric chars with underscores.
     let sanitized: String = name
         .chars()
-        .map(|c| if c.is_alphanumeric() || c == '_' || c == '-' { c } else { '_' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
 
     Ok(sanitized)
@@ -327,7 +340,10 @@ pub fn run_install(args: &[String]) -> Result<(), String> {
         // `iris install <url>` — install from URL
         let url = &args[0];
         let pkg = install_from_url(url)?;
-        eprintln!("installed {} v{} into {}/", pkg.name, pkg.version, PACKAGES_DIR);
+        eprintln!(
+            "installed {} v{} into {}/",
+            pkg.name, pkg.version, PACKAGES_DIR
+        );
     }
     Ok(())
 }

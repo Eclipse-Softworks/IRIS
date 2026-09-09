@@ -1,0 +1,14 @@
+// Test Issue 21: A generic instantiated at a generic type (e.g. Box<Box<i64>>)
+record Box[T] { item: T }
+
+def box_of[T](v: T) -> Box<T> {
+    Box { item: v }
+}
+
+def test_nested_generic() -> i64 {
+    val inner: Box<i64> = box_of(3);
+    val outer: Box<Box<i64>> = box_of(inner);
+    val mid = outer.item;
+    assert(mid.item == 3);
+    0
+}

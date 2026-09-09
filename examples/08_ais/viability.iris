@@ -1,0 +1,25 @@
+bring std.ais
+
+def main() -> i64 {
+    val bounds : list<ViabilityBound> = list(viability_bound_new("energy", 0.4, 0.8, 0.2, 0.9, 1.0,
+    7));
+    val first : list<f64> = list(0.9, 0.1);
+    val second : list<f64> = list(0.2, 0.8);
+    val outcomes : list<list<f64>> = list();
+    list_push(outcomes, first);
+    list_push(outcomes, second);
+    val preferences : list<f64> = list(1.0, 0.0);
+    val ambiguity : list<f64> = list(0.1, 0.05);
+    val curiosity : list<f64> = list(0.05, 0.4);
+    val endangered = autonomy_v2_step(bounds, list(0.1), list(0.0), 1.0, outcomes, preferences,
+    ambiguity, curiosity, 99);
+    val regulated = autonomy_v2_step(bounds, list(0.6), list(0.0), 1.0, outcomes, preferences,
+    ambiguity, curiosity, 99);
+    assert(endangered.emergency);
+    assert(endangered.action == 7);
+    assert(regulated.viable);
+    assert(!regulated.emergency);
+    assert(regulated.action == 0);
+    println("viability: ok");
+    return 0
+}

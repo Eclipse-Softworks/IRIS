@@ -1,0 +1,12 @@
+bring std.ais
+
+def ais_v2_native_contract() -> i64 {
+    val bounds: list<ViabilityBound> = list()
+    push(bounds, viability_bound_new("energy", 0.4, 0.8, 0.2, 0.9, 1.0, 7));
+    val predicted: list<f64> = list()
+    push(predicted, 0.1);
+    val assessment = viability_assess(bounds, predicted)
+    if assessment.critical && assessment.corrective_action == 7 && assessment.risk > 1.0 {
+        0
+    } else { 1 }
+}

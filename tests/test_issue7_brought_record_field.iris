@@ -1,0 +1,21 @@
+// Test Issue 7: Record field typed by a brought module's record
+// Constructing Holder { s: running_stats_new(), n: 42 } should not falsely
+// mangle the record name as generic over RunningStats.
+bring std.ais
+
+record Holder {
+    s: RunningStats,
+    n: i64,
+}
+
+def make_holder(n: i64) -> Holder {
+    val s = running_stats_new();
+    Holder { s: s, n: n }
+}
+
+def test_holder() -> i64 {
+    val h = make_holder(42);
+    assert(h.n == 42);
+    assert(h.s.count == 0);
+    0
+}

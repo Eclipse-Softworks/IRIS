@@ -1,0 +1,22 @@
+bring std.async
+
+async def square(value: i64) -> i64 {
+    return value * value
+}
+
+def main() -> i64 effect alloc, thread, throw {
+    val pending: list<chan<i64>> = list()
+    for value in 0..128 {
+        list_push(pending, square(value));
+    }
+
+    var total = 0
+    for index in 0..list_len(pending) {
+        total = total + await list_get(pending, index)
+    }
+    assert(total == 690880);
+    assert(async_worker_count() >= 1);
+    assert(async_worker_count() <= 64);
+    assert(async_queued_tasks() == 0);
+    return 0
+}

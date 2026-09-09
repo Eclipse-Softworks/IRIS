@@ -393,16 +393,29 @@ exit(0)
 
 ## http
 
-HTTP client.
+Typed HTTP client. HTTPS is provided by WinHTTP on the validated Windows target;
+check `http_tls_available()` on portable code.
 
 ```iris
 bring std.http
 
-val body = http_get("https://api.example.com/data")
-val resp = http_post("https://api.example.com/post", "{\"x\":1}", "application/json")
+val response = http_send(HttpRequest {
+    method: "POST",
+    url: "https://api.example.com/v1/items",
+    headers: "Authorization: Bearer token\r\n",
+    body: "{\"x\":1}",
+    timeout_ms: 10000,
+})
+if is_ok(response) {
+    println(to_str(unwrap(response).status));
+}
 ```
 
-**Functions:** `http_get`, `http_post`
+**Records:** `HttpRequest`, `HttpResponse`
+
+**Functions:** `http_send`, `http_tls_available`, `http_get`, `http_post`,
+`http_get_request`, `http_post_request`, `http_response`, `http_status_code`,
+`http_header`, `http_body`
 
 ---
 
@@ -598,3 +611,121 @@ val loaded_weights = model_load("weights.txt")
 ```
 
 **Functions:** `agent_loop`, `agent_loop_rewards`, `argmax`, `epsilon_greedy`, `softmax_sample`, `boltzmann_sample`, `discount_rewards`, `gae`, `normalize_list`, `normalize_input`, `clip_list`, `model_save`, `model_load`
+
+---
+
+## net
+
+Typed TCP and UDP transport. TCP helpers return `result` values and provide
+timeouts, exact writes, bounded reads, shutdown, and close.
+
+```iris
+bring std.net
+
+val connected = tcp_connect_checked("127.0.0.1", 8080, 2000, 5000)
+if is_ok(connected) {
+    val stream = unwrap(connected)
+    val sent = tcp_write_exact(stream, "ping")
+    val reply = tcp_read_bounded(stream, 4096)
+    tcp_shutdown(stream, 2);
+    tcp_close_stream(stream);
+}
+```
+
+**Records:** `TcpStream`, `TcpListener`
+
+**Functions:** `tcp_connect_checked`, `tcp_listen_checked`,
+`tcp_accept_checked`, `tcp_set_timeouts`, `tcp_write_exact`,
+`tcp_read_bounded`, `tcp_shutdown`, `tcp_close_stream`, `tcp_close_listener`
+
+---
+
+## llm
+
+Provider-neutral remote chat/tool/embedding requests and local model wrappers.
+Credentials are read from the configured environment variable at call time.
+
+```iris
+bring std.llm
+
+val client = llm_client(chat_url, embeddings_url, "model-name", "API_KEY", 30000)
+val messages: list<LlmMessage> = list()
+list_push(messages, llm_message("user", "Summarize this event"));
+val response = llm_chat(client, messages, 0.2, 256)
+```
+
+**Records:** `LlmClient`, `LlmMessage`, `LlmTool`, `LlmResponse`,
+`EmbeddingResponse`, `LocalModel`
+
+**Functions:** `llm_chat`, `llm_chat_with_tools`, `llm_embed`,
+`llm_request_json`, `llm_response_from_json`, `local_onnx_model`,
+`local_model_run`, `local_pytorch_train_step`
+
+---
+
+## meta
+
+Compiler-hosted typed metaprogramming without a self-hosted compiler.
+
+```iris
+bring std.meta
+
+val program = meta_program("def answer() -> i64 { return 41 }")
+if meta_available() {
+    val analysis = meta_analyze(program)
+    val edited = meta_apply(program, MetaEdit {
+        start_byte: 29,
+        end_byte: 31,
+        replacement: "42",
+    })
+}
+```
+
+**Records:** `MetaProgram`, `MetaEdit`
+
+**Functions:** `meta_available`, `meta_program`, `meta_analyze`, `meta_emit_ir`,
+`meta_apply`
+
+`meta_apply` returns edited source only after the complete compiler accepts it.
+Standalone native programs currently report the compiler service unavailable.
+
+---
+
+## async
+
+Structured concurrency helpers and scheduler telemetry.
+
+```iris
+bring std.async
+
+val group = new_task_group()
+spawn(group) {
+    if !cancellation_requested() {
+        atomic_add(counter, 1)
+    }
+}
+task_group_cancel(group);
+task_group_join(group);
+val cancelled = task_group_cancelled(group)
+```
+
+**Functions:** `new_task_group`, `cancellation_requested`,
+`task_group_cancelled`, `async_worker_count`, `async_queued_tasks`,
+`try_recv`, `channel_bounded`, `channel_unbounded`, `channel_len`, `delay`,
+`sleep`, `num_threads`, `select_first`, `recv_timeout_ms`,
+`gc_collect_sweep`, `gc_get_stats`
+
+Native `spawn`, `spawn(group)`, and lowered `async def` work run on the bounded
+executor. Cancellation is cooperative: queued grouped tasks skip their body at
+entry, and long-running tasks should call `cancellation_requested()` at bounded
+intervals.
+
+---
+
+## Production lifecycle additions
+
+`std.ml` adds `ModelSession`, `ModelHealth`, and `ModelRegistry` with versioned
+backend discovery, open/run/batch/train/close, request/failure counts, mean
+latency and health degradation. `std.ais` adds `AgentRuntime`, `AgentStep`,
+`agent_record_outcome`, and `agent_production_step`; repeated failures or
+homeostatic risk force the caller-provided emergency action.

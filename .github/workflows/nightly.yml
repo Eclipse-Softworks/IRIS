@@ -133,10 +133,8 @@ jobs:
 
       - name: Test ML examples
         run: |
-          while IFS= read -r f; do
-            echo "=== ML Test: $(basename $f) ==="
-            timeout 60 ./target/release/iris run "$f" || echo "  WARN: exit $?"
-          done < <(find examples/06_machine_learning examples/07_applications -type f \( -name 'ml_*.iris' -o -name 'ais_*.iris' \) | sort)
+          python3 tools/verify_learning.py --iris target/release/iris --filter examples/07_ml/
+          python3 tools/verify_learning.py --iris target/release/iris --filter projects/learning_service/
 
   # ───────────────── binary size tracking ──────────────────────────
   binary-size:
@@ -186,7 +184,7 @@ jobs:
       - name: Run benchmarks
         run: |
           mkdir -p bench-results
-          for f in benches/*.iris examples/02_functions/fibonacci.iris examples/02_functions/factorial.iris; do
+          for f in benches/*.iris examples/02_functions/functions.iris; do
             if [ -f "$f" ]; then
               NAME=$(basename "$f" .iris)
               echo "=== Benchmark: $NAME ==="

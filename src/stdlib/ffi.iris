@@ -159,6 +159,22 @@ pub def call_i64_3(handle: i64, func_name: str, a1: i64, a2: i64, a3: i64) -> i6
     ffi_call_i64(handle, func_name, a1, a2, a3)
 }
 
+/// Call a C function with seven i64 arguments, returning i64.
+pub def call_i64_7(
+    handle: i64, func_name: str,
+    a1: i64, a2: i64, a3: i64, a4: i64, a5: i64, a6: i64, a7: i64
+) -> i64 effect ffi {
+    ffi_call_i64(handle, func_name, a1, a2, a3, a4, a5, a6, a7)
+}
+
+/// Call a C function with eight i64 arguments, returning i64.
+pub def call_i64_8(
+    handle: i64, func_name: str,
+    a1: i64, a2: i64, a3: i64, a4: i64, a5: i64, a6: i64, a7: i64, a8: i64
+) -> i64 effect ffi {
+    ffi_call_i64(handle, func_name, a1, a2, a3, a4, a5, a6, a7, a8)
+}
+
 /// Call a C function with two i64 arguments, returning f64.
 pub def call_f64_2(handle: i64, func_name: str, a1: i64, a2: i64) -> f64 effect ffi {
     ffi_call_f64(handle, func_name, a1, a2)

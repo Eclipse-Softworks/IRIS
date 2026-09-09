@@ -1,0 +1,19 @@
+bring std.meta
+bring std.reflect /// Run with IRIS_FORCE_INTERP=1: metadata/editing requires the compiler host.
+def main() -> i64 {
+    assert(meta_available());
+    val source = "def main() -> i64 { return 0 }";
+    val program = meta_program(source);
+    assert(is_ok(meta_analyze(program)));
+
+    val edit = MetaEdit {
+        start_byte : 27, end_byte : 28, replacement : "7"
+    };
+
+    val edited = meta_apply(program, edit);
+    assert(is_ok(edited));
+    assert(unwrap(edited) == "def main() -> i64 { return 7 }");
+    assert(unwrap(reflect_eval_i64(unwrap(edited))) == 7);
+    println("typed edit: ok");
+    return 0
+}

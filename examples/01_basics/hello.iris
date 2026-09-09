@@ -1,8 +1,7 @@
-// hello.iris -- the classic first program
-//
-// Run: cargo run -- --emit eval examples/hello.iris
-
+/// The smallest checked IRIS program. Run: iris run examples/01_basics/hello.iris
 def main() -> i64 {
-    print("Hello, IRIS!");
-    0
+    val answer : i64 = 6 * 7;
+    assert(answer == 42);
+    println(f"Hello, IRIS! answer = {answer}");
+    return 0
 }

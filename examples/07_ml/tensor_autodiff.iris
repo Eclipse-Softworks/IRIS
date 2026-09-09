@@ -1,0 +1,49 @@
+bring std.tensor
+
+record SquaredLayer {
+    marker : i64
+}
+
+trait Layer {
+    def forward(self, input : DiffTensor) -> DiffTensor effect alloc
+}
+
+impl Layer for SquaredLayer {
+    def forward(self, input : DiffTensor) -> DiffTensor effect alloc {
+        return tensor_ad_mul(input, input)
+    }
+
+}
+
+def apply_tensor(input : DiffTensor, transform : |DiffTensor | -> DiffTensor effect alloc) -> DiffTensor effect alloc {
+    return transform(input)
+}
+def main() -> i64 {
+    val shape : list<i64> = list(2);
+    val weights = tensor_ad_parameter(tensor_ad_from_data(list(1.0, 2.0), shape));
+    val factor = tensor_ad_from_data(list(2.0, 3.0), shape);
+    var total = tensor_ad_from_data(list(0.0, 0.0), shape);
+    for step in 0 .. 3 {
+        total = tensor_ad_add(total, tensor_ad_mul(weights, factor));
+
+    };
+
+    val enabled = true;
+    val choose = |value : DiffTensor |if enabled {
+        value
+    } else {
+        tensor_ad_mul(value, value)
+    };
+
+    val layer = SquaredLayer {
+        marker : 0
+    };
+
+    val output = layer.forward(apply_tensor(total, choose));
+    tensor_ad_backward(tensor_ad_sum(output));
+    val gradient = tensor_ad_data(tensor_ad_grad(weights));
+    assert(list_get(gradient, 0) == 72.0);
+    assert(list_get(gradient, 1) == 324.0);
+    println("tensor autodiff: ok");
+    return 0
+}

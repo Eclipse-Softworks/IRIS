@@ -2,7 +2,7 @@
 
 > **Current version: 1.0.0-rc1** — IRIS is pre-1.0 and evolving rapidly.
 > The current locked language/tooling surface is tracked in
-> [`docs/current-language-lock.md`](docs/current-language-lock.md).
+> [`current-language-lock.md`](current-language-lock.md).
 
 This document defines the stability guarantees, deprecation process, and
 versioning discipline the project follows on the path to 1.0 and beyond.
@@ -23,14 +23,15 @@ MAJOR.MINOR.PATCH
 | **MINOR** | New features, new builtins, new passes — fully backward-compatible |
 | **PATCH** | Bug fixes, performance improvements, documentation updates |
 
-### Pre-1.0 Rules (current)
+### 1.0 release-candidate rules (current)
 
-While the version is `0.x.y`:
+While the version is `1.0.0-rc.N`:
 
-- **MINOR** bumps (`0.3 → 0.4`) may include breaking changes but must be
-  documented in `CHANGELOG.md` under a **Breaking** section.
-- **PATCH** bumps (`1.0.0-rc1 → 0.5.1`) are always backward-compatible.
-- Migration guides are provided for any breaking change.
+- A later candidate (`1.0.0-rc1` to `1.0.0-rc2`) may correct syntax or semantics
+  when required for safety or correctness.
+- Every breaking correction must be called out in `CHANGELOG.md` with a
+  migration note.
+- Compatibility becomes the post-1.0 promise only when `1.0.0` is released.
 
 ### Post-1.0 Rules
 
@@ -46,10 +47,11 @@ Once IRIS reaches `1.0.0`:
 
 Every language feature and API surface is categorized into one of three tiers:
 
-### Tier 1 — Stable
+### Tier 1 — Locked for the current release candidate
 
-These features have been extensively tested, are covered by the specification,
-and will not change in backward-incompatible ways without a major version bump.
+These features form the current compatibility target and are covered by the
+specification and corpus. RC correctness fixes may still require a documented
+change before 1.0.
 
 - Core syntax: `def`, inferred `val`/`var`, `if/else`, `while`, `for`, `when`
 - Scalar types: `i32`, `i64`, `f32`, `f64`, `bool`, `str`

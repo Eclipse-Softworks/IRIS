@@ -2,9 +2,35 @@
 //
 // Provides non-blocking channel operations, thread utilities, and timing functions.
 
+extern def iris_async_worker_count() -> i64 effect thread
+extern def iris_async_queued_tasks() -> i64 effect thread
+extern def iris_current_task_cancelled_i64() -> i64 effect thread
+extern def iris_task_group_is_cancelled_i64(group: task_group) -> i64 effect thread
+
+/// Number of fixed executor workers created by native async scheduling.
+pub def async_worker_count() -> i64 effect thread {
+    return iris_async_worker_count()
+}
+
+/// Tasks currently waiting in the native async executor queue.
+pub def async_queued_tasks() -> i64 effect thread {
+    return iris_async_queued_tasks()
+}
+
+/// True when cancellation has been requested for the current structured task.
+/// Long-running CPU tasks should check this at bounded intervals and return.
+pub def cancellation_requested() -> bool effect thread {
+    return iris_current_task_cancelled_i64() != 0
+}
+
+/// Observe cancellation for a specific task group.
+pub def task_group_cancelled(group: task_group) -> bool effect thread {
+    return iris_task_group_is_cancelled_i64(group) != 0
+}
+
 /// Try to receive from a channel without blocking.
 /// Returns `some(value)` if available, `none` otherwise.
-pub def try_recv(ch: chan<i64>) -> option<i64> {
+pub def try_recv(ch: chan<i64>) -> option<i64> effect alloc, thread {
     chan_try_recv(ch)
 }
 
@@ -19,7 +45,7 @@ pub def channel_unbounded() -> chan<i64> {
 }
 
 /// Get the number of pending messages in a channel.
-pub def channel_len(ch: chan<i64>) -> i64 {
+pub def channel_len(ch: chan<i64>) -> i64 effect alloc, thread {
     chan_len(ch)
 }
 
@@ -46,7 +72,7 @@ pub def delay(ms: i64) -> bool effect time {
 }
 
 /// Select the first ready channel from a list (returns index 0..n-1, or -1 if none ready).
-pub def select_first(channels: list<chan<i64>>) -> i64 {
+pub def select_first(channels: list<chan<i64>>) -> i64 effect alloc, thread {
     val n = list_len(channels)
     var i = 0
     while i < n {
@@ -76,4 +102,4 @@ pub def gc_collect_sweep() -> bool {
 /// Retrieve current GC allocation and collection statistics.
 pub def gc_get_stats() -> map<str, i64> {
     gc_stats()
-}
+}

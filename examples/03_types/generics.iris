@@ -1,0 +1,35 @@
+record Box[T] {
+    item : T
+}
+record Fixed[T, const N : usize] {
+    data : [T; N]
+}
+record Wrapped[F[_], A] {
+    value : F<A>
+}
+def identity[T](value : T) -> T {
+    return value
+}
+def main() -> i64 {
+    val value : Box<i64> = Box {
+        item : identity(42)
+    };
+
+    val fixed : Fixed<i64, 3> = Fixed {
+        data : [3, 4, 5]
+    };
+
+    val wrapped : Wrapped<Box, str> = Wrapped {
+        value : Box {
+            item : "iris"
+        }
+
+    };
+
+    assert(value.item == 42);
+    assert(identity("typed") == "typed");
+    assert(fixed.data[2] == 5);
+    assert(wrapped.value.item == "iris");
+    println("generics: ok");
+    return 0
+}

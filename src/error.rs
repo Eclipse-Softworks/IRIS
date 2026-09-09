@@ -14,11 +14,17 @@ fn format_undef(name: &str, suggestion: Option<&str>) -> String {
         // (e.g. the `pub` visibility hint) and reads as nonsense inside that
         // template, so it is emitted as a plain help line.
         if s.contains(' ') {
-            format!("{}
-  help: {}", base, s)
+            format!(
+                "{}
+  help: {}",
+                base, s
+            )
         } else {
-            format!("{}
-  help: did you mean '{}'?", base, s)
+            format!(
+                "{}
+  help: did you mean '{}'?",
+                base, s
+            )
         }
     } else {
         base

@@ -1,0 +1,25 @@
+bring std.ros2 /// Pure geometry and QoS values; DDS/ROS installation is not needed here.
+def main() -> i64 {
+    val transform = Transform {
+        translation : Vector3 {
+            x : 1.0, y : 2.0, z : 3.0
+        },
+        rotation : Quaternion {
+            x : 0.0, y : 0.0, z : 0.0, w : 1.0
+        },
+    };
+    val point = transform_point(transform, Point {
+        x : 1.0, y : 1.0, z : 1.0
+    }
+   );
+
+    val recovered = transform_point(transform_inverse(transform), point);
+    assert(point.x == 2.0);
+    assert(point.y == 3.0);
+    assert(point.z == 4.0);
+    assert(recovered.x == 1.0);
+    assert(qos_sensor_data().depth == 5);
+    assert(qos_control().reliability == 1);
+    println("ros2 geometry: ok");
+    return 0
+}

@@ -44,6 +44,11 @@ def check_integer_args() -> i64 {
     assert(call_i64_3(h, "t_three", 1, 2, 3) == 6);
     assert(call_i64_3(h, "t_three", 100, 20, 3) == 123);
 
+    // Exact high arities: these used to be silently truncated to six args.
+    assert(call_i64_7(h, "t_seven", 1, 1, 1, 1, 1, 1, 1) == 28);
+    assert(call_i64_8(h, "t_eight", 1, 1, 1, 1, 1, 1, 1, 1) == 36);
+    assert(call_i64_8(h, "t_eight", 1, 2, 3, 4, 5, 6, 7, 8) == 204);
+
     lib_close(h);
     0
 }

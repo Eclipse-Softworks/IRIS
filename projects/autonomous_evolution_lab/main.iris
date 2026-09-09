@@ -1,0 +1,10 @@
+bring std.ais bring std.speculation /// Local candidate selection. run.ps1 performs actual audited ORC promotion.
+def main() -> i64 {
+    val candidate = || 42;
+    val fallback = || 10;
+    val acceptable = |value : i64 |value >= 0 && value <= 100;
+    assert(speculate_with_fallback(candidate, fallback, acceptable) == 42);
+    assert(argmax(list(0.2, 0.9, 0.4)) == 1);
+    println("evolution lab: candidate selection checked; run iris evolve for promotion");
+    return 0
+}

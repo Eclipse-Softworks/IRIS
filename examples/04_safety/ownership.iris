@@ -1,0 +1,15 @@
+/// References are compile-time annotations in RC1; this returns a new value.
+def increment(value : &i64) -> i64 {
+    return * value + 1
+}
+def main() -> i64 {
+    val original = 41;
+    val borrowed : &i64 = &original;
+    assert(increment(borrowed) == 42);
+    val items : list<i64> = list(3, 5, 8);
+    val owned = move items;
+    assert(list_get(owned, 2) == 8);
+    // Using items here would be a compile-time use-after-move error.
+    println("ownership: ok");
+    return 0
+}

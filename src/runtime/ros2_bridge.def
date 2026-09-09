@@ -14,9 +14,11 @@ EXPORTS
     iris_rcl_node_destroy
     ; Dynamic Publisher API
     iris_rcl_publisher_create
+    iris_rcl_publisher_create_qos
     iris_rcl_publisher_destroy
     ; Dynamic Subscription API
     iris_rcl_subscription_create
+    iris_rcl_subscription_create_qos
     iris_rcl_subscription_destroy
     ; Typed Publish
     iris_rcl_publish_float64

@@ -1,0 +1,13 @@
+bring std.llm /// Treat model output as data. Only the application selects an allowed action.
+pub def allowed_action(response : LlmResponse) -> result<str,
+str> {
+    if response.content == "status" {
+        return ok("status")
+    }
+    ;
+    if response.content == "help" {
+        return ok("help")
+    }
+    ;
+    return err("model proposed an unsupported action")
+}

@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 use std::fmt;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 
@@ -63,11 +64,14 @@ pub enum IrValue {
     },
     /// A sparse representation: stores (index, value) pairs.
     Sparse(Vec<(usize, IrValue)>),
-    /// A tape node for reverse-mode AD: primal value, op name, parent refs.
+    /// A self-contained reverse-mode AD node. Parent values are embedded so a
+    /// graph survives function calls: each interpreted call has its own SSA
+    /// `ValueId` namespace and its own `Interpreter` instance.
     TapeNode {
+        id: u64,
         primal: Box<IrValue>,
         op: String,
-        parents: Vec<ValueId>,
+        parents: Vec<IrValue>,
     },
     /// A dynamic growable list (shared mutable).
     List(std::sync::Arc<std::sync::Mutex<Vec<IrValue>>>),
@@ -90,6 +94,8 @@ pub enum IrValue {
         resume_value: std::sync::Arc<std::sync::Mutex<Option<IrValue>>>,
     },
 }
+
+static NEXT_TAPE_NODE_ID: AtomicU64 = AtomicU64::new(1);
 
 impl fmt::Display for IrValue {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -168,7 +174,11 @@ impl fmt::Display for IrValue {
             IrValue::List(elems) => write!(f, "list({} items)", elems.lock().unwrap().len()),
             IrValue::Map(entries) => write!(f, "map({} entries)", entries.lock().unwrap().len()),
             IrValue::WeakRef(_) => write!(f, "<weak_ref>"),
-            IrValue::TraitObject { target_trait, concrete, .. } => {
+            IrValue::TraitObject {
+                target_trait,
+                concrete,
+                ..
+            } => {
                 write!(f, "<dyn {} as {}>", target_trait, concrete)
             }
             IrValue::Continuation { .. } => write!(f, "<continuation>"),
@@ -211,8 +221,18 @@ impl PartialEq for IrValue {
             (IrValue::List(a), IrValue::List(b)) => std::sync::Arc::ptr_eq(a, b),
             (IrValue::Map(a), IrValue::Map(b)) => std::sync::Arc::ptr_eq(a, b),
             (
-                IrValue::TraitObject { target_trait: t1, concrete: c1, data: d1, .. },
-                IrValue::TraitObject { target_trait: t2, concrete: c2, data: d2, .. },
+                IrValue::TraitObject {
+                    target_trait: t1,
+                    concrete: c1,
+                    data: d1,
+                    ..
+                },
+                IrValue::TraitObject {
+                    target_trait: t2,
+                    concrete: c2,
+                    data: d2,
+                    ..
+                },
             ) => t1 == t2 && c1 == c2 && d1 == d2,
             (IrValue::Continuation { .. }, IrValue::Continuation { .. }) => true,
             _ => false,
@@ -234,6 +254,208 @@ pub struct SharedChannel {
 pub struct TaskGroupState {
     pub handles: Vec<std::thread::JoinHandle<Result<Vec<IrValue>, InterpError>>>,
     pub cancelled: bool,
+}
+
+thread_local! {
+    static CURRENT_INTERP_TASK_GROUP: std::cell::RefCell<Option<Arc<Mutex<TaskGroupState>>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[derive(Debug)]
+enum TransactionSnapshot {
+    List {
+        target: Arc<Mutex<Vec<IrValue>>>,
+        before: Vec<IrValue>,
+    },
+    Map {
+        target: Arc<Mutex<HashMap<String, IrValue>>>,
+        before: HashMap<String, IrValue>,
+    },
+    Atomic {
+        target: Arc<Mutex<IrValue>>,
+        before: IrValue,
+    },
+}
+
+impl TransactionSnapshot {
+    fn identity(&self) -> (u8, usize) {
+        match self {
+            Self::List { target, .. } => (1, Arc::as_ptr(target) as usize),
+            Self::Map { target, .. } => (2, Arc::as_ptr(target) as usize),
+            Self::Atomic { target, .. } => (3, Arc::as_ptr(target) as usize),
+        }
+    }
+
+    fn restore(self) {
+        match self {
+            Self::List { target, before } => *target.lock().unwrap() = before,
+            Self::Map { target, before } => *target.lock().unwrap() = before,
+            Self::Atomic { target, before } => *target.lock().unwrap() = before,
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct TransactionFrame {
+    snapshots: Vec<TransactionSnapshot>,
+    staged_files: HashMap<String, String>,
+}
+
+thread_local! {
+    /// Speculation is isolated per execution thread. Nested commits merge their
+    /// original snapshots into the parent, so rolling the parent back still
+    /// restores the state observed at the outermost begin.
+    static TRANSACTIONS: std::cell::RefCell<Vec<TransactionFrame>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+fn transaction_begin() -> i64 {
+    TRANSACTIONS.with(|frames| frames.borrow_mut().push(TransactionFrame::default()));
+    1
+}
+
+fn transaction_depth() -> i64 {
+    TRANSACTIONS.with(|frames| frames.borrow().len() as i64)
+}
+
+fn transaction_record(snapshot: TransactionSnapshot) {
+    TRANSACTIONS.with(|frames| {
+        let mut frames = frames.borrow_mut();
+        let Some(frame) = frames.last_mut() else {
+            return;
+        };
+        let identity = snapshot.identity();
+        if !frame
+            .snapshots
+            .iter()
+            .any(|saved| saved.identity() == identity)
+        {
+            frame.snapshots.push(snapshot);
+        }
+    });
+}
+
+fn transaction_record_list(target: &Arc<Mutex<Vec<IrValue>>>) {
+    if transaction_depth() != 0 {
+        transaction_record(TransactionSnapshot::List {
+            target: target.clone(),
+            before: target.lock().unwrap().clone(),
+        });
+    }
+}
+
+fn transaction_record_map(target: &Arc<Mutex<HashMap<String, IrValue>>>) {
+    if transaction_depth() != 0 {
+        transaction_record(TransactionSnapshot::Map {
+            target: target.clone(),
+            before: target.lock().unwrap().clone(),
+        });
+    }
+}
+
+fn transaction_record_atomic(target: &Arc<Mutex<IrValue>>) {
+    if transaction_depth() != 0 {
+        transaction_record(TransactionSnapshot::Atomic {
+            target: target.clone(),
+            before: target.lock().unwrap().clone(),
+        });
+    }
+}
+
+fn transaction_stage_file(path: String, contents: String) -> bool {
+    TRANSACTIONS.with(|frames| {
+        let mut frames = frames.borrow_mut();
+        let Some(frame) = frames.last_mut() else {
+            return false;
+        };
+        frame.staged_files.insert(path, contents);
+        true
+    })
+}
+
+fn transaction_read_file(path: &str) -> Option<String> {
+    TRANSACTIONS.with(|frames| {
+        frames
+            .borrow()
+            .iter()
+            .rev()
+            .find_map(|frame| frame.staged_files.get(path).cloned())
+    })
+}
+
+fn transaction_rollback() -> i64 {
+    TRANSACTIONS.with(|frames| {
+        let Some(frame) = frames.borrow_mut().pop() else {
+            return 0;
+        };
+        for snapshot in frame.snapshots.into_iter().rev() {
+            snapshot.restore();
+        }
+        1
+    })
+}
+
+fn transaction_restore_snapshots(snapshots: Vec<TransactionSnapshot>) {
+    for snapshot in snapshots.into_iter().rev() {
+        snapshot.restore();
+    }
+}
+
+fn transaction_commit() -> i64 {
+    TRANSACTIONS.with(|frames| {
+        let mut frames = frames.borrow_mut();
+        let Some(mut frame) = frames.pop() else {
+            return 0;
+        };
+        if let Some(parent) = frames.last_mut() {
+            for snapshot in frame.snapshots.drain(..) {
+                let identity = snapshot.identity();
+                if !parent
+                    .snapshots
+                    .iter()
+                    .any(|saved| saved.identity() == identity)
+                {
+                    parent.snapshots.push(snapshot);
+                }
+            }
+            parent.staged_files.extend(frame.staged_files);
+            return 1;
+        }
+
+        // Writes are invisible until the outermost commit. Each file is first
+        // written beside its destination and then atomically renamed.
+        let mut prepared = Vec::new();
+        for (index, (path, contents)) in frame.staged_files.into_iter().enumerate() {
+            let destination = std::path::PathBuf::from(&path);
+            let Some(file_name) = destination.file_name() else {
+                transaction_restore_snapshots(frame.snapshots);
+                return 0;
+            };
+            let temp_name = format!(
+                ".{}.iris-txn-{}-{}",
+                file_name.to_string_lossy(),
+                std::process::id(),
+                index
+            );
+            let temp = destination.with_file_name(temp_name);
+            if std::fs::write(&temp, contents).is_err() {
+                for (temp, _) in prepared {
+                    let _ = std::fs::remove_file(temp);
+                }
+                transaction_restore_snapshots(frame.snapshots);
+                return 0;
+            }
+            prepared.push((temp, destination));
+        }
+        for (temp, destination) in prepared {
+            if std::fs::rename(&temp, &destination).is_err() {
+                let _ = std::fs::remove_file(temp);
+                transaction_restore_snapshots(frame.snapshots);
+                return 0;
+            }
+        }
+        1
+    })
 }
 
 thread_local! {
@@ -291,7 +513,7 @@ pub fn eval_function(func: &IrFunction, args: &[IrValue]) -> Result<Vec<IrValue>
 // captured: it has no deterministic position in the stream anyway, and still goes
 // to stdout.
 thread_local! {
-    static OUT_SINK: std::cell::RefCell<Option<String>> = std::cell::RefCell::new(None);
+    static OUT_SINK: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
 }
 
 /// Emit one line of program output — to the active sink, or stdout if none.
@@ -367,16 +589,42 @@ pub fn collect_trace(
     source: &str,
     out: std::rc::Rc<std::cell::RefCell<Vec<crate::debugger::TraceEntry>>>,
 ) -> Result<(), InterpError> {
+    collect_trace_function(module, source, None, out)
+}
+
+/// Runs a named zero-argument function, or the normal program entry point when
+/// `entry_function` is absent, while collecting a source-level execution trace.
+pub fn collect_trace_function(
+    module: &IrModule,
+    source: &str,
+    entry_function: Option<&str>,
+    out: std::rc::Rc<std::cell::RefCell<Vec<crate::debugger::TraceEntry>>>,
+) -> Result<(), InterpError> {
     use crate::debugger::TraceEntry;
 
-    let func = module
-        .functions()
-        .iter()
-        .find(|f| f.name == "main" && f.params.is_empty())
-        .or_else(|| module.functions().iter().find(|f| f.params.is_empty()))
-        .ok_or_else(|| InterpError::Unsupported {
-            detail: "no zero-argument function for trace collection".into(),
-        })?;
+    let func = if let Some(entry) = entry_function {
+        module
+            .functions()
+            .iter()
+            .find(|function| function.name == entry && function.params.is_empty())
+            .ok_or_else(|| InterpError::Unsupported {
+                detail: format!("no zero-argument function named '{}' for debugging", entry),
+            })?
+    } else {
+        module
+            .functions()
+            .iter()
+            .find(|function| function.name == "main" && function.params.is_empty())
+            .or_else(|| {
+                module
+                    .functions()
+                    .iter()
+                    .find(|function| function.params.is_empty())
+            })
+            .ok_or_else(|| InterpError::Unsupported {
+                detail: "no zero-argument function for trace collection".into(),
+            })?
+    };
 
     // Run the program with trace collection enabled.
     let opts = InterpOptions::default();
@@ -418,7 +666,15 @@ pub(crate) struct Interpreter<'m> {
     /// Source text for byte-offset → line/col conversion.
     trace_source: String,
     /// Gradient accumulator for reverse-mode AD (populated by Backward).
-    tape_grads: HashMap<ValueId, f64>,
+    tape_grads: HashMap<u64, f64>,
+    /// Tensor reverse-mode gradients, keyed by self-contained tape node id.
+    tensor_tape_grads: HashMap<u64, Vec<f32>>,
+    /// Associates SSA values with their self-contained tape nodes.  Hand-built
+    /// IR may name an ordinary primal value as a TapeRecord parent and later
+    /// request TapeGrad for that same value, while lowered IR commonly passes
+    /// TapeNode values directly.  Keeping this per-frame alias table supports
+    /// both forms without using frame-local ValueIds inside the graph itself.
+    tape_nodes: HashMap<ValueId, IrValue>,
     /// Byte offset of the most-recently executed instruction (for error location).
     last_byte: Option<u32>,
     /// Name of the function currently executing (for error location).
@@ -441,6 +697,8 @@ impl<'m> Interpreter<'m> {
             trace_func: String::new(),
             trace_source: String::new(),
             tape_grads: HashMap::new(),
+            tensor_tape_grads: HashMap::new(),
+            tape_nodes: HashMap::new(),
             last_byte: None,
             cur_func: String::new(),
             profiler: None,
@@ -514,649 +772,650 @@ impl<'m> Interpreter<'m> {
         let entry = func.entry_block();
         for (param, arg) in entry.params.iter().zip(entry_args.iter()) {
             self.values.insert(param.id, arg.clone());
+            if matches!(arg, IrValue::TapeNode { .. }) {
+                self.tape_nodes.insert(param.id, arg.clone());
+            }
         }
 
         let mut current = BlockId(0);
         let mut steps = 0usize;
 
         'blocks: loop {
-                let block = func
-                    .block(current)
-                    .ok_or(InterpError::UndefinedValue { id: current.0 })?;
+            let block = func
+                .block(current)
+                .ok_or(InterpError::UndefinedValue { id: current.0 })?;
 
-                for (instr_idx, instr) in block.instrs.iter().enumerate() {
-                    steps += 1;
-                    if let Some(ref prof) = self.profiler {
-                        prof.borrow_mut().record_instruction();
-                    }
-                    if steps > self.opts.max_steps {
-                        return Err(InterpError::Unsupported {
+            for (instr_idx, instr) in block.instrs.iter().enumerate() {
+                steps += 1;
+                if let Some(ref prof) = self.profiler {
+                    prof.borrow_mut().record_instruction();
+                }
+                if steps > self.opts.max_steps {
+                    return Err(InterpError::Unsupported {
                         detail: format!(
                             "exceeded step limit of {} (infinite loop?); use --max-steps to increase",
                             self.opts.max_steps
                         ),
                     });
-                    }
+                }
 
-                    // Track the source span of the current instruction for error reporting.
-                    if let Some(byte) = func.span_table.get(current.0, instr_idx) {
-                        self.last_byte = Some(byte);
-                    }
+                // Track the source span of the current instruction for error reporting.
+                if let Some(byte) = func.get_instr_span(current.0, instr_idx) {
+                    self.last_byte = Some(byte);
+                }
 
-                    // Emit a trace entry whenever this instruction has a recorded span.
-                    if let Some(ref trace) = self.trace_out {
-                        if let Some(byte) = func.span_table.get(current.0, instr_idx) {
-                            let (line, col) = if self.trace_source.is_empty() {
-                                (0, 0)
-                            } else {
-                                crate::diagnostics::byte_to_line_col(&self.trace_source, byte)
-                            };
-                            // Snapshot all named block-param values currently in scope.
-                            let variables: Vec<(String, String)> = func
-                                .value_defs
-                                .iter()
-                                .filter_map(|(vid, def)| {
-                                    if let crate::ir::value::ValueDef::BlockParam { block: bid } =
-                                        def
-                                    {
-                                        let b = func.block(*bid)?;
-                                        let param = b.params.iter().find(|p| p.id == *vid)?;
-                                        let name = param.name.as_ref()?.clone();
-                                        let val = self.values.get(vid)?;
-                                        Some((name, format!("{}", val)))
-                                    } else {
-                                        None
-                                    }
+                // Emit a trace entry whenever this instruction has a recorded span.
+                if let Some(ref trace) = self.trace_out {
+                    if let Some(byte) = func.get_instr_span(current.0, instr_idx) {
+                        let (line, col) = if self.trace_source.is_empty() {
+                            (0, 0)
+                        } else {
+                            crate::diagnostics::byte_to_line_col(&self.trace_source, byte)
+                        };
+                        // Snapshot all named block-param values currently in scope.
+                        let variables: Vec<(String, String)> = func
+                            .value_defs
+                            .iter()
+                            .filter_map(|(vid, def)| {
+                                if let crate::ir::value::ValueDef::BlockParam { block: bid } = def {
+                                    let b = func.block(*bid)?;
+                                    let param = b.params.iter().find(|p| p.id == *vid)?;
+                                    let name = param.name.as_ref()?.clone();
+                                    let val = self.values.get(vid)?;
+                                    Some((name, format!("{}", val)))
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect();
+                        trace.borrow_mut().push(crate::debugger::TraceEntry {
+                            func_name: self.trace_func.clone(),
+                            line,
+                            column: col,
+                            variables,
+                            depth: self.depth as u32,
+                        });
+                    }
+                }
+
+                // A loop executes the same SSA instruction (and therefore
+                // the same result ValueId) more than once.  Drop any tape
+                // alias left by the preceding iteration before computing
+                // the new result; TapeRecord installs the new association
+                // after it has captured its parents.
+                if let Some(result) = instr.result() {
+                    self.tape_nodes.remove(&result);
+                }
+
+                match instr {
+                    IrInstr::ConstFloat { result, value, ty } => {
+                        let v = match ty {
+                            IrType::Scalar(DType::F32) => IrValue::F32(*value as f32),
+                            IrType::Scalar(DType::F64) => IrValue::F64(*value),
+                            _ => {
+                                return Err(InterpError::TypeError {
+                                    detail: format!("ConstFloat with type {}", ty),
                                 })
-                                .collect();
-                            trace.borrow_mut().push(crate::debugger::TraceEntry {
-                                func_name: self.trace_func.clone(),
-                                line,
-                                column: col,
-                                variables,
-                                depth: self.depth as u32,
+                            }
+                        };
+                        self.values.insert(*result, v);
+                    }
+
+                    IrInstr::ConstInt { result, value, ty } => {
+                        let v = match ty {
+                            IrType::Scalar(DType::I32) => IrValue::I32(*value as i32),
+                            IrType::Scalar(DType::I64) => IrValue::I64(*value),
+                            // Extended integer types: stored as I64 for interpreter purposes.
+                            IrType::Scalar(DType::U8) => IrValue::I64((*value as u8) as i64),
+                            IrType::Scalar(DType::I8) => IrValue::I64((*value as i8) as i64),
+                            IrType::Scalar(DType::U32) => IrValue::I64((*value as u32) as i64),
+                            IrType::Scalar(DType::U64) => IrValue::I64(*value),
+                            IrType::Scalar(DType::USize) => IrValue::I64(*value),
+                            _ => {
+                                return Err(InterpError::TypeError {
+                                    detail: format!("ConstInt with type {}", ty),
+                                })
+                            }
+                        };
+                        self.values.insert(*result, v);
+                    }
+
+                    IrInstr::ConstBool { result, value } => {
+                        self.values.insert(*result, IrValue::Bool(*value));
+                    }
+
+                    IrInstr::BinOp {
+                        result,
+                        op,
+                        lhs,
+                        rhs,
+                        ..
+                    } => {
+                        let lv = self.get(*lhs)?;
+                        let rv = self.get(*rhs)?;
+                        let res = eval_binop(*op, &lv, &rv)?;
+                        self.values.insert(*result, res);
+                    }
+
+                    IrInstr::UnaryOp {
+                        result,
+                        op,
+                        operand,
+                        ..
+                    } => {
+                        let v = self.get(*operand)?;
+                        let res = eval_unary(*op, &v)?;
+                        self.values.insert(*result, res);
+                    }
+
+                    IrInstr::Cast {
+                        result,
+                        operand,
+                        to_ty,
+                        ..
+                    } => {
+                        let v = self.get(*operand)?;
+                        let res = eval_cast(&v, to_ty)?;
+                        self.values.insert(*result, res);
+                    }
+
+                    IrInstr::Load {
+                        result,
+                        tensor,
+                        indices,
+                        ..
+                    } => {
+                        let tv = self.get(*tensor)?;
+                        let flat = self.compute_flat_index(&tv, indices)?;
+                        if let IrValue::Tensor(data, _) = tv {
+                            self.values.insert(*result, IrValue::F32(data[flat]));
+                        } else {
+                            return Err(InterpError::TypeError {
+                                detail: "load from non-tensor".into(),
                             });
                         }
                     }
 
-                    match instr {
-                        IrInstr::ConstFloat { result, value, ty } => {
-                            let v = match ty {
-                                IrType::Scalar(DType::F32) => IrValue::F32(*value as f32),
-                                IrType::Scalar(DType::F64) => IrValue::F64(*value),
-                                _ => {
+                    IrInstr::Store {
+                        tensor,
+                        indices,
+                        value,
+                    } => {
+                        let tv = self.get(*tensor)?;
+                        let val = self.get(*value)?;
+                        let flat = self.compute_flat_index(&tv, indices)?;
+                        let val_f32 = to_f32_val(&val)?;
+                        if let IrValue::Tensor(mut data, shape) = tv {
+                            data[flat] = val_f32;
+                            self.values.insert(*tensor, IrValue::Tensor(data, shape));
+                        } else {
+                            return Err(InterpError::TypeError {
+                                detail: "store to non-tensor".into(),
+                            });
+                        }
+                    }
+
+                    IrInstr::TensorOp {
+                        result, op, inputs, ..
+                    } => match op {
+                        TensorOp::Unary { op: unary_op } => {
+                            if inputs.len() == 1 {
+                                let tv = self.get(inputs[0])?;
+                                if let IrValue::Tensor(data, shape) = tv {
+                                    let new_data = data
+                                        .iter()
+                                        .map(|&x| apply_unary_f32(unary_op, x))
+                                        .collect();
+                                    self.values
+                                        .insert(*result, IrValue::Tensor(new_data, shape));
+                                } else {
                                     return Err(InterpError::TypeError {
-                                        detail: format!("ConstFloat with type {}", ty),
-                                    })
+                                        detail: "TensorOp::Unary on non-tensor".into(),
+                                    });
                                 }
-                            };
-                            self.values.insert(*result, v);
-                        }
-
-                        IrInstr::ConstInt { result, value, ty } => {
-                            let v = match ty {
-                                IrType::Scalar(DType::I32) => IrValue::I32(*value as i32),
-                                IrType::Scalar(DType::I64) => IrValue::I64(*value),
-                                // Extended integer types: stored as I64 for interpreter purposes.
-                                IrType::Scalar(DType::U8) => IrValue::I64((*value as u8) as i64),
-                                IrType::Scalar(DType::I8) => IrValue::I64((*value as i8) as i64),
-                                IrType::Scalar(DType::U32) => IrValue::I64((*value as u32) as i64),
-                                IrType::Scalar(DType::U64) => IrValue::I64(*value),
-                                IrType::Scalar(DType::USize) => IrValue::I64(*value),
-                                _ => {
-                                    return Err(InterpError::TypeError {
-                                        detail: format!("ConstInt with type {}", ty),
-                                    })
-                                }
-                            };
-                            self.values.insert(*result, v);
-                        }
-
-                        IrInstr::ConstBool { result, value } => {
-                            self.values.insert(*result, IrValue::Bool(*value));
-                        }
-
-                        IrInstr::BinOp {
-                            result,
-                            op,
-                            lhs,
-                            rhs,
-                            ..
-                        } => {
-                            let lv = self.get(*lhs)?;
-                            let rv = self.get(*rhs)?;
-                            let res = eval_binop(*op, &lv, &rv)?;
-                            self.values.insert(*result, res);
-                        }
-
-                        IrInstr::UnaryOp {
-                            result,
-                            op,
-                            operand,
-                            ..
-                        } => {
-                            let v = self.get(*operand)?;
-                            let res = eval_unary(*op, &v)?;
-                            self.values.insert(*result, res);
-                        }
-
-                        IrInstr::Cast {
-                            result,
-                            operand,
-                            to_ty,
-                            ..
-                        } => {
-                            let v = self.get(*operand)?;
-                            let res = eval_cast(&v, to_ty)?;
-                            self.values.insert(*result, res);
-                        }
-
-                        IrInstr::Load {
-                            result,
-                            tensor,
-                            indices,
-                            ..
-                        } => {
-                            let tv = self.get(*tensor)?;
-                            let flat = self.compute_flat_index(&tv, indices)?;
-                            if let IrValue::Tensor(data, _) = tv {
-                                self.values.insert(*result, IrValue::F32(data[flat]));
                             } else {
-                                return Err(InterpError::TypeError {
-                                    detail: "load from non-tensor".into(),
+                                return Err(InterpError::Unsupported {
+                                    detail: "TensorOp::Unary requires exactly 1 input".into(),
                                 });
                             }
                         }
-
-                        IrInstr::Store {
-                            tensor,
-                            indices,
-                            value,
-                        } => {
-                            let tv = self.get(*tensor)?;
-                            let val = self.get(*value)?;
-                            let flat = self.compute_flat_index(&tv, indices)?;
-                            let val_f32 = to_f32_val(&val)?;
-                            if let IrValue::Tensor(mut data, shape) = tv {
-                                data[flat] = val_f32;
-                                self.values.insert(*tensor, IrValue::Tensor(data, shape));
+                        TensorOp::Einsum { notation } => {
+                            if inputs.len() == 2 {
+                                let a = self.get(inputs[0])?;
+                                let b = self.get(inputs[1])?;
+                                if let (
+                                    IrValue::Tensor(a_data, a_shape),
+                                    IrValue::Tensor(b_data, b_shape),
+                                ) = (a, b)
+                                {
+                                    let result_val = eval_einsum(
+                                        notation, &a_data, &a_shape, &b_data, &b_shape,
+                                    )?;
+                                    self.values.insert(*result, result_val);
+                                } else {
+                                    return Err(InterpError::TypeError {
+                                        detail: "einsum inputs must be tensors".into(),
+                                    });
+                                }
+                            } else if inputs.len() == 1 {
+                                // Trace/diagonal einsum on single tensor
+                                let a = self.get(inputs[0])?;
+                                if let IrValue::Tensor(data, shape) = a {
+                                    let result_val = eval_einsum_single(notation, &data, &shape)?;
+                                    self.values.insert(*result, result_val);
+                                } else {
+                                    return Err(InterpError::TypeError {
+                                        detail: "einsum input must be a tensor".into(),
+                                    });
+                                }
                             } else {
-                                return Err(InterpError::TypeError {
-                                    detail: "store to non-tensor".into(),
+                                return Err(InterpError::Unsupported {
+                                    detail: format!(
+                                        "einsum with {} inputs not supported",
+                                        inputs.len()
+                                    ),
                                 });
                             }
                         }
-
-                        IrInstr::TensorOp {
-                            result, op, inputs, ..
-                        } => match op {
-                            TensorOp::Unary { op: unary_op } => {
-                                if inputs.len() == 1 {
-                                    let tv = self.get(inputs[0])?;
-                                    if let IrValue::Tensor(data, shape) = tv {
-                                        let new_data = data
-                                            .iter()
-                                            .map(|&x| apply_unary_f32(unary_op, x))
-                                            .collect();
-                                        self.values
-                                            .insert(*result, IrValue::Tensor(new_data, shape));
-                                    } else {
-                                        return Err(InterpError::TypeError {
-                                            detail: "TensorOp::Unary on non-tensor".into(),
-                                        });
-                                    }
-                                } else {
-                                    return Err(InterpError::Unsupported {
-                                        detail: "TensorOp::Unary requires exactly 1 input".into(),
-                                    });
-                                }
-                            }
-                            TensorOp::Einsum { notation } => {
-                                if inputs.len() == 2 {
-                                    let a = self.get(inputs[0])?;
-                                    let b = self.get(inputs[1])?;
-                                    if let (
-                                        IrValue::Tensor(a_data, a_shape),
-                                        IrValue::Tensor(b_data, b_shape),
-                                    ) = (a, b)
-                                    {
-                                        let result_val = eval_einsum(
-                                            notation, &a_data, &a_shape, &b_data, &b_shape,
-                                        )?;
-                                        self.values.insert(*result, result_val);
-                                    } else {
-                                        return Err(InterpError::TypeError {
-                                            detail: "einsum inputs must be tensors".into(),
-                                        });
-                                    }
-                                } else if inputs.len() == 1 {
-                                    // Trace/diagonal einsum on single tensor
-                                    let a = self.get(inputs[0])?;
-                                    if let IrValue::Tensor(data, shape) = a {
-                                        let result_val =
-                                            eval_einsum_single(notation, &data, &shape)?;
-                                        self.values.insert(*result, result_val);
-                                    } else {
-                                        return Err(InterpError::TypeError {
-                                            detail: "einsum input must be a tensor".into(),
-                                        });
-                                    }
-                                } else {
-                                    return Err(InterpError::Unsupported {
-                                        detail: format!(
-                                            "einsum with {} inputs not supported",
-                                            inputs.len()
-                                        ),
-                                    });
-                                }
-                            }
-                            TensorOp::Reshape => {
-                                // Reshape: takes the tensor input and the result_ty
-                                // to determine the new shape
-                                if !inputs.is_empty() {
-                                    let tv = self.get(inputs[0])?;
-                                    if let IrValue::Tensor(data, old_shape) = tv {
-                                        // Extract new shape from result_ty or from
-                                        // additional shape inputs
-                                        let new_shape =
-                                            if inputs.len() > 1 {
-                                                // Shape provided as additional i64 inputs
-                                                let mut s = Vec::new();
-                                                for input in inputs.iter().skip(1) {
-                                                    match self.get(*input)? {
-                                                        IrValue::I64(n) => s.push(n as usize),
-                                                        IrValue::I32(n) => s.push(n as usize),
-                                                        _ => return Err(InterpError::TypeError {
-                                                            detail:
-                                                                "reshape dimension must be integer"
-                                                                    .into(),
-                                                        }),
-                                                    }
+                        TensorOp::Reshape => {
+                            // Reshape: takes the tensor input and the result_ty
+                            // to determine the new shape
+                            if !inputs.is_empty() {
+                                let tv = self.get(inputs[0])?;
+                                if let IrValue::Tensor(data, old_shape) = tv {
+                                    // Extract new shape from result_ty or from
+                                    // additional shape inputs
+                                    let new_shape = if inputs.len() > 1 {
+                                        // Shape provided as additional i64 inputs
+                                        let mut s = Vec::new();
+                                        for input in inputs.iter().skip(1) {
+                                            match self.get(*input)? {
+                                                IrValue::I64(n) => s.push(n as usize),
+                                                IrValue::I32(n) => s.push(n as usize),
+                                                _ => {
+                                                    return Err(InterpError::TypeError {
+                                                        detail: "reshape dimension must be integer"
+                                                            .into(),
+                                                    })
                                                 }
-                                                s
-                                            } else {
-                                                // Infer: flatten to 1D
-                                                let total: usize = old_shape.iter().product();
-                                                vec![total]
-                                            };
-                                        let new_numel: usize = new_shape.iter().product();
-                                        let old_numel: usize = old_shape.iter().product();
-                                        if new_numel != old_numel {
-                                            return Err(InterpError::TypeError {
+                                            }
+                                        }
+                                        s
+                                    } else {
+                                        // Infer: flatten to 1D
+                                        let total: usize = old_shape.iter().product();
+                                        vec![total]
+                                    };
+                                    let new_numel: usize = new_shape.iter().product();
+                                    let old_numel: usize = old_shape.iter().product();
+                                    if new_numel != old_numel {
+                                        return Err(InterpError::TypeError {
                                             detail: format!(
                                                 "reshape: new shape {:?} has {} elements, but tensor has {}",
                                                 new_shape, new_numel, old_numel
                                             ),
                                         });
-                                        }
-                                        self.values
-                                            .insert(*result, IrValue::Tensor(data, new_shape));
-                                    } else {
-                                        return Err(InterpError::TypeError {
-                                            detail: "reshape on non-tensor".into(),
-                                        });
                                     }
+                                    self.values
+                                        .insert(*result, IrValue::Tensor(data, new_shape));
                                 } else {
-                                    return Err(InterpError::Unsupported {
-                                        detail: "reshape requires at least 1 input".into(),
+                                    return Err(InterpError::TypeError {
+                                        detail: "reshape on non-tensor".into(),
                                     });
                                 }
+                            } else {
+                                return Err(InterpError::Unsupported {
+                                    detail: "reshape requires at least 1 input".into(),
+                                });
                             }
-                            TensorOp::Transpose { axes } => {
-                                if inputs.len() == 1 {
-                                    let tv = self.get(inputs[0])?;
-                                    if let IrValue::Tensor(data, shape) = tv {
-                                        let ndim = shape.len();
-                                        let perm = if axes.is_empty() {
-                                            // Default: reverse axes
-                                            (0..ndim).rev().collect::<Vec<_>>()
-                                        } else {
-                                            axes.clone()
-                                        };
-                                        if perm.len() != ndim {
-                                            return Err(InterpError::TypeError {
+                        }
+                        TensorOp::Transpose { axes } => {
+                            if inputs.len() == 1 {
+                                let tv = self.get(inputs[0])?;
+                                if let IrValue::Tensor(data, shape) = tv {
+                                    let ndim = shape.len();
+                                    let perm = if axes.is_empty() {
+                                        // Default: reverse axes
+                                        (0..ndim).rev().collect::<Vec<_>>()
+                                    } else {
+                                        axes.clone()
+                                    };
+                                    if perm.len() != ndim {
+                                        return Err(InterpError::TypeError {
                                             detail: format!(
                                                 "transpose: axes {:?} has {} elements, tensor has {} dims",
                                                 perm, perm.len(), ndim
                                             ),
                                         });
-                                        }
-
-                                        // Compute new shape
-                                        let new_shape: Vec<usize> =
-                                            perm.iter().map(|&a| shape[a]).collect();
-                                        let numel: usize = shape.iter().product();
-                                        let mut new_data = vec![0.0f32; numel];
-
-                                        // Compute source strides
-                                        let mut src_strides = vec![1usize; ndim];
-                                        for i in (0..ndim.saturating_sub(1)).rev() {
-                                            src_strides[i] = src_strides[i + 1] * shape[i + 1];
-                                        }
-                                        // Compute dest strides
-                                        let mut dst_strides = vec![1usize; ndim];
-                                        for i in (0..ndim.saturating_sub(1)).rev() {
-                                            dst_strides[i] = dst_strides[i + 1] * new_shape[i + 1];
-                                        }
-
-                                        let mut coords = vec![0usize; ndim];
-                                        for (flat, &val) in data.iter().enumerate().take(numel) {
-                                            // Decompose flat index into coords using source strides
-                                            let mut rem = flat;
-                                            for d in 0..ndim {
-                                                coords[d] = rem / src_strides[d];
-                                                rem %= src_strides[d];
-                                            }
-                                            // Compute destination flat index
-                                            let mut dst_flat = 0;
-                                            for d in 0..ndim {
-                                                dst_flat += coords[perm[d]] * dst_strides[d];
-                                            }
-                                            new_data[dst_flat] = val;
-                                        }
-
-                                        self.values
-                                            .insert(*result, IrValue::Tensor(new_data, new_shape));
-                                    } else {
-                                        return Err(InterpError::TypeError {
-                                            detail: "transpose on non-tensor".into(),
-                                        });
                                     }
-                                } else {
-                                    return Err(InterpError::Unsupported {
-                                        detail: "transpose requires exactly 1 input".into(),
-                                    });
-                                }
-                            }
-                            TensorOp::Reduce {
-                                op: reduce_op,
-                                axes: reduce_axes,
-                                keepdims,
-                            } => {
-                                if inputs.len() == 1 {
-                                    let tv = self.get(inputs[0])?;
-                                    if let IrValue::Tensor(data, shape) = tv {
-                                        let result_val = eval_reduce(
-                                            &data,
-                                            &shape,
-                                            reduce_op,
-                                            reduce_axes,
-                                            *keepdims,
-                                        )?;
-                                        self.values.insert(*result, result_val);
-                                    } else {
-                                        return Err(InterpError::TypeError {
-                                            detail: "reduce on non-tensor".into(),
-                                        });
-                                    }
-                                } else {
-                                    return Err(InterpError::Unsupported {
-                                        detail: "reduce requires exactly 1 input".into(),
-                                    });
-                                }
-                            }
-                        },
 
-                        IrInstr::Call {
-                            result,
-                            callee,
-                            args,
-                            ..
-                        } => {
-                            let call_args: Vec<IrValue> = args
-                                .iter()
-                                .map(|&v| {
+                                    // Compute new shape
+                                    let new_shape: Vec<usize> =
+                                        perm.iter().map(|&a| shape[a]).collect();
+                                    let numel: usize = shape.iter().product();
+                                    let mut new_data = vec![0.0f32; numel];
+
+                                    // Compute source strides
+                                    let mut src_strides = vec![1usize; ndim];
+                                    for i in (0..ndim.saturating_sub(1)).rev() {
+                                        src_strides[i] = src_strides[i + 1] * shape[i + 1];
+                                    }
+                                    // Compute dest strides
+                                    let mut dst_strides = vec![1usize; ndim];
+                                    for i in (0..ndim.saturating_sub(1)).rev() {
+                                        dst_strides[i] = dst_strides[i + 1] * new_shape[i + 1];
+                                    }
+
+                                    let mut coords = vec![0usize; ndim];
+                                    for (flat, &val) in data.iter().enumerate().take(numel) {
+                                        // Decompose flat index into coords using source strides
+                                        let mut rem = flat;
+                                        for d in 0..ndim {
+                                            coords[d] = rem / src_strides[d];
+                                            rem %= src_strides[d];
+                                        }
+                                        // Compute destination flat index
+                                        let mut dst_flat = 0;
+                                        for d in 0..ndim {
+                                            dst_flat += coords[perm[d]] * dst_strides[d];
+                                        }
+                                        new_data[dst_flat] = val;
+                                    }
+
                                     self.values
-                                        .get(&v)
-                                        .cloned()
-                                        .ok_or(InterpError::UndefinedValue { id: v.0 })
-                                })
-                                .collect::<Result<Vec<_>, _>>()?;
+                                        .insert(*result, IrValue::Tensor(new_data, new_shape));
+                                } else {
+                                    return Err(InterpError::TypeError {
+                                        detail: "transpose on non-tensor".into(),
+                                    });
+                                }
+                            } else {
+                                return Err(InterpError::Unsupported {
+                                    detail: "transpose requires exactly 1 input".into(),
+                                });
+                            }
+                        }
+                        TensorOp::Reduce {
+                            op: reduce_op,
+                            axes: reduce_axes,
+                            keepdims,
+                        } => {
+                            if inputs.len() == 1 {
+                                let tv = self.get(inputs[0])?;
+                                if let IrValue::Tensor(data, shape) = tv {
+                                    let result_val = eval_reduce(
+                                        &data,
+                                        &shape,
+                                        reduce_op,
+                                        reduce_axes,
+                                        *keepdims,
+                                    )?;
+                                    self.values.insert(*result, result_val);
+                                } else {
+                                    return Err(InterpError::TypeError {
+                                        detail: "reduce on non-tensor".into(),
+                                    });
+                                }
+                            } else {
+                                return Err(InterpError::Unsupported {
+                                    detail: "reduce requires exactly 1 input".into(),
+                                });
+                            }
+                        }
+                    },
 
-                            if let Some(module) = self.module {
-                                if let Some(callee_func) = module.function_by_name(callee) {
-                                    if self.depth >= self.opts.max_depth {
-                                        return Err(InterpError::Unsupported {
+                    IrInstr::Call {
+                        result,
+                        callee,
+                        args,
+                        ..
+                    } => {
+                        let call_args: Vec<IrValue> = args
+                            .iter()
+                            .map(|&v| {
+                                self.values
+                                    .get(&v)
+                                    .cloned()
+                                    .ok_or(InterpError::UndefinedValue { id: v.0 })
+                            })
+                            .collect::<Result<Vec<_>, _>>()?;
+
+                        if let Some(module) = self.module {
+                            if let Some(callee_func) = module.function_by_name(callee) {
+                                if self.depth >= self.opts.max_depth {
+                                    return Err(InterpError::Unsupported {
                                         detail: format!(
                                             "call depth exceeded {} (infinite recursion?); raise it with --max-depth",
                                             self.opts.max_depth
                                         ),
                                     });
+                                }
+                                let mut sub =
+                                    Interpreter::new(self.module, self.opts, self.depth + 1);
+                                sub.profiler = self.profiler.clone();
+                                sub.trace_out = self.trace_out.clone();
+                                sub.trace_func = callee.to_owned();
+                                sub.trace_source = self.trace_source.clone();
+                                if let Some(ref prof) = self.profiler {
+                                    prof.borrow_mut().enter_function(callee);
+                                }
+                                let ret = sub.run(callee_func, &call_args)?;
+                                self.spawn_handles.append(&mut sub.spawn_handles);
+                                if let Some(ref prof) = self.profiler {
+                                    prof.borrow_mut().exit_function(callee);
+                                }
+                                if let Some(r) = result {
+                                    if let Some(v) = ret.into_iter().next() {
+                                        self.values.insert(*r, v);
                                     }
-                                    let mut sub =
-                                        Interpreter::new(self.module, self.opts, self.depth + 1);
-                                    sub.profiler = self.profiler.clone();
-                                    sub.trace_out = self.trace_out.clone();
-                                    sub.trace_func = callee.to_owned();
-                                    sub.trace_source = self.trace_source.clone();
-                                    if let Some(ref prof) = self.profiler {
-                                        prof.borrow_mut().enter_function(callee);
-                                    }
-                                    let ret = sub.run(callee_func, &call_args)?;
-                                    self.spawn_handles.extend(sub.spawn_handles.drain(..));
-                                    if let Some(ref prof) = self.profiler {
-                                        prof.borrow_mut().exit_function(callee);
-                                    }
-                                    if let Some(r) = result {
-                                        if let Some(v) = ret.into_iter().next() {
-                                            self.values.insert(*r, v);
-                                        }
-                                    }
-                                } else {
-                                    return Err(InterpError::Unsupported {
-                                        detail: format!("undefined function '{}'", callee),
-                                    });
                                 }
                             } else {
                                 return Err(InterpError::Unsupported {
-                                    detail: format!("call to '{}' without module context", callee),
+                                    detail: format!("undefined function '{}'", callee),
                                 });
                             }
+                        } else {
+                            return Err(InterpError::Unsupported {
+                                detail: format!("call to '{}' without module context", callee),
+                            });
                         }
+                    }
 
-                        IrInstr::MakeStruct { result, fields, .. } => {
-                            let field_vals: Vec<IrValue> = fields
-                                .iter()
-                                .map(|&v| self.get(v))
-                                .collect::<Result<Vec<_>, _>>()?;
-                            self.values.insert(*result, IrValue::Struct(field_vals));
-                        }
+                    IrInstr::MakeStruct { result, fields, .. } => {
+                        let field_vals: Vec<IrValue> = fields
+                            .iter()
+                            .map(|&v| self.get(v))
+                            .collect::<Result<Vec<_>, _>>()?;
+                        self.values.insert(*result, IrValue::Struct(field_vals));
+                    }
 
-                        IrInstr::GetField {
-                            result,
-                            base,
-                            field_index,
-                            ..
-                        } => {
-                            let sv = self.get(*base)?;
-                            if let IrValue::Struct(fields) = sv {
-                                let val = fields.get(*field_index).cloned().ok_or_else(|| {
-                                    InterpError::Unsupported {
-                                        detail: format!(
+                    IrInstr::GetField {
+                        result,
+                        base,
+                        field_index,
+                        ..
+                    } => {
+                        let sv = self.get(*base)?;
+                        if let IrValue::Struct(fields) = sv {
+                            let val = fields.get(*field_index).cloned().ok_or_else(|| {
+                                InterpError::Unsupported {
+                                    detail: format!(
                                         "field index {} out of bounds for struct with {} fields",
                                         field_index,
                                         fields.len()
                                     ),
-                                    }
-                                })?;
-                                self.values.insert(*result, val);
-                            } else {
-                                return Err(InterpError::TypeError {
-                                    detail: format!("GetField on non-struct value: {:?}", sv),
-                                });
-                            }
+                                }
+                            })?;
+                            self.values.insert(*result, val);
+                        } else {
+                            return Err(InterpError::TypeError {
+                                detail: format!("GetField on non-struct value: {:?}", sv),
+                            });
                         }
+                    }
 
-                        // ---- Trait objects: dyn Trait dispatch ----
-                        IrInstr::MakeTraitObject {
-                            result,
-                            value,
-                            target_trait,
-                            concrete_ty,
-                            ..
-                        } => {
-                            let data = self.get(*value)?;
-                            // Build the per-method vtable by looking up each
-                            // trait method's mangled impl function for the
-                            // concrete type, recorded earlier in
-                            // IrModule::trait_impl_methods.
-                            let mut vtable = std::collections::HashMap::new();
-                            if let Some(module) = &self.module {
-                                if let Some(methods) = module.trait_def(target_trait) {
-                                    for m in methods {
-                                        // Find the entry that pairs this
-                                        // (target_trait, concrete_ty) with
-                                        // m.name. Fall back to scanning.
-                                        let mut found: Option<String> = None;
-                                        if let Some(list) =
-                                            module.trait_impl_methods().get(target_trait)
-                                        {
-                                            for (cty, mname, mangled) in list {
-                                                if cty == concrete_ty && mname == &m.name {
-                                                    found = Some(mangled.clone());
-                                                    break;
-                                                }
+                    // ---- Trait objects: dyn Trait dispatch ----
+                    IrInstr::MakeTraitObject {
+                        result,
+                        value,
+                        target_trait,
+                        concrete_ty,
+                        ..
+                    } => {
+                        let data = self.get(*value)?;
+                        // Build the per-method vtable by looking up each
+                        // trait method's mangled impl function for the
+                        // concrete type, recorded earlier in
+                        // IrModule::trait_impl_methods.
+                        let mut vtable = std::collections::HashMap::new();
+                        if let Some(module) = &self.module {
+                            if let Some(methods) = module.trait_def(target_trait) {
+                                for m in methods {
+                                    // Find the entry that pairs this
+                                    // (target_trait, concrete_ty) with
+                                    // m.name. Fall back to scanning.
+                                    let mut found: Option<String> = None;
+                                    if let Some(list) =
+                                        module.trait_impl_methods().get(target_trait)
+                                    {
+                                        for (cty, mname, mangled) in list {
+                                            if cty == concrete_ty && mname == &m.name {
+                                                found = Some(mangled.clone());
+                                                break;
                                             }
                                         }
-                                        if let Some(mangled) = found {
-                                            vtable.insert(m.name.clone(), mangled);
-                                        }
+                                    }
+                                    if let Some(mangled) = found {
+                                        vtable.insert(m.name.clone(), mangled);
                                     }
                                 }
                             }
-                            self.values.insert(
-                                *result,
-                                IrValue::TraitObject {
-                                    target_trait: target_trait.clone(),
-                                    concrete: concrete_ty.clone(),
-                                    data: Box::new(data),
-                                    vtable,
-                                },
-                            );
                         }
+                        self.values.insert(
+                            *result,
+                            IrValue::TraitObject {
+                                target_trait: target_trait.clone(),
+                                concrete: concrete_ty.clone(),
+                                data: Box::new(data),
+                                vtable,
+                            },
+                        );
+                    }
 
-                        IrInstr::DynCall {
-                            result,
-                            obj,
-                            method_name,
-                            args,
-                            ..
-                        } => {
-                            // Pull the vtable entry; call the mangled function
-                            // synchronously in the interpreter using the
-                            // boxed data value as the `self` first argument.
-                            let obj_val = self.get(*obj)?;
-                            let method_name = method_name.clone();
-                            let arg_vals: Vec<IrValue> = args
-                                .iter()
-                                .map(|&v| self.get(v))
-                                .collect::<Result<Vec<_>, _>>()?;
-                            let (target_trait, concrete, data, vtable) =
-                                match obj_val {
-                                    IrValue::TraitObject {
-                                        target_trait,
-                                        concrete,
-                                        data,
-                                        vtable,
-                                    } => (target_trait, concrete, data, vtable),
-                                    other => {
-                                        return Err(InterpError::TypeError {
-                                            detail: format!(
-                                                "DynCall on non-trait-object: {:?}",
-                                                other
-                                            ),
-                                        });
-                                    }
-                                };
-                            let mangled = vtable.get(&method_name).cloned().ok_or_else(
-                                || InterpError::Unsupported {
+                    IrInstr::DynCall {
+                        result,
+                        obj,
+                        method_name,
+                        args,
+                        ..
+                    } => {
+                        // Pull the vtable entry; call the mangled function
+                        // synchronously in the interpreter using the
+                        // boxed data value as the `self` first argument.
+                        let obj_val = self.get(*obj)?;
+                        let method_name = method_name.clone();
+                        let arg_vals: Vec<IrValue> = args
+                            .iter()
+                            .map(|&v| self.get(v))
+                            .collect::<Result<Vec<_>, _>>()?;
+                        let (target_trait, concrete, data, vtable) = match obj_val {
+                            IrValue::TraitObject {
+                                target_trait,
+                                concrete,
+                                data,
+                                vtable,
+                            } => (target_trait, concrete, data, vtable),
+                            other => {
+                                return Err(InterpError::TypeError {
+                                    detail: format!("DynCall on non-trait-object: {:?}", other),
+                                });
+                            }
+                        };
+                        let mangled = vtable.get(&method_name).cloned().ok_or_else(|| {
+                            InterpError::Unsupported {
+                                detail: format!(
+                                    "no impl method '{}' in vtable for dyn {} (concrete {})",
+                                    method_name, target_trait, concrete
+                                ),
+                            }
+                        })?;
+                        let callee_func = self
+                            .module
+                            .as_ref()
+                            .and_then(|m| m.function_by_name(&mangled).cloned())
+                            .ok_or_else(|| InterpError::Unsupported {
+                                detail: format!("undefined function '{}'", mangled),
+                            })?;
+                        // Construct the full argument list:
+                        // [data, args...] — the impl method's first param
+                        // is the concrete struct type.
+                        let mut call_args = Vec::with_capacity(arg_vals.len() + 1);
+                        call_args.push(*data);
+                        call_args.extend(arg_vals);
+                        let mut sub = Interpreter::new(self.module, self.opts, self.depth + 1);
+                        let ret_vals = sub.run(&callee_func, &call_args)?;
+                        self.spawn_handles.append(&mut sub.spawn_handles);
+                        if let Some(v) = ret_vals.into_iter().next() {
+                            self.values.insert(*result, v);
+                        } else {
+                            // The impl return is Unit: insert dummy 0.
+                            self.values.insert(*result, IrValue::Unit);
+                        }
+                    }
+
+                    IrInstr::MakeVariant {
+                        result,
+                        variant_idx,
+                        fields,
+                        ..
+                    } => {
+                        let field_vals: Vec<IrValue> = fields
+                            .iter()
+                            .map(|&v| self.get(v))
+                            .collect::<Result<Vec<_>, _>>()?;
+                        self.values
+                            .insert(*result, IrValue::Enum(*variant_idx, field_vals));
+                    }
+
+                    IrInstr::SwitchVariant {
+                        scrutinee,
+                        arms,
+                        default_block,
+                    } => {
+                        let tag = match self.get(*scrutinee)? {
+                            IrValue::Enum(t, _) => t,
+                            other => {
+                                return Err(InterpError::TypeError {
                                     detail: format!(
-                                "no impl method '{}' in vtable for dyn {} (concrete {})",
-                                method_name, target_trait, concrete
-                            ),
-                                },
-                            )?;
-                            let callee_func = self
-                                .module
-                                .as_ref()
-                                .and_then(|m| m.function_by_name(&mangled).cloned())
-                                .ok_or_else(|| InterpError::Unsupported {
-                                    detail: format!("undefined function '{}'", mangled),
-                                })?;
-                            // Construct the full argument list:
-                            // [data, args...] — the impl method's first param
-                            // is the concrete struct type.
-                            let mut call_args = Vec::with_capacity(arg_vals.len() + 1);
-                            call_args.push(*data);
-                            call_args.extend(arg_vals);
-                            let mut sub = Interpreter::new(
-                                self.module.clone(),
-                                self.opts,
-                                self.depth + 1,
-                            );
-                            let ret_vals = sub.run(&callee_func, &call_args)?;
-                            self.spawn_handles.extend(sub.spawn_handles.drain(..));
-                            if let Some(v) = ret_vals.into_iter().next() {
-                                self.values.insert(*result, v);
-                            } else {
-                                // The impl return is Unit: insert dummy 0.
-                                self.values.insert(*result, IrValue::Unit);
+                                        "SwitchVariant scrutinee must be Enum, got {:?}",
+                                        other
+                                    ),
+                                })
                             }
-                        }
+                        };
+                        let target = arms
+                            .iter()
+                            .find(|(idx, _)| *idx == tag)
+                            .map(|(_, bb)| *bb)
+                            .or(*default_block)
+                            .ok_or_else(|| InterpError::Unsupported {
+                                detail: format!("SwitchVariant: no arm for tag {}", tag),
+                            })?;
+                        self.bind_block_params(func, target, &[])?;
+                        current = target;
+                        continue 'blocks;
+                    }
 
-                        IrInstr::MakeVariant {
-                            result,
-                            variant_idx,
-                            fields,
-                            ..
-                        } => {
-                            let field_vals: Vec<IrValue> = fields
-                                .iter()
-                                .map(|&v| self.get(v))
-                                .collect::<Result<Vec<_>, _>>()?;
-                            self.values
-                                .insert(*result, IrValue::Enum(*variant_idx, field_vals));
-                        }
-
-                        IrInstr::SwitchVariant {
-                            scrutinee,
-                            arms,
-                            default_block,
-                        } => {
-                            let tag = match self.get(*scrutinee)? {
-                                IrValue::Enum(t, _) => t,
-                                other => {
-                                    return Err(InterpError::TypeError {
-                                        detail: format!(
-                                            "SwitchVariant scrutinee must be Enum, got {:?}",
-                                            other
-                                        ),
-                                    })
-                                }
-                            };
-                            let target = arms
-                                .iter()
-                                .find(|(idx, _)| *idx == tag)
-                                .map(|(_, bb)| *bb)
-                                .or(*default_block)
-                                .ok_or_else(|| InterpError::Unsupported {
-                                    detail: format!("SwitchVariant: no arm for tag {}", tag),
-                                })?;
-                            self.bind_block_params(func, target, &[])?;
-                            current = target;
-                            continue 'blocks;
-                        }
-
-                        IrInstr::ExtractVariantField {
-                            result,
-                            operand,
-                            field_idx,
-                            ..
-                        } => {
-                            let ev = self.get(*operand)?;
-                            match ev {
-                                IrValue::Enum(_, data) => {
-                                    let val = data.get(*field_idx).cloned().ok_or_else(|| {
+                    IrInstr::ExtractVariantField {
+                        result,
+                        operand,
+                        field_idx,
+                        ..
+                    } => {
+                        let ev = self.get(*operand)?;
+                        match ev {
+                            IrValue::Enum(_, data) => {
+                                let val = data.get(*field_idx).cloned().ok_or_else(|| {
                                     InterpError::TypeError {
                                         detail: format!(
                                             "ExtractVariantField: field {} out of bounds (variant has {} fields)",
@@ -1164,1820 +1423,1950 @@ impl<'m> Interpreter<'m> {
                                         ),
                                     }
                                 })?;
-                                    self.values.insert(*result, val);
-                                }
-                                other => {
-                                    return Err(InterpError::TypeError {
-                                        detail: format!(
-                                            "ExtractVariantField on non-Enum value: {:?}",
-                                            other
-                                        ),
-                                    });
-                                }
-                            }
-                        }
-
-                        IrInstr::MakeTuple {
-                            result, elements, ..
-                        } => {
-                            let elem_vals: Vec<IrValue> = elements
-                                .iter()
-                                .map(|&v| self.get(v))
-                                .collect::<Result<Vec<_>, _>>()?;
-                            self.values.insert(*result, IrValue::Tuple(elem_vals));
-                        }
-
-                        IrInstr::GetElement {
-                            result,
-                            base,
-                            index,
-                            ..
-                        } => {
-                            let bv = self.get(*base)?;
-                            match bv {
-                                IrValue::Tuple(elems) => {
-                                    let val = elems.get(*index).cloned().ok_or_else(|| {
-                                        InterpError::Unsupported {
-                                            detail: format!(
-                                                "tuple index {} out of bounds for {} elements",
-                                                index,
-                                                elems.len()
-                                            ),
-                                        }
-                                    })?;
-                                    self.values.insert(*result, val);
-                                }
-                                IrValue::Struct(fields) => {
-                                    let val = fields.get(*index).cloned().ok_or_else(|| {
-                                        InterpError::Unsupported {
-                                            detail: format!(
-                                                "element index {} out of bounds for struct",
-                                                index
-                                            ),
-                                        }
-                                    })?;
-                                    self.values.insert(*result, val);
-                                }
-                                other => {
-                                    return Err(InterpError::TypeError {
-                                        detail: format!(
-                                            "GetElement on non-tuple value: {:?}",
-                                            other
-                                        ),
-                                    });
-                                }
-                            }
-                        }
-
-                        IrInstr::AllocArray { result, init, .. } => {
-                            let vals: Vec<IrValue> = init
-                                .iter()
-                                .map(|&v| self.get(v))
-                                .collect::<Result<Vec<_>, _>>()?;
-                            self.values.insert(*result, IrValue::Array(vals));
-                        }
-
-                        IrInstr::ArrayLoad {
-                            result,
-                            array,
-                            index,
-                            ..
-                        } => {
-                            let arr = self.get(*array)?;
-                            let idx = match self.get(*index)? {
-                                IrValue::I64(n) => n as usize,
-                                IrValue::I32(n) => n as usize,
-                                other => {
-                                    return Err(InterpError::TypeError {
-                                        detail: format!(
-                                            "ArrayLoad index must be integer, got {:?}",
-                                            other
-                                        ),
-                                    });
-                                }
-                            };
-                            match arr {
-                                IrValue::Array(elems) => {
-                                    let val = elems.get(idx).cloned().ok_or_else(|| {
-                                        InterpError::Unsupported {
-                                            detail: format!(
-                                                "array index {} out of bounds ({} elements)",
-                                                idx,
-                                                elems.len()
-                                            ),
-                                        }
-                                    })?;
-                                    self.values.insert(*result, val);
-                                }
-                                other => {
-                                    return Err(InterpError::TypeError {
-                                        detail: format!("ArrayLoad on non-array: {:?}", other),
-                                    });
-                                }
-                            }
-                        }
-
-                        IrInstr::ArrayStore {
-                            array,
-                            index,
-                            value,
-                        } => {
-                            let arr = self.get(*array)?;
-                            let idx = match self.get(*index)? {
-                                IrValue::I64(n) => n as usize,
-                                IrValue::I32(n) => n as usize,
-                                other => {
-                                    return Err(InterpError::TypeError {
-                                        detail: format!(
-                                            "ArrayStore index must be integer, got {:?}",
-                                            other
-                                        ),
-                                    });
-                                }
-                            };
-                            let val = self.get(*value)?;
-                            match arr {
-                                IrValue::Array(mut elems) => {
-                                    if idx >= elems.len() {
-                                        return Err(InterpError::Unsupported {
-                                            detail: format!(
-                                                "array index {} out of bounds ({} elements)",
-                                                idx,
-                                                elems.len()
-                                            ),
-                                        });
-                                    }
-                                    elems[idx] = val;
-                                    self.values.insert(*array, IrValue::Array(elems));
-                                }
-                                other => {
-                                    return Err(InterpError::TypeError {
-                                        detail: format!("ArrayStore on non-array: {:?}", other),
-                                    });
-                                }
-                            }
-                        }
-
-                        IrInstr::ConstStr { result, value } => {
-                            self.values.insert(*result, IrValue::Str(value.clone()));
-                        }
-
-                        IrInstr::StrLen { result, operand } => {
-                            let sv = self.get(*operand)?;
-                            match sv {
-                                IrValue::Str(s) => {
-                                    self.values.insert(*result, IrValue::I64(s.len() as i64));
-                                }
-                                other => {
-                                    return Err(InterpError::TypeError {
-                                        detail: format!("StrLen on non-string: {:?}", other),
-                                    });
-                                }
-                            }
-                        }
-
-                        IrInstr::StrConcat { result, lhs, rhs } => {
-                            let lv = self.get(*lhs)?;
-                            let rv = self.get(*rhs)?;
-                            match (lv, rv) {
-                                (IrValue::Str(l), IrValue::Str(r)) => {
-                                    self.values.insert(*result, IrValue::Str(l + &r));
-                                }
-                                other => {
-                                    return Err(InterpError::TypeError {
-                                        detail: format!("StrConcat on non-strings: {:?}", other),
-                                    });
-                                }
-                            }
-                        }
-
-                        IrInstr::Print { operand } => {
-                            let v = self.get(*operand)?;
-                            match &v {
-                                // Print strings without surrounding quotes.
-                                IrValue::Str(s) => emit_line(s),
-                                other => emit_line(&format!("{}", other)),
-                            }
-                        }
-
-                        IrInstr::StrContains {
-                            result,
-                            haystack,
-                            needle,
-                        } => {
-                            let h = self.get(*haystack)?;
-                            let n = self.get(*needle)?;
-                            match (h, n) {
-                                (IrValue::Str(hs), IrValue::Str(ns)) => {
-                                    self.values
-                                        .insert(*result, IrValue::Bool(hs.contains(ns.as_str())));
-                                }
-                                other => {
-                                    return Err(InterpError::TypeError {
-                                        detail: format!("StrContains on non-strings: {:?}", other),
-                                    })
-                                }
-                            }
-                        }
-
-                        IrInstr::StrStartsWith {
-                            result,
-                            haystack,
-                            prefix,
-                        } => {
-                            let h = self.get(*haystack)?;
-                            let p = self.get(*prefix)?;
-                            match (h, p) {
-                                (IrValue::Str(hs), IrValue::Str(ps)) => {
-                                    self.values.insert(
-                                        *result,
-                                        IrValue::Bool(hs.starts_with(ps.as_str())),
-                                    );
-                                }
-                                other => {
-                                    return Err(InterpError::TypeError {
-                                        detail: format!(
-                                            "StrStartsWith on non-strings: {:?}",
-                                            other
-                                        ),
-                                    })
-                                }
-                            }
-                        }
-
-                        IrInstr::StrEndsWith {
-                            result,
-                            haystack,
-                            suffix,
-                        } => {
-                            let h = self.get(*haystack)?;
-                            let s = self.get(*suffix)?;
-                            match (h, s) {
-                                (IrValue::Str(hs), IrValue::Str(ss)) => {
-                                    self.values
-                                        .insert(*result, IrValue::Bool(hs.ends_with(ss.as_str())));
-                                }
-                                other => {
-                                    return Err(InterpError::TypeError {
-                                        detail: format!("StrEndsWith on non-strings: {:?}", other),
-                                    })
-                                }
-                            }
-                        }
-
-                        IrInstr::StrToUpper { result, operand } => {
-                            let v = self.get(*operand)?;
-                            match v {
-                                IrValue::Str(s) => {
-                                    self.values.insert(*result, IrValue::Str(s.to_uppercase()));
-                                }
-                                other => {
-                                    return Err(InterpError::TypeError {
-                                        detail: format!("StrToUpper on non-string: {:?}", other),
-                                    })
-                                }
-                            }
-                        }
-
-                        IrInstr::StrToLower { result, operand } => {
-                            let v = self.get(*operand)?;
-                            match v {
-                                IrValue::Str(s) => {
-                                    self.values.insert(*result, IrValue::Str(s.to_lowercase()));
-                                }
-                                other => {
-                                    return Err(InterpError::TypeError {
-                                        detail: format!("StrToLower on non-string: {:?}", other),
-                                    })
-                                }
-                            }
-                        }
-
-                        IrInstr::StrTrim { result, operand } => {
-                            let v = self.get(*operand)?;
-                            match v {
-                                IrValue::Str(s) => {
-                                    self.values
-                                        .insert(*result, IrValue::Str(s.trim().to_string()));
-                                }
-                                other => {
-                                    return Err(InterpError::TypeError {
-                                        detail: format!("StrTrim on non-string: {:?}", other),
-                                    })
-                                }
-                            }
-                        }
-
-                        IrInstr::StrRepeat {
-                            result,
-                            operand,
-                            count,
-                        } => {
-                            let sv = self.get(*operand)?;
-                            let cv = self.get(*count)?;
-                            match (sv, cv) {
-                                (IrValue::Str(s), IrValue::I64(n)) => {
-                                    self.values
-                                        .insert(*result, IrValue::Str(s.repeat(n.max(0) as usize)));
-                                }
-                                other => {
-                                    return Err(InterpError::TypeError {
-                                        detail: format!("StrRepeat invalid args: {:?}", other),
-                                    })
-                                }
-                            }
-                        }
-
-                        IrInstr::ParFor {
-                            start,
-                            end,
-                            body_fn,
-                            args,
-                            ..
-                        } => {
-                            // Parallel for: run iterations on real threads.
-                            let s = match self.get(*start)? {
-                                IrValue::I64(n) => n,
-                                other => {
-                                    return Err(InterpError::TypeError {
-                                        detail: format!(
-                                            "ParFor start must be i64, got {:?}",
-                                            other
-                                        ),
-                                    })
-                                }
-                            };
-                            let e = match self.get(*end)? {
-                                IrValue::I64(n) => n,
-                                other => {
-                                    return Err(InterpError::TypeError {
-                                        detail: format!("ParFor end must be i64, got {:?}", other),
-                                    })
-                                }
-                            };
-                            let callee = self
-                                .module
-                                .and_then(|m| m.function_by_name(body_fn))
-                                .ok_or_else(|| InterpError::Unsupported {
-                                    detail: format!("undefined par_for function: {}", body_fn),
-                                })?
-                                .clone();
-                            // Resolve captured args once.
-                            let mut cap_vals: Vec<IrValue> = Vec::new();
-                            for a in args {
-                                cap_vals.push(self.get(*a)?);
-                            }
-                            let module = self.module;
-                            let opts = self.opts;
-                            let depth = self.depth;
-                            // Use the enclosing thread scope for parallelism.
-                            // Limit thread count to available parallelism.
-                            let n_iters = (e - s) as usize;
-                            let n_threads = std::thread::available_parallelism()
-                                .map(|p| p.get())
-                                .unwrap_or(4)
-                                .min(n_iters);
-                            if n_threads <= 1 || n_iters == 0 {
-                                // Sequential fallback for tiny ranges.
-                                for i in s..e {
-                                    let mut call_args = vec![IrValue::I64(i)];
-                                    call_args.extend(cap_vals.iter().cloned());
-                                    let mut sub = Interpreter::new(module, opts, depth + 1);
-                                    sub.run(&callee, &call_args)?;
-                                    self.spawn_handles.extend(sub.spawn_handles.drain(..));
-                                }
-                            } else {
-                                let chunk_size = n_iters.div_ceil(n_threads);
-                                let first_err: std::sync::Mutex<Option<InterpError>> =
-                                    std::sync::Mutex::new(None);
-                                // Use a dedicated scope so ParFor blocks until all
-                                // iterations complete.
-                                std::thread::scope(|par_scope| {
-                                    let callee_ref = &callee;
-                                    let cap_ref = &cap_vals;
-                                    let err_ref = &first_err;
-                                    for t in 0..n_threads {
-                                        let lo = s + (t as i64) * (chunk_size as i64);
-                                        let hi = lo + (chunk_size as i64);
-                                        let hi = hi.min(e);
-                                        if lo >= hi {
-                                            break;
-                                        }
-                                        par_scope.spawn(move || {
-                                            for i in lo..hi {
-                                                let mut call_args = vec![IrValue::I64(i)];
-                                                call_args.extend(cap_ref.iter().cloned());
-                                                let mut sub =
-                                                    Interpreter::new(module, opts, depth + 1);
-                                                if let Err(err) = sub.run(callee_ref, &call_args) {
-                                                    let mut guard = err_ref.lock().unwrap();
-                                                    if guard.is_none() {
-                                                        *guard = Some(err);
-                                                    }
-                                                    return;
-                                                }
-                                            }
-                                        });
-                                    }
-                                });
-                                if let Some(err) = first_err.into_inner().unwrap() {
-                                    return Err(err);
-                                }
-                            }
-                        }
-
-                        IrInstr::ChanNew { result, capacity, .. } => {
-                            let cap_val = self.get(*capacity)?;
-                            let cap = match cap_val {
-                                IrValue::I64(c) => if c <= 0 { std::usize::MAX } else { c as usize },
-                                _ => return Err(InterpError::TypeError { detail: "ChanNew capacity must be an integer".into() }),
-                            };
-                            let ch = Arc::new(SharedChannel {
-                                queue: Mutex::new(std::collections::VecDeque::new()),
-                                not_empty: Condvar::new(),
-                                not_full: Condvar::new(),
-                                capacity: cap,
-                            });
-                            self.values.insert(*result, IrValue::Chan(ch));
-                        }
-
-                        IrInstr::ChanSend { chan, value } => {
-                            let ch = self.get(*chan)?;
-                            let v = self.get(*value)?;
-                            match ch {
-                                IrValue::Chan(q) => {
-                                    let mut queue = q.queue.lock().unwrap();
-                                    while queue.len() >= q.capacity {
-                                        queue = q.not_full.wait(queue).unwrap();
-                                    }
-                                    queue.push_back(v);
-                                    q.not_empty.notify_one();
-                                }
-                                other => {
-                                    return Err(InterpError::TypeError {
-                                        detail: format!("ChanSend on non-channel: {:?}", other),
-                                    })
-                                }
-                            }
-                        }
-
-                        IrInstr::ChanRecv { result, chan, .. } => {
-                            let ch = self.get(*chan)?;
-                            match ch {
-                                IrValue::Chan(q) => {
-                                    let mut queue = q.queue.lock().unwrap();
-                                    while queue.is_empty() {
-                                        queue = q.not_empty.wait(queue).unwrap();
-                                    }
-                                    let val = queue.pop_front().unwrap();
-                                    q.not_full.notify_one();
-                                    self.values.insert(*result, val);
-                                }
-                                other => {
-                                    return Err(InterpError::TypeError {
-                                        detail: format!("ChanRecv on non-channel: {:?}", other),
-                                    })
-                                }
-                            }
-                        }
-
-                        IrInstr::Spawn { body_fn, args } => {
-                            // Spawn the body function on a real OS thread.
-                            let callee = self
-                                .module
-                                .and_then(|m| m.function_by_name(body_fn))
-                                .ok_or_else(|| InterpError::Unsupported {
-                                    detail: format!("undefined spawn function: {}", body_fn),
-                                })?
-                                .clone();
-                            let mut call_args = Vec::new();
-                            for a in args {
-                                call_args.push(self.get(*a)?);
-                            }
-                            let module_raw: usize = self
-                                .module
-                                .map(|m| m as *const IrModule as usize)
-                                .unwrap_or(0);
-                            let opts = self.opts;
-                            let depth = self.depth;
-                            self.spawn_handles.push(std::thread::spawn(move || {
-                                let module: Option<&IrModule> = if module_raw == 0 {
-                                    None
-                                } else {
-                                    Some(unsafe { &*(module_raw as *const IrModule) })
-                                };
-                                let mut sub = Interpreter::new(module, opts, depth + 1);
-                                sub.run(&callee, &call_args)
-                            }));
-                        }
-
-                        IrInstr::TaskGroupNew { result } => {
-                            let tg = Arc::new(Mutex::new(TaskGroupState {
-                                handles: Vec::new(),
-                                cancelled: false,
-                            }));
-                            self.values.insert(*result, IrValue::TaskGroup(tg));
-                        }
-
-                        IrInstr::TaskGroupSpawn { group, body_fn, args } => {
-                            let tg_val = self.get(*group)?;
-                            match tg_val {
-                                IrValue::TaskGroup(tg) => {
-                                    let callee = self
-                                        .module
-                                        .and_then(|m| m.function_by_name(body_fn))
-                                        .ok_or_else(|| InterpError::Unsupported {
-                                            detail: format!("undefined spawn function: {}", body_fn),
-                                        })?
-                                        .clone();
-                                    let mut call_args = Vec::new();
-                                    for a in args {
-                                        call_args.push(self.get(*a)?);
-                                    }
-                                    let module_raw: usize = self
-                                        .module
-                                        .map(|m| m as *const IrModule as usize)
-                                        .unwrap_or(0);
-                                    let opts = self.opts;
-                                    let depth = self.depth;
-                                    let handle = std::thread::spawn(move || {
-                                        let module: Option<&IrModule> = if module_raw == 0 {
-                                            None
-                                        } else {
-                                            Some(unsafe { &*(module_raw as *const IrModule) })
-                                        };
-                                        let mut sub = Interpreter::new(module, opts, depth + 1);
-                                        sub.run(&callee, &call_args)
-                                    });
-                                    tg.lock().unwrap().handles.push(handle);
-                                }
-                                other => {
-                                    return Err(InterpError::TypeError {
-                                        detail: format!("TaskGroupSpawn on non-task-group: {:?}", other),
-                                    })
-                                }
-                            }
-                        }
-
-                        IrInstr::TaskGroupJoin { group } => {
-                            let tg_val = self.get(*group)?;
-                            match tg_val {
-                                IrValue::TaskGroup(tg) => {
-                                    let handles = tg.lock().unwrap().handles.drain(..).collect::<Vec<_>>();
-                                    for h in handles {
-                                        let _ = h.join().map_err(|_| InterpError::Unsupported {
-                                            detail: "task panicked during join".into(),
-                                        })?;
-                                    }
-                                }
-                                other => {
-                                    return Err(InterpError::TypeError {
-                                        detail: format!("TaskGroupJoin on non-task-group: {:?}", other),
-                                    })
-                                }
-                            }
-                        }
-
-                        IrInstr::TaskGroupCancel { group } => {
-                            let tg_val = self.get(*group)?;
-                            match tg_val {
-                                IrValue::TaskGroup(tg) => {
-                                    tg.lock().unwrap().cancelled = true;
-                                }
-                                other => {
-                                    return Err(InterpError::TypeError {
-                                        detail: format!("TaskGroupCancel on non-task-group: {:?}", other),
-                                    })
-                                }
-                            }
-                        }
-
-                        IrInstr::AtomicNew {
-                            result,
-                            value,
-                            result_ty,
-                        } => {
-                            let v = self.get(*value)?;
-                            let cell = std::sync::Arc::new(std::sync::Mutex::new(v));
-                            let _ = result_ty;
-                            self.values.insert(*result, IrValue::Atomic(cell));
-                        }
-
-                        IrInstr::AtomicLoad { result, atomic, .. } => {
-                            let v = self.get(*atomic)?;
-                            match v {
-                                IrValue::Atomic(cell) => {
-                                    self.values.insert(*result, cell.lock().unwrap().clone());
-                                }
-                                other => {
-                                    return Err(InterpError::TypeError {
-                                        detail: format!("AtomicLoad on non-atomic: {:?}", other),
-                                    })
-                                }
-                            }
-                        }
-
-                        IrInstr::AtomicStore { atomic, value } => {
-                            let v = self.get(*value)?;
-                            let a = self.get(*atomic)?;
-                            match a {
-                                IrValue::Atomic(cell) => {
-                                    *cell.lock().unwrap() = v;
-                                }
-                                other => {
-                                    return Err(InterpError::TypeError {
-                                        detail: format!("AtomicStore on non-atomic: {:?}", other),
-                                    })
-                                }
-                            }
-                        }
-
-                        IrInstr::AtomicAdd {
-                            result,
-                            atomic,
-                            value,
-                            ..
-                        } => {
-                            let v = self.get(*value)?;
-                            let a = self.get(*atomic)?;
-                            match a {
-                                IrValue::Atomic(cell) => {
-                                    let mut guard = cell.lock().unwrap();
-                                    let old = guard.clone();
-                                    let new_val = match (old.clone(), v) {
-                                        (IrValue::I64(a), IrValue::I64(b)) => IrValue::I64(a + b),
-                                        (IrValue::I32(a), IrValue::I32(b)) => IrValue::I32(a + b),
-                                        (IrValue::F32(a), IrValue::F32(b)) => IrValue::F32(a + b),
-                                        (IrValue::F64(a), IrValue::F64(b)) => IrValue::F64(a + b),
-                                        _ => {
-                                            return Err(InterpError::TypeError {
-                                                detail: "AtomicAdd on non-numeric".into(),
-                                            })
-                                        }
-                                    };
-                                    *guard = new_val.clone();
-                                    self.values.insert(*result, new_val);
-                                }
-                                other => {
-                                    return Err(InterpError::TypeError {
-                                        detail: format!("AtomicAdd on non-atomic: {:?}", other),
-                                    })
-                                }
-                            }
-                        }
-
-                        IrInstr::MutexNew {
-                            result,
-                            value,
-                            result_ty,
-                        } => {
-                            let v = self.get(*value)?;
-                            let cell = std::sync::Arc::new(std::sync::Mutex::new(v));
-                            let _ = result_ty;
-                            self.values.insert(*result, IrValue::Atomic(cell));
-                        }
-
-                        IrInstr::MutexLock { result, mutex, .. } => {
-                            let v = self.get(*mutex)?;
-                            match v {
-                                IrValue::Atomic(cell) => {
-                                    self.values.insert(*result, cell.lock().unwrap().clone());
-                                }
-                                other => {
-                                    return Err(InterpError::TypeError {
-                                        detail: format!("MutexLock on non-mutex: {:?}", other),
-                                    })
-                                }
-                            }
-                        }
-
-                        IrInstr::MutexUnlock { .. } => {
-                            // No-op in single-threaded interpreter.
-                        }
-
-                        IrInstr::Sparsify {
-                            result, operand, ..
-                        } => {
-                            // Convert an Array or Tensor to sparse (index, value) pairs.
-                            // Only non-zero elements are stored.
-                            let v = self.get(*operand)?;
-                            let pairs = match v {
-                                IrValue::Array(elems) => elems
-                                    .iter()
-                                    .enumerate()
-                                    .filter(|(_, e)| match e {
-                                        IrValue::I64(0) | IrValue::I32(0) => false,
-                                        IrValue::F32(f) => *f != 0.0,
-                                        IrValue::F64(f) => *f != 0.0,
-                                        _ => true,
-                                    })
-                                    .map(|(i, e)| (i, e.clone()))
-                                    .collect(),
-                                IrValue::Tensor(data, _shape) => data
-                                    .iter()
-                                    .enumerate()
-                                    .filter(|(_, &val)| val != 0.0)
-                                    .map(|(i, &val)| (i, IrValue::F32(val)))
-                                    .collect(),
-                                other => vec![(0, other)],
-                            };
-                            self.values.insert(*result, IrValue::Sparse(pairs));
-                        }
-
-                        IrInstr::Densify {
-                            result, operand, ..
-                        } => {
-                            // Reconstruct the dense collection, filling the gaps
-                            // with zeros, exactly as the runtime's iris_densify
-                            // does. This used to return the non-zero count, which
-                            // contradicted the builtin's name and documented
-                            // signature and disagreed with the native backend.
-                            // The count is now SparseNnz.
-                            let v = self.get(*operand)?;
-                            let dense = match v {
-                                IrValue::Sparse(pairs) => {
-                                    let size = pairs
-                                        .iter()
-                                        .map(|(idx, _)| *idx + 1)
-                                        .max()
-                                        .unwrap_or(0);
-                                    let mut out = vec![IrValue::I64(0); size];
-                                    for (idx, value) in pairs {
-                                        if idx < size {
-                                            out[idx] = value;
-                                        }
-                                    }
-                                    IrValue::List(std::sync::Arc::new(std::sync::Mutex::new(out)))
-                                }
-                                other => other,
-                            };
-                            self.values.insert(*result, dense);
-                        }
-
-                        IrInstr::SparseNnz { result, operand } => {
-                            let v = self.get(*operand)?;
-                            let nnz = match v {
-                                IrValue::Sparse(pairs) => pairs.len() as i64,
-                                // A non-sparse operand has no stored-element count;
-                                // treat a list as fully populated.
-                                IrValue::List(items) => {
-                                    items.lock().map(|g| g.len()).unwrap_or(0) as i64
-                                }
-                                _ => 0,
-                            };
-                            self.values.insert(*result, IrValue::I64(nnz));
-                        }
-
-                        IrInstr::Barrier => {
-                            // No-op in single-threaded interpreter.
-                        }
-
-                        IrInstr::MakeGrad {
-                            result,
-                            value,
-                            tangent,
-                            ..
-                        } => {
-                            let v = self.get(*value)?;
-                            let t = self.get(*tangent)?;
-                            let vf = match v {
-                                IrValue::F64(x) => x,
-                                IrValue::F32(x) => x as f64,
-                                IrValue::I64(x) => x as f64,
-                                IrValue::I32(x) => x as f64,
-                                other => {
-                                    return Err(InterpError::TypeError {
-                                        detail: format!(
-                                            "MakeGrad value must be numeric, got {:?}",
-                                            other
-                                        ),
-                                    })
-                                }
-                            };
-                            let tf = match t {
-                                IrValue::F64(x) => x,
-                                IrValue::F32(x) => x as f64,
-                                IrValue::I64(x) => x as f64,
-                                IrValue::I32(x) => x as f64,
-                                other => {
-                                    return Err(InterpError::TypeError {
-                                        detail: format!(
-                                            "MakeGrad tangent must be numeric, got {:?}",
-                                            other
-                                        ),
-                                    })
-                                }
-                            };
-                            self.values.insert(
-                                *result,
-                                IrValue::Grad {
-                                    value: vf,
-                                    tangent: tf,
-                                },
-                            );
-                        }
-
-                        IrInstr::GradValue {
-                            result, operand, ..
-                        } => {
-                            let v = self.get(*operand)?;
-                            match v {
-                                IrValue::Grad { value, .. } => {
-                                    self.values.insert(*result, IrValue::F64(value));
-                                }
-                                other => {
-                                    return Err(InterpError::TypeError {
-                                        detail: format!("GradValue on non-grad: {:?}", other),
-                                    })
-                                }
-                            }
-                        }
-
-                        IrInstr::GradTangent {
-                            result, operand, ..
-                        } => {
-                            let v = self.get(*operand)?;
-                            match v {
-                                IrValue::Grad { tangent, .. } => {
-                                    self.values.insert(*result, IrValue::F64(tangent));
-                                }
-                                other => {
-                                    return Err(InterpError::TypeError {
-                                        detail: format!("GradTangent on non-grad: {:?}", other),
-                                    })
-                                }
-                            }
-                        }
-
-                        // ── Reverse-mode AD (tape-based backpropagation) ──
-                        IrInstr::TapeRecord {
-                            result,
-                            value,
-                            op,
-                            parents,
-                        } => {
-                            let primal = self.get(*value)?;
-                            let parent_ids: Vec<ValueId> = parents.clone();
-                            // Store as a TapeNode containing primal, op, and parent refs
-                            self.values.insert(
-                                *result,
-                                IrValue::TapeNode {
-                                    primal: Box::new(primal),
-                                    op: op.clone(),
-                                    parents: parent_ids,
-                                },
-                            );
-                        }
-
-                        IrInstr::Backward { result, loss } => {
-                            // Reverse-mode backpropagation from a loss scalar
-                            let mut grads: std::collections::HashMap<ValueId, f64> =
-                                std::collections::HashMap::new();
-                            // Seed: dL/dL = 1.0
-                            grads.insert(*loss, 1.0);
-
-                            // Topological order: collect all tape nodes reachable from loss
-                            let mut topo: Vec<ValueId> = Vec::new();
-                            let mut visited: std::collections::HashSet<ValueId> =
-                                std::collections::HashSet::new();
-                            fn topo_sort(
-                                vid: ValueId,
-                                values: &std::collections::HashMap<ValueId, IrValue>,
-                                visited: &mut std::collections::HashSet<ValueId>,
-                                topo: &mut Vec<ValueId>,
-                            ) {
-                                if !visited.insert(vid) {
-                                    return;
-                                }
-                                if let Some(IrValue::TapeNode { parents, .. }) = values.get(&vid) {
-                                    for &p in parents {
-                                        topo_sort(p, values, visited, topo);
-                                    }
-                                }
-                                topo.push(vid);
-                            }
-                            topo_sort(*loss, &self.values, &mut visited, &mut topo);
-                            topo.reverse(); // reverse post-order
-
-                            // Propagate gradients in reverse topological order
-                            for vid in &topo {
-                                let grad = *grads.get(vid).unwrap_or(&0.0);
-                                if let Some(IrValue::TapeNode {
-                                    op,
-                                    parents,
-                                    primal: _primal,
-                                    ..
-                                }) = self.values.get(vid).cloned()
-                                {
-                                    match op.as_str() {
-                                        "add" => {
-                                            // d(a+b)/da = 1, d(a+b)/db = 1
-                                            for p in &parents {
-                                                *grads.entry(*p).or_insert(0.0) += grad;
-                                            }
-                                        }
-                                        "sub" => {
-                                            if parents.len() >= 2 {
-                                                *grads.entry(parents[0]).or_insert(0.0) += grad;
-                                                *grads.entry(parents[1]).or_insert(0.0) -= grad;
-                                            }
-                                        }
-                                        "mul" => {
-                                            if parents.len() >= 2 {
-                                                let a_val = self.get_f64(parents[0]).unwrap_or(0.0);
-                                                let b_val = self.get_f64(parents[1]).unwrap_or(0.0);
-                                                *grads.entry(parents[0]).or_insert(0.0) +=
-                                                    grad * b_val;
-                                                *grads.entry(parents[1]).or_insert(0.0) +=
-                                                    grad * a_val;
-                                            }
-                                        }
-                                        "div" => {
-                                            if parents.len() >= 2 {
-                                                let a_val = self.get_f64(parents[0]).unwrap_or(0.0);
-                                                let b_val = self.get_f64(parents[1]).unwrap_or(1.0);
-                                                *grads.entry(parents[0]).or_insert(0.0) +=
-                                                    grad / b_val;
-                                                *grads.entry(parents[1]).or_insert(0.0) -=
-                                                    grad * a_val / (b_val * b_val);
-                                            }
-                                        }
-                                        "neg" => {
-                                            if let Some(&p) = parents.first() {
-                                                *grads.entry(p).or_insert(0.0) -= grad;
-                                            }
-                                        }
-                                        "sin" => {
-                                            if let Some(&p) = parents.first() {
-                                                let x = self.get_f64(p).unwrap_or(0.0);
-                                                *grads.entry(p).or_insert(0.0) += grad * x.cos();
-                                            }
-                                        }
-                                        "cos" => {
-                                            if let Some(&p) = parents.first() {
-                                                let x = self.get_f64(p).unwrap_or(0.0);
-                                                *grads.entry(p).or_insert(0.0) -= grad * x.sin();
-                                            }
-                                        }
-                                        "exp" => {
-                                            if let Some(&p) = parents.first() {
-                                                let x = self.get_f64(p).unwrap_or(0.0);
-                                                *grads.entry(p).or_insert(0.0) += grad * x.exp();
-                                            }
-                                        }
-                                        "log" => {
-                                            if let Some(&p) = parents.first() {
-                                                let x = self.get_f64(p).unwrap_or(1.0);
-                                                *grads.entry(p).or_insert(0.0) += grad / x;
-                                            }
-                                        }
-                                        "sqrt" => {
-                                            if let Some(&p) = parents.first() {
-                                                let x = self.get_f64(p).unwrap_or(1.0);
-                                                *grads.entry(p).or_insert(0.0) +=
-                                                    grad / (2.0 * x.sqrt());
-                                            }
-                                        }
-                                        "relu" => {
-                                            if let Some(&p) = parents.first() {
-                                                let x = self.get_f64(p).unwrap_or(0.0);
-                                                *grads.entry(p).or_insert(0.0) +=
-                                                    if x > 0.0 { grad } else { 0.0 };
-                                            }
-                                        }
-                                        "sigmoid" => {
-                                            if let Some(&p) = parents.first() {
-                                                let x = self.get_f64(p).unwrap_or(0.0);
-                                                let s = 1.0 / (1.0 + (-x).exp());
-                                                *grads.entry(p).or_insert(0.0) +=
-                                                    grad * s * (1.0 - s);
-                                            }
-                                        }
-                                        "tanh" => {
-                                            if let Some(&p) = parents.first() {
-                                                let x = self.get_f64(p).unwrap_or(0.0);
-                                                let t = x.tanh();
-                                                *grads.entry(p).or_insert(0.0) +=
-                                                    grad * (1.0 - t * t);
-                                            }
-                                        }
-                                        "pow" => {
-                                            if parents.len() >= 2 {
-                                                let base = self.get_f64(parents[0]).unwrap_or(1.0);
-                                                let exp = self.get_f64(parents[1]).unwrap_or(1.0);
-                                                // d/dbase = exp * base^(exp-1)
-                                                *grads.entry(parents[0]).or_insert(0.0) +=
-                                                    grad * exp * base.powf(exp - 1.0);
-                                                // d/dexp = base^exp * ln(base)
-                                                *grads.entry(parents[1]).or_insert(0.0) +=
-                                                    grad * base.powf(exp) * base.ln();
-                                            }
-                                        }
-                                        "abs" => {
-                                            if let Some(&p) = parents.first() {
-                                                let x = self.get_f64(p).unwrap_or(0.0);
-                                                *grads.entry(p).or_insert(0.0) +=
-                                                    grad * if x >= 0.0 { 1.0 } else { -1.0 };
-                                            }
-                                        }
-                                        _ => {
-                                            // Unknown op: gradients stay 0 for parents
-                                        }
-                                    }
-                                }
-                            }
-
-                            // Store the gradient map as an opaque unit value
-                            // The actual gradients are extracted via TapeGrad
-                            self.tape_grads = grads;
-                            self.values.insert(*result, IrValue::Unit);
-                        }
-
-                        IrInstr::TapeGrad { result, tape_node } => {
-                            let grad_val = self.tape_grads.get(tape_node).copied().unwrap_or(0.0);
-                            self.values.insert(*result, IrValue::F64(grad_val));
-                        }
-
-                        IrInstr::MakeSome { result, value, .. } => {
-                            let v = self.get(*value)?;
-                            self.values
-                                .insert(*result, IrValue::OptionVal(Some(Box::new(v))));
-                        }
-
-                        IrInstr::MakeNone { result, .. } => {
-                            self.values.insert(*result, IrValue::OptionVal(None));
-                        }
-
-                        IrInstr::IsSome { result, operand } => {
-                            let v = self.get(*operand)?;
-                            let b = matches!(v, IrValue::OptionVal(Some(_)));
-                            self.values.insert(*result, IrValue::Bool(b));
-                        }
-
-                        IrInstr::OptionUnwrap {
-                            result, operand, ..
-                        } => match self.get(*operand)? {
-                            IrValue::OptionVal(Some(inner)) => {
-                                self.values.insert(*result, *inner);
-                            }
-                            IrValue::OptionVal(None) => {
-                                return Err(InterpError::Unsupported {
-                                    detail: "unwrap called on none".into(),
-                                });
+                                self.values.insert(*result, val);
                             }
                             other => {
                                 return Err(InterpError::TypeError {
-                                    detail: format!("OptionUnwrap on non-option: {:?}", other),
-                                });
-                            }
-                        },
-
-                        IrInstr::MakeOk { result, value, .. } => {
-                            let v = self.get(*value)?;
-                            self.values
-                                .insert(*result, IrValue::ResultVal(Ok(Box::new(v))));
-                        }
-
-                        IrInstr::MakeErr { result, value, .. } => {
-                            let v = self.get(*value)?;
-                            self.values
-                                .insert(*result, IrValue::ResultVal(Err(Box::new(v))));
-                        }
-
-                        IrInstr::IsOk { result, operand } => {
-                            let v = self.get(*operand)?;
-                            let b = matches!(v, IrValue::ResultVal(Ok(_)));
-                            self.values.insert(*result, IrValue::Bool(b));
-                        }
-
-                        IrInstr::ResultUnwrap {
-                            result, operand, ..
-                        } => match self.get(*operand)? {
-                            IrValue::ResultVal(Ok(inner)) => {
-                                self.values.insert(*result, *inner);
-                            }
-                            IrValue::ResultVal(Err(_)) => {
-                                return Err(InterpError::Unsupported {
-                                    detail: "result_unwrap called on err".into(),
-                                });
-                            }
-                            other => {
-                                return Err(InterpError::TypeError {
-                                    detail: format!("ResultUnwrap on non-result: {:?}", other),
-                                });
-                            }
-                        },
-
-                        IrInstr::ResultUnwrapErr {
-                            result, operand, ..
-                        } => match self.get(*operand)? {
-                            IrValue::ResultVal(Err(inner)) => {
-                                self.values.insert(*result, *inner);
-                            }
-                            IrValue::ResultVal(Ok(_)) => {
-                                return Err(InterpError::Unsupported {
-                                    detail: "result_unwrap_err called on ok".into(),
-                                });
-                            }
-                            other => {
-                                return Err(InterpError::TypeError {
-                                    detail: format!("ResultUnwrapErr on non-result: {:?}", other),
-                                });
-                            }
-                        },
-
-                        IrInstr::MakeClosure {
-                            result,
-                            fn_name,
-                            captures,
-                            result_ty,
-                        } => {
-                            let captured_vals: Vec<IrValue> = captures
-                                .iter()
-                                .map(|v| self.get(*v))
-                                .collect::<Result<_, _>>()?;
-                            self.values.insert(
-                                *result,
-                                IrValue::Closure {
-                                    fn_name: fn_name.clone(),
-                                    captured: captured_vals,
-                                    ty: result_ty.clone(),
-                                },
-                            );
-                        }
-
-                        IrInstr::CallClosure {
-                            result,
-                            closure,
-                            args,
-                            result_ty,
-                            ..
-                        } => {
-                            let closure_val = self.get(*closure)?;
-                            let (fn_name, captured) = match closure_val {
-                                IrValue::Closure {
-                                    fn_name, captured, ..
-                                } => (fn_name, captured),
-                                other => {
-                                    return Err(InterpError::TypeError {
-                                        detail: format!("CallClosure on non-closure: {:?}", other),
-                                    })
-                                }
-                            };
-                            let callee = self
-                                .module
-                                .and_then(|m| m.function_by_name(&fn_name))
-                                .ok_or_else(|| InterpError::Unsupported {
-                                    detail: format!("undefined closure function: {}", fn_name),
-                                })?
-                                .clone();
-                            let mut call_args: Vec<IrValue> = captured;
-                            for a in args {
-                                call_args.push(self.get(*a)?);
-                            }
-                            if self.depth >= self.opts.max_depth {
-                                return Err(InterpError::Unsupported {
                                     detail: format!(
-                                        "call depth exceeded {} (infinite recursion?)",
-                                        self.opts.max_depth
+                                        "ExtractVariantField on non-Enum value: {:?}",
+                                        other
                                     ),
                                 });
                             }
-                            let mut sub = Interpreter::new(self.module, self.opts, self.depth + 1);
-                            sub.profiler = self.profiler.clone();
-                            sub.trace_out = self.trace_out.clone();
-                            sub.trace_func = fn_name.clone();
-                            sub.trace_source = self.trace_source.clone();
-                            if let Some(ref prof) = self.profiler {
-                                prof.borrow_mut().enter_function(&fn_name);
-                            }
-                            let ret = sub.run(&callee, &call_args)?;
-                            self.spawn_handles.extend(sub.spawn_handles.drain(..));
-                            if let Some(ref prof) = self.profiler {
-                                prof.borrow_mut().exit_function(&fn_name);
-                            }
-                            if let Some(r) = result {
-                                self.values
-                                    .insert(*r, ret.into_iter().next().unwrap_or(IrValue::Unit));
-                            }
-                            let _ = result_ty;
                         }
+                    }
 
-                        IrInstr::Br { target, args } => {
-                            self.bind_block_params(func, *target, args)?;
-                            current = *target;
-                            continue 'blocks;
-                        }
+                    IrInstr::MakeTuple {
+                        result, elements, ..
+                    } => {
+                        let elem_vals: Vec<IrValue> = elements
+                            .iter()
+                            .map(|&v| self.get(v))
+                            .collect::<Result<Vec<_>, _>>()?;
+                        self.values.insert(*result, IrValue::Tuple(elem_vals));
+                    }
 
-                        IrInstr::CondBr {
-                            cond,
-                            then_block,
-                            then_args,
-                            else_block,
-                            else_args,
-                        } => {
-                            let b = match self
-                                .values
-                                .get(cond)
-                                .ok_or(InterpError::UndefinedValue { id: cond.0 })?
-                            {
-                                IrValue::Bool(b) => *b,
-                                other => {
-                                    return Err(InterpError::TypeError {
+                    IrInstr::GetElement {
+                        result,
+                        base,
+                        index,
+                        ..
+                    } => {
+                        let bv = self.get(*base)?;
+                        match bv {
+                            IrValue::Tuple(elems) => {
+                                let val = elems.get(*index).cloned().ok_or_else(|| {
+                                    InterpError::Unsupported {
                                         detail: format!(
-                                            "CondBr condition must be bool, got {:?}",
-                                            other
+                                            "tuple index {} out of bounds for {} elements",
+                                            index,
+                                            elems.len()
                                         ),
-                                    })
-                                }
-                            };
-                            let (target, br_args) = if b {
-                                (then_block, then_args)
-                            } else {
-                                (else_block, else_args)
-                            };
-                            self.bind_block_params(func, *target, br_args)?;
-                            current = *target;
-                            continue 'blocks;
+                                    }
+                                })?;
+                                self.values.insert(*result, val);
+                            }
+                            IrValue::Struct(fields) => {
+                                let val = fields.get(*index).cloned().ok_or_else(|| {
+                                    InterpError::Unsupported {
+                                        detail: format!(
+                                            "element index {} out of bounds for struct",
+                                            index
+                                        ),
+                                    }
+                                })?;
+                                self.values.insert(*result, val);
+                            }
+                            other => {
+                                return Err(InterpError::TypeError {
+                                    detail: format!("GetElement on non-tuple value: {:?}", other),
+                                });
+                            }
                         }
+                    }
 
-                        IrInstr::Return { values } => {
-                            let results = values
-                                .iter()
-                                .map(|&v| {
-                                    self.values
-                                        .get(&v)
-                                        .cloned()
-                                        .ok_or(InterpError::UndefinedValue { id: v.0 })
+                    IrInstr::AllocArray { result, init, .. } => {
+                        let vals: Vec<IrValue> = init
+                            .iter()
+                            .map(|&v| self.get(v))
+                            .collect::<Result<Vec<_>, _>>()?;
+                        self.values.insert(*result, IrValue::Array(vals));
+                    }
+
+                    IrInstr::ArrayLoad {
+                        result,
+                        array,
+                        index,
+                        ..
+                    } => {
+                        let arr = self.get(*array)?;
+                        let idx = match self.get(*index)? {
+                            IrValue::I64(n) => n as usize,
+                            IrValue::I32(n) => n as usize,
+                            other => {
+                                return Err(InterpError::TypeError {
+                                    detail: format!(
+                                        "ArrayLoad index must be integer, got {:?}",
+                                        other
+                                    ),
+                                });
+                            }
+                        };
+                        match arr {
+                            IrValue::Array(elems) => {
+                                let val = elems.get(idx).cloned().ok_or_else(|| {
+                                    InterpError::Unsupported {
+                                        detail: format!(
+                                            "array index {} out of bounds ({} elements)",
+                                            idx,
+                                            elems.len()
+                                        ),
+                                    }
+                                })?;
+                                self.values.insert(*result, val);
+                            }
+                            other => {
+                                return Err(InterpError::TypeError {
+                                    detail: format!("ArrayLoad on non-array: {:?}", other),
+                                });
+                            }
+                        }
+                    }
+
+                    IrInstr::ArrayStore {
+                        array,
+                        index,
+                        value,
+                    } => {
+                        let arr = self.get(*array)?;
+                        let idx = match self.get(*index)? {
+                            IrValue::I64(n) => n as usize,
+                            IrValue::I32(n) => n as usize,
+                            other => {
+                                return Err(InterpError::TypeError {
+                                    detail: format!(
+                                        "ArrayStore index must be integer, got {:?}",
+                                        other
+                                    ),
+                                });
+                            }
+                        };
+                        let val = self.get(*value)?;
+                        match arr {
+                            IrValue::Array(mut elems) => {
+                                if idx >= elems.len() {
+                                    return Err(InterpError::Unsupported {
+                                        detail: format!(
+                                            "array index {} out of bounds ({} elements)",
+                                            idx,
+                                            elems.len()
+                                        ),
+                                    });
+                                }
+                                elems[idx] = val;
+                                self.values.insert(*array, IrValue::Array(elems));
+                            }
+                            other => {
+                                return Err(InterpError::TypeError {
+                                    detail: format!("ArrayStore on non-array: {:?}", other),
+                                });
+                            }
+                        }
+                    }
+
+                    IrInstr::ConstStr { result, value } => {
+                        self.values.insert(*result, IrValue::Str(value.clone()));
+                    }
+
+                    IrInstr::StrLen { result, operand } => {
+                        let sv = self.get(*operand)?;
+                        match sv {
+                            IrValue::Str(s) => {
+                                self.values.insert(*result, IrValue::I64(s.len() as i64));
+                            }
+                            other => {
+                                return Err(InterpError::TypeError {
+                                    detail: format!("StrLen on non-string: {:?}", other),
+                                });
+                            }
+                        }
+                    }
+
+                    IrInstr::StrConcat { result, lhs, rhs } => {
+                        let lv = self.get(*lhs)?;
+                        let rv = self.get(*rhs)?;
+                        match (lv, rv) {
+                            (IrValue::Str(l), IrValue::Str(r)) => {
+                                self.values.insert(*result, IrValue::Str(l + &r));
+                            }
+                            other => {
+                                return Err(InterpError::TypeError {
+                                    detail: format!("StrConcat on non-strings: {:?}", other),
+                                });
+                            }
+                        }
+                    }
+
+                    IrInstr::Print { operand } => {
+                        let v = self.get(*operand)?;
+                        match &v {
+                            // Print strings without surrounding quotes.
+                            IrValue::Str(s) => emit_line(s),
+                            other => emit_line(&format!("{}", other)),
+                        }
+                    }
+
+                    IrInstr::StrContains {
+                        result,
+                        haystack,
+                        needle,
+                    } => {
+                        let h = self.get(*haystack)?;
+                        let n = self.get(*needle)?;
+                        match (h, n) {
+                            (IrValue::Str(hs), IrValue::Str(ns)) => {
+                                self.values
+                                    .insert(*result, IrValue::Bool(hs.contains(ns.as_str())));
+                            }
+                            other => {
+                                return Err(InterpError::TypeError {
+                                    detail: format!("StrContains on non-strings: {:?}", other),
                                 })
-                                .collect::<Result<Vec<_>, _>>()?;
-                            return Ok(results);
-                        }
-
-                        IrInstr::Panic { msg, span_byte } => {
-                            // Prefer the position carried on the instruction over
-                            // the sticky `last_byte`. `span_table` is keyed by
-                            // (block, instr_idx) and no pass maintains it, so once
-                            // const-folding deletes the ConstStr holding the panic
-                            // message every later index shifts and the panic is
-                            // attributed to the preceding statement — a line that
-                            // succeeded. See known-issues #20.
-                            if let Some(byte) = span_byte {
-                                self.last_byte = Some(*byte);
-                            }
-                            let msg_val = self
-                                .values
-                                .get(msg)
-                                .cloned()
-                                .ok_or(InterpError::UndefinedValue { id: msg.0 })?;
-                            let msg_str = match &msg_val {
-                                IrValue::Str(s) => s.clone(),
-                                other => format!("{}", other),
-                            };
-                            return Err(InterpError::Panic { msg: msg_str });
-                        }
-
-                        IrInstr::ValueToStr { result, operand } => {
-                            let v = self.get(*operand)?;
-                            let s = match &v {
-                                IrValue::Str(s) => s.clone(),
-                                other => format!("{}", other),
-                            };
-                            self.values.insert(*result, IrValue::Str(s));
-                        }
-
-                        IrInstr::ReadLine { result } => {
-                            let mut line = String::new();
-                            std::io::stdin().read_line(&mut line).map_err(|e| {
-                                InterpError::Unsupported {
-                                    detail: format!("read_line failed: {}", e),
-                                }
-                            })?;
-                            let s = line.trim_end_matches(['\n', '\r']).to_owned();
-                            self.values.insert(*result, IrValue::Str(s));
-                        }
-
-                        IrInstr::ReadI64 { result } => {
-                            let mut line = String::new();
-                            std::io::stdin().read_line(&mut line).map_err(|e| {
-                                InterpError::Unsupported {
-                                    detail: format!("read_i64 failed: {}", e),
-                                }
-                            })?;
-                            let n: i64 =
-                                line.trim().parse().map_err(|e| InterpError::Unsupported {
-                                    detail: format!("read_i64 parse error: {}", e),
-                                })?;
-                            self.values.insert(*result, IrValue::I64(n));
-                        }
-
-                        IrInstr::ReadF64 { result } => {
-                            let mut line = String::new();
-                            std::io::stdin().read_line(&mut line).map_err(|e| {
-                                InterpError::Unsupported {
-                                    detail: format!("read_f64 failed: {}", e),
-                                }
-                            })?;
-                            let x: f64 =
-                                line.trim().parse().map_err(|e| InterpError::Unsupported {
-                                    detail: format!("read_f64 parse error: {}", e),
-                                })?;
-                            self.values.insert(*result, IrValue::F64(x));
-                        }
-
-                        IrInstr::ParseI64 { result, operand } => {
-                            let v = self.get(*operand)?;
-                            let s = match &v {
-                                IrValue::Str(s) => s.clone(),
-                                other => format!("{}", other),
-                            };
-                            let opt = s
-                                .trim()
-                                .parse::<i64>()
-                                .ok()
-                                .map(|n| Box::new(IrValue::I64(n)));
-                            self.values.insert(*result, IrValue::OptionVal(opt));
-                        }
-
-                        IrInstr::ParseF64 { result, operand } => {
-                            let v = self.get(*operand)?;
-                            let s = match &v {
-                                IrValue::Str(s) => s.clone(),
-                                other => format!("{}", other),
-                            };
-                            let opt = s
-                                .trim()
-                                .parse::<f64>()
-                                .ok()
-                                .map(|x| Box::new(IrValue::F64(x)));
-                            self.values.insert(*result, IrValue::OptionVal(opt));
-                        }
-
-                        IrInstr::StrIndex {
-                            result,
-                            string,
-                            index,
-                        } => {
-                            let sv = self.get(*string)?;
-                            let iv = self.get(*index)?;
-                            let s = match &sv {
-                                IrValue::Str(s) => s.clone(),
-                                other => format!("{}", other),
-                            };
-                            let idx = match &iv {
-                                IrValue::I64(n) => *n,
-                                _ => {
-                                    return Err(InterpError::TypeError {
-                                        detail: "str_index index must be i64".into(),
-                                    })
-                                }
-                            };
-                            let byte = s
-                                .as_bytes()
-                                .get(idx as usize)
-                                .ok_or(InterpError::IndexOutOfBounds { idx, len: s.len() })?;
-                            self.values.insert(*result, IrValue::I64(*byte as i64));
-                        }
-
-                        IrInstr::StrSlice {
-                            result,
-                            string,
-                            start,
-                            end,
-                        } => {
-                            let sv = self.get(*string)?;
-                            let startv = self.get(*start)?;
-                            let endv = self.get(*end)?;
-                            let s = match &sv {
-                                IrValue::Str(s) => s.clone(),
-                                other => format!("{}", other),
-                            };
-                            let start_idx = match &startv {
-                                IrValue::I64(n) => *n as usize,
-                                _ => {
-                                    return Err(InterpError::TypeError {
-                                        detail: "slice start must be i64".into(),
-                                    })
-                                }
-                            };
-                            let end_idx = match &endv {
-                                IrValue::I64(n) => *n as usize,
-                                _ => {
-                                    return Err(InterpError::TypeError {
-                                        detail: "slice end must be i64".into(),
-                                    })
-                                }
-                            };
-                            let slice = s.get(start_idx..end_idx).unwrap_or("").to_owned();
-                            self.values.insert(*result, IrValue::Str(slice));
-                        }
-
-                        IrInstr::StrFind {
-                            result,
-                            haystack,
-                            needle,
-                        } => {
-                            let hv = self.get(*haystack)?;
-                            let nv = self.get(*needle)?;
-                            let h = match &hv {
-                                IrValue::Str(s) => s.clone(),
-                                other => format!("{}", other),
-                            };
-                            let n = match &nv {
-                                IrValue::Str(s) => s.clone(),
-                                other => format!("{}", other),
-                            };
-                            let opt = h.find(&*n).map(|i| Box::new(IrValue::I64(i as i64)));
-                            self.values.insert(*result, IrValue::OptionVal(opt));
-                        }
-
-                        IrInstr::StrReplace {
-                            result,
-                            string,
-                            from,
-                            to,
-                        } => {
-                            let sv = self.get(*string)?;
-                            let fv = self.get(*from)?;
-                            let tv = self.get(*to)?;
-                            let s = match &sv {
-                                IrValue::Str(s) => s.clone(),
-                                other => format!("{}", other),
-                            };
-                            let f = match &fv {
-                                IrValue::Str(s) => s.clone(),
-                                other => format!("{}", other),
-                            };
-                            let t = match &tv {
-                                IrValue::Str(s) => s.clone(),
-                                other => format!("{}", other),
-                            };
-                            self.values
-                                .insert(*result, IrValue::Str(s.replace(&*f, &t)));
-                        }
-
-                        IrInstr::ListNew { result, .. } => {
-                            let list = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-                            self.values.insert(*result, IrValue::List(list));
-                        }
-                        IrInstr::ListPush { list, value } => {
-                            let lv = self.get(*list)?;
-                            let v = self.get(*value)?;
-                            if let IrValue::List(cells) = lv {
-                                cells.lock().unwrap().push(v);
-                                self.values.insert(*list, IrValue::List(cells));
-                            } else {
-                                return Err(InterpError::TypeError {
-                                    detail: "list_push: not a list".into(),
-                                });
                             }
                         }
-                        IrInstr::ListLen { result, list } => {
-                            let lv = self.get(*list)?;
-                            let len = if let IrValue::List(cells) = &lv {
-                                cells.lock().unwrap().len() as i64
-                            } else {
+                    }
+
+                    IrInstr::StrStartsWith {
+                        result,
+                        haystack,
+                        prefix,
+                    } => {
+                        let h = self.get(*haystack)?;
+                        let p = self.get(*prefix)?;
+                        match (h, p) {
+                            (IrValue::Str(hs), IrValue::Str(ps)) => {
+                                self.values
+                                    .insert(*result, IrValue::Bool(hs.starts_with(ps.as_str())));
+                            }
+                            other => {
                                 return Err(InterpError::TypeError {
-                                    detail: "list_len: not a list".into(),
-                                });
-                            };
-                            self.values.insert(*result, IrValue::I64(len));
+                                    detail: format!("StrStartsWith on non-strings: {:?}", other),
+                                })
+                            }
                         }
-                        IrInstr::ListGet {
-                            result,
-                            list,
-                            index,
-                            elem_ty,
-                        } => {
-                            let lv = self.get(*list)?;
-                            let iv = self.get(*index)?;
-                            let idx = match iv {
-                                IrValue::I64(n) => n as usize,
-                                _ => {
-                                    return Err(InterpError::TypeError {
-                                        detail: "list_get: index must be i64".into(),
-                                    })
-                                }
-                            };
-                            if let IrValue::List(cells) = lv {
-                                let raw =
-                                    cells.lock().unwrap().get(idx).cloned().ok_or_else(|| {
-                                        InterpError::TypeError {
-                                            detail: format!(
-                                                "list_get: index {} out of bounds",
-                                                idx
-                                            ),
+                    }
+
+                    IrInstr::StrEndsWith {
+                        result,
+                        haystack,
+                        suffix,
+                    } => {
+                        let h = self.get(*haystack)?;
+                        let s = self.get(*suffix)?;
+                        match (h, s) {
+                            (IrValue::Str(hs), IrValue::Str(ss)) => {
+                                self.values
+                                    .insert(*result, IrValue::Bool(hs.ends_with(ss.as_str())));
+                            }
+                            other => {
+                                return Err(InterpError::TypeError {
+                                    detail: format!("StrEndsWith on non-strings: {:?}", other),
+                                })
+                            }
+                        }
+                    }
+
+                    IrInstr::StrToUpper { result, operand } => {
+                        let v = self.get(*operand)?;
+                        match v {
+                            IrValue::Str(s) => {
+                                self.values.insert(*result, IrValue::Str(s.to_uppercase()));
+                            }
+                            other => {
+                                return Err(InterpError::TypeError {
+                                    detail: format!("StrToUpper on non-string: {:?}", other),
+                                })
+                            }
+                        }
+                    }
+
+                    IrInstr::StrToLower { result, operand } => {
+                        let v = self.get(*operand)?;
+                        match v {
+                            IrValue::Str(s) => {
+                                self.values.insert(*result, IrValue::Str(s.to_lowercase()));
+                            }
+                            other => {
+                                return Err(InterpError::TypeError {
+                                    detail: format!("StrToLower on non-string: {:?}", other),
+                                })
+                            }
+                        }
+                    }
+
+                    IrInstr::StrTrim { result, operand } => {
+                        let v = self.get(*operand)?;
+                        match v {
+                            IrValue::Str(s) => {
+                                self.values
+                                    .insert(*result, IrValue::Str(s.trim().to_string()));
+                            }
+                            other => {
+                                return Err(InterpError::TypeError {
+                                    detail: format!("StrTrim on non-string: {:?}", other),
+                                })
+                            }
+                        }
+                    }
+
+                    IrInstr::StrRepeat {
+                        result,
+                        operand,
+                        count,
+                    } => {
+                        let sv = self.get(*operand)?;
+                        let cv = self.get(*count)?;
+                        match (sv, cv) {
+                            (IrValue::Str(s), IrValue::I64(n)) => {
+                                self.values
+                                    .insert(*result, IrValue::Str(s.repeat(n.max(0) as usize)));
+                            }
+                            other => {
+                                return Err(InterpError::TypeError {
+                                    detail: format!("StrRepeat invalid args: {:?}", other),
+                                })
+                            }
+                        }
+                    }
+
+                    IrInstr::ParFor {
+                        start,
+                        end,
+                        body_fn,
+                        args,
+                        ..
+                    } => {
+                        // Parallel for: run iterations on real threads.
+                        let s = match self.get(*start)? {
+                            IrValue::I64(n) => n,
+                            other => {
+                                return Err(InterpError::TypeError {
+                                    detail: format!("ParFor start must be i64, got {:?}", other),
+                                })
+                            }
+                        };
+                        let e = match self.get(*end)? {
+                            IrValue::I64(n) => n,
+                            other => {
+                                return Err(InterpError::TypeError {
+                                    detail: format!("ParFor end must be i64, got {:?}", other),
+                                })
+                            }
+                        };
+                        let callee = self
+                            .module
+                            .and_then(|m| m.function_by_name(body_fn))
+                            .ok_or_else(|| InterpError::Unsupported {
+                                detail: format!("undefined par_for function: {}", body_fn),
+                            })?
+                            .clone();
+                        // Resolve captured args once.
+                        let mut cap_vals: Vec<IrValue> = Vec::new();
+                        for a in args {
+                            cap_vals.push(self.get(*a)?);
+                        }
+                        let module = self.module;
+                        let opts = self.opts;
+                        let depth = self.depth;
+                        // Use the enclosing thread scope for parallelism.
+                        // Limit thread count to available parallelism.
+                        let n_iters = (e - s) as usize;
+                        let n_threads = std::thread::available_parallelism()
+                            .map(|p| p.get())
+                            .unwrap_or(4)
+                            .min(n_iters);
+                        if n_threads <= 1 || n_iters == 0 {
+                            // Sequential fallback for tiny ranges.
+                            for i in s..e {
+                                let mut call_args = vec![IrValue::I64(i)];
+                                call_args.extend(cap_vals.iter().cloned());
+                                let mut sub = Interpreter::new(module, opts, depth + 1);
+                                sub.run(&callee, &call_args)?;
+                                self.spawn_handles.append(&mut sub.spawn_handles);
+                            }
+                        } else {
+                            let chunk_size = n_iters.div_ceil(n_threads);
+                            let first_err: std::sync::Mutex<Option<InterpError>> =
+                                std::sync::Mutex::new(None);
+                            // Use a dedicated scope so ParFor blocks until all
+                            // iterations complete.
+                            std::thread::scope(|par_scope| {
+                                let callee_ref = &callee;
+                                let cap_ref = &cap_vals;
+                                let err_ref = &first_err;
+                                for t in 0..n_threads {
+                                    let lo = s + (t as i64) * (chunk_size as i64);
+                                    let hi = lo + (chunk_size as i64);
+                                    let hi = hi.min(e);
+                                    if lo >= hi {
+                                        break;
+                                    }
+                                    par_scope.spawn(move || {
+                                        for i in lo..hi {
+                                            let mut call_args = vec![IrValue::I64(i)];
+                                            call_args.extend(cap_ref.iter().cloned());
+                                            let mut sub = Interpreter::new(module, opts, depth + 1);
+                                            if let Err(err) = sub.run(callee_ref, &call_args) {
+                                                let mut guard = err_ref.lock().unwrap();
+                                                if guard.is_none() {
+                                                    *guard = Some(err);
+                                                }
+                                                return;
+                                            }
                                         }
+                                    });
+                                }
+                            });
+                            if let Some(err) = first_err.into_inner().unwrap() {
+                                return Err(err);
+                            }
+                        }
+                    }
+
+                    IrInstr::ChanNew {
+                        result, capacity, ..
+                    } => {
+                        let cap_val = self.get(*capacity)?;
+                        let cap = match cap_val {
+                            IrValue::I64(c) => {
+                                if c <= 0 {
+                                    usize::MAX
+                                } else {
+                                    c as usize
+                                }
+                            }
+                            _ => {
+                                return Err(InterpError::TypeError {
+                                    detail: "ChanNew capacity must be an integer".into(),
+                                })
+                            }
+                        };
+                        let ch = Arc::new(SharedChannel {
+                            queue: Mutex::new(std::collections::VecDeque::new()),
+                            not_empty: Condvar::new(),
+                            not_full: Condvar::new(),
+                            capacity: cap,
+                        });
+                        self.values.insert(*result, IrValue::Chan(ch));
+                    }
+
+                    IrInstr::ChanSend { chan, value } => {
+                        let ch = self.get(*chan)?;
+                        let v = self.get(*value)?;
+                        match ch {
+                            IrValue::Chan(q) => {
+                                let mut queue = q.queue.lock().unwrap();
+                                while queue.len() >= q.capacity {
+                                    queue = q.not_full.wait(queue).unwrap();
+                                }
+                                queue.push_back(v);
+                                q.not_empty.notify_one();
+                            }
+                            other => {
+                                return Err(InterpError::TypeError {
+                                    detail: format!("ChanSend on non-channel: {:?}", other),
+                                })
+                            }
+                        }
+                    }
+
+                    IrInstr::ChanRecv { result, chan, .. } => {
+                        let ch = self.get(*chan)?;
+                        match ch {
+                            IrValue::Chan(q) => {
+                                let mut queue = q.queue.lock().unwrap();
+                                while queue.is_empty() {
+                                    queue = q.not_empty.wait(queue).unwrap();
+                                }
+                                let val = queue.pop_front().unwrap();
+                                q.not_full.notify_one();
+                                self.values.insert(*result, val);
+                            }
+                            other => {
+                                return Err(InterpError::TypeError {
+                                    detail: format!("ChanRecv on non-channel: {:?}", other),
+                                })
+                            }
+                        }
+                    }
+
+                    IrInstr::Spawn { body_fn, args } => {
+                        // Spawn the body function on a real OS thread.
+                        let callee = self
+                            .module
+                            .and_then(|m| m.function_by_name(body_fn))
+                            .ok_or_else(|| InterpError::Unsupported {
+                                detail: format!("undefined spawn function: {}", body_fn),
+                            })?
+                            .clone();
+                        let mut call_args = Vec::new();
+                        for a in args {
+                            call_args.push(self.get(*a)?);
+                        }
+                        let module_raw: usize = self
+                            .module
+                            .map(|m| m as *const IrModule as usize)
+                            .unwrap_or(0);
+                        let opts = self.opts;
+                        let depth = self.depth;
+                        self.spawn_handles.push(std::thread::spawn(move || {
+                            let module: Option<&IrModule> = if module_raw == 0 {
+                                None
+                            } else {
+                                Some(unsafe { &*(module_raw as *const IrModule) })
+                            };
+                            let mut sub = Interpreter::new(module, opts, depth + 1);
+                            sub.run(&callee, &call_args)
+                        }));
+                    }
+
+                    IrInstr::TaskGroupNew { result } => {
+                        let tg = Arc::new(Mutex::new(TaskGroupState {
+                            handles: Vec::new(),
+                            cancelled: false,
+                        }));
+                        self.values.insert(*result, IrValue::TaskGroup(tg));
+                    }
+
+                    IrInstr::TaskGroupSpawn {
+                        group,
+                        body_fn,
+                        args,
+                    } => {
+                        let tg_val = self.get(*group)?;
+                        match tg_val {
+                            IrValue::TaskGroup(tg) => {
+                                let callee = self
+                                    .module
+                                    .and_then(|m| m.function_by_name(body_fn))
+                                    .ok_or_else(|| InterpError::Unsupported {
+                                        detail: format!("undefined spawn function: {}", body_fn),
+                                    })?
+                                    .clone();
+                                let mut call_args = Vec::new();
+                                for a in args {
+                                    call_args.push(self.get(*a)?);
+                                }
+                                let module_raw: usize = self
+                                    .module
+                                    .map(|m| m as *const IrModule as usize)
+                                    .unwrap_or(0);
+                                let opts = self.opts;
+                                let depth = self.depth;
+                                let current_group = tg.clone();
+                                let handle = std::thread::spawn(move || {
+                                    if current_group.lock().unwrap().cancelled {
+                                        return Ok(Vec::new());
+                                    }
+                                    let module: Option<&IrModule> = if module_raw == 0 {
+                                        None
+                                    } else {
+                                        Some(unsafe { &*(module_raw as *const IrModule) })
+                                    };
+                                    let mut sub = Interpreter::new(module, opts, depth + 1);
+                                    CURRENT_INTERP_TASK_GROUP.with(|slot| {
+                                        *slot.borrow_mut() = Some(current_group.clone())
+                                    });
+                                    let result = sub.run(&callee, &call_args);
+                                    CURRENT_INTERP_TASK_GROUP
+                                        .with(|slot| *slot.borrow_mut() = None);
+                                    result
+                                });
+                                tg.lock().unwrap().handles.push(handle);
+                            }
+                            other => {
+                                return Err(InterpError::TypeError {
+                                    detail: format!(
+                                        "TaskGroupSpawn on non-task-group: {:?}",
+                                        other
+                                    ),
+                                })
+                            }
+                        }
+                    }
+
+                    IrInstr::TaskGroupJoin { group } => {
+                        let tg_val = self.get(*group)?;
+                        match tg_val {
+                            IrValue::TaskGroup(tg) => {
+                                let handles =
+                                    tg.lock().unwrap().handles.drain(..).collect::<Vec<_>>();
+                                for h in handles {
+                                    let _ = h.join().map_err(|_| InterpError::Unsupported {
+                                        detail: "task panicked during join".into(),
                                     })?;
-                                // Coerce to declared element type (e.g. f32 stored → f64 expected)
-                                let elem = eval_cast(&raw, elem_ty).unwrap_or(raw);
-                                self.values.insert(*result, elem);
-                            } else {
+                                }
+                            }
+                            other => {
                                 return Err(InterpError::TypeError {
-                                    detail: "list_get: not a list".into(),
-                                });
+                                    detail: format!("TaskGroupJoin on non-task-group: {:?}", other),
+                                })
                             }
                         }
-                        IrInstr::ListSet { list, index, value } => {
-                            let lv = self.get(*list)?;
-                            let iv = self.get(*index)?;
-                            let v = self.get(*value)?;
-                            let idx = match iv {
-                                IrValue::I64(n) => n as usize,
-                                _ => {
-                                    return Err(InterpError::TypeError {
-                                        detail: "list_set: index must be i64".into(),
-                                    })
-                                }
-                            };
-                            if let IrValue::List(cells) = lv {
-                                {
-                                    let mut borrow = cells.lock().unwrap();
-                                    if idx >= borrow.len() {
+                    }
+
+                    IrInstr::TaskGroupCancel { group } => {
+                        let tg_val = self.get(*group)?;
+                        match tg_val {
+                            IrValue::TaskGroup(tg) => {
+                                tg.lock().unwrap().cancelled = true;
+                            }
+                            other => {
+                                return Err(InterpError::TypeError {
+                                    detail: format!(
+                                        "TaskGroupCancel on non-task-group: {:?}",
+                                        other
+                                    ),
+                                })
+                            }
+                        }
+                    }
+
+                    IrInstr::AtomicNew {
+                        result,
+                        value,
+                        result_ty,
+                    } => {
+                        let v = self.get(*value)?;
+                        let cell = std::sync::Arc::new(std::sync::Mutex::new(v));
+                        let _ = result_ty;
+                        self.values.insert(*result, IrValue::Atomic(cell));
+                    }
+
+                    IrInstr::AtomicLoad { result, atomic, .. } => {
+                        let v = self.get(*atomic)?;
+                        match v {
+                            IrValue::Atomic(cell) => {
+                                self.values.insert(*result, cell.lock().unwrap().clone());
+                            }
+                            other => {
+                                return Err(InterpError::TypeError {
+                                    detail: format!("AtomicLoad on non-atomic: {:?}", other),
+                                })
+                            }
+                        }
+                    }
+
+                    IrInstr::AtomicStore { atomic, value } => {
+                        let v = self.get(*value)?;
+                        let a = self.get(*atomic)?;
+                        match a {
+                            IrValue::Atomic(cell) => {
+                                transaction_record_atomic(&cell);
+                                *cell.lock().unwrap() = v;
+                            }
+                            other => {
+                                return Err(InterpError::TypeError {
+                                    detail: format!("AtomicStore on non-atomic: {:?}", other),
+                                })
+                            }
+                        }
+                    }
+
+                    IrInstr::AtomicAdd {
+                        result,
+                        atomic,
+                        value,
+                        ..
+                    } => {
+                        let v = self.get(*value)?;
+                        let a = self.get(*atomic)?;
+                        match a {
+                            IrValue::Atomic(cell) => {
+                                transaction_record_atomic(&cell);
+                                let mut guard = cell.lock().unwrap();
+                                let old = guard.clone();
+                                let new_val = match (old.clone(), v) {
+                                    (IrValue::I64(a), IrValue::I64(b)) => IrValue::I64(a + b),
+                                    (IrValue::I32(a), IrValue::I32(b)) => IrValue::I32(a + b),
+                                    (IrValue::F32(a), IrValue::F32(b)) => IrValue::F32(a + b),
+                                    (IrValue::F64(a), IrValue::F64(b)) => IrValue::F64(a + b),
+                                    _ => {
                                         return Err(InterpError::TypeError {
-                                            detail: format!(
-                                                "list_set: index {} out of bounds",
-                                                idx
-                                            ),
-                                        });
+                                            detail: "AtomicAdd on non-numeric".into(),
+                                        })
                                     }
-                                    borrow[idx] = v;
-                                }
-                                self.values.insert(*list, IrValue::List(cells));
-                            } else {
+                                };
+                                *guard = new_val.clone();
+                                self.values.insert(*result, new_val);
+                            }
+                            other => {
                                 return Err(InterpError::TypeError {
-                                    detail: "list_set: not a list".into(),
-                                });
+                                    detail: format!("AtomicAdd on non-atomic: {:?}", other),
+                                })
                             }
                         }
-                        IrInstr::ListPop { result, list, .. } => {
-                            let lv = self.get(*list)?;
-                            if let IrValue::List(cells) = lv {
-                                let elem = cells.lock().unwrap().pop().ok_or_else(|| {
-                                    InterpError::TypeError {
-                                        detail: "list_pop: empty list".into(),
-                                    }
-                                })?;
-                                self.values.insert(*list, IrValue::List(cells));
-                                self.values.insert(*result, elem);
-                            } else {
+                    }
+
+                    IrInstr::MutexNew {
+                        result,
+                        value,
+                        result_ty,
+                    } => {
+                        let v = self.get(*value)?;
+                        let cell = std::sync::Arc::new(std::sync::Mutex::new(v));
+                        let _ = result_ty;
+                        self.values.insert(*result, IrValue::Atomic(cell));
+                    }
+
+                    IrInstr::MutexLock { result, mutex, .. } => {
+                        let v = self.get(*mutex)?;
+                        match v {
+                            IrValue::Atomic(cell) => {
+                                self.values.insert(*result, cell.lock().unwrap().clone());
+                            }
+                            other => {
                                 return Err(InterpError::TypeError {
-                                    detail: "list_pop: not a list".into(),
-                                });
+                                    detail: format!("MutexLock on non-mutex: {:?}", other),
+                                })
+                            }
+                        }
+                    }
+
+                    IrInstr::MutexUnlock { .. } => {
+                        // No-op in single-threaded interpreter.
+                    }
+
+                    IrInstr::Sparsify {
+                        result, operand, ..
+                    } => {
+                        // Convert an Array or Tensor to sparse (index, value) pairs.
+                        // Only non-zero elements are stored.
+                        let v = self.get(*operand)?;
+                        let pairs = match v {
+                            IrValue::Array(elems) => elems
+                                .iter()
+                                .enumerate()
+                                .filter(|(_, e)| match e {
+                                    IrValue::I64(0) | IrValue::I32(0) => false,
+                                    IrValue::F32(f) => *f != 0.0,
+                                    IrValue::F64(f) => *f != 0.0,
+                                    _ => true,
+                                })
+                                .map(|(i, e)| (i, e.clone()))
+                                .collect(),
+                            IrValue::Tensor(data, _shape) => data
+                                .iter()
+                                .enumerate()
+                                .filter(|(_, &val)| val != 0.0)
+                                .map(|(i, &val)| (i, IrValue::F32(val)))
+                                .collect(),
+                            other => vec![(0, other)],
+                        };
+                        self.values.insert(*result, IrValue::Sparse(pairs));
+                    }
+
+                    IrInstr::Densify {
+                        result, operand, ..
+                    } => {
+                        // Reconstruct the dense collection, filling the gaps
+                        // with zeros, exactly as the runtime's iris_densify
+                        // does. This used to return the non-zero count, which
+                        // contradicted the builtin's name and documented
+                        // signature and disagreed with the native backend.
+                        // The count is now SparseNnz.
+                        let v = self.get(*operand)?;
+                        let dense = match v {
+                            IrValue::Sparse(pairs) => {
+                                let size = pairs.iter().map(|(idx, _)| *idx + 1).max().unwrap_or(0);
+                                let mut out = vec![IrValue::I64(0); size];
+                                for (idx, value) in pairs {
+                                    if idx < size {
+                                        out[idx] = value;
+                                    }
+                                }
+                                IrValue::List(std::sync::Arc::new(std::sync::Mutex::new(out)))
+                            }
+                            other => other,
+                        };
+                        self.values.insert(*result, dense);
+                    }
+
+                    IrInstr::SparseNnz { result, operand } => {
+                        let v = self.get(*operand)?;
+                        let nnz = match v {
+                            IrValue::Sparse(pairs) => pairs.len() as i64,
+                            // A non-sparse operand has no stored-element count;
+                            // treat a list as fully populated.
+                            IrValue::List(items) => {
+                                items.lock().map(|g| g.len()).unwrap_or(0) as i64
+                            }
+                            _ => 0,
+                        };
+                        self.values.insert(*result, IrValue::I64(nnz));
+                    }
+
+                    IrInstr::Barrier => {
+                        // No-op in single-threaded interpreter.
+                    }
+
+                    IrInstr::MakeGrad {
+                        result,
+                        value,
+                        tangent,
+                        ..
+                    } => {
+                        let v = self.get(*value)?;
+                        let t = self.get(*tangent)?;
+                        let vf = match v {
+                            IrValue::F64(x) => x,
+                            IrValue::F32(x) => x as f64,
+                            IrValue::I64(x) => x as f64,
+                            IrValue::I32(x) => x as f64,
+                            other => {
+                                return Err(InterpError::TypeError {
+                                    detail: format!(
+                                        "MakeGrad value must be numeric, got {:?}",
+                                        other
+                                    ),
+                                })
+                            }
+                        };
+                        let tf = match t {
+                            IrValue::F64(x) => x,
+                            IrValue::F32(x) => x as f64,
+                            IrValue::I64(x) => x as f64,
+                            IrValue::I32(x) => x as f64,
+                            other => {
+                                return Err(InterpError::TypeError {
+                                    detail: format!(
+                                        "MakeGrad tangent must be numeric, got {:?}",
+                                        other
+                                    ),
+                                })
+                            }
+                        };
+                        self.values.insert(
+                            *result,
+                            IrValue::Grad {
+                                value: vf,
+                                tangent: tf,
+                            },
+                        );
+                    }
+
+                    IrInstr::GradValue {
+                        result, operand, ..
+                    } => {
+                        let v = self.get(*operand)?;
+                        match v {
+                            IrValue::Grad { value, .. } => {
+                                self.values.insert(*result, IrValue::F64(value));
+                            }
+                            other => {
+                                return Err(InterpError::TypeError {
+                                    detail: format!("GradValue on non-grad: {:?}", other),
+                                })
+                            }
+                        }
+                    }
+
+                    IrInstr::GradTangent {
+                        result, operand, ..
+                    } => {
+                        let v = self.get(*operand)?;
+                        match v {
+                            IrValue::Grad { tangent, .. } => {
+                                self.values.insert(*result, IrValue::F64(tangent));
+                            }
+                            other => {
+                                return Err(InterpError::TypeError {
+                                    detail: format!("GradTangent on non-grad: {:?}", other),
+                                })
+                            }
+                        }
+                    }
+
+                    // ── Reverse-mode AD (tape-based backpropagation) ──
+                    IrInstr::TapeRecord {
+                        result,
+                        value,
+                        op,
+                        parents,
+                    } => {
+                        let primal = self.get(*value)?;
+                        let mut parent_values = Vec::with_capacity(parents.len());
+                        for parent in parents {
+                            let raw_parent = self.get(*parent)?;
+                            let parent_node = if matches!(raw_parent, IrValue::TapeNode { .. }) {
+                                raw_parent
+                            } else if let Some(node) = self.tape_nodes.get(parent) {
+                                node.clone()
+                            } else {
+                                let leaf = IrValue::TapeNode {
+                                    id: NEXT_TAPE_NODE_ID.fetch_add(1, Ordering::Relaxed),
+                                    primal: Box::new(raw_parent),
+                                    op: "identity".into(),
+                                    parents: Vec::new(),
+                                };
+                                self.tape_nodes.insert(*parent, leaf.clone());
+                                leaf
+                            };
+                            parent_values.push(parent_node);
+                        }
+                        let node = IrValue::TapeNode {
+                            id: NEXT_TAPE_NODE_ID.fetch_add(1, Ordering::Relaxed),
+                            primal: Box::new(primal),
+                            op: op.clone(),
+                            parents: parent_values,
+                        };
+                        self.values.insert(*result, node.clone());
+                        self.tape_nodes.insert(*result, node.clone());
+                        self.tape_nodes.insert(*value, node);
+                    }
+
+                    IrInstr::Backward { result, loss } => {
+                        fn tape_id(value: &IrValue) -> Option<u64> {
+                            match value {
+                                IrValue::TapeNode { id, .. } => Some(*id),
+                                _ => None,
                             }
                         }
 
-                        IrInstr::MapNew { result, .. } => {
-                            let map = std::sync::Arc::new(std::sync::Mutex::new(
-                                std::collections::HashMap::new(),
-                            ));
-                            self.values.insert(*result, IrValue::Map(map));
-                        }
-                        IrInstr::MapSet { map, key, value } => {
-                            let mv = self.get(*map)?;
-                            let kv = self.get(*key)?;
-                            let v = self.get(*value)?;
-                            let key_str = format!("{}", kv);
-                            if let IrValue::Map(entries) = mv {
-                                entries.lock().unwrap().insert(key_str, v);
-                                self.values.insert(*map, IrValue::Map(entries));
-                            } else {
-                                return Err(InterpError::TypeError {
-                                    detail: "map_set: not a map".into(),
-                                });
+                        fn primal_f64(value: &IrValue) -> Option<f64> {
+                            match value {
+                                IrValue::F64(value) => Some(*value),
+                                IrValue::F32(value) => Some(*value as f64),
+                                IrValue::I64(value) => Some(*value as f64),
+                                IrValue::I32(value) => Some(*value as f64),
+                                IrValue::TapeNode { primal, .. } => primal_f64(primal),
+                                _ => None,
                             }
-                        }
-                        IrInstr::MapGet {
-                            result, map, key, ..
-                        } => {
-                            let mv = self.get(*map)?;
-                            let kv = self.get(*key)?;
-                            let key_str = format!("{}", kv);
-                            if let IrValue::Map(entries) = mv {
-                                let opt =
-                                    entries.lock().unwrap().get(&key_str).cloned().map(Box::new);
-                                self.values.insert(*result, IrValue::OptionVal(opt));
-                            } else {
-                                return Err(InterpError::TypeError {
-                                    detail: "map_get: not a map".into(),
-                                });
-                            }
-                        }
-                        IrInstr::MapContains { result, map, key } => {
-                            let mv = self.get(*map)?;
-                            let kv = self.get(*key)?;
-                            let key_str = format!("{}", kv);
-                            if let IrValue::Map(entries) = mv {
-                                let contains = entries.lock().unwrap().contains_key(&key_str);
-                                self.values.insert(*result, IrValue::Bool(contains));
-                            } else {
-                                return Err(InterpError::TypeError {
-                                    detail: "map_contains: not a map".into(),
-                                });
-                            }
-                        }
-                        IrInstr::MapRemove { map, key } => {
-                            let mv = self.get(*map)?;
-                            let kv = self.get(*key)?;
-                            let key_str = format!("{}", kv);
-                            if let IrValue::Map(entries) = mv {
-                                entries.lock().unwrap().remove(&key_str);
-                                self.values.insert(*map, IrValue::Map(entries));
-                            } else {
-                                return Err(InterpError::TypeError {
-                                    detail: "map_remove: not a map".into(),
-                                });
-                            }
-                        }
-                        IrInstr::MapLen { result, map } => {
-                            let mv = self.get(*map)?;
-                            let len = if let IrValue::Map(entries) = &mv {
-                                entries.lock().unwrap().len() as i64
-                            } else {
-                                return Err(InterpError::TypeError {
-                                    detail: "map_len: not a map".into(),
-                                });
-                            };
-                            self.values.insert(*result, IrValue::I64(len));
                         }
 
-                        // ── Phase 56: File I/O ────────────────────────────────
-                        IrInstr::FileReadAll { result, path } => {
-                            let p = self.get(*path)?;
-                            let path_str = if let IrValue::Str(s) = p {
-                                s
-                            } else {
-                                String::new()
+                        fn accumulate(
+                            grads: &mut HashMap<u64, f64>,
+                            parent: &IrValue,
+                            amount: f64,
+                        ) {
+                            if let Some(id) = tape_id(parent) {
+                                *grads.entry(id).or_insert(0.0) += amount;
+                            }
+                        }
+
+                        fn topo_sort(
+                            value: &IrValue,
+                            visited: &mut std::collections::HashSet<u64>,
+                            topo: &mut Vec<IrValue>,
+                        ) {
+                            let IrValue::TapeNode { id, parents, .. } = value else {
+                                return;
                             };
-                            security::check_fs_read(&path_str)?;
-                            match std::fs::read_to_string(&path_str) {
-                                Ok(s) => {
-                                    self.values.insert(
-                                        *result,
-                                        IrValue::ResultVal(Ok(Box::new(IrValue::Str(s)))),
-                                    );
+                            if !visited.insert(*id) {
+                                return;
+                            }
+                            for parent in parents {
+                                if tape_id(parent).is_some() {
+                                    topo_sort(parent, visited, topo);
                                 }
-                                Err(e) => {
-                                    self.values.insert(
-                                        *result,
-                                        IrValue::ResultVal(Err(Box::new(IrValue::Str(
-                                            e.to_string(),
-                                        )))),
-                                    );
+                            }
+                            topo.push(value.clone());
+                        }
+
+                        let loss_value = self.get(*loss)?;
+                        let mut grads: HashMap<u64, f64> = HashMap::new();
+                        if let Some(loss_id) = tape_id(&loss_value) {
+                            grads.insert(loss_id, 1.0);
+                        }
+                        let mut topo = Vec::new();
+                        let mut visited = std::collections::HashSet::new();
+                        topo_sort(&loss_value, &mut visited, &mut topo);
+                        topo.reverse();
+
+                        // Propagate gradients in reverse topological order
+                        for node in &topo {
+                            if let IrValue::TapeNode {
+                                id, op, parents, ..
+                            } = node
+                            {
+                                let grad = *grads.get(id).unwrap_or(&0.0);
+                                match op.as_str() {
+                                    "add" => {
+                                        for parent in parents {
+                                            accumulate(&mut grads, parent, grad);
+                                        }
+                                    }
+                                    "sub" => {
+                                        if parents.len() >= 2 {
+                                            accumulate(&mut grads, &parents[0], grad);
+                                            accumulate(&mut grads, &parents[1], -grad);
+                                        }
+                                    }
+                                    "mul" => {
+                                        if parents.len() >= 2 {
+                                            let a = primal_f64(&parents[0]).unwrap_or(0.0);
+                                            let b = primal_f64(&parents[1]).unwrap_or(0.0);
+                                            accumulate(&mut grads, &parents[0], grad * b);
+                                            accumulate(&mut grads, &parents[1], grad * a);
+                                        }
+                                    }
+                                    "div" => {
+                                        if parents.len() >= 2 {
+                                            let a = primal_f64(&parents[0]).unwrap_or(0.0);
+                                            let b = primal_f64(&parents[1]).unwrap_or(1.0);
+                                            accumulate(&mut grads, &parents[0], grad / b);
+                                            accumulate(
+                                                &mut grads,
+                                                &parents[1],
+                                                -grad * a / (b * b),
+                                            );
+                                        }
+                                    }
+                                    "neg" => {
+                                        if let Some(parent) = parents.first() {
+                                            accumulate(&mut grads, parent, -grad);
+                                        }
+                                    }
+                                    "sin" => {
+                                        if let Some(parent) = parents.first() {
+                                            let x = primal_f64(parent).unwrap_or(0.0);
+                                            accumulate(&mut grads, parent, grad * x.cos());
+                                        }
+                                    }
+                                    "cos" => {
+                                        if let Some(parent) = parents.first() {
+                                            let x = primal_f64(parent).unwrap_or(0.0);
+                                            accumulate(&mut grads, parent, -grad * x.sin());
+                                        }
+                                    }
+                                    "exp" => {
+                                        if let Some(parent) = parents.first() {
+                                            let x = primal_f64(parent).unwrap_or(0.0);
+                                            accumulate(&mut grads, parent, grad * x.exp());
+                                        }
+                                    }
+                                    "log" => {
+                                        if let Some(parent) = parents.first() {
+                                            let x = primal_f64(parent).unwrap_or(1.0);
+                                            accumulate(&mut grads, parent, grad / x);
+                                        }
+                                    }
+                                    "sqrt" => {
+                                        if let Some(parent) = parents.first() {
+                                            let x = primal_f64(parent).unwrap_or(1.0);
+                                            accumulate(&mut grads, parent, grad / (2.0 * x.sqrt()));
+                                        }
+                                    }
+                                    "relu" => {
+                                        if let Some(parent) = parents.first() {
+                                            let x = primal_f64(parent).unwrap_or(0.0);
+                                            accumulate(
+                                                &mut grads,
+                                                parent,
+                                                if x > 0.0 { grad } else { 0.0 },
+                                            );
+                                        }
+                                    }
+                                    "sigmoid" => {
+                                        if let Some(parent) = parents.first() {
+                                            let x = primal_f64(parent).unwrap_or(0.0);
+                                            let s = 1.0 / (1.0 + (-x).exp());
+                                            accumulate(&mut grads, parent, grad * s * (1.0 - s));
+                                        }
+                                    }
+                                    "tanh" => {
+                                        if let Some(parent) = parents.first() {
+                                            let x = primal_f64(parent).unwrap_or(0.0);
+                                            let t = x.tanh();
+                                            accumulate(&mut grads, parent, grad * (1.0 - t * t));
+                                        }
+                                    }
+                                    "pow" => {
+                                        if parents.len() >= 2 {
+                                            let base = primal_f64(&parents[0]).unwrap_or(1.0);
+                                            let exponent = primal_f64(&parents[1]).unwrap_or(1.0);
+                                            accumulate(
+                                                &mut grads,
+                                                &parents[0],
+                                                grad * exponent * base.powf(exponent - 1.0),
+                                            );
+                                            accumulate(
+                                                &mut grads,
+                                                &parents[1],
+                                                grad * base.powf(exponent) * base.ln(),
+                                            );
+                                        }
+                                    }
+                                    "abs" => {
+                                        if let Some(parent) = parents.first() {
+                                            let x = primal_f64(parent).unwrap_or(0.0);
+                                            accumulate(
+                                                &mut grads,
+                                                parent,
+                                                grad * if x >= 0.0 { 1.0 } else { -1.0 },
+                                            );
+                                        }
+                                    }
+                                    _ => {}
                                 }
                             }
                         }
-                        IrInstr::FileWriteAll {
-                            result,
-                            path,
-                            content,
-                        } => {
-                            let p = self.get(*path)?;
-                            let c = self.get(*content)?;
-                            let path_str = if let IrValue::Str(s) = p {
-                                s
-                            } else {
-                                String::new()
-                            };
-                            let content_str = if let IrValue::Str(s) = c {
-                                s
-                            } else {
-                                String::new()
-                            };
-                            security::check_fs_write(&path_str)?;
-                            match std::fs::write(&path_str, &content_str) {
-                                Ok(()) => {
-                                    let written_len = content_str.len() as i64;
-                                    self.values.insert(
-                                        *result,
-                                        IrValue::ResultVal(Ok(Box::new(IrValue::I64(written_len)))),
-                                    );
+
+                        // Store the gradient map as an opaque unit value
+                        // The actual gradients are extracted via TapeGrad
+                        self.tape_grads = grads;
+                        self.values.insert(*result, IrValue::Unit);
+                    }
+
+                    IrInstr::TapeGrad { result, tape_node } => {
+                        let node = self.get(*tape_node)?;
+                        let node = match node {
+                            IrValue::TapeNode { .. } => Some(node),
+                            _ => self.tape_nodes.get(tape_node).cloned(),
+                        };
+                        let grad_val = match node {
+                            Some(IrValue::TapeNode { id, .. }) => {
+                                self.tape_grads.get(&id).copied().unwrap_or(0.0)
+                            }
+                            _ => 0.0,
+                        };
+                        self.values.insert(*result, IrValue::F64(grad_val));
+                    }
+
+                    IrInstr::MakeSome { result, value, .. } => {
+                        let v = self.get(*value)?;
+                        self.values
+                            .insert(*result, IrValue::OptionVal(Some(Box::new(v))));
+                    }
+
+                    IrInstr::MakeNone { result, .. } => {
+                        self.values.insert(*result, IrValue::OptionVal(None));
+                    }
+
+                    IrInstr::IsSome { result, operand } => {
+                        let v = self.get(*operand)?;
+                        let b = matches!(v, IrValue::OptionVal(Some(_)));
+                        self.values.insert(*result, IrValue::Bool(b));
+                    }
+
+                    IrInstr::OptionUnwrap {
+                        result, operand, ..
+                    } => match self.get(*operand)? {
+                        IrValue::OptionVal(Some(inner)) => {
+                            self.values.insert(*result, *inner);
+                        }
+                        IrValue::OptionVal(None) => {
+                            return Err(InterpError::Unsupported {
+                                detail: "unwrap called on none".into(),
+                            });
+                        }
+                        other => {
+                            return Err(InterpError::TypeError {
+                                detail: format!("OptionUnwrap on non-option: {:?}", other),
+                            });
+                        }
+                    },
+
+                    IrInstr::MakeOk { result, value, .. } => {
+                        let v = self.get(*value)?;
+                        self.values
+                            .insert(*result, IrValue::ResultVal(Ok(Box::new(v))));
+                    }
+
+                    IrInstr::MakeErr { result, value, .. } => {
+                        let v = self.get(*value)?;
+                        self.values
+                            .insert(*result, IrValue::ResultVal(Err(Box::new(v))));
+                    }
+
+                    IrInstr::IsOk { result, operand } => {
+                        let v = self.get(*operand)?;
+                        let b = matches!(v, IrValue::ResultVal(Ok(_)));
+                        self.values.insert(*result, IrValue::Bool(b));
+                    }
+
+                    IrInstr::ResultUnwrap {
+                        result, operand, ..
+                    } => match self.get(*operand)? {
+                        IrValue::ResultVal(Ok(inner)) => {
+                            self.values.insert(*result, *inner);
+                        }
+                        IrValue::ResultVal(Err(_)) => {
+                            return Err(InterpError::Unsupported {
+                                detail: "result_unwrap called on err".into(),
+                            });
+                        }
+                        other => {
+                            return Err(InterpError::TypeError {
+                                detail: format!("ResultUnwrap on non-result: {:?}", other),
+                            });
+                        }
+                    },
+
+                    IrInstr::ResultUnwrapErr {
+                        result, operand, ..
+                    } => match self.get(*operand)? {
+                        IrValue::ResultVal(Err(inner)) => {
+                            self.values.insert(*result, *inner);
+                        }
+                        IrValue::ResultVal(Ok(_)) => {
+                            return Err(InterpError::Unsupported {
+                                detail: "result_unwrap_err called on ok".into(),
+                            });
+                        }
+                        other => {
+                            return Err(InterpError::TypeError {
+                                detail: format!("ResultUnwrapErr on non-result: {:?}", other),
+                            });
+                        }
+                    },
+
+                    IrInstr::MakeClosure {
+                        result,
+                        fn_name,
+                        captures,
+                        result_ty,
+                    } => {
+                        let captured_vals: Vec<IrValue> = captures
+                            .iter()
+                            .map(|v| self.get(*v))
+                            .collect::<Result<_, _>>()?;
+                        self.values.insert(
+                            *result,
+                            IrValue::Closure {
+                                fn_name: fn_name.clone(),
+                                captured: captured_vals,
+                                ty: result_ty.clone(),
+                            },
+                        );
+                    }
+
+                    IrInstr::CallClosure {
+                        result,
+                        closure,
+                        args,
+                        result_ty,
+                        ..
+                    } => {
+                        let closure_val = self.get(*closure)?;
+                        let (fn_name, captured) = match closure_val {
+                            IrValue::Closure {
+                                fn_name, captured, ..
+                            } => (fn_name, captured),
+                            other => {
+                                return Err(InterpError::TypeError {
+                                    detail: format!("CallClosure on non-closure: {:?}", other),
+                                })
+                            }
+                        };
+                        let callee = self
+                            .module
+                            .and_then(|m| m.function_by_name(&fn_name))
+                            .ok_or_else(|| InterpError::Unsupported {
+                                detail: format!("undefined closure function: {}", fn_name),
+                            })?
+                            .clone();
+                        let mut call_args: Vec<IrValue> = captured;
+                        for a in args {
+                            call_args.push(self.get(*a)?);
+                        }
+                        if self.depth >= self.opts.max_depth {
+                            return Err(InterpError::Unsupported {
+                                detail: format!(
+                                    "call depth exceeded {} (infinite recursion?)",
+                                    self.opts.max_depth
+                                ),
+                            });
+                        }
+                        let mut sub = Interpreter::new(self.module, self.opts, self.depth + 1);
+                        sub.profiler = self.profiler.clone();
+                        sub.trace_out = self.trace_out.clone();
+                        sub.trace_func = fn_name.clone();
+                        sub.trace_source = self.trace_source.clone();
+                        if let Some(ref prof) = self.profiler {
+                            prof.borrow_mut().enter_function(&fn_name);
+                        }
+                        let ret = sub.run(&callee, &call_args)?;
+                        self.spawn_handles.append(&mut sub.spawn_handles);
+                        if let Some(ref prof) = self.profiler {
+                            prof.borrow_mut().exit_function(&fn_name);
+                        }
+                        if let Some(r) = result {
+                            self.values
+                                .insert(*r, ret.into_iter().next().unwrap_or(IrValue::Unit));
+                        }
+                        let _ = result_ty;
+                    }
+
+                    IrInstr::Br { target, args } => {
+                        self.bind_block_params(func, *target, args)?;
+                        current = *target;
+                        continue 'blocks;
+                    }
+
+                    IrInstr::CondBr {
+                        cond,
+                        then_block,
+                        then_args,
+                        else_block,
+                        else_args,
+                    } => {
+                        let b = match self
+                            .values
+                            .get(cond)
+                            .ok_or(InterpError::UndefinedValue { id: cond.0 })?
+                        {
+                            IrValue::Bool(b) => *b,
+                            other => {
+                                return Err(InterpError::TypeError {
+                                    detail: format!(
+                                        "CondBr condition must be bool, got {:?}",
+                                        other
+                                    ),
+                                })
+                            }
+                        };
+                        let (target, br_args) = if b {
+                            (then_block, then_args)
+                        } else {
+                            (else_block, else_args)
+                        };
+                        self.bind_block_params(func, *target, br_args)?;
+                        current = *target;
+                        continue 'blocks;
+                    }
+
+                    IrInstr::Return { values } => {
+                        let results = values
+                            .iter()
+                            .map(|&v| {
+                                self.values
+                                    .get(&v)
+                                    .cloned()
+                                    .ok_or(InterpError::UndefinedValue { id: v.0 })
+                            })
+                            .collect::<Result<Vec<_>, _>>()?;
+                        return Ok(results);
+                    }
+
+                    IrInstr::Panic { msg, span_byte } => {
+                        // Prefer the position carried on the instruction over
+                        // the sticky `last_byte`. `span_table` is keyed by
+                        // (block, instr_idx) and no pass maintains it, so once
+                        // const-folding deletes the ConstStr holding the panic
+                        // message every later index shifts and the panic is
+                        // attributed to the preceding statement — a line that
+                        // succeeded. See known-issues #20.
+                        if let Some(byte) = span_byte {
+                            self.last_byte = Some(*byte);
+                        }
+                        let msg_val = self
+                            .values
+                            .get(msg)
+                            .cloned()
+                            .ok_or(InterpError::UndefinedValue { id: msg.0 })?;
+                        let msg_str = match &msg_val {
+                            IrValue::Str(s) => s.clone(),
+                            other => format!("{}", other),
+                        };
+                        return Err(InterpError::Panic { msg: msg_str });
+                    }
+
+                    IrInstr::ValueToStr { result, operand } => {
+                        let v = self.get(*operand)?;
+                        let s = match &v {
+                            IrValue::Str(s) => s.clone(),
+                            other => format!("{}", other),
+                        };
+                        self.values.insert(*result, IrValue::Str(s));
+                    }
+
+                    IrInstr::ReadLine { result } => {
+                        let mut line = String::new();
+                        std::io::stdin().read_line(&mut line).map_err(|e| {
+                            InterpError::Unsupported {
+                                detail: format!("read_line failed: {}", e),
+                            }
+                        })?;
+                        let s = line.trim_end_matches(['\n', '\r']).to_owned();
+                        self.values.insert(*result, IrValue::Str(s));
+                    }
+
+                    IrInstr::ReadI64 { result } => {
+                        let mut line = String::new();
+                        std::io::stdin().read_line(&mut line).map_err(|e| {
+                            InterpError::Unsupported {
+                                detail: format!("read_i64 failed: {}", e),
+                            }
+                        })?;
+                        let n: i64 = line.trim().parse().map_err(|e| InterpError::Unsupported {
+                            detail: format!("read_i64 parse error: {}", e),
+                        })?;
+                        self.values.insert(*result, IrValue::I64(n));
+                    }
+
+                    IrInstr::ReadF64 { result } => {
+                        let mut line = String::new();
+                        std::io::stdin().read_line(&mut line).map_err(|e| {
+                            InterpError::Unsupported {
+                                detail: format!("read_f64 failed: {}", e),
+                            }
+                        })?;
+                        let x: f64 = line.trim().parse().map_err(|e| InterpError::Unsupported {
+                            detail: format!("read_f64 parse error: {}", e),
+                        })?;
+                        self.values.insert(*result, IrValue::F64(x));
+                    }
+
+                    IrInstr::ParseI64 { result, operand } => {
+                        let v = self.get(*operand)?;
+                        let s = match &v {
+                            IrValue::Str(s) => s.clone(),
+                            other => format!("{}", other),
+                        };
+                        let opt = s
+                            .trim()
+                            .parse::<i64>()
+                            .ok()
+                            .map(|n| Box::new(IrValue::I64(n)));
+                        self.values.insert(*result, IrValue::OptionVal(opt));
+                    }
+
+                    IrInstr::ParseF64 { result, operand } => {
+                        let v = self.get(*operand)?;
+                        let s = match &v {
+                            IrValue::Str(s) => s.clone(),
+                            other => format!("{}", other),
+                        };
+                        let opt = s
+                            .trim()
+                            .parse::<f64>()
+                            .ok()
+                            .map(|x| Box::new(IrValue::F64(x)));
+                        self.values.insert(*result, IrValue::OptionVal(opt));
+                    }
+
+                    IrInstr::StrIndex {
+                        result,
+                        string,
+                        index,
+                    } => {
+                        let sv = self.get(*string)?;
+                        let iv = self.get(*index)?;
+                        let s = match &sv {
+                            IrValue::Str(s) => s.clone(),
+                            other => format!("{}", other),
+                        };
+                        let idx = match &iv {
+                            IrValue::I64(n) => *n,
+                            _ => {
+                                return Err(InterpError::TypeError {
+                                    detail: "str_index index must be i64".into(),
+                                })
+                            }
+                        };
+                        let byte = s
+                            .as_bytes()
+                            .get(idx as usize)
+                            .ok_or(InterpError::IndexOutOfBounds { idx, len: s.len() })?;
+                        self.values.insert(*result, IrValue::I64(*byte as i64));
+                    }
+
+                    IrInstr::StrSlice {
+                        result,
+                        string,
+                        start,
+                        end,
+                    } => {
+                        let sv = self.get(*string)?;
+                        let startv = self.get(*start)?;
+                        let endv = self.get(*end)?;
+                        let s = match &sv {
+                            IrValue::Str(s) => s.clone(),
+                            other => format!("{}", other),
+                        };
+                        let start_idx = match &startv {
+                            IrValue::I64(n) => *n as usize,
+                            _ => {
+                                return Err(InterpError::TypeError {
+                                    detail: "slice start must be i64".into(),
+                                })
+                            }
+                        };
+                        let end_idx = match &endv {
+                            IrValue::I64(n) => *n as usize,
+                            _ => {
+                                return Err(InterpError::TypeError {
+                                    detail: "slice end must be i64".into(),
+                                })
+                            }
+                        };
+                        let slice = s.get(start_idx..end_idx).unwrap_or("").to_owned();
+                        self.values.insert(*result, IrValue::Str(slice));
+                    }
+
+                    IrInstr::StrFind {
+                        result,
+                        haystack,
+                        needle,
+                    } => {
+                        let hv = self.get(*haystack)?;
+                        let nv = self.get(*needle)?;
+                        let h = match &hv {
+                            IrValue::Str(s) => s.clone(),
+                            other => format!("{}", other),
+                        };
+                        let n = match &nv {
+                            IrValue::Str(s) => s.clone(),
+                            other => format!("{}", other),
+                        };
+                        let opt = h.find(&*n).map(|i| Box::new(IrValue::I64(i as i64)));
+                        self.values.insert(*result, IrValue::OptionVal(opt));
+                    }
+
+                    IrInstr::StrReplace {
+                        result,
+                        string,
+                        from,
+                        to,
+                    } => {
+                        let sv = self.get(*string)?;
+                        let fv = self.get(*from)?;
+                        let tv = self.get(*to)?;
+                        let s = match &sv {
+                            IrValue::Str(s) => s.clone(),
+                            other => format!("{}", other),
+                        };
+                        let f = match &fv {
+                            IrValue::Str(s) => s.clone(),
+                            other => format!("{}", other),
+                        };
+                        let t = match &tv {
+                            IrValue::Str(s) => s.clone(),
+                            other => format!("{}", other),
+                        };
+                        self.values
+                            .insert(*result, IrValue::Str(s.replace(&*f, &t)));
+                    }
+
+                    IrInstr::ListNew { result, .. } => {
+                        let list = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+                        self.values.insert(*result, IrValue::List(list));
+                    }
+                    IrInstr::ListPush { list, value } => {
+                        let lv = self.get(*list)?;
+                        let v = self.get(*value)?;
+                        if let IrValue::List(cells) = lv {
+                            transaction_record_list(&cells);
+                            cells.lock().unwrap().push(v);
+                            self.values.insert(*list, IrValue::List(cells));
+                        } else {
+                            return Err(InterpError::TypeError {
+                                detail: "list_push: not a list".into(),
+                            });
+                        }
+                    }
+                    IrInstr::ListLen { result, list } => {
+                        let lv = self.get(*list)?;
+                        let len = if let IrValue::List(cells) = &lv {
+                            cells.lock().unwrap().len() as i64
+                        } else {
+                            return Err(InterpError::TypeError {
+                                detail: "list_len: not a list".into(),
+                            });
+                        };
+                        self.values.insert(*result, IrValue::I64(len));
+                    }
+                    IrInstr::ListGet {
+                        result,
+                        list,
+                        index,
+                        elem_ty,
+                    } => {
+                        let lv = self.get(*list)?;
+                        let iv = self.get(*index)?;
+                        let idx = match iv {
+                            IrValue::I64(n) => n as usize,
+                            _ => {
+                                return Err(InterpError::TypeError {
+                                    detail: "list_get: index must be i64".into(),
+                                })
+                            }
+                        };
+                        if let IrValue::List(cells) = lv {
+                            let raw = cells.lock().unwrap().get(idx).cloned().ok_or_else(|| {
+                                InterpError::TypeError {
+                                    detail: format!("list_get: index {} out of bounds", idx),
                                 }
-                                Err(e) => {
-                                    self.values.insert(
-                                        *result,
-                                        IrValue::ResultVal(Err(Box::new(IrValue::Str(
-                                            e.to_string(),
-                                        )))),
-                                    );
+                            })?;
+                            // Coerce to declared element type (e.g. f32 stored → f64 expected)
+                            let elem = eval_cast(&raw, elem_ty).unwrap_or(raw);
+                            self.values.insert(*result, elem);
+                        } else {
+                            return Err(InterpError::TypeError {
+                                detail: "list_get: not a list".into(),
+                            });
+                        }
+                    }
+                    IrInstr::ListSet { list, index, value } => {
+                        let lv = self.get(*list)?;
+                        let iv = self.get(*index)?;
+                        let v = self.get(*value)?;
+                        let idx = match iv {
+                            IrValue::I64(n) => n as usize,
+                            _ => {
+                                return Err(InterpError::TypeError {
+                                    detail: "list_set: index must be i64".into(),
+                                })
+                            }
+                        };
+                        if let IrValue::List(cells) = lv {
+                            transaction_record_list(&cells);
+                            {
+                                let mut borrow = cells.lock().unwrap();
+                                if idx >= borrow.len() {
+                                    return Err(InterpError::TypeError {
+                                        detail: format!("list_set: index {} out of bounds", idx),
+                                    });
                                 }
+                                borrow[idx] = v;
+                            }
+                            self.values.insert(*list, IrValue::List(cells));
+                        } else {
+                            return Err(InterpError::TypeError {
+                                detail: "list_set: not a list".into(),
+                            });
+                        }
+                    }
+                    IrInstr::ListPop { result, list, .. } => {
+                        let lv = self.get(*list)?;
+                        if let IrValue::List(cells) = lv {
+                            transaction_record_list(&cells);
+                            let elem = cells.lock().unwrap().pop().ok_or_else(|| {
+                                InterpError::TypeError {
+                                    detail: "list_pop: empty list".into(),
+                                }
+                            })?;
+                            self.values.insert(*list, IrValue::List(cells));
+                            self.values.insert(*result, elem);
+                        } else {
+                            return Err(InterpError::TypeError {
+                                detail: "list_pop: not a list".into(),
+                            });
+                        }
+                    }
+
+                    IrInstr::MapNew { result, .. } => {
+                        let map = std::sync::Arc::new(std::sync::Mutex::new(
+                            std::collections::HashMap::new(),
+                        ));
+                        self.values.insert(*result, IrValue::Map(map));
+                    }
+                    IrInstr::MapSet { map, key, value } => {
+                        let mv = self.get(*map)?;
+                        let kv = self.get(*key)?;
+                        let v = self.get(*value)?;
+                        let key_str = format!("{}", kv);
+                        if let IrValue::Map(entries) = mv {
+                            transaction_record_map(&entries);
+                            entries.lock().unwrap().insert(key_str, v);
+                            self.values.insert(*map, IrValue::Map(entries));
+                        } else {
+                            return Err(InterpError::TypeError {
+                                detail: "map_set: not a map".into(),
+                            });
+                        }
+                    }
+                    IrInstr::MapGet {
+                        result, map, key, ..
+                    } => {
+                        let mv = self.get(*map)?;
+                        let kv = self.get(*key)?;
+                        let key_str = format!("{}", kv);
+                        if let IrValue::Map(entries) = mv {
+                            let opt = entries.lock().unwrap().get(&key_str).cloned().map(Box::new);
+                            self.values.insert(*result, IrValue::OptionVal(opt));
+                        } else {
+                            return Err(InterpError::TypeError {
+                                detail: "map_get: not a map".into(),
+                            });
+                        }
+                    }
+                    IrInstr::MapContains { result, map, key } => {
+                        let mv = self.get(*map)?;
+                        let kv = self.get(*key)?;
+                        let key_str = format!("{}", kv);
+                        if let IrValue::Map(entries) = mv {
+                            let contains = entries.lock().unwrap().contains_key(&key_str);
+                            self.values.insert(*result, IrValue::Bool(contains));
+                        } else {
+                            return Err(InterpError::TypeError {
+                                detail: "map_contains: not a map".into(),
+                            });
+                        }
+                    }
+                    IrInstr::MapRemove { map, key } => {
+                        let mv = self.get(*map)?;
+                        let kv = self.get(*key)?;
+                        let key_str = format!("{}", kv);
+                        if let IrValue::Map(entries) = mv {
+                            transaction_record_map(&entries);
+                            entries.lock().unwrap().remove(&key_str);
+                            self.values.insert(*map, IrValue::Map(entries));
+                        } else {
+                            return Err(InterpError::TypeError {
+                                detail: "map_remove: not a map".into(),
+                            });
+                        }
+                    }
+                    IrInstr::MapLen { result, map } => {
+                        let mv = self.get(*map)?;
+                        let len = if let IrValue::Map(entries) = &mv {
+                            entries.lock().unwrap().len() as i64
+                        } else {
+                            return Err(InterpError::TypeError {
+                                detail: "map_len: not a map".into(),
+                            });
+                        };
+                        self.values.insert(*result, IrValue::I64(len));
+                    }
+
+                    // ── Phase 56: File I/O ────────────────────────────────
+                    IrInstr::FileReadAll { result, path } => {
+                        let p = self.get(*path)?;
+                        let path_str = if let IrValue::Str(s) = p {
+                            s
+                        } else {
+                            String::new()
+                        };
+                        security::check_fs_read(&path_str)?;
+                        let contents = transaction_read_file(&path_str)
+                            .map(Ok)
+                            .unwrap_or_else(|| std::fs::read_to_string(&path_str));
+                        match contents {
+                            Ok(s) => {
+                                self.values.insert(
+                                    *result,
+                                    IrValue::ResultVal(Ok(Box::new(IrValue::Str(s)))),
+                                );
+                            }
+                            Err(e) => {
+                                self.values.insert(
+                                    *result,
+                                    IrValue::ResultVal(Err(Box::new(IrValue::Str(e.to_string())))),
+                                );
                             }
                         }
-                        IrInstr::FileExists { result, path } => {
-                            let p = self.get(*path)?;
-                            let path_str = if let IrValue::Str(s) = p {
-                                s
-                            } else {
-                                String::new()
-                            };
-                            security::check_fs_read(&path_str)?;
-                            let exists = std::path::Path::new(&path_str).exists();
-                            self.values.insert(*result, IrValue::Bool(exists));
-                        }
-                        IrInstr::FileLines { result, path } => {
-                            let p = self.get(*path)?;
-                            let path_str = if let IrValue::Str(s) = p {
-                                s
-                            } else {
-                                String::new()
-                            };
-                            security::check_fs_read(&path_str)?;
-                            let lines: Vec<IrValue> = match std::fs::read_to_string(&path_str) {
-                                Ok(s) => s.lines().map(|l| IrValue::Str(l.to_string())).collect(),
-                                Err(_) => vec![],
-                            };
+                    }
+                    IrInstr::FileWriteAll {
+                        result,
+                        path,
+                        content,
+                    } => {
+                        let p = self.get(*path)?;
+                        let c = self.get(*content)?;
+                        let path_str = if let IrValue::Str(s) = p {
+                            s
+                        } else {
+                            String::new()
+                        };
+                        let content_str = if let IrValue::Str(s) = c {
+                            s
+                        } else {
+                            String::new()
+                        };
+                        security::check_fs_write(&path_str)?;
+                        if transaction_stage_file(path_str.clone(), content_str.clone()) {
+                            let written_len = content_str.len() as i64;
                             self.values.insert(
                                 *result,
-                                IrValue::List(std::sync::Arc::new(std::sync::Mutex::new(lines))),
+                                IrValue::ResultVal(Ok(Box::new(IrValue::I64(written_len)))),
                             );
+                            continue;
                         }
+                        match std::fs::write(&path_str, &content_str) {
+                            Ok(()) => {
+                                let written_len = content_str.len() as i64;
+                                self.values.insert(
+                                    *result,
+                                    IrValue::ResultVal(Ok(Box::new(IrValue::I64(written_len)))),
+                                );
+                            }
+                            Err(e) => {
+                                self.values.insert(
+                                    *result,
+                                    IrValue::ResultVal(Err(Box::new(IrValue::Str(e.to_string())))),
+                                );
+                            }
+                        }
+                    }
+                    IrInstr::FileExists { result, path } => {
+                        let p = self.get(*path)?;
+                        let path_str = if let IrValue::Str(s) = p {
+                            s
+                        } else {
+                            String::new()
+                        };
+                        security::check_fs_read(&path_str)?;
+                        let exists = std::path::Path::new(&path_str).exists();
+                        self.values.insert(*result, IrValue::Bool(exists));
+                    }
+                    IrInstr::FileLines { result, path } => {
+                        let p = self.get(*path)?;
+                        let path_str = if let IrValue::Str(s) = p {
+                            s
+                        } else {
+                            String::new()
+                        };
+                        security::check_fs_read(&path_str)?;
+                        let lines: Vec<IrValue> = match std::fs::read_to_string(&path_str) {
+                            Ok(s) => s.lines().map(|l| IrValue::Str(l.to_string())).collect(),
+                            Err(_) => vec![],
+                        };
+                        self.values.insert(
+                            *result,
+                            IrValue::List(std::sync::Arc::new(std::sync::Mutex::new(lines))),
+                        );
+                    }
 
-                        // ── Database operations ─────────────────────────────────
-                        IrInstr::DbOpen { result, path } => {
-                            let p = self.get(*path)?;
-                            let path_str = if let IrValue::Str(s) = p {
-                                s
-                            } else {
-                                String::new()
+                    // ── Database operations ─────────────────────────────────
+                    IrInstr::DbOpen { result, path } => {
+                        let p = self.get(*path)?;
+                        let path_str = if let IrValue::Str(s) = p {
+                            s
+                        } else {
+                            String::new()
+                        };
+                        security::check_fs_write(&path_str)?;
+                        match rusqlite::Connection::open(&path_str) {
+                            Ok(conn) => {
+                                let handle = Box::into_raw(Box::new(conn)) as i64;
+                                self.values.insert(*result, IrValue::I64(handle));
+                            }
+                            Err(_) => {
+                                self.values.insert(*result, IrValue::I64(0));
+                            }
+                        }
+                    }
+                    IrInstr::DbExec { result, db, sql } => {
+                        let db_handle = if let IrValue::I64(h) = self.get(*db)? {
+                            h
+                        } else {
+                            0
+                        };
+                        let sql_str = if let IrValue::Str(s) = self.get(*sql)? {
+                            s
+                        } else {
+                            String::new()
+                        };
+                        if db_handle != 0 {
+                            let conn = unsafe { &*(db_handle as *const rusqlite::Connection) };
+                            match conn.execute_batch(&sql_str) {
+                                Ok(()) => self.values.insert(*result, IrValue::I64(0)),
+                                Err(_) => self.values.insert(*result, IrValue::I64(-1)),
                             };
-                            security::check_fs_write(&path_str)?;
-                            match rusqlite::Connection::open(&path_str) {
-                                Ok(conn) => {
-                                    let handle = Box::into_raw(Box::new(conn)) as i64;
-                                    self.values.insert(*result, IrValue::I64(handle));
+                        } else {
+                            self.values.insert(*result, IrValue::I64(-1));
+                        }
+                    }
+                    IrInstr::DbExecParams {
+                        result,
+                        db,
+                        sql,
+                        params,
+                    } => {
+                        let db_handle = if let IrValue::I64(h) = self.get(*db)? {
+                            h
+                        } else {
+                            0
+                        };
+                        let sql_str = if let IrValue::Str(s) = self.get(*sql)? {
+                            s
+                        } else {
+                            String::new()
+                        };
+                        let params_val = self.get(*params)?;
+                        if db_handle != 0 {
+                            let conn = unsafe { &*(db_handle as *const rusqlite::Connection) };
+                            let bind_values = self.sqlite_param_values(&params_val);
+                            match conn.execute(&sql_str, params_from_iter(bind_values)) {
+                                Ok(_) => self.values.insert(*result, IrValue::I64(0)),
+                                Err(_) => self.values.insert(*result, IrValue::I64(-1)),
+                            };
+                        } else {
+                            self.values.insert(*result, IrValue::I64(-1));
+                        }
+                    }
+                    IrInstr::DbQuery { result, db, sql } => {
+                        let db_handle = if let IrValue::I64(h) = self.get(*db)? {
+                            h
+                        } else {
+                            0
+                        };
+                        let sql_str = if let IrValue::Str(s) = self.get(*sql)? {
+                            s
+                        } else {
+                            String::new()
+                        };
+                        let rows: Vec<IrValue> = if db_handle != 0 {
+                            let conn = unsafe { &*(db_handle as *const rusqlite::Connection) };
+                            match conn.prepare(&sql_str) {
+                                Ok(mut stmt) => {
+                                    let col_count = stmt.column_count();
+                                    let mut all_rows = Vec::new();
+                                    if let Ok(iter) = stmt.query_map([], |row| {
+                                        let mut cols = Vec::new();
+                                        for i in 0..col_count {
+                                            let val: String =
+                                                row.get::<_, String>(i).unwrap_or_default();
+                                            cols.push(IrValue::Str(val));
+                                        }
+                                        Ok(cols)
+                                    }) {
+                                        for cols in iter.flatten() {
+                                            all_rows.push(IrValue::List(std::sync::Arc::new(
+                                                std::sync::Mutex::new(cols),
+                                            )));
+                                        }
+                                    }
+                                    all_rows
                                 }
-                                Err(_) => {
-                                    self.values.insert(*result, IrValue::I64(0));
-                                }
+                                Err(_) => vec![],
                             }
-                        }
-                        IrInstr::DbExec { result, db, sql } => {
-                            let db_handle = if let IrValue::I64(h) = self.get(*db)? {
-                                h
-                            } else {
-                                0
-                            };
-                            let sql_str = if let IrValue::Str(s) = self.get(*sql)? {
-                                s
-                            } else {
-                                String::new()
-                            };
-                            if db_handle != 0 {
-                                let conn = unsafe { &*(db_handle as *const rusqlite::Connection) };
-                                match conn.execute_batch(&sql_str) {
-                                    Ok(()) => self.values.insert(*result, IrValue::I64(0)),
-                                    Err(_) => self.values.insert(*result, IrValue::I64(-1)),
-                                };
-                            } else {
-                                self.values.insert(*result, IrValue::I64(-1));
-                            }
-                        }
-                        IrInstr::DbExecParams {
-                            result,
-                            db,
-                            sql,
-                            params,
-                        } => {
-                            let db_handle = if let IrValue::I64(h) = self.get(*db)? {
-                                h
-                            } else {
-                                0
-                            };
-                            let sql_str = if let IrValue::Str(s) = self.get(*sql)? {
-                                s
-                            } else {
-                                String::new()
-                            };
-                            let params_val = self.get(*params)?;
-                            if db_handle != 0 {
-                                let conn = unsafe { &*(db_handle as *const rusqlite::Connection) };
-                                let bind_values = self.sqlite_param_values(&params_val);
-                                match conn.execute(&sql_str, params_from_iter(bind_values)) {
-                                    Ok(_) => self.values.insert(*result, IrValue::I64(0)),
-                                    Err(_) => self.values.insert(*result, IrValue::I64(-1)),
-                                };
-                            } else {
-                                self.values.insert(*result, IrValue::I64(-1));
-                            }
-                        }
-                        IrInstr::DbQuery { result, db, sql } => {
-                            let db_handle = if let IrValue::I64(h) = self.get(*db)? {
-                                h
-                            } else {
-                                0
-                            };
-                            let sql_str = if let IrValue::Str(s) = self.get(*sql)? {
-                                s
-                            } else {
-                                String::new()
-                            };
-                            let rows: Vec<IrValue> = if db_handle != 0 {
-                                let conn = unsafe { &*(db_handle as *const rusqlite::Connection) };
-                                match conn.prepare(&sql_str) {
-                                    Ok(mut stmt) => {
-                                        let col_count = stmt.column_count();
-                                        let mut all_rows = Vec::new();
-                                        if let Ok(iter) = stmt.query_map([], |row| {
+                        } else {
+                            vec![]
+                        };
+                        self.values.insert(
+                            *result,
+                            IrValue::List(std::sync::Arc::new(std::sync::Mutex::new(rows))),
+                        );
+                    }
+                    IrInstr::DbQueryParams {
+                        result,
+                        db,
+                        sql,
+                        params,
+                    } => {
+                        let db_handle = if let IrValue::I64(h) = self.get(*db)? {
+                            h
+                        } else {
+                            0
+                        };
+                        let sql_str = if let IrValue::Str(s) = self.get(*sql)? {
+                            s
+                        } else {
+                            String::new()
+                        };
+                        let params_val = self.get(*params)?;
+                        let rows: Vec<IrValue> = if db_handle != 0 {
+                            let conn = unsafe { &*(db_handle as *const rusqlite::Connection) };
+                            let bind_values = self.sqlite_param_values(&params_val);
+                            match conn.prepare(&sql_str) {
+                                Ok(mut stmt) => {
+                                    let col_count = stmt.column_count();
+                                    let mut all_rows = Vec::new();
+                                    if let Ok(iter) =
+                                        stmt.query_map(params_from_iter(bind_values), |row| {
                                             let mut cols = Vec::new();
                                             for i in 0..col_count {
                                                 let val: String =
@@ -2985,500 +3374,450 @@ impl<'m> Interpreter<'m> {
                                                 cols.push(IrValue::Str(val));
                                             }
                                             Ok(cols)
-                                        }) {
-                                            for cols in iter.flatten() {
-                                                all_rows.push(IrValue::List(std::sync::Arc::new(
-                                                    std::sync::Mutex::new(cols),
-                                                )));
-                                            }
+                                        })
+                                    {
+                                        for cols in iter.flatten() {
+                                            all_rows.push(IrValue::List(std::sync::Arc::new(
+                                                std::sync::Mutex::new(cols),
+                                            )));
                                         }
-                                        all_rows
                                     }
-                                    Err(_) => vec![],
+                                    all_rows
                                 }
-                            } else {
-                                vec![]
-                            };
-                            self.values.insert(
-                                *result,
-                                IrValue::List(std::sync::Arc::new(std::sync::Mutex::new(rows))),
-                            );
-                        }
-                        IrInstr::DbQueryParams {
-                            result,
-                            db,
-                            sql,
-                            params,
-                        } => {
-                            let db_handle = if let IrValue::I64(h) = self.get(*db)? {
-                                h
-                            } else {
-                                0
-                            };
-                            let sql_str = if let IrValue::Str(s) = self.get(*sql)? {
-                                s
-                            } else {
-                                String::new()
-                            };
-                            let params_val = self.get(*params)?;
-                            let rows: Vec<IrValue> = if db_handle != 0 {
-                                let conn = unsafe { &*(db_handle as *const rusqlite::Connection) };
-                                let bind_values = self.sqlite_param_values(&params_val);
-                                match conn.prepare(&sql_str) {
-                                    Ok(mut stmt) => {
-                                        let col_count = stmt.column_count();
-                                        let mut all_rows = Vec::new();
-                                        if let Ok(iter) =
-                                            stmt.query_map(params_from_iter(bind_values), |row| {
-                                                let mut cols = Vec::new();
-                                                for i in 0..col_count {
-                                                    let val: String =
-                                                        row.get::<_, String>(i).unwrap_or_default();
-                                                    cols.push(IrValue::Str(val));
-                                                }
-                                                Ok(cols)
-                                            })
-                                        {
-                                            for cols in iter.flatten() {
-                                                all_rows.push(IrValue::List(std::sync::Arc::new(
-                                                    std::sync::Mutex::new(cols),
-                                                )));
-                                            }
-                                        }
-                                        all_rows
-                                    }
-                                    Err(_) => vec![],
-                                }
-                            } else {
-                                vec![]
-                            };
-                            self.values.insert(
-                                *result,
-                                IrValue::List(std::sync::Arc::new(std::sync::Mutex::new(rows))),
-                            );
-                        }
-                        IrInstr::DbClose { result, db } => {
-                            let db_handle = if let IrValue::I64(h) = self.get(*db)? {
-                                h
-                            } else {
-                                0
-                            };
-                            if db_handle != 0 {
-                                unsafe {
-                                    drop(Box::from_raw(db_handle as *mut rusqlite::Connection));
-                                }
+                                Err(_) => vec![],
                             }
-                            self.values.insert(*result, IrValue::I64(0));
+                        } else {
+                            vec![]
+                        };
+                        self.values.insert(
+                            *result,
+                            IrValue::List(std::sync::Arc::new(std::sync::Mutex::new(rows))),
+                        );
+                    }
+                    IrInstr::DbClose { result, db } => {
+                        let db_handle = if let IrValue::I64(h) = self.get(*db)? {
+                            h
+                        } else {
+                            0
+                        };
+                        if db_handle != 0 {
+                            unsafe {
+                                drop(Box::from_raw(db_handle as *mut rusqlite::Connection));
+                            }
                         }
+                        self.values.insert(*result, IrValue::I64(0));
+                    }
 
-                        // ── Phase 58: Extended collections ─────────────────────
-                        IrInstr::ListContains {
-                            result,
-                            list,
-                            value,
-                        } => {
-                            let v = self.get(*value)?;
-                            let lst = self.get(*list)?;
-                            if let IrValue::List(rc) = lst {
-                                let found = rc.lock().unwrap().iter().any(|item| item == &v);
-                                self.values.insert(*result, IrValue::Bool(found));
-                            } else {
-                                self.values.insert(*result, IrValue::Bool(false));
-                            }
-                        }
-                        IrInstr::ListSort { list } => {
-                            let lst = self.get(*list)?;
-                            if let IrValue::List(rc) = lst {
-                                rc.lock().unwrap().sort_by(|a, b| match (a, b) {
-                                    (IrValue::I64(x), IrValue::I64(y)) => x.cmp(y),
-                                    (IrValue::F64(x), IrValue::F64(y)) => {
-                                        x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal)
-                                    }
-                                    (IrValue::F32(x), IrValue::F32(y)) => {
-                                        x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal)
-                                    }
-                                    (IrValue::Str(x), IrValue::Str(y)) => x.cmp(y),
-                                    _ => std::cmp::Ordering::Equal,
-                                });
-                            }
-                        }
-                        IrInstr::MapKeys { result, map } => {
-                            let m = self.get(*map)?;
-                            if let IrValue::Map(rc) = m {
-                                let keys: Vec<IrValue> = rc
-                                    .lock()
-                                    .unwrap()
-                                    .keys()
-                                    .map(|k| IrValue::Str(k.clone()))
-                                    .collect();
-                                self.values.insert(
-                                    *result,
-                                    IrValue::List(std::sync::Arc::new(std::sync::Mutex::new(keys))),
-                                );
-                            } else {
-                                self.values.insert(
-                                    *result,
-                                    IrValue::List(std::sync::Arc::new(std::sync::Mutex::new(
-                                        vec![],
-                                    ))),
-                                );
-                            }
-                        }
-                        IrInstr::MapValues { result, map } => {
-                            let m = self.get(*map)?;
-                            if let IrValue::Map(rc) = m {
-                                let vals: Vec<IrValue> =
-                                    rc.lock().unwrap().values().cloned().collect();
-                                self.values.insert(
-                                    *result,
-                                    IrValue::List(std::sync::Arc::new(std::sync::Mutex::new(vals))),
-                                );
-                            } else {
-                                self.values.insert(
-                                    *result,
-                                    IrValue::List(std::sync::Arc::new(std::sync::Mutex::new(
-                                        vec![],
-                                    ))),
-                                );
-                            }
-                        }
-                        IrInstr::ListConcat { result, lhs, rhs } => {
-                            let l = self.get(*lhs)?;
-                            let r = self.get(*rhs)?;
-                            let mut combined = vec![];
-                            if let IrValue::List(rc) = l {
-                                combined.extend(rc.lock().unwrap().iter().cloned());
-                            }
-                            if let IrValue::List(rc) = r {
-                                combined.extend(rc.lock().unwrap().iter().cloned());
-                            }
-                            self.values.insert(
-                                *result,
-                                IrValue::List(std::sync::Arc::new(std::sync::Mutex::new(combined))),
-                            );
-                        }
-                        IrInstr::ListSlice {
-                            result,
-                            list,
-                            start,
-                            end,
-                        } => {
-                            let lst = self.get(*list)?;
-                            let s = self.get(*start)?;
-                            let e = self.get(*end)?;
-                            let si = if let IrValue::I64(n) = s {
-                                n as usize
-                            } else {
-                                0
-                            };
-                            let ei = if let IrValue::I64(n) = e {
-                                n as usize
-                            } else {
-                                0
-                            };
-                            if let IrValue::List(rc) = lst {
-                                let sliced: Vec<IrValue> =
-                                    rc.lock().unwrap().get(si..ei).unwrap_or(&[]).to_vec();
-                                self.values.insert(
-                                    *result,
-                                    IrValue::List(std::sync::Arc::new(std::sync::Mutex::new(
-                                        sliced,
-                                    ))),
-                                );
-                            } else {
-                                self.values.insert(
-                                    *result,
-                                    IrValue::List(std::sync::Arc::new(std::sync::Mutex::new(
-                                        vec![],
-                                    ))),
-                                );
-                            }
-                        }
-
-                        // ── Phase 59: Process / environment ───────────────────
-                        IrInstr::ProcessExit { code } => {
-                            let c = self.get(*code)?;
-                            let code_val = if let IrValue::I64(n) = c { n as i32 } else { 0 };
-                            security::check_process("exit")?;
-                            std::process::exit(code_val);
-                        }
-                        IrInstr::ProcessArgs { result } => {
-                            let args: Vec<IrValue> = std::env::args().map(IrValue::Str).collect();
-                            self.values.insert(
-                                *result,
-                                IrValue::List(std::sync::Arc::new(std::sync::Mutex::new(args))),
-                            );
-                        }
-                        IrInstr::EnvVar { result, name } => {
-                            let n = self.get(*name)?;
-                            let name_str = if let IrValue::Str(s) = n {
-                                s
-                            } else {
-                                String::new()
-                            };
-                            match std::env::var(&name_str) {
-                                Ok(v) => {
-                                    self.values.insert(
-                                        *result,
-                                        IrValue::OptionVal(Some(Box::new(IrValue::Str(v)))),
-                                    );
-                                }
-                                Err(_) => {
-                                    self.values.insert(*result, IrValue::OptionVal(None));
-                                }
-                            }
-                        }
-                        // Phase 61: Pattern matching helpers
-                        IrInstr::GetVariantTag { result, operand } => {
-                            let v = self.get(*operand)?;
-                            match v {
-                                IrValue::Enum(tag, _) => {
-                                    self.values.insert(*result, IrValue::I64(tag as i64));
-                                }
-                                other => {
-                                    return Err(InterpError::TypeError {
-                                        detail: format!(
-                                            "GetVariantTag on non-Enum value: {:?}",
-                                            other
-                                        ),
-                                    });
-                                }
-                            }
-                        }
-                        IrInstr::StrEq { result, lhs, rhs } => {
-                            let lv = self.get(*lhs)?;
-                            let rv = self.get(*rhs)?;
-                            let eq = match (lv, rv) {
-                                (IrValue::Str(a), IrValue::Str(b)) => a == b,
-                                _ => false,
-                            };
-                            self.values.insert(*result, IrValue::Bool(eq));
-                        }
-                        // Phase 83: GC retain/release — no-op in interpreter (Rc handles it)
-                        IrInstr::Retain { .. } => {}
-                        IrInstr::Release { .. } => {}
-                        // Phase 81: FFI extern calls — interpreter dispatches known names to Rust stubs
-                        IrInstr::CallExtern {
-                            result,
-                            name,
-                            args,
-                            ret_ty,
-                        } => {
-                            let arg_vals: Vec<IrValue> = args
-                                .iter()
-                                .map(|a| self.get(*a))
-                                .collect::<Result<Vec<_>, _>>()?;
-
-                            // Check if this extern call is intercepted by an effect handler.
-                            let handler_result = self.dispatch_handler(name, &arg_vals);
-
-                            if let Some(handled_ret) = handler_result {
-                                if let Some(r) = result {
-                                    self.values.insert(*r, handled_ret);
-                                }
-                            } else {
-                                let ret = self.dispatch_extern(name, &arg_vals, ret_ty)?;
-                                if let Some(r) = result {
-                                    self.values.insert(*r, ret);
-                                }
-                            }
-                        }
-                        // Phase 88: TCP network I/O — wire to real TCP via tcp_store
-                        IrInstr::TcpConnect { result, host, port } => {
-                            let h = match self.get(*host)? {
-                                IrValue::Str(s) => s,
-                                _ => String::new(),
-                            };
-                            let p = match self.get(*port)? {
-                                IrValue::I64(n) => n,
-                                _ => 0,
-                            };
-                            security::check_network(&h)?;
-                            let id = match std::net::TcpStream::connect(format!("{}:{}", h, p)) {
-                                Ok(stream) => tcp_store::store_stream(stream),
-                                Err(_) => -1,
-                            };
-                            self.values.insert(*result, IrValue::I64(id));
-                        }
-                        IrInstr::TcpListen { result, port } => {
-                            let p = match self.get(*port)? {
-                                IrValue::I64(n) => n,
-                                _ => 0,
-                            };
-                            security::check_network("0.0.0.0")?;
-                            let id = match std::net::TcpListener::bind(format!("0.0.0.0:{}", p)) {
-                                Ok(listener) => tcp_store::store_listener(listener),
-                                Err(_) => -1,
-                            };
-                            self.values.insert(*result, IrValue::I64(id));
-                        }
-                        IrInstr::TcpAccept { result, listener } => {
-                            let id = match self.get(*listener)? {
-                                IrValue::I64(n) => n,
-                                _ => -1,
-                            };
-                            let conn = tcp_store::accept_listener(id).unwrap_or(-1);
-                            self.values.insert(*result, IrValue::I64(conn));
-                        }
-                        IrInstr::TcpRead { result, conn } => {
-                            let id = match self.get(*conn)? {
-                                IrValue::I64(n) => n,
-                                _ => -1,
-                            };
-                            let data = tcp_store::read_stream(id).unwrap_or_default();
-                            self.values.insert(*result, IrValue::Str(data));
-                        }
-                        IrInstr::TcpWrite { conn, data } => {
-                            let id = match self.get(*conn)? {
-                                IrValue::I64(n) => n,
-                                _ => -1,
-                            };
-                            let s = match self.get(*data)? {
-                                IrValue::Str(s) => s,
-                                _ => String::new(),
-                            };
-                            tcp_store::write_stream(id, &s);
-                        }
-                        IrInstr::TcpClose { conn } => {
-                            let id = match self.get(*conn)? {
-                                IrValue::I64(n) => n,
-                                _ => -1,
-                            };
-                            tcp_store::close(id);
-                        }
-                        IrInstr::StrSplit {
-                            result,
-                            str_val,
-                            delim,
-                        } => {
-                            let sv = self.get(*str_val)?;
-                            let dv = self.get(*delim)?;
-                            let (s, d) = match (&sv, &dv) {
-                                (IrValue::Str(s), IrValue::Str(d)) => (s.clone(), d.clone()),
-                                _ => {
-                                    return Err(InterpError::TypeError {
-                                        detail: "str_split: expected str".into(),
-                                    })
-                                }
-                            };
-                            let parts: Vec<IrValue> = if d.is_empty() {
-                                s.chars().map(|c| IrValue::Str(c.to_string())).collect()
-                            } else {
-                                s.split(d.as_str())
-                                    .map(|p| IrValue::Str(p.to_owned()))
-                                    .collect()
-                            };
-                            let list =
-                                IrValue::List(std::sync::Arc::new(std::sync::Mutex::new(parts)));
-                            self.values.insert(*result, list);
-                        }
-                        IrInstr::StrJoin {
-                            result,
-                            list_val,
-                            delim,
-                        } => {
-                            let lv = self.get(*list_val)?;
-                            let dv = self.get(*delim)?;
-                            let d = if let IrValue::Str(s) = &dv {
-                                s.clone()
-                            } else {
-                                return Err(InterpError::TypeError {
-                                    detail: "str_join: delim must be str".into(),
-                                });
-                            };
-                            let joined = if let IrValue::List(cells) = &lv {
-                                cells
-                                    .lock()
-                                    .unwrap()
-                                    .iter()
-                                    .map(|v| {
-                                        if let IrValue::Str(s) = v {
-                                            s.clone()
-                                        } else {
-                                            format!("{}", v)
-                                        }
-                                    })
-                                    .collect::<Vec<_>>()
-                                    .join(&d)
-                            } else {
-                                return Err(InterpError::TypeError {
-                                    detail: "str_join: expected list<str>".into(),
-                                });
-                            };
-                            self.values.insert(*result, IrValue::Str(joined));
-                        }
-                        IrInstr::NowMs { result } => {
-                            use std::time::{SystemTime, UNIX_EPOCH};
-                            let ms = SystemTime::now()
-                                .duration_since(UNIX_EPOCH)
-                                .map(|d| d.as_millis() as i64)
-                                .unwrap_or(0);
-                            self.values.insert(*result, IrValue::I64(ms));
-                        }
-                        IrInstr::SleepMs { result, ms } => {
-                            let n = match self.get(*ms)? {
-                                IrValue::I64(n) => n,
-                                _ => {
-                                    return Err(InterpError::TypeError {
-                                        detail: "sleep_ms: expected i64".into(),
-                                    })
-                                }
-                            };
-                            std::thread::sleep(std::time::Duration::from_millis(n as u64));
-                            self.values.insert(*result, IrValue::I64(0));
-                        }
-                        // Effect handler instructions
-                        IrInstr::PushHandler { arms } => {
-                            self.handler_stack.push(arms.clone());
-                        }
-                        IrInstr::PopHandler => {
-                            self.handler_stack.pop();
-                        }
-                        IrInstr::ResumeCont { cont, value, result } => {
-                            // Look up the continuation value to get its resume cell.
-                            let cell = match self.values.get(cont) {
-                                Some(IrValue::Continuation { resume_value }) => resume_value.clone(),
-                                _ => {
-                                    return Err(InterpError::Unsupported {
-                                        detail: "resume called on non-continuation value".into(),
-                                    });
-                                }
-                            };
-                            let v = self.get(*value)?.clone();
-                            *cell.lock().unwrap() = Some(v.clone());
-                            self.values.insert(*result, v);
-                        }
-                        // Phase 104: BuiltinCall — unified dispatch for new builtins
-                        IrInstr::BuiltinCall {
-                            result,
-                            name,
-                            args,
-                            result_ty: _,
-                        } => {
-                            let arg_vals: Vec<IrValue> = args
-                                .iter()
-                                .map(|a| self.get(*a))
-                                .collect::<Result<Vec<_>, _>>()?;
-
-                            // Handle closure-invoking builtins here (need `self` for function dispatch).
-                            let ret = match name.as_str() {
-                                "list_map" => self.builtin_list_map(&arg_vals)?,
-                                "list_filter" => self.builtin_list_filter(&arg_vals)?,
-                                "list_reduce" => self.builtin_list_reduce(&arg_vals)?,
-                                "par_map" => self.builtin_par_map(&arg_vals)?,
-                                _ => interp_builtin(name, &arg_vals)?,
-                            };
-                            self.values.insert(*result, ret);
+                    // ── Phase 58: Extended collections ─────────────────────
+                    IrInstr::ListContains {
+                        result,
+                        list,
+                        value,
+                    } => {
+                        let v = self.get(*value)?;
+                        let lst = self.get(*list)?;
+                        if let IrValue::List(rc) = lst {
+                            let found = rc.lock().unwrap().iter().any(|item| item == &v);
+                            self.values.insert(*result, IrValue::Bool(found));
+                        } else {
+                            self.values.insert(*result, IrValue::Bool(false));
                         }
                     }
-                }
+                    IrInstr::ListSort { list } => {
+                        let lst = self.get(*list)?;
+                        if let IrValue::List(rc) = lst {
+                            rc.lock().unwrap().sort_by(|a, b| match (a, b) {
+                                (IrValue::I64(x), IrValue::I64(y)) => x.cmp(y),
+                                (IrValue::F64(x), IrValue::F64(y)) => {
+                                    x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal)
+                                }
+                                (IrValue::F32(x), IrValue::F32(y)) => {
+                                    x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal)
+                                }
+                                (IrValue::Str(x), IrValue::Str(y)) => x.cmp(y),
+                                _ => std::cmp::Ordering::Equal,
+                            });
+                        }
+                    }
+                    IrInstr::MapKeys { result, map } => {
+                        let m = self.get(*map)?;
+                        if let IrValue::Map(rc) = m {
+                            let keys: Vec<IrValue> = rc
+                                .lock()
+                                .unwrap()
+                                .keys()
+                                .map(|k| IrValue::Str(k.clone()))
+                                .collect();
+                            self.values.insert(
+                                *result,
+                                IrValue::List(std::sync::Arc::new(std::sync::Mutex::new(keys))),
+                            );
+                        } else {
+                            self.values.insert(
+                                *result,
+                                IrValue::List(std::sync::Arc::new(std::sync::Mutex::new(vec![]))),
+                            );
+                        }
+                    }
+                    IrInstr::MapValues { result, map } => {
+                        let m = self.get(*map)?;
+                        if let IrValue::Map(rc) = m {
+                            let vals: Vec<IrValue> = rc.lock().unwrap().values().cloned().collect();
+                            self.values.insert(
+                                *result,
+                                IrValue::List(std::sync::Arc::new(std::sync::Mutex::new(vals))),
+                            );
+                        } else {
+                            self.values.insert(
+                                *result,
+                                IrValue::List(std::sync::Arc::new(std::sync::Mutex::new(vec![]))),
+                            );
+                        }
+                    }
+                    IrInstr::ListConcat { result, lhs, rhs } => {
+                        let l = self.get(*lhs)?;
+                        let r = self.get(*rhs)?;
+                        let mut combined = vec![];
+                        if let IrValue::List(rc) = l {
+                            combined.extend(rc.lock().unwrap().iter().cloned());
+                        }
+                        if let IrValue::List(rc) = r {
+                            combined.extend(rc.lock().unwrap().iter().cloned());
+                        }
+                        self.values.insert(
+                            *result,
+                            IrValue::List(std::sync::Arc::new(std::sync::Mutex::new(combined))),
+                        );
+                    }
+                    IrInstr::ListSlice {
+                        result,
+                        list,
+                        start,
+                        end,
+                    } => {
+                        let lst = self.get(*list)?;
+                        let s = self.get(*start)?;
+                        let e = self.get(*end)?;
+                        let si = if let IrValue::I64(n) = s {
+                            n as usize
+                        } else {
+                            0
+                        };
+                        let ei = if let IrValue::I64(n) = e {
+                            n as usize
+                        } else {
+                            0
+                        };
+                        if let IrValue::List(rc) = lst {
+                            let sliced: Vec<IrValue> =
+                                rc.lock().unwrap().get(si..ei).unwrap_or(&[]).to_vec();
+                            self.values.insert(
+                                *result,
+                                IrValue::List(std::sync::Arc::new(std::sync::Mutex::new(sliced))),
+                            );
+                        } else {
+                            self.values.insert(
+                                *result,
+                                IrValue::List(std::sync::Arc::new(std::sync::Mutex::new(vec![]))),
+                            );
+                        }
+                    }
 
-                // If we fall through the block without hitting a terminator,
-                // something is wrong with the IR (ValidatePass would have caught it).
-                return Err(InterpError::Unsupported {
-                    detail: format!("block {} has no terminator", current),
-                });
+                    // ── Phase 59: Process / environment ───────────────────
+                    IrInstr::ProcessExit { code } => {
+                        let c = self.get(*code)?;
+                        let code_val = if let IrValue::I64(n) = c { n as i32 } else { 0 };
+                        security::check_process("exit")?;
+                        std::process::exit(code_val);
+                    }
+                    IrInstr::ProcessArgs { result } => {
+                        let args: Vec<IrValue> = std::env::args().map(IrValue::Str).collect();
+                        self.values.insert(
+                            *result,
+                            IrValue::List(std::sync::Arc::new(std::sync::Mutex::new(args))),
+                        );
+                    }
+                    IrInstr::EnvVar { result, name } => {
+                        let n = self.get(*name)?;
+                        let name_str = if let IrValue::Str(s) = n {
+                            s
+                        } else {
+                            String::new()
+                        };
+                        match std::env::var(&name_str) {
+                            Ok(v) => {
+                                self.values.insert(
+                                    *result,
+                                    IrValue::OptionVal(Some(Box::new(IrValue::Str(v)))),
+                                );
+                            }
+                            Err(_) => {
+                                self.values.insert(*result, IrValue::OptionVal(None));
+                            }
+                        }
+                    }
+                    // Phase 61: Pattern matching helpers
+                    IrInstr::GetVariantTag { result, operand } => {
+                        let v = self.get(*operand)?;
+                        match v {
+                            IrValue::Enum(tag, _) => {
+                                self.values.insert(*result, IrValue::I64(tag as i64));
+                            }
+                            other => {
+                                return Err(InterpError::TypeError {
+                                    detail: format!("GetVariantTag on non-Enum value: {:?}", other),
+                                });
+                            }
+                        }
+                    }
+                    IrInstr::StrEq { result, lhs, rhs } => {
+                        let lv = self.get(*lhs)?;
+                        let rv = self.get(*rhs)?;
+                        let eq = match (lv, rv) {
+                            (IrValue::Str(a), IrValue::Str(b)) => a == b,
+                            _ => false,
+                        };
+                        self.values.insert(*result, IrValue::Bool(eq));
+                    }
+                    // Phase 83: GC retain/release — no-op in interpreter (Rc handles it)
+                    IrInstr::Retain { .. } => {}
+                    IrInstr::Release { .. } => {}
+                    // Phase 81: FFI extern calls — interpreter dispatches known names to Rust stubs
+                    IrInstr::CallExtern {
+                        result,
+                        name,
+                        args,
+                        ret_ty,
+                    } => {
+                        let arg_vals: Vec<IrValue> = args
+                            .iter()
+                            .map(|a| self.get(*a))
+                            .collect::<Result<Vec<_>, _>>()?;
+
+                        // Check if this extern call is intercepted by an effect handler.
+                        let handler_result = self.dispatch_handler(name, &arg_vals);
+
+                        if let Some(handled_ret) = handler_result {
+                            if let Some(r) = result {
+                                self.values.insert(*r, handled_ret);
+                            }
+                        } else {
+                            let ret = self.dispatch_extern(name, &arg_vals, ret_ty)?;
+                            if let Some(r) = result {
+                                self.values.insert(*r, ret);
+                            }
+                        }
+                    }
+                    // Phase 88: TCP network I/O — wire to real TCP via tcp_store
+                    IrInstr::TcpConnect { result, host, port } => {
+                        let h = match self.get(*host)? {
+                            IrValue::Str(s) => s,
+                            _ => String::new(),
+                        };
+                        let p = match self.get(*port)? {
+                            IrValue::I64(n) => n,
+                            _ => 0,
+                        };
+                        security::check_network(&h)?;
+                        let id = match std::net::TcpStream::connect(format!("{}:{}", h, p)) {
+                            Ok(stream) => tcp_store::store_stream(stream),
+                            Err(_) => -1,
+                        };
+                        self.values.insert(*result, IrValue::I64(id));
+                    }
+                    IrInstr::TcpListen { result, port } => {
+                        let p = match self.get(*port)? {
+                            IrValue::I64(n) => n,
+                            _ => 0,
+                        };
+                        security::check_network("0.0.0.0")?;
+                        let id = match std::net::TcpListener::bind(format!("0.0.0.0:{}", p)) {
+                            Ok(listener) => tcp_store::store_listener(listener),
+                            Err(_) => -1,
+                        };
+                        self.values.insert(*result, IrValue::I64(id));
+                    }
+                    IrInstr::TcpAccept { result, listener } => {
+                        let id = match self.get(*listener)? {
+                            IrValue::I64(n) => n,
+                            _ => -1,
+                        };
+                        let conn = tcp_store::accept_listener(id).unwrap_or(-1);
+                        self.values.insert(*result, IrValue::I64(conn));
+                    }
+                    IrInstr::TcpRead { result, conn } => {
+                        let id = match self.get(*conn)? {
+                            IrValue::I64(n) => n,
+                            _ => -1,
+                        };
+                        let data = tcp_store::read_stream(id).unwrap_or_default();
+                        self.values.insert(*result, IrValue::Str(data));
+                    }
+                    IrInstr::TcpWrite { conn, data } => {
+                        let id = match self.get(*conn)? {
+                            IrValue::I64(n) => n,
+                            _ => -1,
+                        };
+                        let s = match self.get(*data)? {
+                            IrValue::Str(s) => s,
+                            _ => String::new(),
+                        };
+                        tcp_store::write_stream(id, &s);
+                    }
+                    IrInstr::TcpClose { conn } => {
+                        let id = match self.get(*conn)? {
+                            IrValue::I64(n) => n,
+                            _ => -1,
+                        };
+                        tcp_store::close(id);
+                    }
+                    IrInstr::StrSplit {
+                        result,
+                        str_val,
+                        delim,
+                    } => {
+                        let sv = self.get(*str_val)?;
+                        let dv = self.get(*delim)?;
+                        let (s, d) = match (&sv, &dv) {
+                            (IrValue::Str(s), IrValue::Str(d)) => (s.clone(), d.clone()),
+                            _ => {
+                                return Err(InterpError::TypeError {
+                                    detail: "str_split: expected str".into(),
+                                })
+                            }
+                        };
+                        let parts: Vec<IrValue> = if d.is_empty() {
+                            s.chars().map(|c| IrValue::Str(c.to_string())).collect()
+                        } else {
+                            s.split(d.as_str())
+                                .map(|p| IrValue::Str(p.to_owned()))
+                                .collect()
+                        };
+                        let list = IrValue::List(std::sync::Arc::new(std::sync::Mutex::new(parts)));
+                        self.values.insert(*result, list);
+                    }
+                    IrInstr::StrJoin {
+                        result,
+                        list_val,
+                        delim,
+                    } => {
+                        let lv = self.get(*list_val)?;
+                        let dv = self.get(*delim)?;
+                        let d = if let IrValue::Str(s) = &dv {
+                            s.clone()
+                        } else {
+                            return Err(InterpError::TypeError {
+                                detail: "str_join: delim must be str".into(),
+                            });
+                        };
+                        let joined = if let IrValue::List(cells) = &lv {
+                            cells
+                                .lock()
+                                .unwrap()
+                                .iter()
+                                .map(|v| {
+                                    if let IrValue::Str(s) = v {
+                                        s.clone()
+                                    } else {
+                                        format!("{}", v)
+                                    }
+                                })
+                                .collect::<Vec<_>>()
+                                .join(&d)
+                        } else {
+                            return Err(InterpError::TypeError {
+                                detail: "str_join: expected list<str>".into(),
+                            });
+                        };
+                        self.values.insert(*result, IrValue::Str(joined));
+                    }
+                    IrInstr::NowMs { result } => {
+                        use std::time::{SystemTime, UNIX_EPOCH};
+                        let ms = SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .map(|d| d.as_millis() as i64)
+                            .unwrap_or(0);
+                        self.values.insert(*result, IrValue::I64(ms));
+                    }
+                    IrInstr::SleepMs { result, ms } => {
+                        let n = match self.get(*ms)? {
+                            IrValue::I64(n) => n,
+                            _ => {
+                                return Err(InterpError::TypeError {
+                                    detail: "sleep_ms: expected i64".into(),
+                                })
+                            }
+                        };
+                        std::thread::sleep(std::time::Duration::from_millis(n as u64));
+                        self.values.insert(*result, IrValue::I64(0));
+                    }
+                    // Effect handler instructions
+                    IrInstr::PushHandler { arms } => {
+                        self.handler_stack.push(arms.clone());
+                    }
+                    IrInstr::PopHandler => {
+                        self.handler_stack.pop();
+                    }
+                    IrInstr::ResumeCont {
+                        cont,
+                        value,
+                        result,
+                    } => {
+                        // Look up the continuation value to get its resume cell.
+                        let cell = match self.values.get(cont) {
+                            Some(IrValue::Continuation { resume_value }) => resume_value.clone(),
+                            _ => {
+                                return Err(InterpError::Unsupported {
+                                    detail: "resume called on non-continuation value".into(),
+                                });
+                            }
+                        };
+                        let v = self.get(*value)?.clone();
+                        *cell.lock().unwrap() = Some(v.clone());
+                        self.values.insert(*result, v);
+                    }
+                    // Phase 104: BuiltinCall — unified dispatch for new builtins
+                    IrInstr::BuiltinCall {
+                        result,
+                        name,
+                        args,
+                        result_ty: _,
+                    } => {
+                        let arg_vals: Vec<IrValue> = args
+                            .iter()
+                            .map(|a| self.get(*a))
+                            .collect::<Result<Vec<_>, _>>()?;
+
+                        // Handle closure-invoking builtins here (need `self` for function dispatch).
+                        let ret = match name.as_str() {
+                            "transaction_begin" => IrValue::I64(transaction_begin()),
+                            "transaction_commit" => IrValue::I64(transaction_commit()),
+                            "transaction_rollback" => IrValue::I64(transaction_rollback()),
+                            "transaction_depth" => IrValue::I64(transaction_depth()),
+                            "tensor_from_lists" | "tensor_to_list" | "tensor_tape"
+                            | "tensor_add" | "tensor_sub" | "tensor_mul" | "tensor_div"
+                            | "tensor_matmul" | "tensor_relu" | "tensor_sigmoid"
+                            | "tensor_tanh_act" | "tensor_sum_all" | "tensor_backward"
+                            | "tensor_grad" | "tensor_item" => {
+                                self.builtin_tensor_ad(name, &arg_vals)?
+                            }
+                            "list_map" => self.builtin_list_map(&arg_vals)?,
+                            "list_filter" => self.builtin_list_filter(&arg_vals)?,
+                            "list_reduce" => self.builtin_list_reduce(&arg_vals)?,
+                            "par_map" => self.builtin_par_map(&arg_vals)?,
+                            _ => interp_builtin(name, &arg_vals)?,
+                        };
+                        self.values.insert(*result, ret);
+                    }
+                }
             }
+
+            // If we fall through the block without hitting a terminator,
+            // something is wrong with the IR (ValidatePass would have caught it).
+            return Err(InterpError::Unsupported {
+                detail: format!("block {} has no terminator", current),
+            });
+        }
     }
 
     /// Looks up a value by ID, returning a clone.
@@ -3487,25 +3826,6 @@ impl<'m> Interpreter<'m> {
             .get(&id)
             .cloned()
             .ok_or(InterpError::UndefinedValue { id: id.0 })
-    }
-
-    /// Extract an f64 from a value (for reverse-mode AD gradient computation).
-    /// Works on F64, F32, TapeNode (extracts primal), I64, I32.
-    fn get_f64(&self, id: ValueId) -> Option<f64> {
-        match self.values.get(&id)? {
-            IrValue::F64(v) => Some(*v),
-            IrValue::F32(v) => Some(*v as f64),
-            IrValue::I64(v) => Some(*v as f64),
-            IrValue::I32(v) => Some(*v as f64),
-            IrValue::TapeNode { primal, .. } => match primal.as_ref() {
-                IrValue::F64(v) => Some(*v),
-                IrValue::F32(v) => Some(*v as f64),
-                IrValue::I64(v) => Some(*v as f64),
-                IrValue::I32(v) => Some(*v as f64),
-                _ => None,
-            },
-            _ => None,
-        }
     }
 
     /// Binds a target block's parameters to the provided argument values.
@@ -3527,7 +3847,24 @@ impl<'m> Interpreter<'m> {
                     .ok_or(InterpError::UndefinedValue { id: v.0 })
             })
             .collect::<Result<Vec<_>, _>>()?;
-        for (param, val) in block_ref.params.iter().zip(arg_vals.into_iter()) {
+        for ((param, arg), val) in block_ref
+            .params
+            .iter()
+            .zip(args.iter())
+            .zip(arg_vals.into_iter())
+        {
+            let tape_node = match &val {
+                IrValue::TapeNode { .. } => Some(val.clone()),
+                _ => self.tape_nodes.get(arg).cloned(),
+            };
+            if let Some(node) = tape_node {
+                self.tape_nodes.insert(param.id, node);
+            } else {
+                // Block parameter IDs are reused on every loop iteration.  A
+                // stale alias from the preceding edge must not be mistaken for
+                // the current argument's graph.
+                self.tape_nodes.remove(&param.id);
+            }
             self.values.insert(param.id, val);
         }
         Ok(())
@@ -3615,11 +3952,347 @@ impl<'m> Interpreter<'m> {
         }
         let mut sub = Interpreter::new(self.module, self.opts, self.depth + 1);
         let ret = sub.run(&callee, &args_full)?;
-        self.spawn_handles.extend(sub.spawn_handles.drain(..));
+        self.spawn_handles.append(&mut sub.spawn_handles);
         Ok(ret.into_iter().next().unwrap_or(IrValue::Unit))
     }
 
     /// list_map(list, closure) — apply closure to each element, return new list.
+    fn builtin_tensor_ad(&mut self, name: &str, args: &[IrValue]) -> Result<IrValue, InterpError> {
+        fn tensor(value: &IrValue) -> Option<(Vec<f32>, Vec<usize>)> {
+            match value {
+                IrValue::Tensor(data, shape) => Some((data.clone(), shape.clone())),
+                IrValue::TapeNode { primal, .. } => tensor(primal),
+                _ => None,
+            }
+        }
+
+        fn tensor_node(
+            op: &str,
+            data: Vec<f32>,
+            shape: Vec<usize>,
+            parents: &[IrValue],
+        ) -> IrValue {
+            let primal = IrValue::Tensor(data, shape);
+            if parents
+                .iter()
+                .any(|parent| matches!(parent, IrValue::TapeNode { .. }))
+            {
+                IrValue::TapeNode {
+                    id: NEXT_TAPE_NODE_ID.fetch_add(1, Ordering::Relaxed),
+                    primal: Box::new(primal),
+                    op: op.to_owned(),
+                    parents: parents.to_vec(),
+                }
+            } else {
+                primal
+            }
+        }
+
+        fn tensor_error(name: &str) -> InterpError {
+            InterpError::TypeError {
+                detail: format!("{} expects differentiable tensor arguments", name),
+            }
+        }
+
+        match name {
+            "tensor_from_lists" => {
+                let IrValue::List(data) = &args[0] else {
+                    return Err(tensor_error(name));
+                };
+                let IrValue::List(shape) = &args[1] else {
+                    return Err(tensor_error(name));
+                };
+                let data = data
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .map(|value| match value {
+                        IrValue::F64(v) => *v as f32,
+                        IrValue::F32(v) => *v,
+                        IrValue::I64(v) => *v as f32,
+                        _ => 0.0,
+                    })
+                    .collect();
+                let shape = shape
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .map(|value| match value {
+                        IrValue::I64(v) => (*v).max(0) as usize,
+                        IrValue::I32(v) => (*v).max(0) as usize,
+                        _ => 0,
+                    })
+                    .collect();
+                Ok(IrValue::Tensor(data, shape))
+            }
+            "tensor_to_list" => {
+                let (data, _) = tensor(&args[0]).ok_or_else(|| tensor_error(name))?;
+                Ok(IrValue::List(Arc::new(Mutex::new(
+                    data.into_iter().map(|v| IrValue::F64(v as f64)).collect(),
+                ))))
+            }
+            "tensor_tape" => {
+                let (data, shape) = tensor(&args[0]).ok_or_else(|| tensor_error(name))?;
+                Ok(IrValue::TapeNode {
+                    id: NEXT_TAPE_NODE_ID.fetch_add(1, Ordering::Relaxed),
+                    primal: Box::new(IrValue::Tensor(data, shape)),
+                    op: "tensor_leaf".into(),
+                    parents: Vec::new(),
+                })
+            }
+            "tensor_add" | "tensor_sub" | "tensor_mul" | "tensor_div" => {
+                let (left, shape) = tensor(&args[0]).ok_or_else(|| tensor_error(name))?;
+                let (right, right_shape) = tensor(&args[1]).ok_or_else(|| tensor_error(name))?;
+                if left.len() != right.len() || shape != right_shape {
+                    return Err(InterpError::TypeError {
+                        detail: format!("{} requires equal tensor shapes", name),
+                    });
+                }
+                let data = left
+                    .iter()
+                    .zip(right.iter())
+                    .map(|(a, b)| match name {
+                        "tensor_add" => a + b,
+                        "tensor_sub" => a - b,
+                        "tensor_mul" => a * b,
+                        _ => {
+                            if *b == 0.0 {
+                                0.0
+                            } else {
+                                a / b
+                            }
+                        }
+                    })
+                    .collect();
+                Ok(tensor_node(name, data, shape, args))
+            }
+            "tensor_matmul" => {
+                let (left, left_shape) = tensor(&args[0]).ok_or_else(|| tensor_error(name))?;
+                let (right, right_shape) = tensor(&args[1]).ok_or_else(|| tensor_error(name))?;
+                if left_shape.len() != 2
+                    || right_shape.len() != 2
+                    || left_shape[1] != right_shape[0]
+                {
+                    return Err(InterpError::TypeError {
+                        detail: "tensor_matmul requires [M,K] and [K,N]".into(),
+                    });
+                }
+                let (m, k, n) = (left_shape[0], left_shape[1], right_shape[1]);
+                let mut data = vec![0.0; m * n];
+                for i in 0..m {
+                    for p in 0..k {
+                        for j in 0..n {
+                            data[i * n + j] += left[i * k + p] * right[p * n + j];
+                        }
+                    }
+                }
+                Ok(tensor_node(name, data, vec![m, n], args))
+            }
+            "tensor_relu" | "tensor_sigmoid" | "tensor_tanh_act" => {
+                let (input, shape) = tensor(&args[0]).ok_or_else(|| tensor_error(name))?;
+                let data = input
+                    .iter()
+                    .map(|x| match name {
+                        "tensor_relu" => x.max(0.0),
+                        "tensor_sigmoid" => 1.0 / (1.0 + (-x).exp()),
+                        _ => x.tanh(),
+                    })
+                    .collect();
+                Ok(tensor_node(name, data, shape, args))
+            }
+            "tensor_sum_all" => {
+                let (input, _) = tensor(&args[0]).ok_or_else(|| tensor_error(name))?;
+                Ok(tensor_node(name, vec![input.iter().sum()], vec![1], args))
+            }
+            "tensor_item" => {
+                let (data, _) = tensor(&args[0]).ok_or_else(|| tensor_error(name))?;
+                Ok(IrValue::F64(data.first().copied().unwrap_or(0.0) as f64))
+            }
+            "tensor_backward" => {
+                fn topo(
+                    value: &IrValue,
+                    visited: &mut std::collections::HashSet<u64>,
+                    order: &mut Vec<IrValue>,
+                ) {
+                    if let IrValue::TapeNode { id, parents, .. } = value {
+                        if !visited.insert(*id) {
+                            return;
+                        }
+                        for parent in parents {
+                            topo(parent, visited, order);
+                        }
+                        order.push(value.clone());
+                    }
+                }
+                fn node_id(value: &IrValue) -> Option<u64> {
+                    if let IrValue::TapeNode { id, .. } = value {
+                        Some(*id)
+                    } else {
+                        None
+                    }
+                }
+                fn accumulate(
+                    grads: &mut HashMap<u64, Vec<f32>>,
+                    parent: &IrValue,
+                    delta: Vec<f32>,
+                ) {
+                    let Some(id) = node_id(parent) else { return };
+                    let entry = grads.entry(id).or_insert_with(|| vec![0.0; delta.len()]);
+                    if entry.len() == delta.len() {
+                        for (dst, src) in entry.iter_mut().zip(delta) {
+                            *dst += src;
+                        }
+                    }
+                }
+
+                let loss = args.first().ok_or_else(|| tensor_error(name))?;
+                let IrValue::TapeNode { id: loss_id, .. } = loss else {
+                    return Err(InterpError::TypeError {
+                        detail: "dtensor_backward requires a taped tensor loss".into(),
+                    });
+                };
+                let (loss_data, _) = tensor(loss).ok_or_else(|| tensor_error(name))?;
+                let mut order = Vec::new();
+                topo(loss, &mut std::collections::HashSet::new(), &mut order);
+                let mut grads = HashMap::new();
+                grads.insert(*loss_id, vec![1.0; loss_data.len()]);
+                for node in order.into_iter().rev() {
+                    let IrValue::TapeNode {
+                        id, op, parents, ..
+                    } = &node
+                    else {
+                        continue;
+                    };
+                    let Some(grad) = grads.get(id).cloned() else {
+                        continue;
+                    };
+                    match op.as_str() {
+                        "tensor_add" => {
+                            accumulate(&mut grads, &parents[0], grad.clone());
+                            accumulate(&mut grads, &parents[1], grad);
+                        }
+                        "tensor_sub" => {
+                            accumulate(&mut grads, &parents[0], grad.clone());
+                            accumulate(
+                                &mut grads,
+                                &parents[1],
+                                grad.into_iter().map(|g| -g).collect(),
+                            );
+                        }
+                        "tensor_mul" | "tensor_div" => {
+                            let (a, _) = tensor(&parents[0]).unwrap();
+                            let (b, _) = tensor(&parents[1]).unwrap();
+                            if op == "tensor_mul" {
+                                accumulate(
+                                    &mut grads,
+                                    &parents[0],
+                                    grad.iter().zip(&b).map(|(g, b)| g * b).collect(),
+                                );
+                                accumulate(
+                                    &mut grads,
+                                    &parents[1],
+                                    grad.iter().zip(&a).map(|(g, a)| g * a).collect(),
+                                );
+                            } else {
+                                accumulate(
+                                    &mut grads,
+                                    &parents[0],
+                                    grad.iter()
+                                        .zip(&b)
+                                        .map(|(g, b)| if *b == 0.0 { 0.0 } else { g / b })
+                                        .collect(),
+                                );
+                                accumulate(
+                                    &mut grads,
+                                    &parents[1],
+                                    grad.iter()
+                                        .zip(&a)
+                                        .zip(&b)
+                                        .map(
+                                            |((g, a), b)| {
+                                                if *b == 0.0 {
+                                                    0.0
+                                                } else {
+                                                    -g * a / (b * b)
+                                                }
+                                            },
+                                        )
+                                        .collect(),
+                                );
+                            }
+                        }
+                        "tensor_relu" | "tensor_sigmoid" | "tensor_tanh_act" => {
+                            let (x, _) = tensor(&parents[0]).unwrap();
+                            let delta = grad
+                                .iter()
+                                .zip(x)
+                                .map(|(g, x)| match op.as_str() {
+                                    "tensor_relu" => {
+                                        if x > 0.0 {
+                                            *g
+                                        } else {
+                                            0.0
+                                        }
+                                    }
+                                    "tensor_sigmoid" => {
+                                        let s = 1.0 / (1.0 + (-x).exp());
+                                        g * s * (1.0 - s)
+                                    }
+                                    _ => {
+                                        let t = x.tanh();
+                                        g * (1.0 - t * t)
+                                    }
+                                })
+                                .collect();
+                            accumulate(&mut grads, &parents[0], delta);
+                        }
+                        "tensor_sum_all" => {
+                            let (x, _) = tensor(&parents[0]).unwrap();
+                            accumulate(&mut grads, &parents[0], vec![grad[0]; x.len()]);
+                        }
+                        "tensor_matmul" => {
+                            let (a, ashape) = tensor(&parents[0]).unwrap();
+                            let (b, bshape) = tensor(&parents[1]).unwrap();
+                            let (m, k, n) = (ashape[0], ashape[1], bshape[1]);
+                            let mut da = vec![0.0; a.len()];
+                            let mut db = vec![0.0; b.len()];
+                            for i in 0..m {
+                                for p in 0..k {
+                                    for j in 0..n {
+                                        da[i * k + p] += grad[i * n + j] * b[p * n + j];
+                                        db[p * n + j] += a[i * k + p] * grad[i * n + j];
+                                    }
+                                }
+                            }
+                            accumulate(&mut grads, &parents[0], da);
+                            accumulate(&mut grads, &parents[1], db);
+                        }
+                        _ => {}
+                    }
+                }
+                self.tensor_tape_grads = grads;
+                Ok(IrValue::I64(1))
+            }
+            "tensor_grad" => {
+                let IrValue::TapeNode { id, .. } = &args[0] else {
+                    return Err(InterpError::TypeError {
+                        detail: "dtensor_grad requires a taped tensor".into(),
+                    });
+                };
+                let (_, shape) = tensor(&args[0]).ok_or_else(|| tensor_error(name))?;
+                let data = self
+                    .tensor_tape_grads
+                    .get(id)
+                    .cloned()
+                    .unwrap_or_else(|| vec![0.0; shape.iter().copied().product()]);
+                Ok(IrValue::Tensor(data, shape))
+            }
+            _ => Err(InterpError::Unsupported {
+                detail: format!("unknown tensor AD builtin {name}"),
+            }),
+        }
+    }
+
     fn builtin_list_map(&mut self, args: &[IrValue]) -> Result<IrValue, InterpError> {
         if args.len() < 2 {
             return Err(InterpError::TypeError {
@@ -3718,7 +4391,8 @@ impl<'m> Interpreter<'m> {
             }
         };
         let closure = &args[1];
-        let module_raw: usize = self.module
+        let module_raw: usize = self
+            .module
             .map(|m| m as *const IrModule as usize)
             .unwrap_or(0);
         let opts = self.opts;
@@ -3726,7 +4400,9 @@ impl<'m> Interpreter<'m> {
         let n = items.len();
         // Extract closure info
         let (fn_name, captured) = match closure {
-            IrValue::Closure { fn_name, captured, .. } => (fn_name.clone(), captured.clone()),
+            IrValue::Closure {
+                fn_name, captured, ..
+            } => (fn_name.clone(), captured.clone()),
             _ => {
                 return Err(InterpError::TypeError {
                     detail: "par_map: second argument must be a closure".into(),
@@ -3765,12 +4441,16 @@ impl<'m> Interpreter<'m> {
             match h.join() {
                 Ok(Ok(val)) => results.push(val),
                 Ok(Err(e)) => return Err(e),
-                Err(_) => return Err(InterpError::Unsupported {
-                    detail: "par_map: thread panicked".to_string(),
-                }),
+                Err(_) => {
+                    return Err(InterpError::Unsupported {
+                        detail: "par_map: thread panicked".to_string(),
+                    })
+                }
             }
         }
-        Ok(IrValue::List(std::sync::Arc::new(std::sync::Mutex::new(results))))
+        Ok(IrValue::List(std::sync::Arc::new(std::sync::Mutex::new(
+            results,
+        ))))
     }
 
     /// Checks if an extern call is intercepted by an active effect handler.
@@ -3783,11 +4463,7 @@ impl<'m> Interpreter<'m> {
                     // Found a matching handler arm. Call the handler function.
                     if let Some(module) = self.module {
                         if let Some(handler_func) = module.function_by_name(&arm.func_name) {
-                            let mut sub = Interpreter::new(
-                                self.module,
-                                self.opts,
-                                self.depth + 1,
-                            );
+                            let mut sub = Interpreter::new(self.module, self.opts, self.depth + 1);
                             sub.handler_stack = self.handler_stack.clone();
 
                             if arm.has_resume {
@@ -3813,11 +4489,9 @@ impl<'m> Interpreter<'m> {
                                     let val = ret.into_iter().next().unwrap_or(IrValue::I64(0));
                                     return Some(val);
                                 }
-                            } else {
-                                if let Ok(ret) = sub.run(handler_func, args) {
-                                    let val = ret.into_iter().next().unwrap_or(IrValue::I64(0));
-                                    return Some(val);
-                                }
+                            } else if let Ok(ret) = sub.run(handler_func, args) {
+                                let val = ret.into_iter().next().unwrap_or(IrValue::I64(0));
+                                return Some(val);
                             }
                         }
                     }
@@ -3839,6 +4513,159 @@ impl<'m> Interpreter<'m> {
         ret_ty: &IrType,
     ) -> Result<IrValue, InterpError> {
         match name {
+            // The reference interpreter currently executes async bodies on
+            // managed join handles; expose its bounded logical executor view.
+            "iris_async_worker_count" => Ok(IrValue::I64(
+                std::thread::available_parallelism()
+                    .map(|count| count.get() as i64)
+                    .unwrap_or(1),
+            )),
+            "iris_async_queued_tasks" => Ok(IrValue::I64(0)),
+            "iris_current_task_cancelled_i64" => Ok(IrValue::I64(
+                if CURRENT_INTERP_TASK_GROUP.with(|slot| {
+                    slot.borrow()
+                        .as_ref()
+                        .is_some_and(|group| group.lock().unwrap().cancelled)
+                }) {
+                    1
+                } else {
+                    0
+                },
+            )),
+            "iris_task_group_is_cancelled_i64" => Ok(IrValue::I64(
+                if matches!(
+                    args.first(),
+                    Some(IrValue::TaskGroup(group)) if group.lock().unwrap().cancelled
+                ) {
+                    1
+                } else {
+                    0
+                },
+            )),
+            "iris_json_query" => {
+                let json = str_arg(&args[0]);
+                let path = str_arg(&args[1]);
+                let mut current = match serde_json::from_str::<serde_json::Value>(&json) {
+                    Ok(value) => value,
+                    Err(_) => return Ok(IrValue::Str(String::new())),
+                };
+                for segment in path.split('.') {
+                    current = match current {
+                        serde_json::Value::Object(mut object) => match object.remove(segment) {
+                            Some(value) => value,
+                            None => return Ok(IrValue::Str(String::new())),
+                        },
+                        serde_json::Value::Array(mut values) => {
+                            let Ok(index) = segment.parse::<usize>() else {
+                                return Ok(IrValue::Str(String::new()));
+                            };
+                            if index >= values.len() {
+                                return Ok(IrValue::Str(String::new()));
+                            }
+                            values.swap_remove(index)
+                        }
+                        _ => return Ok(IrValue::Str(String::new())),
+                    };
+                }
+                Ok(IrValue::Str(match current {
+                    serde_json::Value::String(value) => value,
+                    other => other.to_string(),
+                }))
+            }
+            "iris_http_request_headers" => {
+                let method = str_arg(&args[0]);
+                let url = str_arg(&args[1]);
+                let body = str_arg(&args[2]);
+                let headers = str_arg(&args[3]);
+                let timeout_ms = i64_arg(&args[4]);
+                security::check_network(&url)?;
+                let (status, response) =
+                    http_request_with_headers(&method, &url, &body, &headers, timeout_ms);
+                INTERP_HTTP_STATUS.with(|last| last.set(status));
+                Ok(IrValue::Str(response))
+            }
+            "iris_http_last_status" => {
+                Ok(IrValue::I64(INTERP_HTTP_STATUS.with(std::cell::Cell::get)))
+            }
+            "iris_http_tls_available" => Ok(IrValue::I64(0)),
+            "iris_tcp_set_timeout" => {
+                let handle = i64_arg(&args[0]);
+                let read_ms =
+                    u64::try_from(i64_arg(&args[1])).map_err(|_| InterpError::TypeError {
+                        detail: "read timeout must be non-negative".into(),
+                    })?;
+                let write_ms =
+                    u64::try_from(i64_arg(&args[2])).map_err(|_| InterpError::TypeError {
+                        detail: "write timeout must be non-negative".into(),
+                    })?;
+                Ok(IrValue::I64(
+                    if tcp_store::set_timeout(handle, read_ms, write_ms).is_ok() {
+                        0
+                    } else {
+                        -1
+                    },
+                ))
+            }
+            "iris_tcp_write_all" => {
+                let handle = i64_arg(&args[0]);
+                let data = str_arg(&args[1]);
+                Ok(IrValue::I64(
+                    tcp_store::write_stream_all(handle, &data)
+                        .map(|count| count as i64)
+                        .unwrap_or(-1),
+                ))
+            }
+            "iris_tcp_read_max" => {
+                let handle = i64_arg(&args[0]);
+                let max_bytes = usize::try_from(i64_arg(&args[1])).unwrap_or(0);
+                Ok(IrValue::Str(
+                    tcp_store::read_stream_max(handle, max_bytes).unwrap_or_default(),
+                ))
+            }
+            "iris_tcp_shutdown" => {
+                let handle = i64_arg(&args[0]);
+                Ok(IrValue::I64(if tcp_store::shutdown(handle).is_ok() {
+                    0
+                } else {
+                    -1
+                }))
+            }
+            "iris_meta_analyze" => {
+                let code = str_arg(&args[0]);
+                match crate::meta::analyze_source_json(&code, "meta_runtime") {
+                    Ok(json) => Ok(IrValue::ResultVal(Ok(Box::new(IrValue::Str(json))))),
+                    Err(error) => Ok(IrValue::ResultVal(Err(Box::new(IrValue::Str(
+                        error.to_string(),
+                    ))))),
+                }
+            }
+            "iris_meta_emit_ir" => {
+                let code = str_arg(&args[0]);
+                match crate::meta::emit_ir(&code, "meta_runtime") {
+                    Ok(ir) => Ok(IrValue::ResultVal(Ok(Box::new(IrValue::Str(ir))))),
+                    Err(error) => Ok(IrValue::ResultVal(Err(Box::new(IrValue::Str(
+                        error.to_string(),
+                    ))))),
+                }
+            }
+            "iris_meta_apply_edit" => {
+                let code = str_arg(&args[0]);
+                let start = usize::try_from(i64_arg(&args[1])).unwrap_or(usize::MAX);
+                let end = usize::try_from(i64_arg(&args[2])).unwrap_or(usize::MAX);
+                let replacement = str_arg(&args[3]);
+                match crate::meta::apply_checked_edit(
+                    &code,
+                    start,
+                    end,
+                    &replacement,
+                    "meta_runtime_edit",
+                ) {
+                    Ok(edited) => Ok(IrValue::ResultVal(Ok(Box::new(IrValue::Str(edited))))),
+                    Err(error) => Ok(IrValue::ResultVal(Err(Box::new(IrValue::Str(
+                        error.to_string(),
+                    ))))),
+                }
+            }
             // Math stubs mirroring common C/CBLAS names
             "cblas_ddot" | "iris_blas_ddot" => {
                 // (n: i64, x: list<f64>, y: list<f64>) -> f64
@@ -3942,7 +4769,8 @@ impl<'m> Interpreter<'m> {
                                     }
                                 }
                                 IrValue::Str(s) => {
-                                    let cs = std::ffi::CString::new(s.as_bytes()).unwrap_or_default();
+                                    let cs =
+                                        std::ffi::CString::new(s.as_bytes()).unwrap_or_default();
                                     let ptr = cs.as_ptr() as i64;
                                     temp_cstrings.push(cs);
                                     ptr
@@ -4626,15 +5454,24 @@ fn eval_binop(op: BinOp, lv: &IrValue, rv: &IrValue) -> Result<IrValue, InterpEr
         (BinOp::CmpGt, F64(a), F64(b)) => Ok(Bool(a > b)),
         (BinOp::CmpGe, F64(a), F64(b)) => Ok(Bool(a >= b)),
         // I32 arithmetic
-        (BinOp::Add, I32(a), I32(b)) => {
-            a.checked_add(*b).ok_or_else(|| InterpError::Panic { msg: format!("integer overflow in addition ({} + {})", a, b) }).map(I32)
-        }
-        (BinOp::Sub, I32(a), I32(b)) => {
-            a.checked_sub(*b).ok_or_else(|| InterpError::Panic { msg: format!("integer overflow in subtraction ({} - {})", a, b) }).map(I32)
-        }
-        (BinOp::Mul, I32(a), I32(b)) => {
-            a.checked_mul(*b).ok_or_else(|| InterpError::Panic { msg: format!("integer overflow in multiplication ({} * {})", a, b) }).map(I32)
-        }
+        (BinOp::Add, I32(a), I32(b)) => a
+            .checked_add(*b)
+            .ok_or_else(|| InterpError::Panic {
+                msg: format!("integer overflow in addition ({} + {})", a, b),
+            })
+            .map(I32),
+        (BinOp::Sub, I32(a), I32(b)) => a
+            .checked_sub(*b)
+            .ok_or_else(|| InterpError::Panic {
+                msg: format!("integer overflow in subtraction ({} - {})", a, b),
+            })
+            .map(I32),
+        (BinOp::Mul, I32(a), I32(b)) => a
+            .checked_mul(*b)
+            .ok_or_else(|| InterpError::Panic {
+                msg: format!("integer overflow in multiplication ({} * {})", a, b),
+            })
+            .map(I32),
         (BinOp::Div, I32(a), I32(b)) => {
             if *b == 0 {
                 return Err(InterpError::DivisionByZero);
@@ -4661,15 +5498,24 @@ fn eval_binop(op: BinOp, lv: &IrValue, rv: &IrValue) -> Result<IrValue, InterpEr
         (BinOp::CmpGt, I32(a), I32(b)) => Ok(Bool(a > b)),
         (BinOp::CmpGe, I32(a), I32(b)) => Ok(Bool(a >= b)),
         // I64 arithmetic
-        (BinOp::Add, I64(a), I64(b)) => {
-            a.checked_add(*b).ok_or_else(|| InterpError::Panic { msg: format!("integer overflow in addition ({} + {})", a, b) }).map(I64)
-        }
-        (BinOp::Sub, I64(a), I64(b)) => {
-            a.checked_sub(*b).ok_or_else(|| InterpError::Panic { msg: format!("integer overflow in subtraction ({} - {})", a, b) }).map(I64)
-        }
-        (BinOp::Mul, I64(a), I64(b)) => {
-            a.checked_mul(*b).ok_or_else(|| InterpError::Panic { msg: format!("integer overflow in multiplication ({} * {})", a, b) }).map(I64)
-        }
+        (BinOp::Add, I64(a), I64(b)) => a
+            .checked_add(*b)
+            .ok_or_else(|| InterpError::Panic {
+                msg: format!("integer overflow in addition ({} + {})", a, b),
+            })
+            .map(I64),
+        (BinOp::Sub, I64(a), I64(b)) => a
+            .checked_sub(*b)
+            .ok_or_else(|| InterpError::Panic {
+                msg: format!("integer overflow in subtraction ({} - {})", a, b),
+            })
+            .map(I64),
+        (BinOp::Mul, I64(a), I64(b)) => a
+            .checked_mul(*b)
+            .ok_or_else(|| InterpError::Panic {
+                msg: format!("integer overflow in multiplication ({} * {})", a, b),
+            })
+            .map(I64),
         (BinOp::Div, I64(a), I64(b)) => {
             if *b == 0 {
                 return Err(InterpError::DivisionByZero);
@@ -4857,35 +5703,38 @@ mod tcp_store {
     use std::collections::HashMap;
     use std::net::{TcpListener, TcpStream};
     use std::sync::atomic::{AtomicI64, Ordering};
-    use std::sync::{Arc, LazyLock, Mutex};
+    use std::sync::{Arc, Mutex, OnceLock};
 
-    static STREAMS: LazyLock<Mutex<HashMap<i64, Arc<TcpStream>>>> =
-        LazyLock::new(|| Mutex::new(HashMap::new()));
-    static LISTENERS: LazyLock<Mutex<HashMap<i64, Arc<TcpListener>>>> =
-        LazyLock::new(|| Mutex::new(HashMap::new()));
+    static STREAMS: OnceLock<Mutex<HashMap<i64, Arc<TcpStream>>>> = OnceLock::new();
+    static LISTENERS: OnceLock<Mutex<HashMap<i64, Arc<TcpListener>>>> = OnceLock::new();
     static NEXT_ID: AtomicI64 = AtomicI64::new(1);
 
     fn next_handle() -> i64 {
         NEXT_ID.fetch_add(1, Ordering::Relaxed)
     }
 
+    fn streams() -> &'static Mutex<HashMap<i64, Arc<TcpStream>>> {
+        STREAMS.get_or_init(|| Mutex::new(HashMap::new()))
+    }
+
+    fn listeners() -> &'static Mutex<HashMap<i64, Arc<TcpListener>>> {
+        LISTENERS.get_or_init(|| Mutex::new(HashMap::new()))
+    }
+
     pub fn store_stream(s: TcpStream) -> i64 {
         let id = next_handle();
-        STREAMS
-            .lock()
-            .unwrap()
-            .insert(id, Arc::new(s));
+        streams().lock().unwrap().insert(id, Arc::new(s));
         id
     }
     pub fn store_listener(l: TcpListener) -> i64 {
         let id = next_handle();
-        LISTENERS.lock().unwrap().insert(id, Arc::new(l));
+        listeners().lock().unwrap().insert(id, Arc::new(l));
         id
     }
     pub fn read_stream(id: i64) -> Result<String, ()> {
         use std::io::Read;
         let stream = {
-            let map = STREAMS.lock().unwrap();
+            let map = streams().lock().unwrap();
             map.get(&id).cloned()
         };
         if let Some(stream) = stream {
@@ -4902,7 +5751,7 @@ mod tcp_store {
     pub fn write_stream(id: i64, data: &str) {
         use std::io::Write;
         let stream = {
-            let map = STREAMS.lock().unwrap();
+            let map = streams().lock().unwrap();
             map.get(&id).cloned()
         };
         if let Some(stream) = stream {
@@ -4910,9 +5759,62 @@ mod tcp_store {
             let _ = (&*stream).write_all(data.as_bytes());
         }
     }
+    pub fn write_stream_all(id: i64, data: &str) -> Result<usize, ()> {
+        use std::io::Write;
+        let stream = {
+            let map = streams().lock().unwrap();
+            map.get(&id).cloned()
+        };
+        let Some(stream) = stream else {
+            return Err(());
+        };
+        (&*stream).write_all(data.as_bytes()).map_err(|_| ())?;
+        Ok(data.len())
+    }
+    pub fn read_stream_max(id: i64, max_bytes: usize) -> Result<String, ()> {
+        use std::io::Read;
+        if max_bytes == 0 || max_bytes > 16 * 1024 * 1024 {
+            return Err(());
+        }
+        let stream = {
+            let map = streams().lock().unwrap();
+            map.get(&id).cloned()
+        };
+        let Some(stream) = stream else {
+            return Err(());
+        };
+        let mut bytes = vec![0; max_bytes];
+        let count = (&*stream).read(&mut bytes).map_err(|_| ())?;
+        Ok(String::from_utf8_lossy(&bytes[..count]).to_string())
+    }
+    pub fn set_timeout(id: i64, read_ms: u64, write_ms: u64) -> Result<(), ()> {
+        let stream = {
+            let map = streams().lock().unwrap();
+            map.get(&id).cloned()
+        };
+        let Some(stream) = stream else {
+            return Err(());
+        };
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_millis(read_ms)))
+            .map_err(|_| ())?;
+        stream
+            .set_write_timeout(Some(std::time::Duration::from_millis(write_ms)))
+            .map_err(|_| ())
+    }
+    pub fn shutdown(id: i64) -> Result<(), ()> {
+        let stream = {
+            let map = streams().lock().unwrap();
+            map.get(&id).cloned()
+        };
+        let Some(stream) = stream else {
+            return Err(());
+        };
+        stream.shutdown(std::net::Shutdown::Both).map_err(|_| ())
+    }
     pub fn accept_listener(id: i64) -> Result<i64, ()> {
         let listener = {
-            let map = LISTENERS.lock().unwrap();
+            let map = listeners().lock().unwrap();
             map.get(&id).cloned()
         };
         if let Some(listener) = listener {
@@ -4925,8 +5827,8 @@ mod tcp_store {
         }
     }
     pub fn close(id: i64) {
-        STREAMS.lock().unwrap().remove(&id);
-        LISTENERS.lock().unwrap().remove(&id);
+        streams().lock().unwrap().remove(&id);
+        listeners().lock().unwrap().remove(&id);
     }
 }
 
@@ -4957,7 +5859,9 @@ mod udp_store {
         SOCKETS.with(|m| {
             let map = m.borrow();
             if let Some(sock) = map.get(&id) {
-                sock.send_to(b"hello", addr_port).map(|_| ()).map_err(|_| ())
+                sock.send_to(b"hello", addr_port)
+                    .map(|_| ())
+                    .map_err(|_| ())
             } else {
                 Err(())
             }
@@ -4984,7 +5888,7 @@ mod udp_store {
     }
 }
 
-/// Helper: dispatch a C/Rust FFI call with up to 6 i64 arguments via transmuted pointers.
+/// Helper: dispatch a C/Rust FFI call via transmuted pointers.
 /// The function pointer `proc` must point to a valid extern "C" function.
 /// Call through a pointer typed to return `f64`.
 ///
@@ -5021,8 +5925,7 @@ unsafe fn ffi_dispatch_call_f64(proc: *const u8, args: &[i64]) -> f64 {
             f(args[0], args[1], args[2], args[3], args[4])
         }
         _ => {
-            let f: extern "C" fn(i64, i64, i64, i64, i64, i64) -> f64 =
-                std::mem::transmute(proc);
+            let f: extern "C" fn(i64, i64, i64, i64, i64, i64) -> f64 = std::mem::transmute(proc);
             f(args[0], args[1], args[2], args[3], args[4], args[5])
         }
     }
@@ -5054,10 +5957,68 @@ unsafe fn ffi_dispatch_call(proc: *const u8, args: &[i64]) -> i64 {
             let f: extern "C" fn(i64, i64, i64, i64, i64) -> i64 = std::mem::transmute(proc);
             f(args[0], args[1], args[2], args[3], args[4])
         }
-        _ => {
+        6 => {
             let f: extern "C" fn(i64, i64, i64, i64, i64, i64) -> i64 = std::mem::transmute(proc);
             f(args[0], args[1], args[2], args[3], args[4], args[5])
         }
+        7 => {
+            let f: extern "C" fn(i64, i64, i64, i64, i64, i64, i64) -> i64 =
+                std::mem::transmute(proc);
+            f(
+                args[0], args[1], args[2], args[3], args[4], args[5], args[6],
+            )
+        }
+        8 => {
+            let f: extern "C" fn(i64, i64, i64, i64, i64, i64, i64, i64) -> i64 =
+                std::mem::transmute(proc);
+            f(
+                args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7],
+            )
+        }
+        9 => {
+            let f: extern "C" fn(i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i64 =
+                std::mem::transmute(proc);
+            f(
+                args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8],
+            )
+        }
+        10 => {
+            let f: extern "C" fn(i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i64 =
+                std::mem::transmute(proc);
+            f(
+                args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8],
+                args[9],
+            )
+        }
+        11 => {
+            let f: extern "C" fn(i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i64 =
+                std::mem::transmute(proc);
+            f(
+                args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8],
+                args[9], args[10],
+            )
+        }
+        12 => {
+            let f: extern "C" fn(
+                i64,
+                i64,
+                i64,
+                i64,
+                i64,
+                i64,
+                i64,
+                i64,
+                i64,
+                i64,
+                i64,
+                i64,
+            ) -> i64 = std::mem::transmute(proc);
+            f(
+                args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8],
+                args[9], args[10], args[11],
+            )
+        }
+        _ => -1,
     }
 }
 
@@ -5160,9 +6121,8 @@ fn f64_arg(v: &IrValue) -> f64 {
 /// bounds-checked and makes a double free a no-op rather than undefined
 /// behaviour.
 fn ffi_out_cells() -> std::sync::MutexGuard<'static, std::collections::HashMap<i64, usize>> {
-    static CELLS: std::sync::OnceLock<
-        std::sync::Mutex<std::collections::HashMap<i64, usize>>,
-    > = std::sync::OnceLock::new();
+    static CELLS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<i64, usize>>> =
+        std::sync::OnceLock::new();
     CELLS
         .get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
         .lock()
@@ -5243,6 +6203,128 @@ fn interp_builtin(name: &str, args: &[IrValue]) -> Result<IrValue, InterpError> 
                 }
             } else {
                 Ok(IrValue::Bool(false))
+            }
+        }
+
+        // ---- Reflection & Dynamic Evaluation ----
+        "reflection_available" | "iris_reflection_available" => Ok(IrValue::Bool(true)),
+        "validate" | "iris_validate" | "reflect_validate" => {
+            let code = str_arg(&args[0]);
+            let (_, parse_errors) = crate::compile_with_recovery(&code);
+            if !parse_errors.is_empty() {
+                return Ok(IrValue::Bool(false));
+            }
+            Ok(IrValue::Bool(
+                crate::compile_to_module(&code, "reflect_validate_mod").is_ok(),
+            ))
+        }
+        "eval" | "iris_eval" | "reflect_eval" => {
+            let code = str_arg(&args[0]);
+            match crate::compile_to_module(&code, "reflect_eval_mod") {
+                Ok(module) => {
+                    let target_fn = module
+                        .function_by_name("main")
+                        .or_else(|| module.functions().first());
+                    if let Some(func) = target_fn {
+                        match eval_function_in_module(&module, func, &[]) {
+                            Ok(vals) => {
+                                let s = if let Some(v) = vals.first() {
+                                    match v {
+                                        IrValue::Str(value) => value.clone(),
+                                        other => other.to_string(),
+                                    }
+                                } else {
+                                    String::new()
+                                };
+                                Ok(IrValue::ResultVal(Ok(Box::new(IrValue::Str(s)))))
+                            }
+                            Err(e) => Ok(IrValue::ResultVal(Err(Box::new(IrValue::Str(format!(
+                                "{}",
+                                e
+                            )))))),
+                        }
+                    } else {
+                        Ok(IrValue::ResultVal(Err(Box::new(IrValue::Str(
+                            "no executable function found in module".into(),
+                        )))))
+                    }
+                }
+                Err(e) => Ok(IrValue::ResultVal(Err(Box::new(IrValue::Str(format!(
+                    "{}",
+                    e
+                )))))),
+            }
+        }
+        "eval_i64" | "iris_eval_i64" | "reflect_eval_i64" => {
+            let code = str_arg(&args[0]);
+            match crate::compile_to_module(&code, "reflect_eval_i64_mod") {
+                Ok(module) => {
+                    let target_fn = module
+                        .function_by_name("main")
+                        .or_else(|| module.functions().first());
+                    if let Some(func) = target_fn {
+                        match eval_function_in_module(&module, func, &[]) {
+                            Ok(vals) => {
+                                let n = if let Some(v) = vals.first() {
+                                    i64_arg(v)
+                                } else {
+                                    0
+                                };
+                                Ok(IrValue::ResultVal(Ok(Box::new(IrValue::I64(n)))))
+                            }
+                            Err(e) => Ok(IrValue::ResultVal(Err(Box::new(IrValue::Str(format!(
+                                "{}",
+                                e
+                            )))))),
+                        }
+                    } else {
+                        Ok(IrValue::ResultVal(Err(Box::new(IrValue::Str(
+                            "no executable function found in module".into(),
+                        )))))
+                    }
+                }
+                Err(e) => Ok(IrValue::ResultVal(Err(Box::new(IrValue::Str(format!(
+                    "{}",
+                    e
+                )))))),
+            }
+        }
+
+        // ---- Compiler-hosted typed metaprogramming ----
+        "iris_meta_analyze" | "meta_analyze" => {
+            let code = str_arg(&args[0]);
+            match crate::meta::analyze_source_json(&code, "meta_runtime") {
+                Ok(json) => Ok(IrValue::ResultVal(Ok(Box::new(IrValue::Str(json))))),
+                Err(error) => Ok(IrValue::ResultVal(Err(Box::new(IrValue::Str(
+                    error.to_string(),
+                ))))),
+            }
+        }
+        "iris_meta_emit_ir" | "meta_emit_ir" => {
+            let code = str_arg(&args[0]);
+            match crate::meta::emit_ir(&code, "meta_runtime") {
+                Ok(ir) => Ok(IrValue::ResultVal(Ok(Box::new(IrValue::Str(ir))))),
+                Err(error) => Ok(IrValue::ResultVal(Err(Box::new(IrValue::Str(
+                    error.to_string(),
+                ))))),
+            }
+        }
+        "iris_meta_apply_edit" | "meta_apply_edit" => {
+            let code = str_arg(&args[0]);
+            let start = usize::try_from(i64_arg(&args[1])).unwrap_or(usize::MAX);
+            let end = usize::try_from(i64_arg(&args[2])).unwrap_or(usize::MAX);
+            let replacement = str_arg(&args[3]);
+            match crate::meta::apply_checked_edit(
+                &code,
+                start,
+                end,
+                &replacement,
+                "meta_runtime_edit",
+            ) {
+                Ok(edited) => Ok(IrValue::ResultVal(Ok(Box::new(IrValue::Str(edited))))),
+                Err(error) => Ok(IrValue::ResultVal(Err(Box::new(IrValue::Str(
+                    error.to_string(),
+                ))))),
             }
         }
 
@@ -5416,6 +6498,7 @@ fn interp_builtin(name: &str, args: &[IrValue]) -> Result<IrValue, InterpError> 
         )))),
         "set_add" => {
             if let IrValue::List(rc) = &args[0] {
+                transaction_record_list(rc);
                 let mut list = rc.lock().unwrap();
                 let item = &args[1];
                 if !list.iter().any(|x| irvalue_eq(x, item)) {
@@ -5435,6 +6518,7 @@ fn interp_builtin(name: &str, args: &[IrValue]) -> Result<IrValue, InterpError> 
         }
         "set_remove" => {
             if let IrValue::List(rc) = &args[0] {
+                transaction_record_list(rc);
                 let mut list = rc.lock().unwrap();
                 let item = &args[1];
                 list.retain(|x| !irvalue_eq(x, item));
@@ -5803,7 +6887,9 @@ fn interp_builtin(name: &str, args: &[IrValue]) -> Result<IrValue, InterpError> 
             map.insert("freed".to_string(), IrValue::I64(0));
             map.insert("cycles_collected".to_string(), IrValue::I64(0));
             map.insert("weak_refs_invalidated".to_string(), IrValue::I64(0));
-            Ok(IrValue::Map(std::sync::Arc::new(std::sync::Mutex::new(map))))
+            Ok(IrValue::Map(std::sync::Arc::new(std::sync::Mutex::new(
+                map,
+            ))))
         }
 
         // ---- Deque (double-ended queue, backed by VecDeque stored as List) ----
@@ -5812,6 +6898,7 @@ fn interp_builtin(name: &str, args: &[IrValue]) -> Result<IrValue, InterpError> 
         )))),
         "deque_push_front" => {
             if let IrValue::List(rc) = &args[0] {
+                transaction_record_list(rc);
                 let mut v = rc.lock().unwrap();
                 v.insert(0, args[1].clone());
             }
@@ -5819,12 +6906,14 @@ fn interp_builtin(name: &str, args: &[IrValue]) -> Result<IrValue, InterpError> 
         }
         "deque_push_back" => {
             if let IrValue::List(rc) = &args[0] {
+                transaction_record_list(rc);
                 rc.lock().unwrap().push(args[1].clone());
             }
             Ok(args[0].clone())
         }
         "deque_pop_front" => {
             if let IrValue::List(rc) = &args[0] {
+                transaction_record_list(rc);
                 let mut v = rc.lock().unwrap();
                 if !v.is_empty() {
                     return Ok(v.remove(0));
@@ -5834,6 +6923,7 @@ fn interp_builtin(name: &str, args: &[IrValue]) -> Result<IrValue, InterpError> 
         }
         "deque_pop_back" => {
             if let IrValue::List(rc) = &args[0] {
+                transaction_record_list(rc);
                 let mut v = rc.lock().unwrap();
                 if let Some(val) = v.pop() {
                     return Ok(val);
@@ -5893,6 +6983,7 @@ fn interp_builtin(name: &str, args: &[IrValue]) -> Result<IrValue, InterpError> 
         }
         "bitset_set" => {
             if let IrValue::List(rc) = &args[0] {
+                transaction_record_list(rc);
                 let bit = i64_arg(&args[1]) as usize;
                 let word_idx = bit / 64;
                 let bit_idx = bit % 64;
@@ -5937,6 +7028,7 @@ fn interp_builtin(name: &str, args: &[IrValue]) -> Result<IrValue, InterpError> 
         }
         "bitset_clear" => {
             if let IrValue::List(rc) = &args[0] {
+                transaction_record_list(rc);
                 let bit = i64_arg(&args[1]) as usize;
                 let word_idx = bit / 64;
                 let bit_idx = bit % 64;
@@ -6106,7 +7198,7 @@ fn interp_builtin(name: &str, args: &[IrValue]) -> Result<IrValue, InterpError> 
             let addr = i64_arg(&args[0]);
             if let Some(len) = ffi_out_cells().remove(&addr) {
                 unsafe {
-                    let _ = Box::from_raw(std::slice::from_raw_parts_mut(addr as *mut u8, len));
+                    let _ = Box::from_raw(std::ptr::slice_from_raw_parts_mut(addr as *mut u8, len));
                 }
             }
             Ok(IrValue::I64(0))
@@ -6168,7 +7260,8 @@ fn interp_builtin(name: &str, args: &[IrValue]) -> Result<IrValue, InterpError> 
 
         "ffi_call_i64" | "ffi_call_f64" | "ffi_call_str" | "ffi_call_void" | "ffi_call_args" => {
             // ffi_call_i64(handle, func_name, arg1, arg2, ...) -> i64/f64/str
-            // Supports up to 6 i64 arguments via transmuted function pointers.
+            // Supports exact arities through 12 i64 arguments; larger calls
+            // are rejected rather than invoked through a mismatched ABI.
             let _handle = i64_arg(&args[0]);
             let _func_name = str_arg(&args[1]);
             // Marshal each argument the way the callee expects to receive it.
@@ -6932,20 +8025,30 @@ fn interp_builtin(name: &str, args: &[IrValue]) -> Result<IrValue, InterpError> 
 
         "list_remove" => {
             if let IrValue::List(arc_list) = &args[0] {
+                transaction_record_list(arc_list);
                 let idx = i64_arg(&args[1]) as usize;
                 let mut list = arc_list.lock().unwrap();
                 if idx < list.len() {
                     let removed = list.remove(idx);
                     Ok(removed)
                 } else {
-                    Err(InterpError::Panic { msg: format!("list_remove: index {} out of bounds (len {})", idx, list.len()) })
+                    Err(InterpError::Panic {
+                        msg: format!(
+                            "list_remove: index {} out of bounds (len {})",
+                            idx,
+                            list.len()
+                        ),
+                    })
                 }
             } else {
-                Err(InterpError::TypeError { detail: "list_remove: first argument must be a list".into() })
+                Err(InterpError::TypeError {
+                    detail: "list_remove: first argument must be a list".into(),
+                })
             }
         }
         "list_insert" => {
             if let IrValue::List(arc_list) = &args[0] {
+                transaction_record_list(arc_list);
                 let idx = i64_arg(&args[1]) as usize;
                 let val = args[2].clone();
                 let mut list = arc_list.lock().unwrap();
@@ -6953,27 +8056,46 @@ fn interp_builtin(name: &str, args: &[IrValue]) -> Result<IrValue, InterpError> 
                     list.insert(idx, val);
                     Ok(IrValue::I64(0))
                 } else {
-                    Err(InterpError::Panic { msg: format!("list_insert: index {} out of bounds (len {})", idx, list.len()) })
+                    Err(InterpError::Panic {
+                        msg: format!(
+                            "list_insert: index {} out of bounds (len {})",
+                            idx,
+                            list.len()
+                        ),
+                    })
                 }
             } else {
-                Err(InterpError::TypeError { detail: "list_insert: first argument must be a list".into() })
+                Err(InterpError::TypeError {
+                    detail: "list_insert: first argument must be a list".into(),
+                })
             }
         }
         "map_entries" => {
             if let IrValue::Map(arc_map) = &args[0] {
                 let map = arc_map.lock().unwrap();
-                let entries: Vec<IrValue> = map.iter().map(|(k, v)| {
-                    IrValue::Str(format!("{}:{}", k, match v {
-                        IrValue::I64(n) => n.to_string(),
-                        IrValue::F64(f) => f.to_string(),
-                        IrValue::Str(s) => s.clone(),
-                        IrValue::Bool(b) => b.to_string(),
-                        _ => "<value>".to_string(),
-                    }))
-                }).collect();
-                Ok(IrValue::List(std::sync::Arc::new(std::sync::Mutex::new(entries))))
+                let entries: Vec<IrValue> = map
+                    .iter()
+                    .map(|(k, v)| {
+                        IrValue::Str(format!(
+                            "{}:{}",
+                            k,
+                            match v {
+                                IrValue::I64(n) => n.to_string(),
+                                IrValue::F64(f) => f.to_string(),
+                                IrValue::Str(s) => s.clone(),
+                                IrValue::Bool(b) => b.to_string(),
+                                _ => "<value>".to_string(),
+                            }
+                        ))
+                    })
+                    .collect();
+                Ok(IrValue::List(std::sync::Arc::new(std::sync::Mutex::new(
+                    entries,
+                ))))
             } else {
-                Err(InterpError::TypeError { detail: "map_entries: argument must be a map".into() })
+                Err(InterpError::TypeError {
+                    detail: "map_entries: argument must be a map".into(),
+                })
             }
         }
         "chan_send" => {
@@ -6987,7 +8109,9 @@ fn interp_builtin(name: &str, args: &[IrValue]) -> Result<IrValue, InterpError> 
                 rc.not_empty.notify_one();
                 Ok(IrValue::I64(0))
             } else {
-                Err(InterpError::TypeError { detail: "chan_send: first argument must be a channel".into() })
+                Err(InterpError::TypeError {
+                    detail: "chan_send: first argument must be a channel".into(),
+                })
             }
         }
 
@@ -7172,7 +8296,11 @@ fn irvalue_to_json(v: &IrValue) -> String {
             IrValue::F64(f) => format!("{}", f),
             IrValue::F32(f) => format!("{}", f),
             IrValue::Bool(b) => {
-                if *b { "true".into() } else { "false".into() }
+                if *b {
+                    "true".into()
+                } else {
+                    "false".into()
+                }
             }
             IrValue::Str(s) => format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"")),
             IrValue::List(rc) => {
@@ -7195,7 +8323,9 @@ fn irvalue_to_json(v: &IrValue) -> String {
                 format!("{{{}}}", pairs.join(","))
             }
             IrValue::Struct(fields) => {
-                let items: Vec<String> = fields.iter().enumerate()
+                let items: Vec<String> = fields
+                    .iter()
+                    .enumerate()
                     .map(|(i, fv)| format!("\"{}\":{}", i, to_json(fv)))
                     .collect();
                 format!("{{{}}}", items.join(","))
@@ -7219,7 +8349,26 @@ fn irvalue_to_json(v: &IrValue) -> String {
     to_json(v)
 }
 
+thread_local! {
+    static INTERP_HTTP_STATUS: std::cell::Cell<i64> = const { std::cell::Cell::new(0) };
+}
+
 fn http_request(method: &str, url: &str, body: &str) -> String {
+    let (status, response) = http_request_with_headers(method, url, body, "", 10_000);
+    INTERP_HTTP_STATUS.with(|last| last.set(status));
+    response
+}
+
+fn http_request_with_headers(
+    method: &str,
+    url: &str,
+    body: &str,
+    headers: &str,
+    timeout_ms: i64,
+) -> (i64, String) {
+    if url.starts_with("https://") {
+        return (0, String::new());
+    }
     let url_trimmed = url.strip_prefix("http://").unwrap_or(url);
     let (hostport, path) = match url_trimmed.find('/') {
         Some(i) => (&url_trimmed[..i], &url_trimmed[i..]),
@@ -7239,31 +8388,38 @@ fn http_request(method: &str, url: &str, body: &str) -> String {
     // empty body, answered 200, and the caller had no way to tell the body had
     // been dropped. PATCH and DELETE-with-body were truncated the same way.
     // See known-issues #43.
-    let req = if !body.is_empty() {
-        format!("{} {} HTTP/1.0\r\nHost: {}\r\nContent-Length: {}\r\nContent-Type: application/x-www-form-urlencoded\r\nConnection: close\r\n\r\n{}",
-            method, path, host, body.len(), body)
-    } else {
-        format!(
-            "{} {} HTTP/1.0\r\nHost: {}\r\nConnection: close\r\n\r\n",
-            method, path, host
-        )
-    };
+    let req = format!(
+        "{} {} HTTP/1.1\r\nHost: {}\r\nContent-Type: application/json\r\n{}Content-Length: {}\r\nConnection: close\r\n\r\n{}",
+        method,
+        path,
+        host,
+        headers,
+        body.len(),
+        body
+    );
     use std::io::{Read, Write};
     match std::net::TcpStream::connect(format!("{}:{}", host, port)) {
         Ok(mut stream) => {
-            let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(10)));
+            let timeout = u64::try_from(timeout_ms).unwrap_or(10_000).max(1);
+            let _ = stream.set_read_timeout(Some(std::time::Duration::from_millis(timeout)));
+            let _ = stream.set_write_timeout(Some(std::time::Duration::from_millis(timeout)));
             if stream.write_all(req.as_bytes()).is_err() {
-                return String::new();
+                return (0, String::new());
             }
             let mut resp = String::new();
             let _ = stream.read_to_string(&mut resp);
+            let status = resp
+                .split_whitespace()
+                .nth(1)
+                .and_then(|value| value.parse::<i64>().ok())
+                .unwrap_or(0);
             if let Some(i) = resp.find("\r\n\r\n") {
-                resp[i + 4..].to_string()
+                (status, resp[i + 4..].to_string())
             } else {
-                resp
+                (status, resp)
             }
         }
-        Err(_) => String::new(),
+        Err(_) => (0, String::new()),
     }
 }
 
@@ -7293,24 +8449,46 @@ fn regex_char_class_matches(cc: &[u8], c: u8) -> (bool, usize) {
         let lo = cc[pos];
         if pos + 2 < cc.len() && cc[pos + 1] == b'-' && cc[pos + 2] != b']' {
             let hi = cc[pos + 2];
-            if c >= lo && c <= hi { matched = true; }
+            if c >= lo && c <= hi {
+                matched = true;
+            }
             pos += 3;
         } else if lo == b'\\' && pos + 1 < cc.len() {
             pos += 1;
             let esc = cc[pos];
             pos += 1;
             match esc {
-                b'd' => if c.is_ascii_digit() { matched = true; },
-                b'w' => if c.is_ascii_alphanumeric() || c == b'_' { matched = true; },
-                b's' => if c == b' ' || c == b'\t' || c == b'\n' || c == b'\r' { matched = true; },
-                _ => if c == esc { matched = true; },
+                b'd' => {
+                    if c.is_ascii_digit() {
+                        matched = true;
+                    }
+                }
+                b'w' => {
+                    if c.is_ascii_alphanumeric() || c == b'_' {
+                        matched = true;
+                    }
+                }
+                b's' => {
+                    if c == b' ' || c == b'\t' || c == b'\n' || c == b'\r' {
+                        matched = true;
+                    }
+                }
+                _ => {
+                    if c == esc {
+                        matched = true;
+                    }
+                }
             }
         } else {
-            if c == lo { matched = true; }
+            if c == lo {
+                matched = true;
+            }
             pos += 1;
         }
     }
-    if pos < cc.len() && cc[pos] == b']' { pos += 1; }
+    if pos < cc.len() && cc[pos] == b']' {
+        pos += 1;
+    }
     (if negated { !matched } else { matched }, pos)
 }
 
@@ -7344,31 +8522,41 @@ fn regex_match_here(pat: &[u8], txt: &[u8]) -> bool {
         let mut depth = 1;
         let mut p = 1;
         while p < pat.len() && depth > 0 {
-            if pat[p] == b'(' { depth += 1; }
-            else if pat[p] == b')' { depth -= 1; }
+            if pat[p] == b'(' {
+                depth += 1;
+            } else if pat[p] == b')' {
+                depth -= 1;
+            }
             p += 1;
         }
         /* p is past the closing ')' */
-        let group = &pat[1..p-1]; // exclude parens
+        let group = &pat[1..p - 1]; // exclude parens
         let rest = &pat[p..];
         // Check for alternation
         let alt_pos = {
             let mut found = None;
             let mut ad = 0;
             for (i, &b) in group.iter().enumerate() {
-                if b == b'(' { ad += 1; }
-                else if b == b')' { ad -= 1; }
-                else if b == b'|' && ad == 0 { found = Some(i); break; }
+                if b == b'(' {
+                    ad += 1;
+                } else if b == b')' {
+                    ad -= 1;
+                } else if b == b'|' && ad == 0 {
+                    found = Some(i);
+                    break;
+                }
             }
             found
         };
         if let Some(ap) = alt_pos {
             let left = &group[..ap];
-            let right = &group[ap+1..];
+            let right = &group[ap + 1..];
             let mut combined = Vec::with_capacity(left.len() + rest.len());
             combined.extend_from_slice(left);
             combined.extend_from_slice(rest);
-            if regex_match_here(&combined, txt) { return true; }
+            if regex_match_here(&combined, txt) {
+                return true;
+            }
             combined.clear();
             combined.extend_from_slice(right);
             combined.extend_from_slice(rest);
@@ -7384,22 +8572,34 @@ fn regex_match_here(pat: &[u8], txt: &[u8]) -> bool {
     if pat[0] == b'\\' && pat.len() >= 2 {
         let esc = pat[1];
         let m = match esc {
-            b'd' => txt.first().map_or(false, |&c| c.is_ascii_digit()),
-            b'w' => txt.first().map_or(false, |&c| c.is_ascii_alphanumeric() || c == b'_'),
-            b's' => txt.first().map_or(false, |&c| c == b' ' || c == b'\t' || c == b'\n' || c == b'\r'),
-            _ => txt.first().map_or(false, |&c| c == esc),
+            b'd' => txt.first().is_some_and(|&c| c.is_ascii_digit()),
+            b'w' => txt
+                .first()
+                .is_some_and(|&c| c.is_ascii_alphanumeric() || c == b'_'),
+            b's' => txt
+                .first()
+                .is_some_and(|&c| c == b' ' || c == b'\t' || c == b'\n' || c == b'\r'),
+            _ => txt.first().is_some_and(|&c| c == esc),
         };
         let after_esc = &pat[2..];
-        if !after_esc.is_empty() && (after_esc[0] == b'+' || after_esc[0] == b'*' || after_esc[0] == b'?') {
+        if !after_esc.is_empty()
+            && (after_esc[0] == b'+' || after_esc[0] == b'*' || after_esc[0] == b'?')
+        {
             let q = after_esc[0];
             let rest = &after_esc[1..];
             if q == b'+' {
-                if !m || txt.is_empty() { return false; }
+                if !m || txt.is_empty() {
+                    return false;
+                }
                 // Match one or more
                 let mut i = 1;
                 loop {
-                    if regex_match_here(rest, &txt[i..]) { return true; }
-                    if i >= txt.len() { break; }
+                    if regex_match_here(rest, &txt[i..]) {
+                        return true;
+                    }
+                    if i >= txt.len() {
+                        break;
+                    }
                     let c = txt[i];
                     let ok = match esc {
                         b'd' => c.is_ascii_digit(),
@@ -7407,15 +8607,21 @@ fn regex_match_here(pat: &[u8], txt: &[u8]) -> bool {
                         b's' => c == b' ' || c == b'\t' || c == b'\n' || c == b'\r',
                         _ => c == esc,
                     };
-                    if !ok { break; }
+                    if !ok {
+                        break;
+                    }
                     i += 1;
                 }
                 return false;
             } else if q == b'*' {
                 let mut i = 0;
                 loop {
-                    if regex_match_here(rest, &txt[i..]) { return true; }
-                    if i >= txt.len() { break; }
+                    if regex_match_here(rest, &txt[i..]) {
+                        return true;
+                    }
+                    if i >= txt.len() {
+                        break;
+                    }
                     let c = txt[i];
                     let ok = match esc {
                         b'd' => c.is_ascii_digit(),
@@ -7423,14 +8629,16 @@ fn regex_match_here(pat: &[u8], txt: &[u8]) -> bool {
                         b's' => c == b' ' || c == b'\t' || c == b'\n' || c == b'\r',
                         _ => c == esc,
                     };
-                    if !ok { break; }
+                    if !ok {
+                        break;
+                    }
                     i += 1;
                 }
                 return false;
             } else {
                 // '?': zero or one
-                if m && !txt.is_empty() {
-                    if regex_match_here(rest, &txt[1..]) { return true; }
+                if m && !txt.is_empty() && regex_match_here(rest, &txt[1..]) {
+                    return true;
                 }
                 return regex_match_here(rest, txt);
             }
@@ -7442,38 +8650,56 @@ fn regex_match_here(pat: &[u8], txt: &[u8]) -> bool {
     }
     /* Character class: [...] */
     if pat[0] == b'[' {
-        if txt.is_empty() { return false; }
+        if txt.is_empty() {
+            return false;
+        }
         let (m, consumed) = regex_char_class_matches(&pat[1..], txt[0]);
         // Check for quantifier after the class
         let after_class = 1 + consumed; // skip '[' + class content
-        if after_class < pat.len() && (pat[after_class] == b'+' || pat[after_class] == b'*' || pat[after_class] == b'?') {
+        if after_class < pat.len()
+            && (pat[after_class] == b'+' || pat[after_class] == b'*' || pat[after_class] == b'?')
+        {
             let q = pat[after_class];
             let rest = &pat[after_class + 1..];
             if q == b'+' {
-                if !m { return false; }
+                if !m {
+                    return false;
+                }
                 let mut i = 1;
                 loop {
-                    if regex_match_here(rest, &txt[i..]) { return true; }
-                    if i >= txt.len() { break; }
+                    if regex_match_here(rest, &txt[i..]) {
+                        return true;
+                    }
+                    if i >= txt.len() {
+                        break;
+                    }
                     let (m2, _) = regex_char_class_matches(&pat[1..], txt[i]);
-                    if !m2 { break; }
+                    if !m2 {
+                        break;
+                    }
                     i += 1;
                 }
                 return false;
             } else if q == b'*' {
                 let mut i = 0;
                 loop {
-                    if regex_match_here(rest, &txt[i..]) { return true; }
-                    if i >= txt.len() { break; }
+                    if regex_match_here(rest, &txt[i..]) {
+                        return true;
+                    }
+                    if i >= txt.len() {
+                        break;
+                    }
                     let (m2, _) = regex_char_class_matches(&pat[1..], txt[i]);
-                    if !m2 { break; }
+                    if !m2 {
+                        break;
+                    }
                     i += 1;
                 }
                 return false;
             } else {
                 // '?': zero or one
-                if m {
-                    if regex_match_here(rest, &txt[1..]) { return true; }
+                if m && regex_match_here(rest, &txt[1..]) {
+                    return true;
                 }
                 return regex_match_here(rest, txt);
             }
@@ -7503,37 +8729,58 @@ fn regex_match_star(c: u8, pat: &[u8], txt: &[u8]) -> bool {
 }
 
 fn regex_mpl(pat: &[u8], txt: &[u8]) -> isize {
-    if pat.is_empty() { return 0; }
-    if pat == b"$" { return if txt.is_empty() { 0 } else { -1 }; }
+    if pat.is_empty() {
+        return 0;
+    }
+    if pat == b"$" {
+        return if txt.is_empty() { 0 } else { -1 };
+    }
 
     // Grouping: (sub-pattern)
     if pat[0] == b'(' {
-        let mut depth = 1; let mut p = 1;
+        let mut depth = 1;
+        let mut p = 1;
         while p < pat.len() && depth > 0 {
-            if pat[p] == b'(' { depth += 1; }
-            else if pat[p] == b')' { depth -= 1; if depth == 0 { p += 1; break; } }
+            if pat[p] == b'(' {
+                depth += 1;
+            } else if pat[p] == b')' {
+                depth -= 1;
+                if depth == 0 {
+                    p += 1;
+                    break;
+                }
+            }
             p += 1;
         }
-        let group = &pat[1..p-1];
+        let group = &pat[1..p - 1];
         let rest = &pat[p..];
         let alt_pos = {
-            let mut found = None; let mut ad = 0;
+            let mut found = None;
+            let mut ad = 0;
             for (i, &b) in group.iter().enumerate() {
-                if b == b'(' { ad += 1; }
-                else if b == b')' { ad -= 1; }
-                else if b == b'|' && ad == 0 { found = Some(i); break; }
+                if b == b'(' {
+                    ad += 1;
+                } else if b == b')' {
+                    ad -= 1;
+                } else if b == b'|' && ad == 0 {
+                    found = Some(i);
+                    break;
+                }
             }
             found
         };
         if let Some(ap) = alt_pos {
-            let left = &group[..ap]; let right = &group[ap+1..];
+            let left = &group[..ap];
+            let right = &group[ap + 1..];
             let mut best: isize = -1;
             for alt in &[left, right] {
                 let mut combined = Vec::with_capacity(alt.len() + rest.len());
                 combined.extend_from_slice(alt);
                 combined.extend_from_slice(rest);
                 let r = regex_mpl(&combined, txt);
-                if r >= 0 && r > best { best = r; }
+                if r >= 0 && r > best {
+                    best = r;
+                }
             }
             return best;
         } else {
@@ -7548,7 +8795,7 @@ fn regex_mpl(pat: &[u8], txt: &[u8]) -> isize {
     if pat[0] == b'\\' && pat.len() >= 2 {
         let esc = pat[1];
         let af = &pat[2..];
-        let m = txt.first().map_or(false, |&c| match esc {
+        let m = txt.first().is_some_and(|&c| match esc {
             b'd' => c.is_ascii_digit(),
             b'w' => c.is_ascii_alphanumeric() || c == b'_',
             b's' => c == b' ' || c == b'\t' || c == b'\n' || c == b'\r',
@@ -7563,123 +8810,187 @@ fn regex_mpl(pat: &[u8], txt: &[u8]) -> isize {
             }
         };
         if !af.is_empty() && (af[0] == b'+' || af[0] == b'*' || af[0] == b'?') {
-            let q = af[0]; let rest = &af[1..];
+            let q = af[0];
+            let rest = &af[1..];
             if q == b'+' {
-                if !m { return -1; }
-                let mut cnt: isize = 0; let mut i = 0;
-                while i < txt.len() && esc_match(txt[i]) { cnt += 1; i += 1; }
+                if !m {
+                    return -1;
+                }
+                let mut cnt: isize = 0;
+                let mut i = 0;
+                while i < txt.len() && esc_match(txt[i]) {
+                    cnt += 1;
+                    i += 1;
+                }
                 for c in (1..=cnt).rev() {
                     let r = regex_mpl(rest, &txt[c as usize..]);
-                    if r >= 0 { return c + r; }
+                    if r >= 0 {
+                        return c + r;
+                    }
                 }
                 return -1;
             } else if q == b'*' {
-                let mut cnt: isize = 0; let mut i = 0;
-                while i < txt.len() && esc_match(txt[i]) { cnt += 1; i += 1; }
+                let mut cnt: isize = 0;
+                let mut i = 0;
+                while i < txt.len() && esc_match(txt[i]) {
+                    cnt += 1;
+                    i += 1;
+                }
                 for c in (0..=cnt).rev() {
                     let r = regex_mpl(rest, &txt[c as usize..]);
-                    if r >= 0 { return c + r; }
+                    if r >= 0 {
+                        return c + r;
+                    }
                 }
                 return -1;
             } else {
                 if m && !txt.is_empty() {
                     let r = regex_mpl(rest, &txt[1..]);
-                    if r >= 0 { return 1 + r; }
+                    if r >= 0 {
+                        return 1 + r;
+                    }
                 }
                 return regex_mpl(rest, txt);
             }
         }
         if m && !txt.is_empty() {
             let r = regex_mpl(af, &txt[1..]);
-            if r >= 0 { return 1 + r; }
+            if r >= 0 {
+                return 1 + r;
+            }
         }
         return -1;
     }
 
     // Character class: [...]
     if pat[0] == b'[' {
-        if txt.is_empty() { return -1; }
+        if txt.is_empty() {
+            return -1;
+        }
         let (m, consumed) = regex_char_class_matches(&pat[1..], txt[0]);
         let after_class = 1 + consumed;
-        if after_class < pat.len() && (pat[after_class] == b'+' || pat[after_class] == b'*' || pat[after_class] == b'?') {
-            let q = pat[after_class]; let rest = &pat[after_class + 1..];
+        if after_class < pat.len()
+            && (pat[after_class] == b'+' || pat[after_class] == b'*' || pat[after_class] == b'?')
+        {
+            let q = pat[after_class];
+            let rest = &pat[after_class + 1..];
             if q == b'+' {
-                if !m { return -1; }
-                let mut cnt: isize = 0; let mut i = 0;
+                if !m {
+                    return -1;
+                }
+                let mut cnt: isize = 0;
+                let mut i = 0;
                 while i < txt.len() {
                     let (m2, _) = regex_char_class_matches(&pat[1..], txt[i]);
-                    if !m2 { break; }
-                    cnt += 1; i += 1;
+                    if !m2 {
+                        break;
+                    }
+                    cnt += 1;
+                    i += 1;
                 }
                 for c in (1..=cnt).rev() {
                     let r = regex_mpl(rest, &txt[c as usize..]);
-                    if r >= 0 { return c + r; }
+                    if r >= 0 {
+                        return c + r;
+                    }
                 }
                 return -1;
             } else if q == b'*' {
-                let mut cnt: isize = 0; let mut i = 0;
+                let mut cnt: isize = 0;
+                let mut i = 0;
                 while i < txt.len() {
                     let (m2, _) = regex_char_class_matches(&pat[1..], txt[i]);
-                    if !m2 { break; }
-                    cnt += 1; i += 1;
+                    if !m2 {
+                        break;
+                    }
+                    cnt += 1;
+                    i += 1;
                 }
                 for c in (0..=cnt).rev() {
                     let r = regex_mpl(rest, &txt[c as usize..]);
-                    if r >= 0 { return c + r; }
+                    if r >= 0 {
+                        return c + r;
+                    }
                 }
                 return -1;
             } else {
                 if m {
                     let r = regex_mpl(rest, &txt[1..]);
-                    if r >= 0 { return 1 + r; }
+                    if r >= 0 {
+                        return 1 + r;
+                    }
                 }
                 return regex_mpl(rest, txt);
             }
         }
         if m {
-            let r = regex_mpl(&pat[1+consumed..], &txt[1..]);
-            if r >= 0 { return 1 + r; }
+            let r = regex_mpl(&pat[1 + consumed..], &txt[1..]);
+            if r >= 0 {
+                return 1 + r;
+            }
         }
         return -1;
     }
 
     // Single char with quantifiers
     if pat.len() >= 2 && pat[1] == b'*' {
-        let mut cnt: isize = 0; let mut i = 0;
-        while i < txt.len() && (pat[0] == b'.' || txt[i] == pat[0]) { cnt += 1; i += 1; }
+        let mut cnt: isize = 0;
+        let mut i = 0;
+        while i < txt.len() && (pat[0] == b'.' || txt[i] == pat[0]) {
+            cnt += 1;
+            i += 1;
+        }
         for c in (0..=cnt).rev() {
             let r = regex_mpl(&pat[2..], &txt[c as usize..]);
-            if r >= 0 { return c + r; }
+            if r >= 0 {
+                return c + r;
+            }
         }
         return -1;
     }
     if pat.len() >= 2 && pat[1] == b'+' {
-        if txt.is_empty() || (pat[0] != b'.' && txt[0] != pat[0]) { return -1; }
-        let mut cnt: isize = 0; let mut i = 0;
-        while i < txt.len() && (pat[0] == b'.' || txt[i] == pat[0]) { cnt += 1; i += 1; }
+        if txt.is_empty() || (pat[0] != b'.' && txt[0] != pat[0]) {
+            return -1;
+        }
+        let mut cnt: isize = 0;
+        let mut i = 0;
+        while i < txt.len() && (pat[0] == b'.' || txt[i] == pat[0]) {
+            cnt += 1;
+            i += 1;
+        }
         for c in (1..=cnt).rev() {
             let r = regex_mpl(&pat[2..], &txt[c as usize..]);
-            if r >= 0 { return c + r; }
+            if r >= 0 {
+                return c + r;
+            }
         }
         return -1;
     }
     if pat.len() >= 2 && pat[1] == b'?' {
         if !txt.is_empty() && (pat[0] == b'.' || txt[0] == pat[0]) {
             let r = regex_mpl(&pat[2..], &txt[1..]);
-            if r >= 0 { return 1 + r; }
+            if r >= 0 {
+                return 1 + r;
+            }
         }
         return regex_mpl(&pat[2..], txt);
     }
     // Single char, no quantifier
     if !txt.is_empty() && (pat[0] == b'.' || txt[0] == pat[0]) {
         let r = regex_mpl(&pat[1..], &txt[1..]);
-        if r >= 0 { return 1 + r; }
+        if r >= 0 {
+            return 1 + r;
+        }
     }
     -1
 }
 
 fn simple_regex_find_all(pattern: &str, text: &str) -> Vec<String> {
-    let pat = if pattern.starts_with('^') { &pattern.as_bytes()[1..] } else { pattern.as_bytes() };
+    let pat = if pattern.starts_with('^') {
+        &pattern.as_bytes()[1..]
+    } else {
+        pattern.as_bytes()
+    };
     let txt = text.as_bytes();
     let mut results = Vec::new();
     let mut pos = 0;
@@ -7844,7 +9155,6 @@ fn base64_decode(s: &str) -> String {
     }
     String::from_utf8_lossy(&out).to_string()
 }
-
 
 // ---------------------------------------------------------------------------
 // Deterministic RNG (SplitMix64)

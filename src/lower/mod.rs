@@ -111,6 +111,9 @@ fn set_current_brings(brings: &[crate::parser::ast::AstBring]) {
                 } else {
                     name.as_str()
                 };
+                if !prefixes.contains(&qualifier.to_string()) {
+                    prefixes.push(qualifier.to_string());
+                }
                 mappings.insert(qualifier.to_string(), mangled_prefix);
             }
         }
@@ -147,6 +150,9 @@ pub(crate) fn resolve_brought_name(name: &str, module: &IrModule) -> String {
         if let Some(prefixes) = prefixes_stack.borrow().last() {
             for prefix in prefixes.iter() {
                 let candidate = format!("{}__{}", prefix, name);
+                if CURRENT_PRIVATE_ITEMS.with(|p| p.borrow().contains(&candidate)) {
+                    continue;
+                }
                 if module.struct_def(&candidate).is_some()
                     || module.enum_def(&candidate).is_some()
                     || module.type_alias(&candidate).is_some()
@@ -168,20 +174,29 @@ pub(crate) fn resolve_brought_name(name: &str, module: &IrModule) -> String {
     }
     // Fallback: scan all type registries for any mangled candidate matching `*__name`.
     let suffix = format!("__{}", name);
+    let mut candidates: Vec<String> = Vec::new();
     for key in module.struct_defs.keys() {
         if key.ends_with(&suffix) {
-            return key.clone();
+            candidates.push(key.clone());
         }
     }
     for key in module.enum_defs.keys() {
         if key.ends_with(&suffix) {
-            return key.clone();
+            candidates.push(key.clone());
         }
     }
     for key in module.type_aliases.keys() {
         if key.ends_with(&suffix) {
-            return key.clone();
+            candidates.push(key.clone());
         }
+    }
+    CURRENT_PRIVATE_ITEMS.with(|p| {
+        let priv_set = p.borrow();
+        candidates.retain(|c| !priv_set.contains(c));
+    });
+    if !candidates.is_empty() {
+        candidates.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
+        return candidates.remove(0);
     }
     name.to_string()
 }
@@ -195,8 +210,7 @@ use crate::ir::types::{DType, Dim, IrType, Shape, TraitMethodSig};
 use crate::ir::value::ValueId;
 use crate::parser::ast::{
     AstBinOp, AstBlock, AstDim, AstExpr, AstFunction, AstHandlerArm, AstModule, AstScalarKind,
-    AstStmt, AstType,
-    AstUnaryOp, AstWhenArm, AstWhenPattern, Ident,
+    AstStmt, AstType, AstUnaryOp, AstWhenArm, AstWhenPattern, Ident,
 };
 use crate::parser::lexer::Span;
 
@@ -222,10 +236,16 @@ fn pattern_has_bindings(pattern: &AstWhenPattern) -> bool {
 /// Lower an `AstModule` to an `IrModule`.
 pub fn lower(ast: &AstModule, module_name: &str) -> Result<IrModule, LowerError> {
     set_current_brings(&ast.brings);
+    CURRENT_PRIVATE_ITEMS.with(|p| {
+        *p.borrow_mut() = ast.private_items.clone();
+    });
     struct ScopeGuard;
     impl Drop for ScopeGuard {
         fn drop(&mut self) {
             clear_current_brings();
+            CURRENT_PRIVATE_ITEMS.with(|p| {
+                p.borrow_mut().clear();
+            });
         }
     }
     let _guard = ScopeGuard;
@@ -288,10 +308,17 @@ pub fn lower(ast: &AstModule, module_name: &str) -> Result<IrModule, LowerError>
     for s in &ast.structs {
         if !s.type_params.is_empty() {
             generic_struct_templates.insert(s.name.name.clone(), s.clone());
+            module.generic_struct_names.insert(s.name.name.clone());
         }
     }
 
-    // Register non-generic struct definitions first.
+    // Pre-register all struct names so forward references and brought module
+    // record field references can be resolved by resolve_brought_name.
+    for s in &ast.structs {
+        let _ = module.add_struct_def(s.name.name.clone(), Vec::new());
+    }
+
+    // Register non-generic struct definitions.
     for s in &ast.structs {
         if s.type_params.is_empty() {
             let fields: Vec<(String, IrType)> = s
@@ -299,17 +326,9 @@ pub fn lower(ast: &AstModule, module_name: &str) -> Result<IrModule, LowerError>
                 .iter()
                 .map(|f| (f.name.name.clone(), lower_type_with_structs(&f.ty, &module)))
                 .collect();
-            let defaults: Vec<Option<AstExpr>> = s
-                .fields
-                .iter()
-                .map(|f| f.default.clone())
-                .collect();
-            module
-                .add_struct_def(s.name.name.clone(), fields)
-                .map_err(|_| LowerError::DuplicateFunction {
-                    name: s.name.name.clone(),
-                    span: s.name.span,
-                })?;
+            let defaults: Vec<Option<AstExpr>> =
+                s.fields.iter().map(|f| f.default.clone()).collect();
+            module.struct_defs.insert(s.name.name.clone(), fields);
             if defaults.iter().any(|d| d.is_some()) {
                 module.struct_defaults.insert(s.name.name.clone(), defaults);
             }
@@ -333,12 +352,14 @@ pub fn lower(ast: &AstModule, module_name: &str) -> Result<IrModule, LowerError>
             .iter()
             .map(|f| (f.name.name.clone(), lower_type_with_structs(&f.ty, &module)))
             .collect();
-        let defaults: Vec<Option<AstExpr>> = template
-            .fields
-            .iter()
-            .map(|f| f.default.clone())
-            .collect();
-        let _ = module.add_struct_def(name.clone(), fields);
+        let defaults: Vec<Option<AstExpr>> =
+            template.fields.iter().map(|f| f.default.clone()).collect();
+        // The first registration pass deliberately inserted an empty
+        // placeholder for every struct name. Populate that placeholder here;
+        // `add_struct_def` would reject it as a duplicate and silently leave
+        // generic templates with zero fields, breaking every later `.field`
+        // access on a monomorphized record.
+        module.struct_defs.insert(name.clone(), fields);
         if defaults.iter().any(|d| d.is_some()) {
             module.struct_defaults.insert(name.clone(), defaults);
         }
@@ -392,11 +413,23 @@ pub fn lower(ast: &AstModule, module_name: &str) -> Result<IrModule, LowerError>
             }
 
             // Register the monomorphized struct definition.
-            let mangled_name = format!("{}__{}", base_name, type_args.iter().map(|arg| mangle_ir_type(&lower_type_with_structs(arg, &module))).collect::<Vec<_>>().join("_"));
-            module.add_struct_def(mangled_name.clone(), lowered_fields).ok();
+            let mangled_name = format!(
+                "{}__{}",
+                base_name,
+                type_args
+                    .iter()
+                    .map(|arg| mangle_ir_type(&lower_type_with_structs(arg, &module)))
+                    .collect::<Vec<_>>()
+                    .join("_")
+            );
+            module
+                .add_struct_def(mangled_name.clone(), lowered_fields)
+                .ok();
             // Carry over defaults from the template (defaults are typically literals).
             if let Some(template_defaults) = module.struct_defaults.get(&base_name).cloned() {
-                module.struct_defaults.insert(mangled_name, template_defaults);
+                module
+                    .struct_defaults
+                    .insert(mangled_name, template_defaults);
             }
         }
     }
@@ -418,7 +451,11 @@ pub fn lower(ast: &AstModule, module_name: &str) -> Result<IrModule, LowerError>
             .iter()
             .map(|m| TraitMethodSig {
                 name: m.name.name.clone(),
-                params: m.params.iter().map(|p| lower_type_with_structs(&p.ty, &module)).collect(),
+                params: m
+                    .params
+                    .iter()
+                    .map(|p| lower_type_with_structs(&p.ty, &module))
+                    .collect(),
                 ret: Box::new(lower_type_with_structs(&m.return_ty, &module)),
             })
             .collect();
@@ -568,6 +605,42 @@ pub fn lower(ast: &AstModule, module_name: &str) -> Result<IrModule, LowerError>
     fn_sigs
         .entry("assert_eq".into())
         .or_insert(IrType::Scalar(DType::I64));
+    fn_sigs
+        .entry("iris_eval".into())
+        .or_insert(IrType::ResultType(
+            Box::new(IrType::Str),
+            Box::new(IrType::Str),
+        ));
+    fn_sigs
+        .entry("reflect_eval".into())
+        .or_insert(IrType::ResultType(
+            Box::new(IrType::Str),
+            Box::new(IrType::Str),
+        ));
+    fn_sigs
+        .entry("iris_eval_i64".into())
+        .or_insert(IrType::ResultType(
+            Box::new(IrType::Scalar(DType::I64)),
+            Box::new(IrType::Str),
+        ));
+    fn_sigs
+        .entry("reflect_eval_i64".into())
+        .or_insert(IrType::ResultType(
+            Box::new(IrType::Scalar(DType::I64)),
+            Box::new(IrType::Str),
+        ));
+    fn_sigs
+        .entry("iris_validate".into())
+        .or_insert(IrType::Scalar(DType::Bool));
+    fn_sigs
+        .entry("reflect_validate".into())
+        .or_insert(IrType::Scalar(DType::Bool));
+    fn_sigs
+        .entry("iris_reflection_available".into())
+        .or_insert(IrType::Scalar(DType::Bool));
+    fn_sigs
+        .entry("reflect_available".into())
+        .or_insert(IrType::Scalar(DType::Bool));
 
     // 3b. Collect global const declarations as named expressions.
     let const_defs_map: HashMap<String, AstExpr> = ast
@@ -597,8 +670,7 @@ pub fn lower(ast: &AstModule, module_name: &str) -> Result<IrModule, LowerError>
         // Without this the blanket path caught it, searched for concrete types
         // satisfying a bound it does not have, found none, and emitted nothing.
         // See known-issues #38.
-        let target_is_generic = impl_def.target_ty.is_some()
-            && !impl_def.generic_params.is_empty();
+        let target_is_generic = impl_def.target_ty.is_some() && !impl_def.generic_params.is_empty();
 
         // Handle blanket impls: monomorphize for each known concrete type.
         if !impl_def.generic_params.is_empty()
@@ -617,11 +689,19 @@ pub fn lower(ast: &AstModule, module_name: &str) -> Result<IrModule, LowerError>
                         .trait_impl_methods()
                         .get(bound_trait)
                         .map(|entries| {
-                            entries.iter().map(|(cty, _, _)| cty.clone()).collect::<std::collections::HashSet<_>>().into_iter().collect()
+                            entries
+                                .iter()
+                                .map(|(cty, _, _)| cty.clone())
+                                .collect::<std::collections::HashSet<_>>()
+                                .into_iter()
+                                .collect()
                         })
                         .unwrap_or_default();
                     candidate_types = Some(match candidate_types {
-                        Some(prev) => prev.into_iter().filter(|t| types_for_bound.contains(t)).collect(),
+                        Some(prev) => prev
+                            .into_iter()
+                            .filter(|t| types_for_bound.contains(t))
+                            .collect(),
                         None => types_for_bound,
                     });
                 }
@@ -651,7 +731,9 @@ pub fn lower(ast: &AstModule, module_name: &str) -> Result<IrModule, LowerError>
                         );
                         // Resolve return type with substitutions.
                         let mut ret_ty = lower_type_with_structs(&method.return_ty, &module);
-                        if method.is_async { ret_ty = IrType::Chan(Box::new(ret_ty)); }
+                        if method.is_async {
+                            ret_ty = IrType::Chan(Box::new(ret_ty));
+                        }
                         fn_sigs.insert(mangled.clone(), ret_ty);
                         trait_dispatch_map
                             .entry(method.name.name.clone())
@@ -673,16 +755,30 @@ pub fn lower(ast: &AstModule, module_name: &str) -> Result<IrModule, LowerError>
                                 }
                             } else {
                                 // Substitute type params in other param types.
-                                let ast_subs: HashMap<String, AstType> = vec![
-                                    (tp_name.clone(), crate::parser::ast::AstType::Named(concrete_ty_name.to_string(), method.span)),
-                                ].into_iter().collect();
-                                param.ty = substitute_ast_type(&param.ty, &ast_subs, &HashMap::new());
+                                let ast_subs: HashMap<String, AstType> = vec![(
+                                    tp_name.clone(),
+                                    crate::parser::ast::AstType::Named(
+                                        concrete_ty_name.to_string(),
+                                        method.span,
+                                    ),
+                                )]
+                                .into_iter()
+                                .collect();
+                                param.ty =
+                                    substitute_ast_type(&param.ty, &ast_subs, &HashMap::new());
                             }
                         }
-                        let ast_subs: HashMap<String, AstType> = vec![
-                            (tp_name.clone(), crate::parser::ast::AstType::Named(concrete_ty_name.to_string(), method.span)),
-                        ].into_iter().collect();
-                        renamed.return_ty = substitute_ast_type(&renamed.return_ty, &ast_subs, &HashMap::new());
+                        let ast_subs: HashMap<String, AstType> = vec![(
+                            tp_name.clone(),
+                            crate::parser::ast::AstType::Named(
+                                concrete_ty_name.to_string(),
+                                method.span,
+                            ),
+                        )]
+                        .into_iter()
+                        .collect();
+                        renamed.return_ty =
+                            substitute_ast_type(&renamed.return_ty, &ast_subs, &HashMap::new());
                         impl_fns.push(renamed);
                     }
                 }
@@ -855,7 +951,9 @@ pub fn lower(ast: &AstModule, module_name: &str) -> Result<IrModule, LowerError>
             for instr in &block.instrs {
                 if let IrInstr::MakeStruct { result_ty, .. } = instr {
                     if let IrType::Struct { name, fields } = result_ty {
-                        if module.struct_def(name).is_none() && !extra_struct_defs.contains_key(name) {
+                        if module.struct_def(name).is_none()
+                            && !extra_struct_defs.contains_key(name)
+                        {
                             extra_struct_defs.insert(name.clone(), fields.clone());
                         }
                     }
@@ -870,6 +968,8 @@ pub fn lower(ast: &AstModule, module_name: &str) -> Result<IrModule, LowerError>
     Ok(module)
 }
 
+type LoopFrame = (BlockId, BlockId, BlockId, Vec<String>, Option<String>, bool);
+
 struct Lowerer<'m> {
     builder: IrFunctionBuilder,
     /// Current lexical scope: name → (ValueId, IrType).
@@ -878,7 +978,7 @@ struct Lowerer<'m> {
     /// Guards against a recursive taped call expanding forever (#49).
     taped_inline_stack: Vec<String>,
     /// Stack of (header_block, merge_block, loop_var_names, label) for nested loops.
-    loop_stack: Vec<(BlockId, BlockId, BlockId, Vec<String>, Option<String>, bool)>,
+    loop_stack: Vec<LoopFrame>,
     /// Reference to the module for struct/enum type lookups.
     module: &'m IrModule,
     /// Pre-collected function return types for resolving call result types.
@@ -1047,16 +1147,6 @@ impl<'m> Lowerer<'m> {
                 candidates.push(key.clone());
             }
         }
-        // This fallback exists for *transitive* brings, where the prefix of the
-        // defining module is not among the current module's own bring prefixes.
-        // It matched on the suffix alone, so it also resolved private items --
-        // and it ran after the prefix loop, which meant refusing them there
-        // achieved nothing. Filtering here is what actually enforces `pub`.
-        // See known-issues #13.
-        CURRENT_PRIVATE_ITEMS.with(|p| {
-            let priv_set = p.borrow();
-            candidates.retain(|c| !priv_set.contains(c));
-        });
         for key in self.mono_sigs.borrow().keys() {
             if key.ends_with(&suffix) {
                 candidates.push(key.clone());
@@ -1072,6 +1162,31 @@ impl<'m> Lowerer<'m> {
                 candidates.push(key.clone());
             }
         }
+        for key in self.module.struct_defs.keys() {
+            if key.ends_with(&suffix) {
+                candidates.push(key.clone());
+            }
+        }
+        for key in self.module.enum_defs.keys() {
+            if key.ends_with(&suffix) {
+                candidates.push(key.clone());
+            }
+        }
+        for key in self.module.type_aliases.keys() {
+            if key.ends_with(&suffix) {
+                candidates.push(key.clone());
+            }
+        }
+        // This fallback exists for *transitive* brings, where the prefix of the
+        // defining module is not among the current module's own bring prefixes.
+        // It matched on the suffix alone, so it also resolved private items --
+        // and it ran after the prefix loop, which meant refusing them there
+        // achieved nothing. Filtering here is what actually enforces `pub`.
+        // See known-issues #13.
+        CURRENT_PRIVATE_ITEMS.with(|p| {
+            let priv_set = p.borrow();
+            candidates.retain(|c| !priv_set.contains(c));
+        });
         if !candidates.is_empty() {
             candidates.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
             return candidates.remove(0);
@@ -1185,19 +1300,29 @@ impl<'m> Lowerer<'m> {
         match ty {
             IrType::Scalar(DType::F64) | IrType::Scalar(DType::F32) => {
                 self.builder.push_instr(
-                    IrInstr::ConstFloat { result: v, value: 0.0, ty: ty.clone() },
+                    IrInstr::ConstFloat {
+                        result: v,
+                        value: 0.0,
+                        ty: ty.clone(),
+                    },
                     Some(ty.clone()),
                 );
             }
             IrType::Scalar(DType::Bool) => {
                 self.builder.push_instr(
-                    IrInstr::ConstBool { result: v, value: false },
+                    IrInstr::ConstBool {
+                        result: v,
+                        value: false,
+                    },
                     Some(ty.clone()),
                 );
             }
             IrType::Str => {
                 self.builder.push_instr(
-                    IrInstr::ConstStr { result: v, value: String::new() },
+                    IrInstr::ConstStr {
+                        result: v,
+                        value: String::new(),
+                    },
                     Some(IrType::Str),
                 );
             }
@@ -1206,7 +1331,11 @@ impl<'m> Lowerer<'m> {
                 // type this is a null pointer, which is what the uncovered arm
                 // of a match that should never be taken can honestly produce.
                 self.builder.push_instr(
-                    IrInstr::ConstInt { result: v, value: 0, ty: ty.clone() },
+                    IrInstr::ConstInt {
+                        result: v,
+                        value: 0,
+                        ty: ty.clone(),
+                    },
                     Some(ty.clone()),
                 );
             }
@@ -1325,9 +1454,12 @@ impl<'m> Lowerer<'m> {
                     IrType::Infer
                 }
             }
-            AstExpr::Tuple { elements, .. } => {
-                IrType::Tuple(elements.iter().map(|e| self.infer_ast_expr_type_simple(e)).collect())
-            }
+            AstExpr::Tuple { elements, .. } => IrType::Tuple(
+                elements
+                    .iter()
+                    .map(|e| self.infer_ast_expr_type_simple(e))
+                    .collect(),
+            ),
             AstExpr::MapLiteral { entries, .. } => {
                 if let Some((k, _)) = entries.first() {
                     let k_ty = self.infer_ast_expr_type_simple(k);
@@ -1341,26 +1473,28 @@ impl<'m> Lowerer<'m> {
         }
     }
 
-    fn find_matching_monomorphized_struct(&self, base_name: &str, fields: &[(String, IrType)]) -> Option<String> {
+    fn find_matching_monomorphized_struct(
+        &self,
+        base_name: &str,
+        fields: &[(String, IrType)],
+    ) -> Option<String> {
         let prefix = format!("{}__", base_name);
         for (struct_name, struct_fields) in &self.module.struct_defs {
-            if struct_name.starts_with(&prefix) {
-                if struct_fields.len() == fields.len() {
-                    let mut matched = true;
-                    for (f_name, f_ty) in fields {
-                        if let Some((_, def_ty)) = struct_fields.iter().find(|(n, _)| n == f_name) {
-                            if *f_ty != IrType::Infer && f_ty != def_ty {
-                                matched = false;
-                                break;
-                            }
-                        } else {
+            if struct_name.starts_with(&prefix) && struct_fields.len() == fields.len() {
+                let mut matched = true;
+                for (f_name, f_ty) in fields {
+                    if let Some((_, def_ty)) = struct_fields.iter().find(|(n, _)| n == f_name) {
+                        if *f_ty != IrType::Infer && f_ty != def_ty {
                             matched = false;
                             break;
                         }
+                    } else {
+                        matched = false;
+                        break;
                     }
-                    if matched {
-                        return Some(struct_name.clone());
-                    }
+                }
+                if matched {
+                    return Some(struct_name.clone());
                 }
             }
         }
@@ -1396,9 +1530,17 @@ impl<'m> Lowerer<'m> {
         expected: &IrType,
         span: crate::parser::lexer::Span,
     ) -> Result<(ValueId, IrType), LowerError> {
-        if let IrType::TraitObject { name, methods: exp_methods } = expected {
+        if let IrType::TraitObject {
+            name,
+            methods: exp_methods,
+        } = expected
+        {
             // Already a matching trait object: no-op.
-            if let IrType::TraitObject { name: existing_name, .. } = &ty {
+            if let IrType::TraitObject {
+                name: existing_name,
+                ..
+            } = &ty
+            {
                 if existing_name == name {
                     return Ok((value, ty));
                 }
@@ -1455,6 +1597,39 @@ impl<'m> Lowerer<'m> {
                 // If the ident is not in scope, check if it's a named function —
                 // create a first-class function reference via MakeClosure.
                 if !self.scope.contains_key(&resolved_name) {
+                    // Source functions used as values need the same closure
+                    // ABI as lambdas when they cross a parameter/record boundary.
+                    // A raw function pointer cannot accept the hidden env argument.
+                    if let Some(function) =
+                        CURRENT_FN_ASTS.with(|asts| asts.borrow().get(&resolved_name).cloned())
+                    {
+                        let params: Vec<crate::parser::ast::AstParam> = function
+                            .params
+                            .iter()
+                            .enumerate()
+                            .map(|(index, parameter)| crate::parser::ast::AstParam {
+                                name: Ident {
+                                    name: format!("__fnref_arg_{index}"),
+                                    span: ident.span,
+                                },
+                                ty: parameter.ty.clone(),
+                                default: None,
+                            })
+                            .collect();
+                        let body = AstExpr::Call {
+                            callee: Ident {
+                                name: resolved_name.clone(),
+                                span: ident.span,
+                            },
+                            args: params
+                                .iter()
+                                .map(|parameter| AstExpr::Ident(parameter.name.clone()))
+                                .collect(),
+                            named_args: vec![],
+                            span: ident.span,
+                        };
+                        return self.lower_lambda(&params, &body, ident.span);
+                    }
                     if let Some(ret_ty) = self.fn_sigs.get(&resolved_name).cloned() {
                         let fn_ty = IrType::Fn {
                             params: vec![], // param types not tracked in fn_sigs
@@ -1542,7 +1717,11 @@ impl<'m> Lowerer<'m> {
                 if lhs_ty == IrType::Str && rhs_ty == IrType::Str && matches!(op, AstBinOp::Add) {
                     let result = self.builder.fresh_value();
                     self.builder.push_instr(
-                        IrInstr::StrConcat { result, lhs: lhs_val, rhs: rhs_val },
+                        IrInstr::StrConcat {
+                            result,
+                            lhs: lhs_val,
+                            rhs: rhs_val,
+                        },
                         Some(IrType::Str),
                     );
                     return Ok((result, IrType::Str));
@@ -1551,12 +1730,21 @@ impl<'m> Lowerer<'m> {
                 if lhs_ty == IrType::Str && matches!(op, AstBinOp::Mul) {
                     let count_val = self.builder.fresh_value();
                     self.builder.push_instr(
-                        IrInstr::Cast { result: count_val, operand: rhs_val, from_ty: rhs_ty.clone(), to_ty: IrType::Scalar(DType::I64) },
+                        IrInstr::Cast {
+                            result: count_val,
+                            operand: rhs_val,
+                            from_ty: rhs_ty.clone(),
+                            to_ty: IrType::Scalar(DType::I64),
+                        },
                         Some(IrType::Scalar(DType::I64)),
                     );
                     let result = self.builder.fresh_value();
                     self.builder.push_instr(
-                        IrInstr::StrRepeat { result, operand: lhs_val, count: count_val },
+                        IrInstr::StrRepeat {
+                            result,
+                            operand: lhs_val,
+                            count: count_val,
+                        },
                         Some(IrType::Str),
                     );
                     return Ok((result, IrType::Str));
@@ -1565,12 +1753,21 @@ impl<'m> Lowerer<'m> {
                 if rhs_ty == IrType::Str && matches!(op, AstBinOp::Mul) {
                     let count_val = self.builder.fresh_value();
                     self.builder.push_instr(
-                        IrInstr::Cast { result: count_val, operand: lhs_val, from_ty: lhs_ty.clone(), to_ty: IrType::Scalar(DType::I64) },
+                        IrInstr::Cast {
+                            result: count_val,
+                            operand: lhs_val,
+                            from_ty: lhs_ty.clone(),
+                            to_ty: IrType::Scalar(DType::I64),
+                        },
                         Some(IrType::Scalar(DType::I64)),
                     );
                     let result = self.builder.fresh_value();
                     self.builder.push_instr(
-                        IrInstr::StrRepeat { result, operand: rhs_val, count: count_val },
+                        IrInstr::StrRepeat {
+                            result,
+                            operand: rhs_val,
+                            count: count_val,
+                        },
                         Some(IrType::Str),
                     );
                     return Ok((result, IrType::Str));
@@ -1728,9 +1925,12 @@ impl<'m> Lowerer<'m> {
                 Ok((result, ty))
             }
 
-            AstExpr::Call { callee, args, named_args, span } => {
-                self.lower_call(callee, args, named_args, *span)
-            }
+            AstExpr::Call {
+                callee,
+                args,
+                named_args,
+                span,
+            } => self.lower_call(callee, args, named_args, *span),
 
             AstExpr::If {
                 cond,
@@ -1742,7 +1942,8 @@ impl<'m> Lowerer<'m> {
             AstExpr::Block(block) => {
                 if let Some(v) = self.lower_block(block)? {
                     Ok(v)
-                } else if let Some((param_id, param_ty)) = self.builder.current_block_first_param() {
+                } else if let Some((param_id, param_ty)) = self.builder.current_block_first_param()
+                {
                     // Block has no tail but the current block has a block param
                     // (e.g. from `?` unwrapping). Use it as the block's value.
                     Ok((param_id, param_ty))
@@ -1759,7 +1960,8 @@ impl<'m> Lowerer<'m> {
                 // Effect mask: lower the body as if it were a normal block.
                 if let Some(v) = self.lower_block(body)? {
                     Ok(v)
-                } else if let Some((param_id, param_ty)) = self.builder.current_block_first_param() {
+                } else if let Some((param_id, param_ty)) = self.builder.current_block_first_param()
+                {
                     Ok((param_id, param_ty))
                 } else {
                     Ok(self.emit_unit_value())
@@ -1818,19 +2020,34 @@ impl<'m> Lowerer<'m> {
                 Ok((result, elem_ty))
             }
 
-            AstExpr::StructLit { name, fields, spread, span } => {
+            AstExpr::StructLit {
+                name,
+                fields,
+                spread,
+                span,
+            } => {
                 let mut resolved_name = resolve_brought_name(name, self.module);
                 // Always check if binding_ty provides a more specific (mangled) name
                 // like "Box__i64" even when the base template "Box" exists.
-                if let Some(IrType::Struct { name: expected_name, .. }) = &self.binding_ty {
+                if let Some(IrType::Struct {
+                    name: expected_name,
+                    ..
+                }) = &self.binding_ty
+                {
                     if expected_name.starts_with(&format!("{}__", name)) {
                         resolved_name = expected_name.clone();
                     }
                 }
                 if self.module.struct_def(&resolved_name).is_none() {
                     let mut found = false;
-                    if let Some(IrType::Struct { name: expected_name, .. }) = &self.binding_ty {
-                        if expected_name == name || expected_name.starts_with(&format!("{}__", name)) {
+                    if let Some(IrType::Struct {
+                        name: expected_name,
+                        ..
+                    }) = &self.binding_ty
+                    {
+                        if expected_name == name
+                            || expected_name.starts_with(&format!("{}__", name))
+                        {
                             resolved_name = expected_name.clone();
                             found = true;
                         }
@@ -1841,7 +2058,9 @@ impl<'m> Lowerer<'m> {
                             let f_ty = self.infer_ast_expr_type_simple(f_expr);
                             lowered_fields.push((f_name.clone(), f_ty));
                         }
-                        if let Some(matched_name) = self.find_matching_monomorphized_struct(name, &lowered_fields) {
+                        if let Some(matched_name) =
+                            self.find_matching_monomorphized_struct(name, &lowered_fields)
+                        {
                             resolved_name = matched_name;
                         }
                     }
@@ -1863,7 +2082,7 @@ impl<'m> Lowerer<'m> {
                 // Also compute the mangled struct name.
                 if !self.type_param_subs.is_empty() {
                     for (_fname, fty) in &mut struct_fields {
-                        *fty = resolve_concrete_field(fty, &self.type_param_subs, self.module);
+                        *fty = resolve_concrete_field(fty, &self.type_param_subs);
                     }
                     // Compute mangled name: e.g. "MinHeap" → "MinHeap__i64"
                     //
@@ -1899,15 +2118,13 @@ impl<'m> Lowerer<'m> {
                 let mut field_vals = Vec::with_capacity(struct_fields.len());
                 let mut field_actual_tys = Vec::with_capacity(struct_fields.len());
                 // Look up field defaults for this struct (by resolved name).
-                let field_defaults = self.local_struct_defaults.get(&resolved_name)
+                let field_defaults = self
+                    .local_struct_defaults
+                    .get(&resolved_name)
                     .or_else(|| self.module.struct_defaults.get(&resolved_name))
                     .cloned();
                 for (field_idx, (field_name, field_ty)) in struct_fields.iter().enumerate() {
-                    if let Some(provided) =
-                        fields
-                            .iter()
-                            .find(|(n, _)| n == field_name)
-                    {
+                    if let Some(provided) = fields.iter().find(|(n, _)| n == field_name) {
                         // Propagate the struct field type down as binding_ty so `list()` can infer its type.
                         let prev_binding_ty = self.binding_ty.take();
                         self.binding_ty = Some(field_ty.clone());
@@ -1921,7 +2138,7 @@ impl<'m> Lowerer<'m> {
                             IrType::Struct { fields, .. } => fields.clone(),
                             _ => {
                                 return Err(LowerError::Unsupported {
-                                    detail: format!("struct update source is not a struct type"),
+                                    detail: "struct update source is not a struct type".to_owned(),
                                     span: *span,
                                 });
                             }
@@ -1930,7 +2147,10 @@ impl<'m> Lowerer<'m> {
                             .iter()
                             .position(|(n, _)| n == field_name)
                             .ok_or_else(|| LowerError::Unsupported {
-                                detail: format!("spread source struct has no field '{}'", field_name),
+                                detail: format!(
+                                    "spread source struct has no field '{}'",
+                                    field_name
+                                ),
                                 span: *span,
                             })?;
                         let result = self.builder.fresh_value();
@@ -1972,18 +2192,34 @@ impl<'m> Lowerer<'m> {
                 // from template fields vs actual field value types. E.g. Box { value: 42 }
                 // has template field ("value", Struct{name:"T"}) and actual type Scalar(I64),
                 // so we infer T=i64, resolve the fields, and mangle the name to Box__i64.
-                if self.type_param_subs.is_empty() && resolved_name == *name && spread_val.is_none() {
-                    let mut inferred_subs: std::collections::HashMap<String, IrType> = std::collections::HashMap::new();
-                    for ((_, template_ty), actual_ty) in struct_fields.iter().zip(field_actual_tys.iter()) {
-                        if let IrType::Struct { name: pname, fields: pfields } = template_ty {
-                            if pfields.is_empty() {
-                                inferred_subs.entry(pname.clone()).or_insert_with(|| actual_ty.clone());
+                if self.type_param_subs.is_empty()
+                    && resolved_name == *name
+                    && spread_val.is_none()
+                    && self.module.generic_struct_names.contains(name)
+                {
+                    let mut inferred_subs: std::collections::HashMap<String, IrType> =
+                        std::collections::HashMap::new();
+                    for ((_, template_ty), actual_ty) in
+                        struct_fields.iter().zip(field_actual_tys.iter())
+                    {
+                        if let IrType::Struct {
+                            name: pname,
+                            fields: pfields,
+                        } = template_ty
+                        {
+                            if pfields.is_empty()
+                                && self.module.struct_def(pname).is_none()
+                                && self.module.enum_def(pname).is_none()
+                            {
+                                inferred_subs
+                                    .entry(pname.clone())
+                                    .or_insert_with(|| actual_ty.clone());
                             }
                         }
                     }
                     if !inferred_subs.is_empty() {
                         for (_, fty) in &mut struct_fields {
-                            *fty = resolve_concrete_field(fty, &inferred_subs, self.module);
+                            *fty = resolve_concrete_field(fty, &inferred_subs);
                         }
                         // Same ordering rule as above -- sorted by type-parameter
                         // name, so the name built here matches the one the use
@@ -1998,10 +2234,14 @@ impl<'m> Lowerer<'m> {
                             .join("_");
                         if !mangle.is_empty() {
                             resolved_name = format!("{}__{}", name, mangle);
-                            self.local_struct_defs.insert(resolved_name.clone(), struct_fields.clone());
+                            self.local_struct_defs
+                                .insert(resolved_name.clone(), struct_fields.clone());
                             // Carry over defaults from the template.
-                            if let Some(template_defaults) = self.module.struct_defaults.get(name).cloned() {
-                                self.local_struct_defaults.insert(resolved_name.clone(), template_defaults);
+                            if let Some(template_defaults) =
+                                self.module.struct_defaults.get(name).cloned()
+                            {
+                                self.local_struct_defaults
+                                    .insert(resolved_name.clone(), template_defaults);
                             }
                         }
                     }
@@ -2134,13 +2374,21 @@ impl<'m> Lowerer<'m> {
                     return Ok((result, ret_ty));
                 }
                 let struct_fields = match &base_ty {
-                    IrType::Struct { name: s_name, fields } => {
+                    IrType::Struct {
+                        name: s_name,
+                        fields,
+                    } => {
                         if let Some(def_fields) = self.local_struct_defs.get(s_name) {
                             def_fields.clone()
                         } else if let Some(def_fields) = self.module.struct_def(s_name) {
                             def_fields.clone()
                         } else {
-                            fields.clone()
+                            let resolved = self.resolve_unqualified_name(s_name);
+                            if let Some(def_fields) = self.module.struct_def(&resolved) {
+                                def_fields.clone()
+                            } else {
+                                fields.clone()
+                            }
                         }
                     }
                     _ => {
@@ -2374,9 +2622,11 @@ impl<'m> Lowerer<'m> {
                         },
                         Some(err_ty.clone()),
                     );
-                    if let (Some(catch_bb), Some(_cont_bb), Some(ref _catch_param)) =
-                        (self.try_catch_catch_bb, self.try_catch_cont_bb, self.try_catch_param.clone())
-                    {
+                    if let (Some(catch_bb), Some(_cont_bb), Some(ref _catch_param)) = (
+                        self.try_catch_catch_bb,
+                        self.try_catch_cont_bb,
+                        self.try_catch_param.clone(),
+                    ) {
                         // Inside try/catch: jump to catch block with error value.
                         self.builder.push_instr(
                             IrInstr::Br {
@@ -2463,8 +2713,7 @@ impl<'m> Lowerer<'m> {
                     // None branch: early return with MakeNone.
                     self.builder.set_current_block(none_bb);
                     let none_result = self.builder.fresh_value();
-                    let none_ret_ty =
-                        IrType::Option(Box::new(ok_ty.clone()));
+                    let none_ret_ty = IrType::Option(Box::new(ok_ty.clone()));
                     self.builder.push_instr(
                         IrInstr::MakeNone {
                             result: none_result,
@@ -2544,7 +2793,10 @@ impl<'m> Lowerer<'m> {
 
                         let unqualified_mangled_fn = self.resolve_unqualified_name(method);
                         // For generic functions, delegate to lower_call which handles monomorphization.
-                        if self.generic_fns.contains_key(unqualified_mangled_fn.as_str()) {
+                        if self
+                            .generic_fns
+                            .contains_key(unqualified_mangled_fn.as_str())
+                        {
                             let synthetic_callee = Ident {
                                 name: unqualified_mangled_fn,
                                 span: base_ident.span,
@@ -2656,7 +2908,10 @@ impl<'m> Lowerer<'m> {
                             let result = self.builder.fresh_value();
                             let ty = IrType::Scalar(DType::I64);
                             self.builder.push_instr(
-                                IrInstr::ListLen { result, list: base_val },
+                                IrInstr::ListLen {
+                                    result,
+                                    list: base_val,
+                                },
                                 Some(ty.clone()),
                             );
                             return Ok((result, ty));
@@ -2671,26 +2926,36 @@ impl<'m> Lowerer<'m> {
                             }
                             let (v, _) = self.lower_expr(&args[0])?;
                             self.builder.push_instr(
-                                IrInstr::ListPush { list: base_val, value: v },
+                                IrInstr::ListPush {
+                                    list: base_val,
+                                    value: v,
+                                },
                                 None,
                             );
                             // Return a dummy i64 zero as unit value
                             let zero = self.builder.fresh_value();
                             self.builder.push_instr(
-                                IrInstr::ConstInt { result: zero, value: 0, ty: IrType::Scalar(DType::I64) },
+                                IrInstr::ConstInt {
+                                    result: zero,
+                                    value: 0,
+                                    ty: IrType::Scalar(DType::I64),
+                                },
                                 Some(IrType::Scalar(DType::I64)),
                             );
                             return Ok((zero, IrType::Scalar(DType::I64)));
                         }
                         "pop" => {
-                            // lst.pop() → list_pop(lst) → returns option<elem>
+                            // lst.pop() → list_pop(lst) → returns elem
                             let result = self.builder.fresh_value();
-                            let ret_ty = IrType::Option(Box::new(elem_ty.clone()));
                             self.builder.push_instr(
-                                IrInstr::ListPop { result, list: base_val, elem_ty: elem_ty.clone() },
-                                Some(ret_ty.clone()),
+                                IrInstr::ListPop {
+                                    result,
+                                    list: base_val,
+                                    elem_ty: elem_ty.clone(),
+                                },
+                                Some(elem_ty.clone()),
                             );
-                            return Ok((result, ret_ty));
+                            return Ok((result, elem_ty));
                         }
                         "get" => {
                             // lst.get(i) → list_get(lst, i) → returns elem
@@ -2703,7 +2968,12 @@ impl<'m> Lowerer<'m> {
                             let (idx, _) = self.lower_expr(&args[0])?;
                             let result = self.builder.fresh_value();
                             self.builder.push_instr(
-                                IrInstr::ListGet { result, list: base_val, index: idx, elem_ty: elem_ty.clone() },
+                                IrInstr::ListGet {
+                                    result,
+                                    list: base_val,
+                                    index: idx,
+                                    elem_ty: elem_ty.clone(),
+                                },
                                 Some(elem_ty.clone()),
                             );
                             return Ok((result, elem_ty));
@@ -2719,13 +2989,21 @@ impl<'m> Lowerer<'m> {
                             let (idx, _) = self.lower_expr(&args[0])?;
                             let (v, _) = self.lower_expr(&args[1])?;
                             self.builder.push_instr(
-                                IrInstr::ListSet { list: base_val, index: idx, value: v },
+                                IrInstr::ListSet {
+                                    list: base_val,
+                                    index: idx,
+                                    value: v,
+                                },
                                 None,
                             );
                             // Return a dummy i64 zero as unit value
                             let zero = self.builder.fresh_value();
                             self.builder.push_instr(
-                                IrInstr::ConstInt { result: zero, value: 0, ty: IrType::Scalar(DType::I64) },
+                                IrInstr::ConstInt {
+                                    result: zero,
+                                    value: 0,
+                                    ty: IrType::Scalar(DType::I64),
+                                },
                                 Some(IrType::Scalar(DType::I64)),
                             );
                             return Ok((zero, IrType::Scalar(DType::I64)));
@@ -2741,7 +3019,10 @@ impl<'m> Lowerer<'m> {
                         "is_some" => {
                             let result = self.builder.fresh_value();
                             self.builder.push_instr(
-                                IrInstr::IsSome { result, operand: base_val },
+                                IrInstr::IsSome {
+                                    result,
+                                    operand: base_val,
+                                },
                                 Some(IrType::Scalar(DType::Bool)),
                             );
                             return Ok((result, IrType::Scalar(DType::Bool)));
@@ -2749,12 +3030,20 @@ impl<'m> Lowerer<'m> {
                         "is_none" => {
                             let is_some_result = self.builder.fresh_value();
                             self.builder.push_instr(
-                                IrInstr::IsSome { result: is_some_result, operand: base_val },
+                                IrInstr::IsSome {
+                                    result: is_some_result,
+                                    operand: base_val,
+                                },
                                 Some(IrType::Scalar(DType::Bool)),
                             );
                             let result = self.builder.fresh_value();
                             self.builder.push_instr(
-                                IrInstr::UnaryOp { result, op: ScalarUnaryOp::Not, operand: is_some_result, ty: IrType::Scalar(DType::Bool) },
+                                IrInstr::UnaryOp {
+                                    result,
+                                    op: ScalarUnaryOp::Not,
+                                    operand: is_some_result,
+                                    ty: IrType::Scalar(DType::Bool),
+                                },
                                 Some(IrType::Scalar(DType::Bool)),
                             );
                             return Ok((result, IrType::Scalar(DType::Bool)));
@@ -2762,7 +3051,11 @@ impl<'m> Lowerer<'m> {
                         "unwrap" => {
                             let result = self.builder.fresh_value();
                             self.builder.push_instr(
-                                IrInstr::OptionUnwrap { result, operand: base_val, result_ty: inner.clone() },
+                                IrInstr::OptionUnwrap {
+                                    result,
+                                    operand: base_val,
+                                    result_ty: inner.clone(),
+                                },
                                 Some(inner.clone()),
                             );
                             return Ok((result, inner));
@@ -2779,7 +3072,10 @@ impl<'m> Lowerer<'m> {
                             let (default_val, _default_ty) = self.lower_expr(&args[0])?;
                             let is_some_result = self.builder.fresh_value();
                             self.builder.push_instr(
-                                IrInstr::IsSome { result: is_some_result, operand: base_val },
+                                IrInstr::IsSome {
+                                    result: is_some_result,
+                                    operand: base_val,
+                                },
                                 Some(IrType::Scalar(DType::Bool)),
                             );
                             let then_bb = self.builder.create_block(Some("unwrap_or_then"));
@@ -2799,23 +3095,37 @@ impl<'m> Lowerer<'m> {
                             self.builder.set_current_block(then_bb);
                             let unwrapped = self.builder.fresh_value();
                             self.builder.push_instr(
-                                IrInstr::OptionUnwrap { result: unwrapped, operand: base_val, result_ty: inner.clone() },
+                                IrInstr::OptionUnwrap {
+                                    result: unwrapped,
+                                    operand: base_val,
+                                    result_ty: inner.clone(),
+                                },
                                 Some(inner.clone()),
                             );
                             let then_result = unwrapped;
                             self.builder.push_instr(
-                                IrInstr::Br { target: merge_bb, args: vec![then_result] },
+                                IrInstr::Br {
+                                    target: merge_bb,
+                                    args: vec![then_result],
+                                },
                                 None,
                             );
                             // Else branch: default
                             self.builder.set_current_block(else_bb);
                             let else_result = default_val;
                             self.builder.push_instr(
-                                IrInstr::Br { target: merge_bb, args: vec![else_result] },
+                                IrInstr::Br {
+                                    target: merge_bb,
+                                    args: vec![else_result],
+                                },
                                 None,
                             );
                             // Merge: phi
-                            let merge_result = self.builder.add_block_param(merge_bb, Some("unwrap_or_res"), inner.clone());
+                            let merge_result = self.builder.add_block_param(
+                                merge_bb,
+                                Some("unwrap_or_res"),
+                                inner.clone(),
+                            );
                             self.builder.set_current_block(merge_bb);
                             return Ok((merge_result, inner));
                         }
@@ -2836,7 +3146,10 @@ impl<'m> Lowerer<'m> {
                             };
                             let is_some_result = self.builder.fresh_value();
                             self.builder.push_instr(
-                                IrInstr::IsSome { result: is_some_result, operand: base_val },
+                                IrInstr::IsSome {
+                                    result: is_some_result,
+                                    operand: base_val,
+                                },
                                 Some(IrType::Scalar(DType::Bool)),
                             );
                             let then_bb = self.builder.create_block(Some("opt_map_then"));
@@ -2856,7 +3169,11 @@ impl<'m> Lowerer<'m> {
                             self.builder.set_current_block(then_bb);
                             let unwrapped = self.builder.fresh_value();
                             self.builder.push_instr(
-                                IrInstr::OptionUnwrap { result: unwrapped, operand: base_val, result_ty: inner.clone() },
+                                IrInstr::OptionUnwrap {
+                                    result: unwrapped,
+                                    operand: base_val,
+                                    result_ty: inner.clone(),
+                                },
                                 Some(inner.clone()),
                             );
                             // Call the closure
@@ -2875,11 +3192,18 @@ impl<'m> Lowerer<'m> {
                             let some_result = self.builder.fresh_value();
                             let some_ty = IrType::Option(Box::new(ret_ty.clone()));
                             self.builder.push_instr(
-                                IrInstr::MakeSome { result: some_result, value: call_result, result_ty: some_ty.clone() },
+                                IrInstr::MakeSome {
+                                    result: some_result,
+                                    value: call_result,
+                                    result_ty: some_ty.clone(),
+                                },
                                 Some(some_ty.clone()),
                             );
                             self.builder.push_instr(
-                                IrInstr::Br { target: merge_bb, args: vec![some_result] },
+                                IrInstr::Br {
+                                    target: merge_bb,
+                                    args: vec![some_result],
+                                },
                                 None,
                             );
                             // Else: None
@@ -2887,15 +3211,25 @@ impl<'m> Lowerer<'m> {
                             let none_result = self.builder.fresh_value();
                             let none_ty = IrType::Option(Box::new(ret_ty.clone()));
                             self.builder.push_instr(
-                                IrInstr::MakeNone { result: none_result, result_ty: none_ty.clone() },
+                                IrInstr::MakeNone {
+                                    result: none_result,
+                                    result_ty: none_ty.clone(),
+                                },
                                 Some(none_ty.clone()),
                             );
                             self.builder.push_instr(
-                                IrInstr::Br { target: merge_bb, args: vec![none_result] },
+                                IrInstr::Br {
+                                    target: merge_bb,
+                                    args: vec![none_result],
+                                },
                                 None,
                             );
                             // Merge
-                            let merge_result = self.builder.add_block_param(merge_bb, Some("opt_map_res"), none_ty.clone());
+                            let merge_result = self.builder.add_block_param(
+                                merge_bb,
+                                Some("opt_map_res"),
+                                none_ty.clone(),
+                            );
                             self.builder.set_current_block(merge_bb);
                             return Ok((merge_result, none_ty));
                         }
@@ -2911,7 +3245,10 @@ impl<'m> Lowerer<'m> {
                         "is_ok" => {
                             let result = self.builder.fresh_value();
                             self.builder.push_instr(
-                                IrInstr::IsOk { result, operand: base_val },
+                                IrInstr::IsOk {
+                                    result,
+                                    operand: base_val,
+                                },
                                 Some(IrType::Scalar(DType::Bool)),
                             );
                             return Ok((result, IrType::Scalar(DType::Bool)));
@@ -2919,12 +3256,20 @@ impl<'m> Lowerer<'m> {
                         "is_err" => {
                             let is_ok_result = self.builder.fresh_value();
                             self.builder.push_instr(
-                                IrInstr::IsOk { result: is_ok_result, operand: base_val },
+                                IrInstr::IsOk {
+                                    result: is_ok_result,
+                                    operand: base_val,
+                                },
                                 Some(IrType::Scalar(DType::Bool)),
                             );
                             let result = self.builder.fresh_value();
                             self.builder.push_instr(
-                                IrInstr::UnaryOp { result, op: ScalarUnaryOp::Not, operand: is_ok_result, ty: IrType::Scalar(DType::Bool) },
+                                IrInstr::UnaryOp {
+                                    result,
+                                    op: ScalarUnaryOp::Not,
+                                    operand: is_ok_result,
+                                    ty: IrType::Scalar(DType::Bool),
+                                },
                                 Some(IrType::Scalar(DType::Bool)),
                             );
                             return Ok((result, IrType::Scalar(DType::Bool)));
@@ -2932,7 +3277,11 @@ impl<'m> Lowerer<'m> {
                         "unwrap" => {
                             let result = self.builder.fresh_value();
                             self.builder.push_instr(
-                                IrInstr::ResultUnwrap { result, operand: base_val, result_ty: ok.clone() },
+                                IrInstr::ResultUnwrap {
+                                    result,
+                                    operand: base_val,
+                                    result_ty: ok.clone(),
+                                },
                                 Some(ok.clone()),
                             );
                             return Ok((result, ok));
@@ -2940,7 +3289,11 @@ impl<'m> Lowerer<'m> {
                         "unwrap_err" => {
                             let result = self.builder.fresh_value();
                             self.builder.push_instr(
-                                IrInstr::ResultUnwrapErr { result, operand: base_val, result_ty: err.clone() },
+                                IrInstr::ResultUnwrapErr {
+                                    result,
+                                    operand: base_val,
+                                    result_ty: err.clone(),
+                                },
                                 Some(err.clone()),
                             );
                             return Ok((result, err));
@@ -2956,7 +3309,10 @@ impl<'m> Lowerer<'m> {
                             let (default_val, _) = self.lower_expr(&args[0])?;
                             let is_ok_result = self.builder.fresh_value();
                             self.builder.push_instr(
-                                IrInstr::IsOk { result: is_ok_result, operand: base_val },
+                                IrInstr::IsOk {
+                                    result: is_ok_result,
+                                    operand: base_val,
+                                },
                                 Some(IrType::Scalar(DType::Bool)),
                             );
                             let then_bb = self.builder.create_block(Some("res_unwrap_or_then"));
@@ -2976,21 +3332,35 @@ impl<'m> Lowerer<'m> {
                             self.builder.set_current_block(then_bb);
                             let unwrapped = self.builder.fresh_value();
                             self.builder.push_instr(
-                                IrInstr::ResultUnwrap { result: unwrapped, operand: base_val, result_ty: ok.clone() },
+                                IrInstr::ResultUnwrap {
+                                    result: unwrapped,
+                                    operand: base_val,
+                                    result_ty: ok.clone(),
+                                },
                                 Some(ok.clone()),
                             );
                             self.builder.push_instr(
-                                IrInstr::Br { target: merge_bb, args: vec![unwrapped] },
+                                IrInstr::Br {
+                                    target: merge_bb,
+                                    args: vec![unwrapped],
+                                },
                                 None,
                             );
                             // Else branch: default
                             self.builder.set_current_block(else_bb);
                             self.builder.push_instr(
-                                IrInstr::Br { target: merge_bb, args: vec![default_val] },
+                                IrInstr::Br {
+                                    target: merge_bb,
+                                    args: vec![default_val],
+                                },
                                 None,
                             );
                             // Merge: phi
-                            let merge_result = self.builder.add_block_param(merge_bb, Some("res_unwrap_or_res"), ok.clone());
+                            let merge_result = self.builder.add_block_param(
+                                merge_bb,
+                                Some("res_unwrap_or_res"),
+                                ok.clone(),
+                            );
                             self.builder.set_current_block(merge_bb);
                             return Ok((merge_result, ok));
                         }
@@ -3005,7 +3375,10 @@ impl<'m> Lowerer<'m> {
                             let result = self.builder.fresh_value();
                             let ty = IrType::Scalar(DType::I64);
                             self.builder.push_instr(
-                                IrInstr::StrLen { result, operand: base_val },
+                                IrInstr::StrLen {
+                                    result,
+                                    operand: base_val,
+                                },
                                 Some(ty.clone()),
                             );
                             return Ok((result, ty));
@@ -3013,7 +3386,10 @@ impl<'m> Lowerer<'m> {
                         "to_upper" => {
                             let result = self.builder.fresh_value();
                             self.builder.push_instr(
-                                IrInstr::StrToUpper { result, operand: base_val },
+                                IrInstr::StrToUpper {
+                                    result,
+                                    operand: base_val,
+                                },
                                 Some(IrType::Str),
                             );
                             return Ok((result, IrType::Str));
@@ -3021,7 +3397,10 @@ impl<'m> Lowerer<'m> {
                         "to_lower" => {
                             let result = self.builder.fresh_value();
                             self.builder.push_instr(
-                                IrInstr::StrToLower { result, operand: base_val },
+                                IrInstr::StrToLower {
+                                    result,
+                                    operand: base_val,
+                                },
                                 Some(IrType::Str),
                             );
                             return Ok((result, IrType::Str));
@@ -3029,7 +3408,10 @@ impl<'m> Lowerer<'m> {
                         "trim" => {
                             let result = self.builder.fresh_value();
                             self.builder.push_instr(
-                                IrInstr::StrTrim { result, operand: base_val },
+                                IrInstr::StrTrim {
+                                    result,
+                                    operand: base_val,
+                                },
                                 Some(IrType::Str),
                             );
                             return Ok((result, IrType::Str));
@@ -3044,7 +3426,11 @@ impl<'m> Lowerer<'m> {
                             let (needle, _) = self.lower_expr(&args[0])?;
                             let result = self.builder.fresh_value();
                             self.builder.push_instr(
-                                IrInstr::StrContains { result, haystack: base_val, needle },
+                                IrInstr::StrContains {
+                                    result,
+                                    haystack: base_val,
+                                    needle,
+                                },
                                 Some(IrType::Scalar(DType::Bool)),
                             );
                             return Ok((result, IrType::Scalar(DType::Bool)));
@@ -3059,7 +3445,11 @@ impl<'m> Lowerer<'m> {
                             let (prefix, _) = self.lower_expr(&args[0])?;
                             let result = self.builder.fresh_value();
                             self.builder.push_instr(
-                                IrInstr::StrStartsWith { result, haystack: base_val, prefix },
+                                IrInstr::StrStartsWith {
+                                    result,
+                                    haystack: base_val,
+                                    prefix,
+                                },
                                 Some(IrType::Scalar(DType::Bool)),
                             );
                             return Ok((result, IrType::Scalar(DType::Bool)));
@@ -3074,7 +3464,11 @@ impl<'m> Lowerer<'m> {
                             let (suffix, _) = self.lower_expr(&args[0])?;
                             let result = self.builder.fresh_value();
                             self.builder.push_instr(
-                                IrInstr::StrEndsWith { result, haystack: base_val, suffix },
+                                IrInstr::StrEndsWith {
+                                    result,
+                                    haystack: base_val,
+                                    suffix,
+                                },
                                 Some(IrType::Scalar(DType::Bool)),
                             );
                             return Ok((result, IrType::Scalar(DType::Bool)));
@@ -3090,7 +3484,11 @@ impl<'m> Lowerer<'m> {
                             let (idx, _) = self.lower_expr(&args[0])?;
                             let result = self.builder.fresh_value();
                             self.builder.push_instr(
-                                IrInstr::StrIndex { result, string: base_val, index: idx },
+                                IrInstr::StrIndex {
+                                    result,
+                                    string: base_val,
+                                    index: idx,
+                                },
                                 Some(IrType::Scalar(DType::I64)),
                             );
                             return Ok((result, IrType::Scalar(DType::I64)));
@@ -3107,7 +3505,12 @@ impl<'m> Lowerer<'m> {
                             let (end, _) = self.lower_expr(&args[1])?;
                             let result = self.builder.fresh_value();
                             self.builder.push_instr(
-                                IrInstr::StrSlice { result, string: base_val, start, end },
+                                IrInstr::StrSlice {
+                                    result,
+                                    string: base_val,
+                                    start,
+                                    end,
+                                },
                                 Some(IrType::Str),
                             );
                             return Ok((result, IrType::Str));
@@ -3122,10 +3525,17 @@ impl<'m> Lowerer<'m> {
                             let (needle, _) = self.lower_expr(&args[0])?;
                             let result = self.builder.fresh_value();
                             self.builder.push_instr(
-                                IrInstr::StrFind { result, haystack: base_val, needle },
+                                IrInstr::StrFind {
+                                    result,
+                                    haystack: base_val,
+                                    needle,
+                                },
                                 Some(IrType::Option(Box::new(IrType::Scalar(DType::I64)))),
                             );
-                            return Ok((result, IrType::Option(Box::new(IrType::Scalar(DType::I64)))));
+                            return Ok((
+                                result,
+                                IrType::Option(Box::new(IrType::Scalar(DType::I64))),
+                            ));
                         }
                         "replace" => {
                             if args.len() != 2 {
@@ -3138,7 +3548,12 @@ impl<'m> Lowerer<'m> {
                             let (new_s, _) = self.lower_expr(&args[1])?;
                             let result = self.builder.fresh_value();
                             self.builder.push_instr(
-                                IrInstr::StrReplace { result, string: base_val, from: old_s, to: new_s },
+                                IrInstr::StrReplace {
+                                    result,
+                                    string: base_val,
+                                    from: old_s,
+                                    to: new_s,
+                                },
                                 Some(IrType::Str),
                             );
                             return Ok((result, IrType::Str));
@@ -3146,17 +3561,30 @@ impl<'m> Lowerer<'m> {
                         "is_empty" => {
                             let len_result = self.builder.fresh_value();
                             self.builder.push_instr(
-                                IrInstr::StrLen { result: len_result, operand: base_val },
+                                IrInstr::StrLen {
+                                    result: len_result,
+                                    operand: base_val,
+                                },
                                 Some(IrType::Scalar(DType::I64)),
                             );
                             let zero = self.builder.fresh_value();
                             self.builder.push_instr(
-                                IrInstr::ConstInt { result: zero, value: 0, ty: IrType::Scalar(DType::I64) },
+                                IrInstr::ConstInt {
+                                    result: zero,
+                                    value: 0,
+                                    ty: IrType::Scalar(DType::I64),
+                                },
                                 Some(IrType::Scalar(DType::I64)),
                             );
                             let result = self.builder.fresh_value();
                             self.builder.push_instr(
-                                IrInstr::BinOp { result, op: BinOp::CmpEq, lhs: len_result, rhs: zero, ty: IrType::Scalar(DType::I64) },
+                                IrInstr::BinOp {
+                                    result,
+                                    op: BinOp::CmpEq,
+                                    lhs: len_result,
+                                    rhs: zero,
+                                    ty: IrType::Scalar(DType::I64),
+                                },
                                 Some(IrType::Scalar(DType::Bool)),
                             );
                             return Ok((result, IrType::Scalar(DType::Bool)));
@@ -3171,7 +3599,11 @@ impl<'m> Lowerer<'m> {
                             let (delim, _) = self.lower_expr(&args[0])?;
                             let result = self.builder.fresh_value();
                             self.builder.push_instr(
-                                IrInstr::StrSplit { result, str_val: base_val, delim },
+                                IrInstr::StrSplit {
+                                    result,
+                                    str_val: base_val,
+                                    delim,
+                                },
                                 Some(IrType::List(Box::new(IrType::Str))),
                             );
                             return Ok((result, IrType::List(Box::new(IrType::Str))));
@@ -3186,7 +3618,11 @@ impl<'m> Lowerer<'m> {
                             let (count, _) = self.lower_expr(&args[0])?;
                             let result = self.builder.fresh_value();
                             self.builder.push_instr(
-                                IrInstr::StrRepeat { result, operand: base_val, count },
+                                IrInstr::StrRepeat {
+                                    result,
+                                    operand: base_val,
+                                    count,
+                                },
                                 Some(IrType::Str),
                             );
                             return Ok((result, IrType::Str));
@@ -3200,7 +3636,10 @@ impl<'m> Lowerer<'m> {
                     if method == "to_str" && args.is_empty() {
                         let result = self.builder.fresh_value();
                         self.builder.push_instr(
-                            IrInstr::ValueToStr { result, operand: base_val },
+                            IrInstr::ValueToStr {
+                                result,
+                                operand: base_val,
+                            },
                             Some(IrType::Str),
                         );
                         return Ok((result, IrType::Str));
@@ -3217,7 +3656,10 @@ impl<'m> Lowerer<'m> {
                             let result = self.builder.fresh_value();
                             let ty = IrType::Scalar(DType::I64);
                             self.builder.push_instr(
-                                IrInstr::MapLen { result, map: base_val },
+                                IrInstr::MapLen {
+                                    result,
+                                    map: base_val,
+                                },
                                 Some(ty.clone()),
                             );
                             return Ok((result, ty));
@@ -3233,7 +3675,12 @@ impl<'m> Lowerer<'m> {
                             let result = self.builder.fresh_value();
                             let ret_ty = IrType::Option(Box::new(v.clone()));
                             self.builder.push_instr(
-                                IrInstr::MapGet { result, map: base_val, key: k, val_ty: v.clone() },
+                                IrInstr::MapGet {
+                                    result,
+                                    map: base_val,
+                                    key: k,
+                                    val_ty: v.clone(),
+                                },
                                 Some(ret_ty.clone()),
                             );
                             return Ok((result, ret_ty));
@@ -3248,13 +3695,21 @@ impl<'m> Lowerer<'m> {
                             let (k, _) = self.lower_expr(&args[0])?;
                             let (v_val, _) = self.lower_expr(&args[1])?;
                             self.builder.push_instr(
-                                IrInstr::MapSet { map: base_val, key: k, value: v_val },
+                                IrInstr::MapSet {
+                                    map: base_val,
+                                    key: k,
+                                    value: v_val,
+                                },
                                 None,
                             );
                             // Return a dummy i64 zero as unit value
                             let zero = self.builder.fresh_value();
                             self.builder.push_instr(
-                                IrInstr::ConstInt { result: zero, value: 0, ty: IrType::Scalar(DType::I64) },
+                                IrInstr::ConstInt {
+                                    result: zero,
+                                    value: 0,
+                                    ty: IrType::Scalar(DType::I64),
+                                },
                                 Some(IrType::Scalar(DType::I64)),
                             );
                             return Ok((zero, IrType::Scalar(DType::I64)));
@@ -3269,7 +3724,11 @@ impl<'m> Lowerer<'m> {
                             let (k, _) = self.lower_expr(&args[0])?;
                             let result = self.builder.fresh_value();
                             self.builder.push_instr(
-                                IrInstr::MapContains { result, map: base_val, key: k },
+                                IrInstr::MapContains {
+                                    result,
+                                    map: base_val,
+                                    key: k,
+                                },
                                 Some(IrType::Scalar(DType::Bool)),
                             );
                             return Ok((result, IrType::Scalar(DType::Bool)));
@@ -3300,13 +3759,20 @@ impl<'m> Lowerer<'m> {
                                 .entry(base_val)
                                 .or_insert_with(|| v_ty.clone());
                             self.builder.push_instr(
-                                IrInstr::ChanSend { chan: base_val, value: v },
+                                IrInstr::ChanSend {
+                                    chan: base_val,
+                                    value: v,
+                                },
                                 None,
                             );
                             // Return a dummy i64 zero as unit value
                             let zero = self.builder.fresh_value();
                             self.builder.push_instr(
-                                IrInstr::ConstInt { result: zero, value: 0, ty: IrType::Scalar(DType::I64) },
+                                IrInstr::ConstInt {
+                                    result: zero,
+                                    value: 0,
+                                    ty: IrType::Scalar(DType::I64),
+                                },
                                 Some(IrType::Scalar(DType::I64)),
                             );
                             return Ok((zero, IrType::Scalar(DType::I64)));
@@ -3351,7 +3817,10 @@ impl<'m> Lowerer<'m> {
                     let mut call_args = vec![*base.clone()];
                     call_args.extend(args.iter().cloned());
                     let call_expr = AstExpr::Call {
-                        callee: Ident { name: method.clone(), span: *span },
+                        callee: Ident {
+                            name: method.clone(),
+                            span: *span,
+                        },
                         args: call_args,
                         named_args: vec![],
                         span: *span,
@@ -3360,15 +3829,16 @@ impl<'m> Lowerer<'m> {
                 }
 
                 // Trait-object dispatch: `obj.method(...)` where obj : dyn Trait.
-                if let IrType::TraitObject { name: trait_name, methods: trait_methods } = &base_ty {
+                if let IrType::TraitObject {
+                    name: trait_name,
+                    methods: trait_methods,
+                } = &base_ty
+                {
                     let method_sig = trait_methods
                         .iter()
                         .find(|m| m.name == *method)
                         .ok_or_else(|| LowerError::Unsupported {
-                            detail: format!(
-                                "trait '{}' has no method '{}'",
-                                trait_name, method
-                            ),
+                            detail: format!("trait '{}' has no method '{}'", trait_name, method),
                             span: *span,
                         })?;
                     let mut arg_vals = Vec::with_capacity(args.len());
@@ -3437,11 +3907,7 @@ impl<'m> Lowerer<'m> {
                                 let (v, _) = self.lower_expr(arg)?;
                                 arg_vals.push(v);
                             }
-                            let ret_ty = self
-                                .fn_sigs
-                                .get(&fname)
-                                .cloned()
-                                .unwrap_or(IrType::Infer);
+                            let ret_ty = self.fn_sigs.get(&fname).cloned().unwrap_or(IrType::Infer);
                             let result = self.builder.fresh_value();
                             self.builder.push_instr(
                                 IrInstr::Call {
@@ -3476,14 +3942,18 @@ impl<'m> Lowerer<'m> {
                 let struct_mangled = format!("{}__{}", type_name, method);
                 if !self.fn_sigs.contains_key(&struct_mangled) {
                     if let Some(fields) = self.module.struct_def(&type_name) {
-                        if let Some((_, field_ty)) = fields.iter().find(|(name, _)| name == method) {
+                        if let Some((_, field_ty)) = fields.iter().find(|(name, _)| name == method)
+                        {
                             if let IrType::Fn { params: _, ret } = field_ty {
                                 let field_val = self.builder.fresh_value();
                                 self.builder.push_instr(
                                     IrInstr::GetField {
                                         result: field_val,
                                         base: base_val,
-                                        field_index: fields.iter().position(|(n, _)| n == method).unwrap(),
+                                        field_index: fields
+                                            .iter()
+                                            .position(|(n, _)| n == method)
+                                            .unwrap(),
                                         result_ty: field_ty.clone(),
                                     },
                                     Some(field_ty.clone()),
@@ -3564,7 +4034,10 @@ impl<'m> Lowerer<'m> {
             }
 
             AstExpr::Handle {
-                expr, arms, return_ty, ..
+                expr,
+                arms,
+                return_ty,
+                ..
             } => self.lower_handle(expr, arms, return_ty),
 
             AstExpr::NullCoal { expr, default, .. } => {
@@ -3579,7 +4052,10 @@ impl<'m> Lowerer<'m> {
                         };
                         let is_some_result = self.builder.fresh_value();
                         self.builder.push_instr(
-                            IrInstr::IsSome { result: is_some_result, operand: val },
+                            IrInstr::IsSome {
+                                result: is_some_result,
+                                operand: val,
+                            },
                             Some(IrType::Scalar(DType::Bool)),
                         );
                         let then_bb = self.builder.create_block(Some("nullcoal_some"));
@@ -3598,13 +4074,33 @@ impl<'m> Lowerer<'m> {
                         self.builder.set_current_block(then_bb);
                         let unwrapped = self.builder.fresh_value();
                         self.builder.push_instr(
-                            IrInstr::OptionUnwrap { result: unwrapped, operand: val, result_ty: result_type.clone() },
+                            IrInstr::OptionUnwrap {
+                                result: unwrapped,
+                                operand: val,
+                                result_ty: result_type.clone(),
+                            },
                             Some(result_type.clone()),
                         );
-                        self.builder.push_instr(IrInstr::Br { target: merge_bb, args: vec![unwrapped] }, None);
+                        self.builder.push_instr(
+                            IrInstr::Br {
+                                target: merge_bb,
+                                args: vec![unwrapped],
+                            },
+                            None,
+                        );
                         self.builder.set_current_block(else_bb);
-                        self.builder.push_instr(IrInstr::Br { target: merge_bb, args: vec![default_val] }, None);
-                        let merge_result = self.builder.add_block_param(merge_bb, Some("nullcoal_res"), result_type.clone());
+                        self.builder.push_instr(
+                            IrInstr::Br {
+                                target: merge_bb,
+                                args: vec![default_val],
+                            },
+                            None,
+                        );
+                        let merge_result = self.builder.add_block_param(
+                            merge_bb,
+                            Some("nullcoal_res"),
+                            result_type.clone(),
+                        );
                         self.builder.set_current_block(merge_bb);
                         Ok((merge_result, result_type))
                     }
@@ -3616,7 +4112,10 @@ impl<'m> Lowerer<'m> {
                         };
                         let is_ok_result = self.builder.fresh_value();
                         self.builder.push_instr(
-                            IrInstr::IsOk { result: is_ok_result, operand: val },
+                            IrInstr::IsOk {
+                                result: is_ok_result,
+                                operand: val,
+                            },
                             Some(IrType::Scalar(DType::Bool)),
                         );
                         let then_bb = self.builder.create_block(Some("nullcoal_ok"));
@@ -3635,19 +4134,37 @@ impl<'m> Lowerer<'m> {
                         self.builder.set_current_block(then_bb);
                         let unwrapped = self.builder.fresh_value();
                         self.builder.push_instr(
-                            IrInstr::ResultUnwrap { result: unwrapped, operand: val, result_ty: result_type.clone() },
+                            IrInstr::ResultUnwrap {
+                                result: unwrapped,
+                                operand: val,
+                                result_ty: result_type.clone(),
+                            },
                             Some(result_type.clone()),
                         );
-                        self.builder.push_instr(IrInstr::Br { target: merge_bb, args: vec![unwrapped] }, None);
+                        self.builder.push_instr(
+                            IrInstr::Br {
+                                target: merge_bb,
+                                args: vec![unwrapped],
+                            },
+                            None,
+                        );
                         self.builder.set_current_block(else_bb);
-                        self.builder.push_instr(IrInstr::Br { target: merge_bb, args: vec![default_val] }, None);
-                        let merge_result = self.builder.add_block_param(merge_bb, Some("nullcoal_res"), result_type.clone());
+                        self.builder.push_instr(
+                            IrInstr::Br {
+                                target: merge_bb,
+                                args: vec![default_val],
+                            },
+                            None,
+                        );
+                        let merge_result = self.builder.add_block_param(
+                            merge_bb,
+                            Some("nullcoal_res"),
+                            result_type.clone(),
+                        );
                         self.builder.set_current_block(merge_bb);
                         Ok((merge_result, result_type))
                     }
-                    _ => {
-                        Ok((val, val_ty))
-                    }
+                    _ => Ok((val, val_ty)),
                 }
             }
 
@@ -3657,9 +4174,9 @@ impl<'m> Lowerer<'m> {
                     (*k.clone(), *v.clone())
                 } else {
                     // Infer from first entry if possible
-                    if let Some((k_expr, _v_expr)) = entries.first() {
+                    if let Some((k_expr, v_expr)) = entries.first() {
                         let k_ty = self.infer_ast_expr_type_simple(k_expr);
-                        let v_ty = self.infer_ast_expr_type_simple(&_v_expr);
+                        let v_ty = self.infer_ast_expr_type_simple(v_expr);
                         (k_ty, v_ty)
                     } else {
                         (IrType::Str, IrType::Scalar(DType::I64))
@@ -3668,14 +4185,22 @@ impl<'m> Lowerer<'m> {
                 let map_ty = IrType::Map(Box::new(key_ty.clone()), Box::new(val_ty.clone()));
                 let result = self.builder.fresh_value();
                 self.builder.push_instr(
-                    IrInstr::MapNew { result, key_ty: key_ty.clone(), val_ty: val_ty.clone() },
+                    IrInstr::MapNew {
+                        result,
+                        key_ty: key_ty.clone(),
+                        val_ty: val_ty.clone(),
+                    },
                     Some(map_ty.clone()),
                 );
                 for (k, v) in entries {
-                    let (key_id, _) = self.lower_expr(&k)?;
-                    let (val_id, _) = self.lower_expr(&v)?;
+                    let (key_id, _) = self.lower_expr(k)?;
+                    let (val_id, _) = self.lower_expr(v)?;
                     self.builder.push_instr(
-                        IrInstr::MapSet { map: result, key: key_id, value: val_id },
+                        IrInstr::MapSet {
+                            map: result,
+                            key: key_id,
+                            value: val_id,
+                        },
                         None,
                     );
                 }
@@ -3688,14 +4213,17 @@ impl<'m> Lowerer<'m> {
             AstExpr::Move { expr, .. } => self.lower_expr(expr),
             AstExpr::Unsafe { body, .. } => self.lower_expr(body),
             AstExpr::Splat { expr, .. } => self.lower_expr(expr),
-            AstExpr::MacroCall { name, .. } => {
-                return Err(crate::error::LowerError::Unsupported {
-                    detail: format!("unexpanded macro call '{}'", name.name),
-                    span: name.span,
-                });
-            }
+            AstExpr::MacroCall { name, .. } => Err(crate::error::LowerError::Unsupported {
+                detail: format!("unexpanded macro call '{}'", name.name),
+                span: name.span,
+            }),
 
-            AstExpr::TryCatch { body, catch_param, catch_body, span: _ } => {
+            AstExpr::TryCatch {
+                body,
+                catch_param,
+                catch_body,
+                span: _,
+            } => {
                 let prev_catch = self.try_catch_catch_bb.take();
                 let prev_cont = self.try_catch_cont_bb.take();
                 let prev_param = self.try_catch_param.take();
@@ -3709,19 +4237,36 @@ impl<'m> Lowerer<'m> {
 
                 let (body_val, body_ty) = self.lower_expr(body)?;
                 if !self.builder.is_current_block_terminated() {
-                    self.builder.push_instr(IrInstr::Br { target: cont_bb, args: vec![body_val] }, None);
+                    self.builder.push_instr(
+                        IrInstr::Br {
+                            target: cont_bb,
+                            args: vec![body_val],
+                        },
+                        None,
+                    );
                 }
 
                 self.builder.set_current_block(catch_bb);
-                let catch_param_val = self.builder.add_block_param(catch_bb, Some(catch_param), IrType::Infer);
-                self.scope.insert(catch_param.clone(), (catch_param_val, IrType::Infer));
+                let catch_param_val =
+                    self.builder
+                        .add_block_param(catch_bb, Some(catch_param), IrType::Infer);
+                self.scope
+                    .insert(catch_param.clone(), (catch_param_val, IrType::Infer));
                 let (catch_val, _catch_ty) = self.lower_expr(catch_body)?;
                 if !self.builder.is_current_block_terminated() {
-                    self.builder.push_instr(IrInstr::Br { target: cont_bb, args: vec![catch_val] }, None);
+                    self.builder.push_instr(
+                        IrInstr::Br {
+                            target: cont_bb,
+                            args: vec![catch_val],
+                        },
+                        None,
+                    );
                 }
 
                 self.builder.set_current_block(cont_bb);
-                let result = self.builder.add_block_param(cont_bb, Some("try_result"), body_ty.clone());
+                let result =
+                    self.builder
+                        .add_block_param(cont_bb, Some("try_result"), body_ty.clone());
 
                 self.try_catch_catch_bb = prev_catch;
                 self.try_catch_cont_bb = prev_cont;
@@ -3730,7 +4275,11 @@ impl<'m> Lowerer<'m> {
                 Ok((result, body_ty))
             }
 
-            AstExpr::Raise { effect_name, args, span: _ } => {
+            AstExpr::Raise {
+                effect_name,
+                args,
+                span: _,
+            } => {
                 let mut lowered_args = Vec::new();
                 let mut arg_tys = Vec::new();
                 for a in args {
@@ -3738,17 +4287,23 @@ impl<'m> Lowerer<'m> {
                     lowered_args.push(v);
                     arg_tys.push(ty);
                 }
-                let ret_ty = self.module.extern_fns.iter()
+                let ret_ty = self
+                    .module
+                    .extern_fns
+                    .iter()
                     .find(|ef| ef.name == *effect_name)
                     .map(|ef| ef.ret_ty.clone())
                     .unwrap_or(IrType::Infer);
                 let result = self.builder.fresh_value();
-                self.builder.push_instr(IrInstr::CallExtern {
-                    result: Some(result),
-                    name: effect_name.clone(),
-                    args: lowered_args,
-                    ret_ty: ret_ty.clone(),
-                }, Some(ret_ty.clone()));
+                self.builder.push_instr(
+                    IrInstr::CallExtern {
+                        result: Some(result),
+                        name: effect_name.clone(),
+                        args: lowered_args,
+                        ret_ty: ret_ty.clone(),
+                    },
+                    Some(ret_ty.clone()),
+                );
                 Ok((result, ret_ty))
             }
         }
@@ -3773,7 +4328,7 @@ impl<'m> Lowerer<'m> {
         let param_names: std::collections::HashSet<String> =
             params.iter().map(|p| p.name.name.clone()).collect();
 
-        // Free variables: everything in scope that isn't a lambda param.
+        // Free variables: referenced scope entries that aren't lambda params.
         //
         // Sorted by name because `scope` is a `HashMap`, whose iteration order
         // changes with the per-process hash seed. The order is self-consistent
@@ -3785,7 +4340,9 @@ impl<'m> Lowerer<'m> {
         let mut captures: Vec<(String, ValueId, IrType)> = self
             .scope
             .iter()
-            .filter(|(name, _)| !param_names.contains(*name))
+            .filter(|(name, _)| {
+                !param_names.contains(*name) && crate::pass::lint::expr_uses_name(body, name)
+            })
             .map(|(name, (vid, ty))| (name.clone(), *vid, ty.clone()))
             .collect();
         captures.sort_by(|a, b| a.0.cmp(&b.0));
@@ -3894,12 +4451,8 @@ impl<'m> Lowerer<'m> {
         }
 
         // Emit PushHandler.
-        self.builder.push_instr(
-            IrInstr::PushHandler {
-                arms: handler_arms,
-            },
-            None,
-        );
+        self.builder
+            .push_instr(IrInstr::PushHandler { arms: handler_arms }, None);
 
         // Lower the body expression.
         let (body_val, body_ty) = self.lower_expr(expr)?;
@@ -3910,7 +4463,11 @@ impl<'m> Lowerer<'m> {
         // The result type of the handle expression.
         // If the parsed return type is Infer, use the body's inferred type.
         let ret_ty = self.resolve_ty(return_ty);
-        let result_ty = if ret_ty == IrType::Infer { body_ty } else { ret_ty };
+        let result_ty = if ret_ty == IrType::Infer {
+            body_ty
+        } else {
+            ret_ty
+        };
         Ok((body_val, result_ty))
     }
 
@@ -3927,10 +4484,16 @@ impl<'m> Lowerer<'m> {
 
         // Build the lifted function: params = handler_params only (no captures).
         // Use the extern function's signature for param types.
-        let extern_fn = self.module.extern_fns.iter().find(|ef| ef.name == arm.effect_name);
+        let extern_fn = self
+            .module
+            .extern_fns
+            .iter()
+            .find(|ef| ef.name == arm.effect_name);
         let mut lifted_params: Vec<Param> = Vec::new();
         for (i, p) in arm.params.iter().enumerate() {
-            let param_ty = extern_fn.and_then(|ef| ef.param_types.get(i).cloned()).unwrap_or(IrType::Infer);
+            let param_ty = extern_fn
+                .and_then(|ef| ef.param_types.get(i).cloned())
+                .unwrap_or(IrType::Infer);
             lifted_params.push(Param {
                 name: p.name.clone(),
                 ty: param_ty,
@@ -3970,10 +4533,13 @@ impl<'m> Lowerer<'m> {
         // The continuation is the first block param when has_resume is true.
         if let Some(ref rp) = arm.resume_param {
             let cont_ty = IrType::WeakRef(Box::new(IrType::Infer));
-            let val = handler_lowerer
-                .builder
-                .add_block_param(entry, Some(&rp.name), cont_ty.clone());
-            handler_lowerer.scope.insert(rp.name.clone(), (val, cont_ty));
+            let val =
+                handler_lowerer
+                    .builder
+                    .add_block_param(entry, Some(&rp.name), cont_ty.clone());
+            handler_lowerer
+                .scope
+                .insert(rp.name.clone(), (val, cont_ty));
         }
         // Use the types already recovered from the extern signature above.
         //
@@ -4041,7 +4607,13 @@ impl<'m> Lowerer<'m> {
             let val = match arg {
                 AstExpr::IntLit { value, .. } => *value,
                 AstExpr::FloatLit { value, .. } => value.to_bits() as i64,
-                AstExpr::BoolLit { value, .. } => if *value { 1 } else { 0 },
+                AstExpr::BoolLit { value, .. } => {
+                    if *value {
+                        1
+                    } else {
+                        0
+                    }
+                }
                 _ => return None,
             };
             params.insert(param.name.name.clone(), val);
@@ -4074,11 +4646,7 @@ impl<'m> Lowerer<'m> {
     }
 
     /// Evaluate a simple expression at compile time.
-    fn eval_const_expr(
-        &self,
-        expr: &AstExpr,
-        locals: &HashMap<String, i64>,
-    ) -> Option<i64> {
+    fn eval_const_expr(&self, expr: &AstExpr, locals: &HashMap<String, i64>) -> Option<i64> {
         match expr {
             AstExpr::IntLit { value, .. } => Some(*value),
             AstExpr::FloatLit { value, .. } => Some(value.to_bits() as i64),
@@ -4092,11 +4660,15 @@ impl<'m> Lowerer<'m> {
                     crate::parser::ast::AstBinOp::Sub => Some(l.wrapping_sub(r)),
                     crate::parser::ast::AstBinOp::Mul => Some(l.wrapping_mul(r)),
                     crate::parser::ast::AstBinOp::Div => {
-                        if r == 0 { return None; }
+                        if r == 0 {
+                            return None;
+                        }
                         Some(l.wrapping_div(r))
                     }
                     crate::parser::ast::AstBinOp::Mod => {
-                        if r == 0 { return None; }
+                        if r == 0 {
+                            return None;
+                        }
                         Some(l.wrapping_rem(r))
                     }
                     crate::parser::ast::AstBinOp::CmpEq => Some(if l == r { 1 } else { 0 }),
@@ -4116,7 +4688,12 @@ impl<'m> Lowerer<'m> {
                     crate::parser::ast::AstUnaryOp::Not => Some(if v == 0 { 1 } else { 0 }),
                 }
             }
-            AstExpr::If { cond, then_block, else_block, .. } => {
+            AstExpr::If {
+                cond,
+                then_block,
+                else_block,
+                ..
+            } => {
                 let c = self.eval_const_expr(cond, locals)?;
                 if c != 0 {
                     self.eval_const_block(&then_block.stmts, locals)
@@ -4308,7 +4885,11 @@ impl<'m> Lowerer<'m> {
             set.contains(&callee.name) || set.contains(&callee_name)
         }) || self.generic_fns.contains_key(&callee.name)
             || self.generic_fns.contains_key(&callee_name);
-        let dispatch_name: &str = if shadows_builtin { "" } else { callee.name.as_str() };
+        let dispatch_name: &str = if shadows_builtin {
+            ""
+        } else {
+            callee.name.as_str()
+        };
 
         // Built-in: resume continuation call.
         // When lowering inside a handler arm with `has_resume`, a call to the
@@ -4319,14 +4900,12 @@ impl<'m> Lowerer<'m> {
             let rp_name = rp_name.clone();
             if callee.name == rp_name && args.len() == 1 {
                 let (val, val_ty) = self.lower_expr(&args[0])?;
-                let cont_val = self
-                    .scope
-                    .get(&rp_name)
-                    .map(|(v, _)| *v)
-                    .ok_or_else(|| LowerError::Unsupported {
+                let cont_val = self.scope.get(&rp_name).map(|(v, _)| *v).ok_or_else(|| {
+                    LowerError::Unsupported {
                         detail: format!("resume continuation '{}' not in scope", rp_name),
                         span,
-                    })?;
+                    }
+                })?;
                 let result = self.builder.fresh_value();
                 self.builder.push_instr(
                     IrInstr::ResumeCont {
@@ -4423,8 +5002,14 @@ impl<'m> Lowerer<'m> {
                 dummy
             };
             let result = self.builder.fresh_value();
-            self.builder
-                .push_instr(IrInstr::ChanNew { result, elem_ty, capacity: capacity_val }, Some(chan_ty.clone()));
+            self.builder.push_instr(
+                IrInstr::ChanNew {
+                    result,
+                    elem_ty,
+                    capacity: capacity_val,
+                },
+                Some(chan_ty.clone()),
+            );
             return Ok((result, chan_ty));
         }
 
@@ -5435,17 +6020,30 @@ impl<'m> Lowerer<'m> {
             if args.is_empty() {
                 // Empty list
                 let result = self.builder.fresh_value();
-                self.builder.push_instr(IrInstr::ListNew { result, elem_ty }, Some(list_ty.clone()));
+                self.builder
+                    .push_instr(IrInstr::ListNew { result, elem_ty }, Some(list_ty.clone()));
                 return Ok((result, list_ty));
             }
 
             // list(a, b, c) — create list and push each element
             let result = self.builder.fresh_value();
-            self.builder.push_instr(IrInstr::ListNew { result, elem_ty: elem_ty.clone() }, Some(list_ty.clone()));
+            self.builder.push_instr(
+                IrInstr::ListNew {
+                    result,
+                    elem_ty: elem_ty.clone(),
+                },
+                Some(list_ty.clone()),
+            );
 
             for arg in args {
                 let (val, _) = self.lower_expr(arg)?;
-                self.builder.push_instr(IrInstr::ListPush { list: result, value: val }, None);
+                self.builder.push_instr(
+                    IrInstr::ListPush {
+                        list: result,
+                        value: val,
+                    },
+                    None,
+                );
             }
 
             return Ok((result, list_ty));
@@ -5474,7 +6072,8 @@ impl<'m> Lowerer<'m> {
             };
             let value = match elem_expected {
                 Some(exp) => {
-                    self.coerce_to_trait_object(value, value_ty, &exp, args[1].span())?.0
+                    self.coerce_to_trait_object(value, value_ty, &exp, args[1].span())?
+                        .0
                 }
                 None => value,
             };
@@ -5689,14 +6288,21 @@ impl<'m> Lowerer<'m> {
             let list_ty = IrType::List(Box::new(elem_ty.clone()));
             let list = self.builder.fresh_value();
             self.builder.push_instr(
-                IrInstr::ListNew { result: list, elem_ty: elem_ty.clone() },
+                IrInstr::ListNew {
+                    result: list,
+                    elem_ty: elem_ty.clone(),
+                },
                 Some(list_ty.clone()),
             );
             for i in 0..arr_len {
                 let idx = self.builder.fresh_value();
                 let idx_ty = IrType::Scalar(DType::I64);
                 self.builder.push_instr(
-                    IrInstr::ConstInt { result: idx, value: i as i64, ty: idx_ty.clone() },
+                    IrInstr::ConstInt {
+                        result: idx,
+                        value: i as i64,
+                        ty: idx_ty.clone(),
+                    },
                     Some(idx_ty.clone()),
                 );
                 let elem = self.builder.fresh_value();
@@ -5709,10 +6315,8 @@ impl<'m> Lowerer<'m> {
                     },
                     Some(elem_ty.clone()),
                 );
-                self.builder.push_instr(
-                    IrInstr::ListPush { list, value: elem },
-                    None,
-                );
+                self.builder
+                    .push_instr(IrInstr::ListPush { list, value: elem }, None);
             }
             return Ok((list, list_ty));
         }
@@ -6432,7 +7036,10 @@ impl<'m> Lowerer<'m> {
             let (msg, _) = self.lower_expr(&args[0])?;
             if !self.builder.is_current_block_terminated() {
                 self.builder.push_instr(
-                    IrInstr::Panic { msg, span_byte: Some(span.start.0) },
+                    IrInstr::Panic {
+                        msg,
+                        span_byte: Some(span.start.0),
+                    },
                     None,
                 );
             }
@@ -6491,7 +7098,10 @@ impl<'m> Lowerer<'m> {
             // See known-issues #20 for the general span-table staleness, which
             // this does not fix.
             self.builder.push_instr(
-                IrInstr::Panic { msg: msg_val, span_byte: Some(span.start.0) },
+                IrInstr::Panic {
+                    msg: msg_val,
+                    span_byte: Some(span.start.0),
+                },
                 None,
             );
             // then_block: jump to merge
@@ -6895,25 +7505,24 @@ impl<'m> Lowerer<'m> {
 
         // Built-in string predicates: contains(s, sub), starts_with(s, p), ends_with(s, p)
         {
-            let str_pred: Option<fn(ValueId, ValueId, ValueId) -> IrInstr> =
-                match dispatch_name {
-                    "contains" => Some(|result, haystack, needle| IrInstr::StrContains {
-                        result,
-                        haystack,
-                        needle,
-                    }),
-                    "starts_with" => Some(|result, haystack, prefix| IrInstr::StrStartsWith {
-                        result,
-                        haystack,
-                        prefix,
-                    }),
-                    "ends_with" => Some(|result, haystack, suffix| IrInstr::StrEndsWith {
-                        result,
-                        haystack,
-                        suffix,
-                    }),
-                    _ => None,
-                };
+            let str_pred: Option<fn(ValueId, ValueId, ValueId) -> IrInstr> = match dispatch_name {
+                "contains" => Some(|result, haystack, needle| IrInstr::StrContains {
+                    result,
+                    haystack,
+                    needle,
+                }),
+                "starts_with" => Some(|result, haystack, prefix| IrInstr::StrStartsWith {
+                    result,
+                    haystack,
+                    prefix,
+                }),
+                "ends_with" => Some(|result, haystack, suffix| IrInstr::StrEndsWith {
+                    result,
+                    haystack,
+                    suffix,
+                }),
+                _ => None,
+            };
             if let Some(mk) = str_pred {
                 if args.len() != 2 {
                     return Err(LowerError::Unsupported {
@@ -7483,11 +8092,155 @@ impl<'m> Lowerer<'m> {
                 "weak_alive" => Some(("weak_alive", IrType::Scalar(DType::Bool))),
 
                 // ── GC ──
-                "gc_stats" => Some(("gc_stats_map", IrType::Map(Box::new(IrType::Str), Box::new(IrType::Scalar(DType::I64))))),
+                "gc_stats" => Some((
+                    "gc_stats_map",
+                    IrType::Map(Box::new(IrType::Str), Box::new(IrType::Scalar(DType::I64))),
+                )),
                 "gc_collect" => Some(("gc_collect_call", IrType::Scalar(DType::Bool))),
 
                 // ── Map extras ──
                 "map_entries" => Some(("map_entries", IrType::List(Box::new(IrType::Str)))),
+
+                // Transaction status/depth use i64 for a stable native ABI.
+                "transaction_begin" => Some(("transaction_begin", IrType::Scalar(DType::I64))),
+                "transaction_commit" => Some(("transaction_commit", IrType::Scalar(DType::I64))),
+                "transaction_rollback" => {
+                    Some(("transaction_rollback", IrType::Scalar(DType::I64)))
+                }
+                "transaction_depth" => Some(("transaction_depth", IrType::Scalar(DType::I64))),
+
+                // Native differentiable tensors. Shape is runtime-owned; the
+                // symbolic dimension keeps the value pointer-typed through IR.
+                "dtensor" => Some((
+                    "tensor_from_lists",
+                    IrType::Tensor {
+                        dtype: DType::F32,
+                        shape: crate::ir::types::Shape(vec![crate::ir::types::Dim::Symbolic(
+                            "N".into(),
+                        )]),
+                    },
+                )),
+                "dtensor_tape" => Some((
+                    "tensor_tape",
+                    IrType::Tensor {
+                        dtype: DType::F32,
+                        shape: crate::ir::types::Shape(vec![crate::ir::types::Dim::Symbolic(
+                            "N".into(),
+                        )]),
+                    },
+                )),
+                "dtensor_add" => Some((
+                    "tensor_add",
+                    IrType::Tensor {
+                        dtype: DType::F32,
+                        shape: crate::ir::types::Shape(vec![crate::ir::types::Dim::Symbolic(
+                            "N".into(),
+                        )]),
+                    },
+                )),
+                "dtensor_sub" => Some((
+                    "tensor_sub",
+                    IrType::Tensor {
+                        dtype: DType::F32,
+                        shape: crate::ir::types::Shape(vec![crate::ir::types::Dim::Symbolic(
+                            "N".into(),
+                        )]),
+                    },
+                )),
+                "dtensor_mul" => Some((
+                    "tensor_mul",
+                    IrType::Tensor {
+                        dtype: DType::F32,
+                        shape: crate::ir::types::Shape(vec![crate::ir::types::Dim::Symbolic(
+                            "N".into(),
+                        )]),
+                    },
+                )),
+                "dtensor_div" => Some((
+                    "tensor_div",
+                    IrType::Tensor {
+                        dtype: DType::F32,
+                        shape: crate::ir::types::Shape(vec![crate::ir::types::Dim::Symbolic(
+                            "N".into(),
+                        )]),
+                    },
+                )),
+                "dtensor_matmul" => Some((
+                    "tensor_matmul",
+                    IrType::Tensor {
+                        dtype: DType::F32,
+                        shape: crate::ir::types::Shape(vec![crate::ir::types::Dim::Symbolic(
+                            "N".into(),
+                        )]),
+                    },
+                )),
+                "dtensor_relu" => Some((
+                    "tensor_relu",
+                    IrType::Tensor {
+                        dtype: DType::F32,
+                        shape: crate::ir::types::Shape(vec![crate::ir::types::Dim::Symbolic(
+                            "N".into(),
+                        )]),
+                    },
+                )),
+                "dtensor_sigmoid" => Some((
+                    "tensor_sigmoid",
+                    IrType::Tensor {
+                        dtype: DType::F32,
+                        shape: crate::ir::types::Shape(vec![crate::ir::types::Dim::Symbolic(
+                            "N".into(),
+                        )]),
+                    },
+                )),
+                "dtensor_tanh" => Some((
+                    "tensor_tanh_act",
+                    IrType::Tensor {
+                        dtype: DType::F32,
+                        shape: crate::ir::types::Shape(vec![crate::ir::types::Dim::Symbolic(
+                            "N".into(),
+                        )]),
+                    },
+                )),
+                "dtensor_sum" => Some((
+                    "tensor_sum_all",
+                    IrType::Tensor {
+                        dtype: DType::F32,
+                        shape: crate::ir::types::Shape(vec![crate::ir::types::Dim::Symbolic(
+                            "N".into(),
+                        )]),
+                    },
+                )),
+                "dtensor_grad" => Some((
+                    "tensor_grad",
+                    IrType::Tensor {
+                        dtype: DType::F32,
+                        shape: crate::ir::types::Shape(vec![crate::ir::types::Dim::Symbolic(
+                            "N".into(),
+                        )]),
+                    },
+                )),
+                "dtensor_backward" => Some(("tensor_backward", IrType::Scalar(DType::I64))),
+                "dtensor_item" => Some(("tensor_item", IrType::Scalar(DType::F64))),
+                "dtensor_to_list" => Some((
+                    "tensor_to_list",
+                    IrType::List(Box::new(IrType::Scalar(DType::F64))),
+                )),
+
+                // ── Reflection & Dynamic Evaluation ──
+                "iris_eval" | "reflect_eval" => Some((
+                    "eval",
+                    IrType::ResultType(Box::new(IrType::Str), Box::new(IrType::Str)),
+                )),
+                "iris_eval_i64" | "reflect_eval_i64" => Some((
+                    "eval_i64",
+                    IrType::ResultType(Box::new(IrType::Scalar(DType::I64)), Box::new(IrType::Str)),
+                )),
+                "iris_validate" | "reflect_validate" => {
+                    Some(("validate", IrType::Scalar(DType::Bool)))
+                }
+                "iris_reflection_available" | "reflect_available" => {
+                    Some(("reflection_available", IrType::Scalar(DType::Bool)))
+                }
 
                 _ => None,
             };
@@ -7503,11 +8256,13 @@ impl<'m> Lowerer<'m> {
                 let (chan_val, chan_ty) = self.lower_expr(&args[0])?;
                 let elem_ty = match &chan_ty {
                     IrType::Chan(elem) => (**elem).clone(),
-                    other => return Err(LowerError::TypeMismatch {
-                        expected: "channel".into(),
-                        found: format!("{}", other),
-                        span,
-                    }),
+                    other => {
+                        return Err(LowerError::TypeMismatch {
+                            expected: "channel".into(),
+                            found: format!("{}", other),
+                            span,
+                        })
+                    }
                 };
                 let ret_ty = IrType::Option(Box::new(elem_ty));
                 let result = self.builder.fresh_value();
@@ -7533,12 +8288,13 @@ impl<'m> Lowerer<'m> {
                 }
                 let (chan_val, chan_ty) = self.lower_expr(&args[0])?;
                 let (timeout_ms, _) = self.lower_expr(&args[1])?;
-                let elem_ty = self.chan_elem_types.get(&chan_val).cloned().unwrap_or_else(|| {
-                    match &chan_ty {
-                        IrType::Chan(elem) => (**elem).clone(),
-                        _ => IrType::Infer,
-                    }
-                });
+                let elem_ty =
+                    self.chan_elem_types.get(&chan_val).cloned().unwrap_or_else(
+                        || match &chan_ty {
+                            IrType::Chan(elem) => (**elem).clone(),
+                            _ => IrType::Infer,
+                        },
+                    );
                 let ret_ty = IrType::Option(Box::new(elem_ty));
                 let result = self.builder.fresh_value();
                 self.builder.push_instr(
@@ -7638,7 +8394,11 @@ impl<'m> Lowerer<'m> {
                         IrType::Scalar(DType::I64) => {
                             let result = self.builder.fresh_value();
                             self.builder.push_instr(
-                                IrInstr::ConstInt { result, value: result_val, ty: ret_ty.clone() },
+                                IrInstr::ConstInt {
+                                    result,
+                                    value: result_val,
+                                    ty: ret_ty.clone(),
+                                },
                                 Some(ret_ty.clone()),
                             );
                             return Ok((result, ret_ty));
@@ -7648,7 +8408,11 @@ impl<'m> Lowerer<'m> {
                             let bits = result_val as u64;
                             let float_val = f64::from_bits(bits);
                             self.builder.push_instr(
-                                IrInstr::ConstFloat { result, value: float_val, ty: ret_ty.clone() },
+                                IrInstr::ConstFloat {
+                                    result,
+                                    value: float_val,
+                                    ty: ret_ty.clone(),
+                                },
                                 Some(ret_ty.clone()),
                             );
                             return Ok((result, ret_ty));
@@ -7656,7 +8420,10 @@ impl<'m> Lowerer<'m> {
                         IrType::Scalar(DType::Bool) => {
                             let result = self.builder.fresh_value();
                             self.builder.push_instr(
-                                IrInstr::ConstBool { result, value: result_val != 0 },
+                                IrInstr::ConstBool {
+                                    result,
+                                    value: result_val != 0,
+                                },
                                 Some(ret_ty.clone()),
                             );
                             return Ok((result, ret_ty));
@@ -7699,7 +8466,12 @@ impl<'m> Lowerer<'m> {
             // Pass 2: Extract type params from Generic AST types (e.g. h: MinHeap<T>).
             // Only inserts if the type param wasn't already found in Pass 1.
             for (param, arg_ty) in generic_fn.params.iter().zip(arg_tys.iter()) {
-                if let crate::parser::ast::AstType::Generic { name: gname, args: gargs, .. } = &param.ty {
+                if let crate::parser::ast::AstType::Generic {
+                    name: gname,
+                    args: gargs,
+                    ..
+                } = &param.ty
+                {
                     // Try matching from monomorphized struct name: "MinHeap__i64" → ["i64"]
                     let concrete_name = match arg_ty {
                         IrType::Struct { name, .. } => Some(name.as_str()),
@@ -7722,7 +8494,9 @@ impl<'m> Lowerer<'m> {
                                 let (arg_ty, next) = parse_mangled_type(remaining);
                                 remaining = next;
                                 if let crate::parser::ast::AstType::Named(n, _) = ast_arg {
-                                    if subs.contains_key(n) { continue; }
+                                    if subs.contains_key(n) {
+                                        continue;
+                                    }
                                     let is_generic_param = generic_fn
                                         .type_params
                                         .iter()
@@ -7766,14 +8540,25 @@ impl<'m> Lowerer<'m> {
                     // Higher-kinded: the AST says `F<T>` and `F` is a declared
                     // constructor parameter, so split the concrete type into
                     // its constructor and its element and bind both.
-                    if let crate::parser::ast::AstType::Generic { name: gname, args: gargs, .. } = ast_ty {
+                    if let crate::parser::ast::AstType::Generic {
+                        name: gname,
+                        args: gargs,
+                        ..
+                    } = ast_ty
+                    {
                         if hkt_params.contains(gname) {
                             match concrete_ty {
                                 IrType::List(inner) => {
                                     subs.entry(gname.clone())
                                         .or_insert_with(|| constructor_marker("list"));
                                     if let Some(a0) = gargs.first() {
-                                        extract_from_ast_type(a0, inner, type_params, hkt_params, subs);
+                                        extract_from_ast_type(
+                                            a0,
+                                            inner,
+                                            type_params,
+                                            hkt_params,
+                                            subs,
+                                        );
                                     }
                                     return;
                                 }
@@ -7781,7 +8566,13 @@ impl<'m> Lowerer<'m> {
                                     subs.entry(gname.clone())
                                         .or_insert_with(|| constructor_marker("option"));
                                     if let Some(a0) = gargs.first() {
-                                        extract_from_ast_type(a0, inner, type_params, hkt_params, subs);
+                                        extract_from_ast_type(
+                                            a0,
+                                            inner,
+                                            type_params,
+                                            hkt_params,
+                                            subs,
+                                        );
                                     }
                                     return;
                                 }
@@ -7799,7 +8590,10 @@ impl<'m> Lowerer<'m> {
                                 // A user record arrives already monomorphised as
                                 // `Box__i64`; the constructor is the part before
                                 // the separator and the element types follow it.
-                                IrType::Struct { name: sname, fields } => {
+                                IrType::Struct {
+                                    name: sname,
+                                    fields,
+                                } => {
                                     let (base, rest) = match sname.split_once("__") {
                                         Some((b, r)) => (b.to_string(), Some(r.to_string())),
                                         None => (sname.clone(), None),
@@ -7818,7 +8612,8 @@ impl<'m> Lowerer<'m> {
                                             let (arg_ty, next) = parse_mangled_type(remaining);
                                             remaining = next;
                                             if let crate::parser::ast::AstType::Named(n, _) = garg {
-                                                if type_params.contains(n) && !subs.contains_key(n) {
+                                                if type_params.contains(n) && !subs.contains_key(n)
+                                                {
                                                     subs.insert(n.clone(), arg_ty);
                                                 }
                                             }
@@ -7828,7 +8623,13 @@ impl<'m> Lowerer<'m> {
                                         // layout, which is what the existing
                                         // non-HKT path does.
                                         for (garg, (_, fty)) in gargs.iter().zip(fields.iter()) {
-                                            extract_from_ast_type(garg, fty, type_params, hkt_params, subs);
+                                            extract_from_ast_type(
+                                                garg,
+                                                fty,
+                                                type_params,
+                                                hkt_params,
+                                                subs,
+                                            );
                                         }
                                     }
                                     return;
@@ -7838,7 +8639,9 @@ impl<'m> Lowerer<'m> {
                         }
                     }
                     match ast_ty {
-                        crate::parser::ast::AstType::Named(n, _) if type_params.contains(n) && !subs.contains_key(n) => {
+                        crate::parser::ast::AstType::Named(n, _)
+                            if type_params.contains(n) && !subs.contains_key(n) =>
+                        {
                             subs.insert(n.clone(), concrete_ty.clone());
                         }
                         crate::parser::ast::AstType::Generic { args: gargs, .. } => {
@@ -7850,18 +8653,42 @@ impl<'m> Lowerer<'m> {
                         }
                         crate::parser::ast::AstType::List(inner_ast, _) => {
                             if let IrType::List(inner_concrete) = concrete_ty {
-                                extract_from_ast_type(inner_ast, inner_concrete, type_params, hkt_params, subs);
+                                extract_from_ast_type(
+                                    inner_ast,
+                                    inner_concrete,
+                                    type_params,
+                                    hkt_params,
+                                    subs,
+                                );
                             }
                         }
                         crate::parser::ast::AstType::Map(k_ast, v_ast, _) => {
                             if let IrType::Map(k_concrete, v_concrete) = concrete_ty {
-                                extract_from_ast_type(k_ast, k_concrete, type_params, hkt_params, subs);
-                                extract_from_ast_type(v_ast, v_concrete, type_params, hkt_params, subs);
+                                extract_from_ast_type(
+                                    k_ast,
+                                    k_concrete,
+                                    type_params,
+                                    hkt_params,
+                                    subs,
+                                );
+                                extract_from_ast_type(
+                                    v_ast,
+                                    v_concrete,
+                                    type_params,
+                                    hkt_params,
+                                    subs,
+                                );
                             }
                         }
                         crate::parser::ast::AstType::Option(inner_ast, _) => {
                             if let IrType::Option(inner_concrete) = concrete_ty {
-                                extract_from_ast_type(inner_ast, inner_concrete, type_params, hkt_params, subs);
+                                extract_from_ast_type(
+                                    inner_ast,
+                                    inner_concrete,
+                                    type_params,
+                                    hkt_params,
+                                    subs,
+                                );
                             }
                         }
                         crate::parser::ast::AstType::Tuple(elems_ast, _) => {
@@ -7871,21 +8698,65 @@ impl<'m> Lowerer<'m> {
                                 }
                             }
                         }
+                        crate::parser::ast::AstType::Fn {
+                            params: params_ast,
+                            ret: ret_ast,
+                            ..
+                        } => {
+                            if let IrType::Fn {
+                                params: params_concrete,
+                                ret: ret_concrete,
+                            } = concrete_ty
+                            {
+                                for (a, c) in params_ast.iter().zip(params_concrete.iter()) {
+                                    extract_from_ast_type(a, c, type_params, hkt_params, subs);
+                                }
+                                extract_from_ast_type(
+                                    ret_ast,
+                                    ret_concrete,
+                                    type_params,
+                                    hkt_params,
+                                    subs,
+                                );
+                            }
+                        }
                         _ => {}
                     }
                 }
-                let type_param_names: Vec<String> = generic_fn.type_params.iter().filter_map(|p| {
-                    if let crate::parser::ast::AstGenericParam::Type(n, _, _) = p { Some(n.clone()) } else { None }
-                }).collect();
+                let type_param_names: Vec<String> = generic_fn
+                    .type_params
+                    .iter()
+                    .filter_map(|p| {
+                        if let crate::parser::ast::AstGenericParam::Type(n, _, _) = p {
+                            Some(n.clone())
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
                 // Constructor parameters are collected separately: they bind to a
                 // constructor rather than to a type, so `extract_from_ast_type`
                 // has to treat them differently. Leaving them out of both lists
                 // is why `F` was never bound.
-                let hkt_param_names: Vec<String> = generic_fn.type_params.iter().filter_map(|p| {
-                    if let crate::parser::ast::AstGenericParam::Hkt(n, _, _, _) = p { Some(n.clone()) } else { None }
-                }).collect();
+                let hkt_param_names: Vec<String> = generic_fn
+                    .type_params
+                    .iter()
+                    .filter_map(|p| {
+                        if let crate::parser::ast::AstGenericParam::Hkt(n, _, _, _) = p {
+                            Some(n.clone())
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
                 for (param2, arg_ty2) in generic_fn.params.iter().zip(arg_tys.iter()) {
-                    extract_from_ast_type(&param2.ty, arg_ty2, &type_param_names, &hkt_param_names, &mut subs);
+                    extract_from_ast_type(
+                        &param2.ty,
+                        arg_ty2,
+                        &type_param_names,
+                        &hkt_param_names,
+                        &mut subs,
+                    );
                 }
             }
 
@@ -7919,7 +8790,11 @@ impl<'m> Lowerer<'m> {
                 })
                 .collect();
             if subs.len() < all_type_params.len() {
-                if let Some(IrType::Struct { name: expected_name, .. }) = self.binding_ty.clone() {
+                if let Some(IrType::Struct {
+                    name: expected_name,
+                    ..
+                }) = self.binding_ty.clone()
+                {
                     if let crate::parser::ast::AstType::Generic {
                         name: gname,
                         args: gargs,
@@ -7993,7 +8868,8 @@ impl<'m> Lowerer<'m> {
 
             // Resolve the concrete return type using resolve_ast_type_with_subs
             // which handles both Named("T") and Generic { name, args } with subs.
-            let mut concrete_ret = resolve_ast_type_with_subs(&generic_fn.return_ty, &subs, self.module);
+            let mut concrete_ret =
+                resolve_ast_type_with_subs(&generic_fn.return_ty, &subs, self.module);
             if generic_fn.is_async {
                 concrete_ret = IrType::Chan(Box::new(concrete_ret));
             }
@@ -8153,8 +9029,7 @@ impl<'m> Lowerer<'m> {
         // reached `DynCall` as a bare struct and failed at *runtime* with
         // "DynCall on non-trait-object" -- a mistake knowable at compile time,
         // deferred to execution. See known-issues #18.
-        let callee_param_tys: Option<Vec<IrType>> =
-            self.fn_param_types.get(&callee_name).cloned();
+        let callee_param_tys: Option<Vec<IrType>> = self.fn_param_types.get(&callee_name).cloned();
 
         // Build argument list, expanding splat args (`..expr`).
         let defaults = self.fn_defaults.get(&callee_name).cloned();
@@ -8171,7 +9046,8 @@ impl<'m> Lowerer<'m> {
                     }
                     _ => {
                         return Err(LowerError::Unsupported {
-                            detail: "splat (`..expr`) requires an array expression with known size".into(),
+                            detail: "splat (`..expr`) requires an array expression with known size"
+                                .into(),
                             span: arg.span(),
                         });
                     }
@@ -8180,7 +9056,11 @@ impl<'m> Lowerer<'m> {
                     let idx_val = self.builder.fresh_value();
                     let idx_ty = IrType::Scalar(DType::I64);
                     self.builder.push_instr(
-                        IrInstr::ConstInt { result: idx_val, value: i as i64, ty: idx_ty.clone() },
+                        IrInstr::ConstInt {
+                            result: idx_val,
+                            value: i as i64,
+                            ty: idx_ty.clone(),
+                        },
                         Some(idx_ty.clone()),
                     );
                     let elem_val = self.builder.fresh_value();
@@ -8293,11 +9173,40 @@ impl<'m> Lowerer<'m> {
             let ty = self.resolve_ty(&param.ty);
             self.scope.insert(param.name.name.clone(), (*val, ty));
         }
-        let lowered = self.lower_block(&func.body);
+        // A final `return expr` is equivalent to a tail expression for this
+        // deliberately small inliner. Lower every preceding statement, then
+        // lower the returned expression without emitting `IrInstr::Return` --
+        // that instruction would otherwise return from the caller. Returns in
+        // any other position remain outside the whitelist below.
+        let lowered = if func.body.tail.is_none() {
+            match func.body.stmts.split_last() {
+                Some((
+                    AstStmt::Return {
+                        value: Some(value), ..
+                    },
+                    prefix,
+                )) => {
+                    let mut error = None;
+                    for stmt in prefix {
+                        if let Err(err) = self.lower_stmt(stmt) {
+                            error = Some(err);
+                            break;
+                        }
+                    }
+                    match error {
+                        Some(err) => Err(err),
+                        None => self.lower_expr(value).map(Some),
+                    }
+                }
+                _ => self.lower_block(&func.body),
+            }
+        } else {
+            self.lower_block(&func.body)
+        };
         self.taped_inline_stack.pop();
         self.scope = saved_scope;
 
-        Ok(lowered?)
+        lowered
     }
 
     fn lower_einsum(
@@ -8811,10 +9720,8 @@ impl<'m> Lowerer<'m> {
                 AstWhenPattern::Or(_) => {
                     // Or-pattern: allocate one shared body block
                     arm_blocks.push(
-                        self.builder.create_block(Some(&format!(
-                            "when_or_{}",
-                            arm_idx
-                        ))),
+                        self.builder
+                            .create_block(Some(&format!("when_or_{}", arm_idx))),
                     );
                 }
                 AstWhenPattern::Binding { .. } => {
@@ -8853,21 +9760,23 @@ impl<'m> Lowerer<'m> {
                     // Or-pattern: each sub-pattern maps to the shared body block
                     for sub in subs {
                         if let AstWhenPattern::EnumVariant { variant_name, .. } = sub {
-                            let variant_idx =
-                                variants
-                                    .iter()
-                                    .position(|v| v == variant_name)
-                                    .ok_or_else(|| LowerError::Unsupported {
-                                        detail: format!(
-                                            "no variant '{}' in enum '{}'",
-                                            variant_name, enum_name
-                                        ),
-                                        span: arm.span,
-                                    })?;
+                            let variant_idx = variants
+                                .iter()
+                                .position(|v| v == variant_name)
+                                .ok_or_else(|| LowerError::Unsupported {
+                                    detail: format!(
+                                        "no variant '{}' in enum '{}'",
+                                        variant_name, enum_name
+                                    ),
+                                    span: arm.span,
+                                })?;
                             switch_arms.push((variant_idx, arm_blocks[arm_idx]));
                         } else {
                             return Err(LowerError::Unsupported {
-                                detail: format!("unsupported sub-pattern in or-pattern for enum match: {:?}", sub),
+                                detail: format!(
+                                    "unsupported sub-pattern in or-pattern for enum match: {:?}",
+                                    sub
+                                ),
                                 span: arm.span,
                             });
                         }
@@ -9027,7 +9936,10 @@ impl<'m> Lowerer<'m> {
         let none_arm = arms
             .iter()
             .find(|a| matches!(a.pattern, AstWhenPattern::OptionNone))
-            .or_else(|| arms.iter().find(|a| matches!(a.pattern, AstWhenPattern::Wildcard)));
+            .or_else(|| {
+                arms.iter()
+                    .find(|a| matches!(a.pattern, AstWhenPattern::Wildcard))
+            });
 
         if some_arm.is_none() && none_arm.is_none() {
             return Err(LowerError::Unsupported {
@@ -9121,7 +10033,10 @@ impl<'m> Lowerer<'m> {
             let some_scope = self.scope.clone();
             for name in &rebound_names {
                 let val = some_scope.get(name).map(|(v, _)| *v).unwrap_or_else(|| {
-                    outer_scope.get(name).map(|(v, _)| *v).expect("missing var in outer_scope")
+                    outer_scope
+                        .get(name)
+                        .map(|(v, _)| *v)
+                        .expect("missing var in outer_scope")
                 });
                 branch_args.push(val);
             }
@@ -9158,7 +10073,10 @@ impl<'m> Lowerer<'m> {
             let none_scope = self.scope.clone();
             for name in &rebound_names {
                 let val = none_scope.get(name).map(|(v, _)| *v).unwrap_or_else(|| {
-                    outer_scope.get(name).map(|(v, _)| *v).expect("missing var in outer_scope")
+                    outer_scope
+                        .get(name)
+                        .map(|(v, _)| *v)
+                        .expect("missing var in outer_scope")
                 });
                 branch_args.push(val);
             }
@@ -9212,7 +10130,10 @@ impl<'m> Lowerer<'m> {
         let err_arm = arms
             .iter()
             .find(|a| matches!(a.pattern, AstWhenPattern::ResultErr { .. }))
-            .or_else(|| arms.iter().find(|a| matches!(a.pattern, AstWhenPattern::Wildcard)));
+            .or_else(|| {
+                arms.iter()
+                    .find(|a| matches!(a.pattern, AstWhenPattern::Wildcard))
+            });
 
         if ok_arm.is_none() && err_arm.is_none() {
             return Err(LowerError::Unsupported {
@@ -9302,7 +10223,10 @@ impl<'m> Lowerer<'m> {
             let ok_scope = self.scope.clone();
             for name in &rebound_names {
                 let val = ok_scope.get(name).map(|(v, _)| *v).unwrap_or_else(|| {
-                    outer_scope.get(name).map(|(v, _)| *v).expect("missing var in outer_scope")
+                    outer_scope
+                        .get(name)
+                        .map(|(v, _)| *v)
+                        .expect("missing var in outer_scope")
                 });
                 branch_args.push(val);
             }
@@ -9355,7 +10279,10 @@ impl<'m> Lowerer<'m> {
             let err_scope = self.scope.clone();
             for name in &rebound_names {
                 let val = err_scope.get(name).map(|(v, _)| *v).unwrap_or_else(|| {
-                    outer_scope.get(name).map(|(v, _)| *v).expect("missing var in outer_scope")
+                    outer_scope
+                        .get(name)
+                        .map(|(v, _)| *v)
+                        .expect("missing var in outer_scope")
                 });
                 branch_args.push(val);
             }
@@ -9598,7 +10525,10 @@ impl<'m> Lowerer<'m> {
                 let arm_scope = self.scope.clone();
                 for name in &rebound_names {
                     let val = arm_scope.get(name).map(|(v, _)| *v).unwrap_or_else(|| {
-                        outer_scope.get(name).map(|(v, _)| *v).expect("missing var in outer_scope")
+                        outer_scope
+                            .get(name)
+                            .map(|(v, _)| *v)
+                            .expect("missing var in outer_scope")
                     });
                     branch_args.push(val);
                 }
@@ -9627,8 +10557,13 @@ impl<'m> Lowerer<'m> {
             },
             Some(IrType::Str),
         );
-        self.builder
-            .push_instr(IrInstr::Panic { msg: panic_msg, span_byte: None }, None);
+        self.builder.push_instr(
+            IrInstr::Panic {
+                msg: panic_msg,
+                span_byte: None,
+            },
+            None,
+        );
         // Panic is now a terminator; we do not need a dummy branch to merge_bb.
 
         self.scope = outer_scope;
@@ -9664,49 +10599,98 @@ impl<'m> Lowerer<'m> {
         span: Span,
     ) -> Result<ValueId, LowerError> {
         match pattern {
-            AstWhenPattern::Binding { pattern: inner, .. } => {
-                self.emit_pattern_condition(scrut_val, scrut_ty, inner, enum_name_opt, enum_variants_opt, span)
-            }
-            AstWhenPattern::Struct { struct_name, fields, .. } => {
+            AstWhenPattern::Binding { pattern: inner, .. } => self.emit_pattern_condition(
+                scrut_val,
+                scrut_ty,
+                inner,
+                enum_name_opt,
+                enum_variants_opt,
+                span,
+            ),
+            AstWhenPattern::Struct {
+                struct_name,
+                fields,
+                ..
+            } => {
                 // Struct pattern: look up the struct def, extract field indices, check sub-patterns.
                 let bool_ty = IrType::Scalar(DType::Bool);
-                let def = self.module.struct_def(struct_name).ok_or_else(|| LowerError::Unsupported {
-                    detail: format!("unknown struct '{}' in pattern", struct_name),
-                    span,
-                })?;
-                let field_map: HashMap<String, (usize, IrType)> = def.iter().enumerate()
-                    .map(|(i, (n, t))| (n.clone(), (i, t.clone()))).collect();
+                let def =
+                    self.module
+                        .struct_def(struct_name)
+                        .ok_or_else(|| LowerError::Unsupported {
+                            detail: format!("unknown struct '{}' in pattern", struct_name),
+                            span,
+                        })?;
+                let field_map: HashMap<String, (usize, IrType)> = def
+                    .iter()
+                    .enumerate()
+                    .map(|(i, (n, t))| (n.clone(), (i, t.clone())))
+                    .collect();
                 let mut all_ok = self.builder.fresh_value();
                 self.builder.push_instr(
-                    IrInstr::ConstBool { result: all_ok, value: true },
+                    IrInstr::ConstBool {
+                        result: all_ok,
+                        value: true,
+                    },
                     Some(bool_ty.clone()),
                 );
                 for (field_name, sub_pat) in fields {
-                    let (field_idx, field_ty) = field_map.get(field_name).ok_or_else(|| LowerError::Unsupported {
-                        detail: format!("no field '{}' in struct '{}'", field_name, struct_name),
-                        span,
-                    })?;
+                    let (field_idx, field_ty) =
+                        field_map
+                            .get(field_name)
+                            .ok_or_else(|| LowerError::Unsupported {
+                                detail: format!(
+                                    "no field '{}' in struct '{}'",
+                                    field_name, struct_name
+                                ),
+                                span,
+                            })?;
                     let field_val = self.builder.fresh_value();
                     self.builder.push_instr(
-                        IrInstr::GetField { result: field_val, base: scrut_val, field_index: *field_idx, result_ty: field_ty.clone() },
+                        IrInstr::GetField {
+                            result: field_val,
+                            base: scrut_val,
+                            field_index: *field_idx,
+                            result_ty: field_ty.clone(),
+                        },
                         Some(field_ty.clone()),
                     );
                     let sub_cond = match sub_pat {
                         AstWhenPattern::EnumVariant { enum_name, .. } if enum_name.is_empty() => {
                             let t = self.builder.fresh_value();
-                            self.builder.push_instr(IrInstr::ConstBool { result: t, value: true }, Some(bool_ty.clone()));
+                            self.builder.push_instr(
+                                IrInstr::ConstBool {
+                                    result: t,
+                                    value: true,
+                                },
+                                Some(bool_ty.clone()),
+                            );
                             t
                         }
                         AstWhenPattern::Wildcard => {
                             let t = self.builder.fresh_value();
-                            self.builder.push_instr(IrInstr::ConstBool { result: t, value: true }, Some(bool_ty.clone()));
+                            self.builder.push_instr(
+                                IrInstr::ConstBool {
+                                    result: t,
+                                    value: true,
+                                },
+                                Some(bool_ty.clone()),
+                            );
                             t
                         }
-                        other => self.emit_pattern_condition(field_val, field_ty, other, &None, &None, span)?,
+                        other => self.emit_pattern_condition(
+                            field_val, field_ty, other, &None, &None, span,
+                        )?,
                     };
                     let new_ok = self.builder.fresh_value();
                     self.builder.push_instr(
-                        IrInstr::BinOp { result: new_ok, op: BinOp::BitAnd, lhs: all_ok, rhs: sub_cond, ty: bool_ty.clone() },
+                        IrInstr::BinOp {
+                            result: new_ok,
+                            op: BinOp::BitAnd,
+                            lhs: all_ok,
+                            rhs: sub_cond,
+                            ty: bool_ty.clone(),
+                        },
                         Some(bool_ty.clone()),
                     );
                     all_ok = new_ok;
@@ -9974,12 +10958,19 @@ impl<'m> Lowerer<'m> {
                 );
                 Ok(result)
             }
-            AstWhenPattern::EnumVariant { variant_name, enum_name, .. } => {
+            AstWhenPattern::EnumVariant {
+                variant_name,
+                enum_name,
+                ..
+            } => {
                 // If enum_name is empty, this is a plain identifier binding (always matches).
                 if enum_name.is_empty() {
                     let result = self.builder.fresh_value();
                     self.builder.push_instr(
-                        IrInstr::ConstBool { result, value: true },
+                        IrInstr::ConstBool {
+                            result,
+                            value: true,
+                        },
                         Some(IrType::Scalar(DType::Bool)),
                     );
                     return Ok(result);
@@ -10137,7 +11128,10 @@ impl<'m> Lowerer<'m> {
                 // Get list length
                 let len_val = self.builder.fresh_value();
                 self.builder.push_instr(
-                    IrInstr::ListLen { result: len_val, list: scrut_val },
+                    IrInstr::ListLen {
+                        result: len_val,
+                        list: scrut_val,
+                    },
                     Some(i64_ty.clone()),
                 );
 
@@ -10205,11 +11199,17 @@ impl<'m> Lowerer<'m> {
                 self.builder.set_current_block(no_match_bb);
                 let false_val = self.builder.fresh_value();
                 self.builder.push_instr(
-                    IrInstr::ConstBool { result: false_val, value: false },
+                    IrInstr::ConstBool {
+                        result: false_val,
+                        value: false,
+                    },
                     Some(bool_ty.clone()),
                 );
                 self.builder.push_instr(
-                    IrInstr::Br { target: merge_bb, args: vec![false_val] },
+                    IrInstr::Br {
+                        target: merge_bb,
+                        args: vec![false_val],
+                    },
                     None,
                 );
 
@@ -10241,9 +11241,8 @@ impl<'m> Lowerer<'m> {
                         },
                         Some(elem_ty.clone()),
                     );
-                    let sub_ok = self.emit_pattern_condition(
-                        elem_val, &elem_ty, sub, &None, &None, span,
-                    )?;
+                    let sub_ok =
+                        self.emit_pattern_condition(elem_val, &elem_ty, sub, &None, &None, span)?;
                     let new_all = self.builder.fresh_value();
                     self.builder.push_instr(
                         IrInstr::BinOp {
@@ -10258,12 +11257,17 @@ impl<'m> Lowerer<'m> {
                     all_ok = new_all;
                 }
                 self.builder.push_instr(
-                    IrInstr::Br { target: merge_bb, args: vec![all_ok] },
+                    IrInstr::Br {
+                        target: merge_bb,
+                        args: vec![all_ok],
+                    },
                     None,
                 );
 
                 // merge: result = phi from no_match(false) or check_elems(all_ok)
-                let result = self.builder.add_block_param(merge_bb, Some("slice_match"), bool_ty.clone());
+                let result =
+                    self.builder
+                        .add_block_param(merge_bb, Some("slice_match"), bool_ty.clone());
                 self.builder.set_current_block(merge_bb);
                 Ok(result)
             }
@@ -10280,9 +11284,20 @@ impl<'m> Lowerer<'m> {
         enum_variant_field_types: &[Vec<IrType>],
     ) -> Result<(), LowerError> {
         match pattern {
-            AstWhenPattern::Binding { name, pattern: inner, .. } => {
-                self.scope.insert(name.clone(), (scrut_val, scrut_ty.clone()));
-                self.bind_pattern_vars(scrut_val, scrut_ty, inner, enum_variants_opt, enum_variant_field_types)?;
+            AstWhenPattern::Binding {
+                name,
+                pattern: inner,
+                ..
+            } => {
+                self.scope
+                    .insert(name.clone(), (scrut_val, scrut_ty.clone()));
+                self.bind_pattern_vars(
+                    scrut_val,
+                    scrut_ty,
+                    inner,
+                    enum_variants_opt,
+                    enum_variant_field_types,
+                )?;
             }
             AstWhenPattern::OptionSome {
                 binding: Some(bind_name),
@@ -10373,26 +11388,54 @@ impl<'m> Lowerer<'m> {
                     }
                 }
             }
-            AstWhenPattern::Struct { struct_name, fields, .. } => {
-                let def = self.module.struct_def(struct_name).cloned().unwrap_or_default();
-                let field_map: HashMap<String, (usize, IrType)> = def.into_iter().enumerate()
-                    .map(|(i, (n, t))| (n, (i, t))).collect();
+            AstWhenPattern::Struct {
+                struct_name,
+                fields,
+                ..
+            } => {
+                let def = self
+                    .module
+                    .struct_def(struct_name)
+                    .cloned()
+                    .unwrap_or_default();
+                let field_map: HashMap<String, (usize, IrType)> = def
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, (n, t))| (n, (i, t)))
+                    .collect();
                 for (field_name, sub_pat) in fields {
                     if let Some((field_idx, field_ty)) = field_map.get(field_name) {
                         let field_val = self.builder.fresh_value();
                         self.builder.push_instr(
-                            IrInstr::GetField { result: field_val, base: scrut_val, field_index: *field_idx, result_ty: field_ty.clone() },
+                            IrInstr::GetField {
+                                result: field_val,
+                                base: scrut_val,
+                                field_index: *field_idx,
+                                result_ty: field_ty.clone(),
+                            },
                             Some(field_ty.clone()),
                         );
                         match sub_pat {
-                            AstWhenPattern::EnumVariant { enum_name, variant_name, .. } if enum_name.is_empty() => {
-                                self.scope.insert(variant_name.clone(), (field_val, field_ty.clone()));
+                            AstWhenPattern::EnumVariant {
+                                enum_name,
+                                variant_name,
+                                ..
+                            } if enum_name.is_empty() => {
+                                self.scope
+                                    .insert(variant_name.clone(), (field_val, field_ty.clone()));
                             }
                             AstWhenPattern::Binding { name, .. } => {
-                                self.scope.insert(name.clone(), (field_val, field_ty.clone()));
+                                self.scope
+                                    .insert(name.clone(), (field_val, field_ty.clone()));
                             }
                             _ => {
-                                self.bind_pattern_vars(field_val, field_ty, sub_pat, enum_variants_opt, enum_variant_field_types)?;
+                                self.bind_pattern_vars(
+                                    field_val,
+                                    field_ty,
+                                    sub_pat,
+                                    enum_variants_opt,
+                                    enum_variant_field_types,
+                                )?;
                             }
                         }
                     }
@@ -10468,7 +11511,8 @@ impl<'m> Lowerer<'m> {
                                 },
                                 Some(elem_ty.clone()),
                             );
-                            self.scope.insert(variant_name.clone(), (elem_val, elem_ty.clone()));
+                            self.scope
+                                .insert(variant_name.clone(), (elem_val, elem_ty.clone()));
                         }
                     }
                 }
@@ -10485,7 +11529,10 @@ impl<'m> Lowerer<'m> {
                     );
                     let len_val = self.builder.fresh_value();
                     self.builder.push_instr(
-                        IrInstr::ListLen { result: len_val, list: scrut_val },
+                        IrInstr::ListLen {
+                            result: len_val,
+                            list: scrut_val,
+                        },
                         Some(i64_ty.clone()),
                     );
                     let rest_val = self.builder.fresh_value();
@@ -10498,7 +11545,8 @@ impl<'m> Lowerer<'m> {
                         },
                         Some(scrut_ty.clone()),
                     );
-                    self.scope.insert(rest_name.clone(), (rest_val, scrut_ty.clone()));
+                    self.scope
+                        .insert(rest_name.clone(), (rest_val, scrut_ty.clone()));
                 }
             }
             // No bindings for wildcard, literals, none.
@@ -10662,8 +11710,14 @@ impl<'m> Lowerer<'m> {
         // Lower body block.
         self.builder.set_current_block(body_bb);
         let loop_var_names: Vec<String> = loop_vars.iter().map(|(n, _, _)| n.clone()).collect();
-        self.loop_stack
-            .push((header_bb, merge_bb, header_bb, loop_var_names.clone(), label.clone(), false));
+        self.loop_stack.push((
+            header_bb,
+            merge_bb,
+            header_bb,
+            loop_var_names.clone(),
+            label.clone(),
+            false,
+        ));
         let _ = self.lower_block(body)?;
         self.loop_stack.pop();
 
@@ -10716,6 +11770,9 @@ impl<'m> Lowerer<'m> {
     ///
     /// The loop variable is incremented by 1 after each body execution.
     /// Semantics: `start` and `end` are evaluated once before the loop.
+    // Loop lowering necessarily receives every syntactic component plus the
+    // active builder; grouping them would obscure the AST-to-SSA mapping.
+    #[allow(clippy::too_many_arguments)]
     fn lower_for_range(
         &mut self,
         var: &crate::parser::ast::Ident,
@@ -10849,7 +11906,11 @@ impl<'m> Lowerer<'m> {
         self.builder.push_instr(
             IrInstr::BinOp {
                 result: cond_result,
-                op: if inclusive { BinOp::CmpLe } else { BinOp::CmpLt },
+                op: if inclusive {
+                    BinOp::CmpLe
+                } else {
+                    BinOp::CmpLt
+                },
                 lhs: loop_var_param,
                 rhs: end_val,
                 ty: IrType::Scalar(DType::Bool),
@@ -10874,7 +11935,14 @@ impl<'m> Lowerer<'m> {
         // 9. Body block.
         self.builder.set_current_block(body_bb);
         let loop_var_names: Vec<String> = loop_vars.iter().map(|(n, _, _)| n.clone()).collect();
-        self.loop_stack.push((header_bb, merge_bb, header_bb, loop_var_names, label.clone(), true));
+        self.loop_stack.push((
+            header_bb,
+            merge_bb,
+            header_bb,
+            loop_var_names,
+            label.clone(),
+            true,
+        ));
         // Use lower_block (not lower_block_stmts) so tail expressions like `print(x)` without `;`
         // are also evaluated as side-effecting statements.
         self.lower_block(body)?;
@@ -11155,8 +12223,14 @@ impl<'m> Lowerer<'m> {
         self.scope.insert(var.name.clone(), (elem_val, elem_ty));
 
         let loop_var_names: Vec<String> = loop_vars.iter().map(|(n, _, _)| n.clone()).collect();
-        self.loop_stack
-            .push((header_bb, merge_bb, header_bb, loop_var_names.clone(), None, false));
+        self.loop_stack.push((
+            header_bb,
+            merge_bb,
+            header_bb,
+            loop_var_names.clone(),
+            None,
+            false,
+        ));
         let _ = self.lower_block(body)?;
         self.loop_stack.pop();
 
@@ -15896,7 +16970,12 @@ impl<'m> Lowerer<'m> {
     }
 
     /// Lowers a `loop { body }` (infinite loop). `break` exits to merge_bb.
-    fn lower_loop(&mut self, body: &AstBlock, label: &Option<String>, span: Span) -> Result<(), LowerError> {
+    fn lower_loop(
+        &mut self,
+        body: &AstBlock,
+        label: &Option<String>,
+        span: Span,
+    ) -> Result<(), LowerError> {
         // Pre-scan body to find which variables get rebound inside the loop.
         let outer_names = self.scope_names();
         let rebound = find_rebound_vars(body);
@@ -15949,18 +17028,24 @@ impl<'m> Lowerer<'m> {
             self.scope.insert(name.clone(), (param_val, ty.clone()));
         }
         self.builder.push_instr(
-                IrInstr::Br {
-                    target: body_bb,
-                    args: vec![],
-                },
-                None,
-            );
+            IrInstr::Br {
+                target: body_bb,
+                args: vec![],
+            },
+            None,
+        );
 
         // Lower body block.
         self.builder.set_current_block(body_bb);
         let loop_var_names: Vec<String> = loop_vars.iter().map(|(n, _, _)| n.clone()).collect();
-        self.loop_stack
-            .push((header_bb, merge_bb, header_bb, loop_var_names.clone(), label.clone(), false));
+        self.loop_stack.push((
+            header_bb,
+            merge_bb,
+            header_bb,
+            loop_var_names.clone(),
+            label.clone(),
+            false,
+        ));
         let _ = self.lower_block(body)?;
         self.loop_stack.pop();
 
@@ -16064,7 +17149,11 @@ impl<'m> Lowerer<'m> {
         if is_for_range {
             // For-range: increment the loop var inline, then branch to header with all
             // updated values. Save and restore scope so the increment doesn't leak.
-            let saved_scope: Vec<_> = self.scope.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+            let saved_scope: Vec<_> = self
+                .scope
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
 
             let (cur_loop_var, loop_var_ty) = self
                 .scope
@@ -16073,15 +17162,26 @@ impl<'m> Lowerer<'m> {
                 .unwrap_or((ValueId(0), IrType::Scalar(DType::I64)));
             let one = self.builder.fresh_value();
             self.builder.push_instr(
-                IrInstr::ConstInt { result: one, value: 1, ty: loop_var_ty.clone() },
+                IrInstr::ConstInt {
+                    result: one,
+                    value: 1,
+                    ty: loop_var_ty.clone(),
+                },
                 Some(loop_var_ty.clone()),
             );
             let incremented = self.builder.fresh_value();
             self.builder.push_instr(
-                IrInstr::BinOp { result: incremented, op: BinOp::Add, lhs: cur_loop_var, rhs: one, ty: loop_var_ty.clone() },
+                IrInstr::BinOp {
+                    result: incremented,
+                    op: BinOp::Add,
+                    lhs: cur_loop_var,
+                    rhs: one,
+                    ty: loop_var_ty.clone(),
+                },
                 Some(loop_var_ty.clone()),
             );
-            self.scope.insert(loop_var_names[0].clone(), (incremented, loop_var_ty));
+            self.scope
+                .insert(loop_var_names[0].clone(), (incremented, loop_var_ty));
 
             let mut args = Vec::with_capacity(loop_var_names.len());
             for name in &loop_var_names {
@@ -16100,7 +17200,13 @@ impl<'m> Lowerer<'m> {
                 self.scope.insert(k, v);
             }
 
-            self.builder.push_instr(IrInstr::Br { target: header_bb, args }, None);
+            self.builder.push_instr(
+                IrInstr::Br {
+                    target: header_bb,
+                    args,
+                },
+                None,
+            );
         } else {
             // While/loop: just pass current values of loop vars to header params.
             let mut args = Vec::with_capacity(loop_var_names.len());
@@ -16113,7 +17219,13 @@ impl<'m> Lowerer<'m> {
                 };
                 args.push(*value);
             }
-            self.builder.push_instr(IrInstr::Br { target: header_bb, args }, None);
+            self.builder.push_instr(
+                IrInstr::Br {
+                    target: header_bb,
+                    args,
+                },
+                None,
+            );
         }
         Ok(())
     }
@@ -16192,12 +17304,8 @@ impl<'m> Lowerer<'m> {
                 // trait-object fat pointer via MakeTraitObject.
                 if let Some(ast_ty_for_box) = ann_ty {
                     let ann = self.resolve_ty(ast_ty_for_box);
-                    let (nv, nt) = self.coerce_to_trait_object(
-                        val,
-                        ty.clone(),
-                        &ann,
-                        ast_ty_for_box.span(),
-                    )?;
+                    let (nv, nt) =
+                        self.coerce_to_trait_object(val, ty.clone(), &ann, ast_ty_for_box.span())?;
                     val = nv;
                     ty = nt;
                 }
@@ -16205,7 +17313,9 @@ impl<'m> Lowerer<'m> {
                 self.scope.insert(name.name.clone(), (val, ty));
                 Ok(())
             }
-            AstStmt::LetTuple { names, init, span, .. } => {
+            AstStmt::LetTuple {
+                names, init, span, ..
+            } => {
                 let (tuple_val, tuple_ty) = self.lower_expr(init)?;
                 let elem_types = match &tuple_ty {
                     IrType::Tuple(elems) => elems.clone(),
@@ -16281,7 +17391,12 @@ impl<'m> Lowerer<'m> {
                 }
                 Ok(())
             }
-            AstStmt::While { cond, body, span, label } => self.lower_while(cond, body, label, *span),
+            AstStmt::While {
+                cond,
+                body,
+                span,
+                label,
+            } => self.lower_while(cond, body, label, *span),
             AstStmt::ForRange {
                 var,
                 start,
@@ -16291,7 +17406,16 @@ impl<'m> Lowerer<'m> {
                 step,
                 label,
                 span,
-            } => self.lower_for_range(var, start, end, body, *inclusive, step.as_deref(), label, *span),
+            } => self.lower_for_range(
+                var,
+                start,
+                end,
+                body,
+                *inclusive,
+                step.as_deref(),
+                label,
+                *span,
+            ),
             AstStmt::Loop { body, span, label } => self.lower_loop(body, label, *span),
             AstStmt::Break { label, span, .. } => self.lower_break(label, *span),
             AstStmt::Continue { label, span, .. } => self.lower_continue(label, *span),
@@ -16315,7 +17439,7 @@ impl<'m> Lowerer<'m> {
                             self.builder.push_instr(
                                 IrInstr::BinOp {
                                     result,
-                                    op: bin_op.clone(),
+                            op: *bin_op,
                                     lhs: lhs_val,
                                     rhs: rhs_val,
                                     ty: lhs_ty.clone(),
@@ -16752,7 +17876,10 @@ impl<'m> Lowerer<'m> {
                 Ok(())
             }
             AstStmt::HandleStmt {
-                expr, arms, return_ty, ..
+                expr,
+                arms,
+                return_ty,
+                ..
             } => {
                 // Lower each handler arm into an IR function + HandlerArm descriptor.
                 let mut handler_arms = Vec::new();
@@ -16762,12 +17889,8 @@ impl<'m> Lowerer<'m> {
                 }
 
                 // Emit PushHandler.
-                self.builder.push_instr(
-                    IrInstr::PushHandler {
-                        arms: handler_arms,
-                    },
-                    None,
-                );
+                self.builder
+                    .push_instr(IrInstr::PushHandler { arms: handler_arms }, None);
 
                 // Lower body.
                 self.lower_expr(expr)?;
@@ -16783,7 +17906,7 @@ impl<'m> Lowerer<'m> {
                 Ok(())
             }
             AstStmt::Yield { expr, .. } => {
-                self.lower_expr(&*expr)?;
+                self.lower_expr(expr)?;
                 Ok(())
             }
             AstStmt::Select { arms, default, .. } => {
@@ -16805,23 +17928,33 @@ impl<'m> Lowerer<'m> {
                 // Add block params to merge_bb for rebound variables (phi merge).
                 let mut rebound_params: Vec<(String, ValueId, IrType)> = Vec::new();
                 for name in &rebound_names {
-                    let Some((_, ty)) = outer_scope.get(name) else { continue };
-                    let param = self.builder.add_block_param(merge_bb, Some(name), ty.clone());
+                    let Some((_, ty)) = outer_scope.get(name) else {
+                        continue;
+                    };
+                    let param = self
+                        .builder
+                        .add_block_param(merge_bb, Some(name), ty.clone());
                     rebound_params.push((name.clone(), param, ty.clone()));
                 }
 
                 // Branch to the loop
                 self.builder.push_instr(
-                    IrInstr::Br { target: loop_bb, args: vec![] },
+                    IrInstr::Br {
+                        target: loop_bb,
+                        args: vec![],
+                    },
                     None,
                 );
 
                 // -- loop_bb: call select(ch0, ch1, ...)
                 self.builder.set_current_block(loop_bb);
-                let channels: Vec<ValueId> = arms.iter().map(|arm| {
-                    let (v, _) = self.lower_expr(&arm.channel)?;
-                    Ok(v)
-                }).collect::<Result<Vec<_>, LowerError>>()?;
+                let channels: Vec<ValueId> = arms
+                    .iter()
+                    .map(|arm| {
+                        let (v, _) = self.lower_expr(&arm.channel)?;
+                        Ok(v)
+                    })
+                    .collect::<Result<Vec<_>, LowerError>>()?;
 
                 // Emit select(ch0, ch1, ...) builtin call
                 let select_result = self.builder.fresh_value();
@@ -16858,9 +17991,12 @@ impl<'m> Lowerer<'m> {
                         },
                         Some(IrType::Scalar(DType::Bool)),
                     );
-                    let arm_body_bb = self.builder.create_block(Some(&format!("select_arm_{}", i)));
+                    let arm_body_bb = self
+                        .builder
+                        .create_block(Some(&format!("select_arm_{}", i)));
                     let fall_bb = if i < arms.len() - 1 {
-                        self.builder.create_block(Some(&format!("select_check_{}", i + 1)))
+                        self.builder
+                            .create_block(Some(&format!("select_check_{}", i + 1)))
                     } else {
                         next_check_bb
                     };
@@ -16888,7 +18024,8 @@ impl<'m> Lowerer<'m> {
                         Some(IrType::Infer),
                     );
                     // Bind the received value
-                    self.scope.insert(arm.binding.clone(), (recv_result, IrType::Infer));
+                    self.scope
+                        .insert(arm.binding.clone(), (recv_result, IrType::Infer));
                     for stmt in &arm.body.stmts {
                         self.lower_stmt(stmt)?;
                     }
@@ -16898,14 +18035,19 @@ impl<'m> Lowerer<'m> {
                     if !self.builder.is_current_block_terminated() {
                         let mut merge_args: Vec<ValueId> = Vec::new();
                         for name in &rebound_names {
-                            let val = self.scope.get(name)
+                            let val = self
+                                .scope
+                                .get(name)
                                 .or_else(|| outer_scope.get(name))
                                 .map(|(v, _)| *v)
                                 .expect("rebound variable missing from select arm scope");
                             merge_args.push(val);
                         }
                         self.builder.push_instr(
-                            IrInstr::Br { target: merge_bb, args: merge_args },
+                            IrInstr::Br {
+                                target: merge_bb,
+                                args: merge_args,
+                            },
                             None,
                         );
                     }
@@ -16929,14 +18071,19 @@ impl<'m> Lowerer<'m> {
                     if !self.builder.is_current_block_terminated() {
                         let mut merge_args: Vec<ValueId> = Vec::new();
                         for name in &rebound_names {
-                            let val = self.scope.get(name)
+                            let val = self
+                                .scope
+                                .get(name)
                                 .or_else(|| outer_scope.get(name))
                                 .map(|(v, _)| *v)
                                 .expect("rebound variable missing from select default scope");
                             merge_args.push(val);
                         }
                         self.builder.push_instr(
-                            IrInstr::Br { target: merge_bb, args: merge_args },
+                            IrInstr::Br {
+                                target: merge_bb,
+                                args: merge_args,
+                            },
                             None,
                         );
                     }
@@ -16953,11 +18100,17 @@ impl<'m> Lowerer<'m> {
                     );
                     let sleep_result = self.builder.fresh_value();
                     self.builder.push_instr(
-                        IrInstr::SleepMs { result: sleep_result, ms: ms_val },
+                        IrInstr::SleepMs {
+                            result: sleep_result,
+                            ms: ms_val,
+                        },
                         Some(IrType::Scalar(DType::I64)),
                     );
                     self.builder.push_instr(
-                        IrInstr::Br { target: loop_bb, args: vec![] },
+                        IrInstr::Br {
+                            target: loop_bb,
+                            args: vec![],
+                        },
                         None,
                     );
                 }
@@ -17030,18 +18183,19 @@ impl<'m> Lowerer<'m> {
 
         match base {
             AstExpr::Ident(base_ident) => {
-                self.scope.insert(base_ident.name.clone(), (result, result_ty));
+                self.scope
+                    .insert(base_ident.name.clone(), (result, result_ty));
                 Ok(())
             }
-            AstExpr::FieldAccess { base: parent_base, field: parent_field, span: parent_span } => {
-                self.lower_field_assignment(parent_base, parent_field, result, *parent_span)
-            }
-            _ => {
-                Err(LowerError::Unsupported {
-                    detail: "field assignment target base must be an identifier or field access".into(),
-                    span,
-                })
-            }
+            AstExpr::FieldAccess {
+                base: parent_base,
+                field: parent_field,
+                span: parent_span,
+            } => self.lower_field_assignment(parent_base, parent_field, result, *parent_span),
+            _ => Err(LowerError::Unsupported {
+                detail: "field assignment target base must be an identifier or field access".into(),
+                span,
+            }),
         }
     }
 }
@@ -17107,9 +18261,8 @@ fn lower_function_with_generics_and_subs(
     ),
     LowerError,
 > {
-    let resolve = |ty: &AstType| -> IrType {
-        resolve_ast_type_with_subs(ty, &type_param_subs, module)
-    };
+    let resolve =
+        |ty: &AstType| -> IrType { resolve_ast_type_with_subs(ty, &type_param_subs, module) };
 
     let return_ty = resolve(&func.return_ty);
     let params: Vec<Param> = func
@@ -17146,7 +18299,7 @@ fn lower_function_with_generics_and_subs(
             lambda_counter.clone(),
         )?;
         // Preserve attributes on the inner implementation only.
-        inner_ir.attrs = func.attrs.iter().map(|a| ast_attr_to_ir_attr(a)).collect();
+        inner_ir.attrs = func.attrs.iter().map(ast_attr_to_ir_attr).collect();
 
         // Build the spawn body function: call inner, send on channel, return 0.
         let mut spawn_params: Vec<Param> = Vec::with_capacity(params.len() + 1);
@@ -17296,15 +18449,25 @@ fn lower_function_with_generics_and_subs(
                     .iter()
                     .map(|a| resolve_ast_type_with_subs(a, subs, module))
                     .collect();
-                let mangled = format!("{}__{}", name, resolved_args.iter().map(mangle_ir_type).collect::<Vec<_>>().join("_"));
+                let mangled = format!(
+                    "{}__{}",
+                    name,
+                    resolved_args
+                        .iter()
+                        .map(mangle_ir_type)
+                        .collect::<Vec<_>>()
+                        .join("_")
+                );
                 let resolved = resolve_brought_name(&mangled, module);
                 if module.struct_def(&resolved).is_none() && !local_defs.contains_key(&resolved) {
                     // Compute concrete fields from the template.
-                    if let Some(template_fields) = module.struct_def(&resolve_brought_name(name, module)) {
+                    if let Some(template_fields) =
+                        module.struct_def(&resolve_brought_name(name, module))
+                    {
                         let concrete_fields: Vec<(String, IrType)> = template_fields
                             .iter()
                             .map(|(fn_, ft)| {
-                                let concrete_ft = resolve_concrete_field(ft, subs, module);
+                                let concrete_ft = resolve_concrete_field(ft, subs);
                                 (fn_.clone(), concrete_ft)
                             })
                             .collect();
@@ -17319,12 +18482,15 @@ fn lower_function_with_generics_and_subs(
         register_generic_structs(&func.return_ty, &type_param_subs, module, &mut local_defs);
         lowerer.local_struct_defs = local_defs;
         // Also carry over defaults for any monomorphized structs registered above.
-        let mut local_defaults: HashMap<String, Vec<Option<crate::parser::ast::AstExpr>>> = HashMap::new();
+        let mut local_defaults: HashMap<String, Vec<Option<crate::parser::ast::AstExpr>>> =
+            HashMap::new();
         for mangled_name in lowerer.local_struct_defs.keys() {
-            if module.struct_defaults.get(mangled_name).is_none() {
+            if !module.struct_defaults.contains_key(mangled_name) {
                 // Find the base name by matching known base names with __ suffix.
                 for (base_name, base_defaults) in &module.struct_defaults {
-                    if mangled_name == base_name || mangled_name.starts_with(&format!("{}__", base_name)) {
+                    if mangled_name == base_name
+                        || mangled_name.starts_with(&format!("{}__", base_name))
+                    {
                         local_defaults.insert(mangled_name.clone(), base_defaults.clone());
                         break;
                     }
@@ -17372,7 +18538,7 @@ fn lower_function_with_generics_and_subs(
 
     let mut ir_func = lowerer.builder.build();
     // Propagate AST function attributes (e.g., "kernel", "differentiable") to IR.
-    ir_func.attrs = func.attrs.iter().map(|a| ast_attr_to_ir_attr(a)).collect();
+    ir_func.attrs = func.attrs.iter().map(ast_attr_to_ir_attr).collect();
     ir_func.is_const = func.is_const;
     let lifted = match std::rc::Rc::try_unwrap(lifted_fns) {
         Ok(cell) => cell.into_inner(),
@@ -17382,7 +18548,9 @@ fn lower_function_with_generics_and_subs(
 }
 
 /// Convert an AST attribute to an IR attribute (args omitted for simplicity).
-fn ast_attr_to_ir_attr(attr: &crate::parser::ast::AstAttribute) -> crate::ir::function::IrAttribute {
+fn ast_attr_to_ir_attr(
+    attr: &crate::parser::ast::AstAttribute,
+) -> crate::ir::function::IrAttribute {
     crate::ir::function::IrAttribute {
         name: attr.name.clone(),
         args: Vec::new(),
@@ -17406,6 +18574,8 @@ pub fn lower_type(ty: &AstType) -> IrType {
         AstType::Named(name, _) => {
             if name == "str" {
                 IrType::Str
+            } else if name == "task_group" {
+                IrType::TaskGroup
             } else {
                 IrType::Struct {
                     name: name.clone(),
@@ -17435,7 +18605,14 @@ pub fn lower_type(ty: &AstType) -> IrType {
         },
         AstType::WeakRef(inner, _) => IrType::WeakRef(Box::new(lower_type(inner))),
         AstType::Generic { name, args, .. } => IrType::Struct {
-            name: format!("{}__{}", name, args.iter().map(|a| format!("{:?}", a)).collect::<Vec<_>>().join("_")),
+            name: format!(
+                "{}__{}",
+                name,
+                args.iter()
+                    .map(|a| format!("{:?}", a))
+                    .collect::<Vec<_>>()
+                    .join("_")
+            ),
             fields: Vec::new(),
         },
         AstType::ConstInt(_, _) => IrType::Scalar(DType::I64),
@@ -17559,10 +18736,7 @@ fn parse_mangled_type(s: &str) -> (IrType, &str) {
         Some((h, t)) => (h, t),
         None => (s, ""),
     };
-    fn one<'a>(
-        ctor: fn(Box<IrType>) -> IrType,
-        rest: &'a str,
-    ) -> (IrType, &'a str) {
+    fn one(ctor: fn(Box<IrType>) -> IrType, rest: &str) -> (IrType, &str) {
         let (inner, r) = parse_mangled_type(rest);
         (ctor(Box::new(inner)), r)
     }
@@ -17603,7 +18777,10 @@ fn parse_mangled_type(s: &str) -> (IrType, &str) {
 /// with `lower_type_with_structs`.
 pub(crate) fn resolve_mangled_struct(ty: IrType, module: &IrModule) -> IrType {
     match ty {
-        IrType::Struct { ref name, ref fields } if fields.is_empty() => lower_type_with_structs(
+        IrType::Struct {
+            ref name,
+            ref fields,
+        } if fields.is_empty() => lower_type_with_structs(
             &crate::parser::ast::AstType::Named(name.clone(), crate::parser::lexer::Span::at(0)),
             module,
         ),
@@ -17630,22 +18807,16 @@ pub(crate) fn mangle_ir_type(ty: &IrType) -> String {
             format!("arr{}_{}", len, mangle_ir_type(elem))
         }
         IrType::Option(inner) => format!("opt_{}", mangle_ir_type(inner)),
-        IrType::ResultType(ok, err) => format!(
-            "res_{}_{}",
-            mangle_ir_type(ok),
-            mangle_ir_type(err)
-        ),
+        IrType::ResultType(ok, err) => {
+            format!("res_{}_{}", mangle_ir_type(ok), mangle_ir_type(err))
+        }
         IrType::Chan(inner) => format!("chan_{}", mangle_ir_type(inner)),
         IrType::Atomic(inner) => format!("atomic_{}", mangle_ir_type(inner)),
         IrType::Mutex(inner) => format!("mutex_{}", mangle_ir_type(inner)),
         IrType::Grad(inner) => format!("grad_{}", mangle_ir_type(inner)),
         IrType::Sparse(inner) => format!("sparse_{}", mangle_ir_type(inner)),
         IrType::List(inner) => format!("list_{}", mangle_ir_type(inner)),
-        IrType::Map(k, v) => format!(
-            "map_{}_{}",
-            mangle_ir_type(k),
-            mangle_ir_type(v)
-        ),
+        IrType::Map(k, v) => format!("map_{}_{}", mangle_ir_type(k), mangle_ir_type(v)),
         IrType::Tensor { dtype, shape } => format!("tensor_{}_{}", dtype, shape),
         IrType::Fn { params, ret } => {
             let ps: Vec<String> = params.iter().map(mangle_ir_type).collect();
@@ -17684,6 +18855,9 @@ pub fn lower_type_with_structs(ty: &AstType, module: &IrModule) -> IrType {
             }
             if name == "bool" {
                 return IrType::Scalar(DType::Bool);
+            }
+            if name == "task_group" {
+                return IrType::TaskGroup;
             }
             let resolved_name = resolve_brought_name(name, module);
             // Check type aliases first.
@@ -17730,19 +18904,34 @@ pub fn lower_type_with_structs(ty: &AstType, module: &IrModule) -> IrType {
             Box::new(lower_type_with_structs(k, module)),
             Box::new(lower_type_with_structs(v, module)),
         ),
-        AstType::WeakRef(inner, _) => IrType::WeakRef(Box::new(lower_type_with_structs(inner, module))),
+        AstType::WeakRef(inner, _) => {
+            IrType::WeakRef(Box::new(lower_type_with_structs(inner, module)))
+        }
         AstType::Fn { params, ret, .. } => IrType::Fn {
-            params: params.iter().map(|p| lower_type_with_structs(p, module)).collect(),
+            params: params
+                .iter()
+                .map(|p| lower_type_with_structs(p, module))
+                .collect(),
             ret: Box::new(lower_type_with_structs(ret, module)),
         },
         AstType::Grad(inner, _) => IrType::Grad(Box::new(lower_type_with_structs(inner, module))),
-        AstType::Sparse(inner, _) => IrType::Sparse(Box::new(lower_type_with_structs(inner, module))),
+        AstType::Sparse(inner, _) => {
+            IrType::Sparse(Box::new(lower_type_with_structs(inner, module)))
+        }
         AstType::Generic { name, args, .. } => {
             let resolved_args: Vec<IrType> = args
                 .iter()
                 .map(|arg| lower_type_with_structs(arg, module))
                 .collect();
-            let mangled_name = format!("{}__{}", name, resolved_args.iter().map(mangle_ir_type).collect::<Vec<_>>().join("_"));
+            let mangled_name = format!(
+                "{}__{}",
+                name,
+                resolved_args
+                    .iter()
+                    .map(mangle_ir_type)
+                    .collect::<Vec<_>>()
+                    .join("_")
+            );
             let resolved_name = resolve_brought_name(&mangled_name, module);
             if let Some(fields) = module.struct_def(&resolved_name) {
                 IrType::Struct {
@@ -17768,10 +18957,7 @@ pub fn lower_type_with_structs(ty: &AstType, module: &IrModule) -> IrType {
         AstType::ConstInt(_, _) => IrType::Scalar(DType::I64),
         AstType::AssocType { .. } => IrType::Infer,
         AstType::DynTrait { trait_name, .. } => {
-            let methods = module
-                .trait_def(trait_name)
-                .cloned()
-                .unwrap_or_default();
+            let methods = module.trait_def(trait_name).cloned().unwrap_or_default();
             IrType::TraitObject {
                 name: trait_name.clone(),
                 methods,
@@ -17930,7 +19116,32 @@ fn derive_einsum_result_type(notation: &str, input_tys: &[IrType]) -> IrType {
 /// an unrecognised form declines the inline, and the program merely gets the
 /// same error it did before.
 fn taped_inline_ok_block(block: &AstBlock) -> bool {
-    let stmts_ok = block.stmts.iter().all(|st| match st {
+    taped_inline_ok_block_with_terminal_return(block, true)
+}
+
+/// Checks a block used by taped-call inlining.
+///
+/// Only the callee's outermost block may use a final `return expr` as its
+/// result. A final return in an `if` arm is still an early return from the
+/// callee, and lowering that arm inline would emit a return from the caller.
+fn taped_inline_ok_block_with_terminal_return(
+    block: &AstBlock,
+    allow_terminal_return: bool,
+) -> bool {
+    let (stmts, has_terminal_return) = if allow_terminal_return && block.tail.is_none() {
+        match block.stmts.split_last() {
+            Some((
+                AstStmt::Return {
+                    value: Some(value), ..
+                },
+                prefix,
+            )) => (prefix, taped_inline_ok_expr(value)),
+            _ => (block.stmts.as_slice(), false),
+        }
+    } else {
+        (block.stmts.as_slice(), false)
+    };
+    let stmts_ok = stmts.iter().all(|st| match st {
         AstStmt::Let { init, .. } => taped_inline_ok_expr(init),
         AstStmt::LetTuple { init, .. } => taped_inline_ok_expr(init),
         AstStmt::Expr(e) => taped_inline_ok_expr(e),
@@ -17942,7 +19153,7 @@ fn taped_inline_ok_block(block: &AstBlock) -> bool {
         // encloses the *call site*. Everything else is simply not traversed.
         _ => false,
     });
-    stmts_ok && block.tail.as_deref().is_some_and(taped_inline_ok_expr)
+    stmts_ok && (block.tail.as_deref().is_some_and(taped_inline_ok_expr) || has_terminal_return)
 }
 
 fn taped_inline_ok_expr(expr: &AstExpr) -> bool {
@@ -17952,9 +19163,7 @@ fn taped_inline_ok_expr(expr: &AstExpr) -> bool {
         | AstExpr::FloatLit { .. }
         | AstExpr::BoolLit { .. }
         | AstExpr::StringLit { .. } => true,
-        AstExpr::BinOp { lhs, rhs, .. } => {
-            taped_inline_ok_expr(lhs) && taped_inline_ok_expr(rhs)
-        }
+        AstExpr::BinOp { lhs, rhs, .. } => taped_inline_ok_expr(lhs) && taped_inline_ok_expr(rhs),
         AstExpr::UnaryOp { expr, .. } => taped_inline_ok_expr(expr),
         AstExpr::Cast { expr, .. } => taped_inline_ok_expr(expr),
         AstExpr::FieldAccess { base, .. } => taped_inline_ok_expr(base),
@@ -17962,7 +19171,9 @@ fn taped_inline_ok_expr(expr: &AstExpr) -> bool {
         AstExpr::Index { base, indices, .. } => {
             taped_inline_ok_expr(base) && indices.iter().all(taped_inline_ok_expr)
         }
-        AstExpr::Call { args, named_args, .. } => {
+        AstExpr::Call {
+            args, named_args, ..
+        } => {
             args.iter().all(taped_inline_ok_expr)
                 && named_args.iter().all(|(_, e)| taped_inline_ok_expr(e))
         }
@@ -17978,8 +19189,10 @@ fn taped_inline_ok_expr(expr: &AstExpr) -> bool {
             ..
         } => {
             taped_inline_ok_expr(cond)
-                && taped_inline_ok_block(then_block)
-                && else_block.as_ref().is_none_or(taped_inline_ok_block)
+                && taped_inline_ok_block_with_terminal_return(then_block, false)
+                && else_block.as_ref().map_or(true, |block| {
+                    taped_inline_ok_block_with_terminal_return(block, false)
+                })
         }
         _ => false,
     }
@@ -18100,8 +19313,18 @@ fn collect_rebound_vars_in_stmt(stmt: &AstStmt, names: &mut Vec<String>, include
 
 /// Builtins that mutate a collection in place. First argument is the target.
 const MUTATING_COLLECTION_BUILTINS: &[&str] = &[
-    "push", "pop", "list_push", "list_pop", "list_set", "list_insert",
-    "list_remove", "list_sort", "map_set", "map_insert", "map_remove", "set",
+    "push",
+    "pop",
+    "list_push",
+    "list_pop",
+    "list_set",
+    "list_insert",
+    "list_remove",
+    "list_sort",
+    "map_set",
+    "map_insert",
+    "map_remove",
+    "set",
 ];
 
 /// Find the first call of a mutating collection builtin whose target is one of
@@ -18292,7 +19515,9 @@ fn collect_rebound_vars_in_expr(expr: &AstExpr, names: &mut Vec<String>) {
                 collect_rebound_vars_in_expr(a, names);
             }
         }
-        AstExpr::TryCatch { body, catch_body, .. } => {
+        AstExpr::TryCatch {
+            body, catch_body, ..
+        } => {
             collect_rebound_vars_in_expr(body, names);
             collect_rebound_vars_in_expr(catch_body, names);
         }
@@ -18325,7 +19550,12 @@ pub fn substitute_ast_type(
                 .collect(),
             *span,
         ),
-        AstType::Array { elem, len, len_expr, span } => AstType::Array {
+        AstType::Array {
+            elem,
+            len,
+            len_expr,
+            span,
+        } => AstType::Array {
             elem: Box::new(substitute_ast_type(elem, type_subs, constructor_subs)),
             len: *len,
             len_expr: len_expr.clone(),
@@ -18373,12 +19603,18 @@ pub fn substitute_ast_type(
             Box::new(substitute_ast_type(inner, type_subs, constructor_subs)),
             *span,
         ),
-        AstType::Fn { params, ret, span } => AstType::Fn {
+        AstType::Fn {
+            params,
+            ret,
+            effects,
+            span,
+        } => AstType::Fn {
             params: params
                 .iter()
                 .map(|p| substitute_ast_type(p, type_subs, constructor_subs))
                 .collect(),
             ret: Box::new(substitute_ast_type(ret, type_subs, constructor_subs)),
+            effects: effects.clone(),
             span: *span,
         },
         AstType::Generic { name, args, span } => {
@@ -18400,7 +19636,11 @@ pub fn substitute_ast_type(
             }
         }
         AstType::ConstInt(v, span) => AstType::ConstInt(*v, *span),
-        AstType::AssocType { base, assoc_name, span } => AstType::AssocType {
+        AstType::AssocType {
+            base,
+            assoc_name,
+            span,
+        } => AstType::AssocType {
             base: base.clone(),
             assoc_name: assoc_name.clone(),
             span: *span,
@@ -18446,6 +19686,9 @@ pub fn resolve_ast_type_with_subs(
             if name == "bool" {
                 return IrType::Scalar(DType::Bool);
             }
+            if name == "task_group" {
+                return IrType::TaskGroup;
+            }
             if let Some(concrete) = subs.get(name) {
                 return concrete.clone();
             }
@@ -18487,23 +19730,38 @@ pub fn resolve_ast_type_with_subs(
             Box::new(resolve_ast_type_with_subs(ok_ty, subs, module)),
             Box::new(resolve_ast_type_with_subs(err_ty, subs, module)),
         ),
-        AstType::Chan(elem, _) => IrType::Chan(Box::new(resolve_ast_type_with_subs(elem, subs, module))),
+        AstType::Chan(elem, _) => {
+            IrType::Chan(Box::new(resolve_ast_type_with_subs(elem, subs, module)))
+        }
         AstType::Atomic(inner, _) => {
             IrType::Atomic(Box::new(resolve_ast_type_with_subs(inner, subs, module)))
         }
-        AstType::Mutex(inner, _) => IrType::Mutex(Box::new(resolve_ast_type_with_subs(inner, subs, module))),
-        AstType::List(elem, _) => IrType::List(Box::new(resolve_ast_type_with_subs(elem, subs, module))),
+        AstType::Mutex(inner, _) => {
+            IrType::Mutex(Box::new(resolve_ast_type_with_subs(inner, subs, module)))
+        }
+        AstType::List(elem, _) => {
+            IrType::List(Box::new(resolve_ast_type_with_subs(elem, subs, module)))
+        }
         AstType::Map(k, v, _) => IrType::Map(
             Box::new(resolve_ast_type_with_subs(k, subs, module)),
             Box::new(resolve_ast_type_with_subs(v, subs, module)),
         ),
-        AstType::WeakRef(inner, _) => IrType::WeakRef(Box::new(resolve_ast_type_with_subs(inner, subs, module))),
+        AstType::WeakRef(inner, _) => {
+            IrType::WeakRef(Box::new(resolve_ast_type_with_subs(inner, subs, module)))
+        }
         AstType::Fn { params, ret, .. } => IrType::Fn {
-            params: params.iter().map(|p| resolve_ast_type_with_subs(p, subs, module)).collect(),
+            params: params
+                .iter()
+                .map(|p| resolve_ast_type_with_subs(p, subs, module))
+                .collect(),
             ret: Box::new(resolve_ast_type_with_subs(ret, subs, module)),
         },
-        AstType::Grad(inner, _) => IrType::Grad(Box::new(resolve_ast_type_with_subs(inner, subs, module))),
-        AstType::Sparse(inner, _) => IrType::Sparse(Box::new(resolve_ast_type_with_subs(inner, subs, module))),
+        AstType::Grad(inner, _) => {
+            IrType::Grad(Box::new(resolve_ast_type_with_subs(inner, subs, module)))
+        }
+        AstType::Sparse(inner, _) => {
+            IrType::Sparse(Box::new(resolve_ast_type_with_subs(inner, subs, module)))
+        }
         AstType::Generic { name, args, .. } => {
             let resolved_args: Vec<IrType> = args
                 .iter()
@@ -18546,11 +19804,20 @@ pub fn resolve_ast_type_with_subs(
             } else {
                 name.clone()
             };
-            let mangled_name = format!("{}__{}", base_name, resolved_args.iter().map(mangle_ir_type).collect::<Vec<_>>().join("_"));
+            let mangled_name = format!(
+                "{}__{}",
+                base_name,
+                resolved_args
+                    .iter()
+                    .map(mangle_ir_type)
+                    .collect::<Vec<_>>()
+                    .join("_")
+            );
             let resolved_name = resolve_brought_name(&mangled_name, module);
             if let Some(fields) = module.struct_def(&resolved_name) {
-                let resolved_fields: Vec<(String, IrType)> = fields.iter()
-                    .map(|(n, t)| (n.clone(), resolve_concrete_field(t, subs, module)))
+                let resolved_fields: Vec<(String, IrType)> = fields
+                    .iter()
+                    .map(|(n, t)| (n.clone(), resolve_concrete_field(t, subs)))
                     .collect();
                 IrType::Struct {
                     name: resolved_name,
@@ -18560,8 +19827,9 @@ pub fn resolve_ast_type_with_subs(
                 // Fallback: use the generic struct template's registered field layout.
                 let resolved_base = resolve_brought_name(name, module);
                 if let Some(template_fields) = module.struct_def(&resolved_base) {
-                    let resolved_fields: Vec<(String, IrType)> = template_fields.iter()
-                        .map(|(n, t)| (n.clone(), resolve_concrete_field(t, subs, module)))
+                    let resolved_fields: Vec<(String, IrType)> = template_fields
+                        .iter()
+                        .map(|(n, t)| (n.clone(), resolve_concrete_field(t, subs)))
                         .collect();
                     IrType::Struct {
                         name: resolved_name,
@@ -18578,10 +19846,7 @@ pub fn resolve_ast_type_with_subs(
         AstType::ConstInt(_, _) => IrType::Scalar(DType::I64),
         AstType::AssocType { .. } => IrType::Infer,
         AstType::DynTrait { trait_name, .. } => {
-            let methods = module
-                .trait_def(trait_name)
-                .cloned()
-                .unwrap_or_default();
+            let methods = module.trait_def(trait_name).cloned().unwrap_or_default();
             IrType::TraitObject {
                 name: trait_name.clone(),
                 methods,
@@ -18592,17 +19857,20 @@ pub fn resolve_ast_type_with_subs(
     }
 }
 
-pub(crate) fn resolve_concrete_field(ft: &IrType, subs: &HashMap<String, IrType>, module: &IrModule) -> IrType {
+pub(crate) fn resolve_concrete_field(ft: &IrType, subs: &HashMap<String, IrType>) -> IrType {
     match ft {
-        IrType::List(inner) => IrType::List(Box::new(resolve_concrete_field(inner, subs, module))),
+        IrType::List(inner) => IrType::List(Box::new(resolve_concrete_field(inner, subs))),
         IrType::Map(k, v) => IrType::Map(
-            Box::new(resolve_concrete_field(k, subs, module)),
-            Box::new(resolve_concrete_field(v, subs, module)),
+            Box::new(resolve_concrete_field(k, subs)),
+            Box::new(resolve_concrete_field(v, subs)),
         ),
-        IrType::Option(inner) => IrType::Option(Box::new(resolve_concrete_field(inner, subs, module))),
-        IrType::Chan(inner) => IrType::Chan(Box::new(resolve_concrete_field(inner, subs, module))),
+        IrType::Option(inner) => IrType::Option(Box::new(resolve_concrete_field(inner, subs))),
+        IrType::Chan(inner) => IrType::Chan(Box::new(resolve_concrete_field(inner, subs))),
         IrType::Tuple(elems) => IrType::Tuple(
-            elems.iter().map(|e| resolve_concrete_field(e, subs, module)).collect(),
+            elems
+                .iter()
+                .map(|e| resolve_concrete_field(e, subs))
+                .collect(),
         ),
         IrType::Struct { name, fields } => {
             if let Some(concrete) = subs.get(name) {
@@ -18610,15 +19878,21 @@ pub(crate) fn resolve_concrete_field(ft: &IrType, subs: &HashMap<String, IrType>
             }
             let new_fields: Vec<(String, IrType)> = fields
                 .iter()
-                .map(|(n, t)| (n.clone(), resolve_concrete_field(t, subs, module)))
+                .map(|(n, t)| (n.clone(), resolve_concrete_field(t, subs)))
                 .collect();
-            IrType::Struct { name: name.clone(), fields: new_fields }
+            IrType::Struct {
+                name: name.clone(),
+                fields: new_fields,
+            }
         }
         other => other.clone(),
     }
 }
 
-pub fn collect_generic_apps_in_type(ty: &AstType, apps: &mut std::collections::HashSet<(String, Vec<AstType>)>) {
+pub fn collect_generic_apps_in_type(
+    ty: &AstType,
+    apps: &mut std::collections::HashSet<(String, Vec<AstType>)>,
+) {
     match ty {
         AstType::Tuple(elems, _) => {
             for e in elems {
@@ -18658,10 +19932,16 @@ pub fn collect_generic_apps_in_type(ty: &AstType, apps: &mut std::collections::H
     }
 }
 
-pub fn collect_generic_apps_in_expr(expr: &AstExpr, apps: &mut std::collections::HashSet<(String, Vec<AstType>)>) {
+pub fn collect_generic_apps_in_expr(
+    expr: &AstExpr,
+    apps: &mut std::collections::HashSet<(String, Vec<AstType>)>,
+) {
     match expr {
         AstExpr::Ident(_) => {}
-        AstExpr::IntLit { .. } | AstExpr::FloatLit { .. } | AstExpr::BoolLit { .. } | AstExpr::StringLit { .. } => {}
+        AstExpr::IntLit { .. }
+        | AstExpr::FloatLit { .. }
+        | AstExpr::BoolLit { .. }
+        | AstExpr::StringLit { .. } => {}
         AstExpr::BinOp { lhs, rhs, .. } => {
             collect_generic_apps_in_expr(lhs, apps);
             collect_generic_apps_in_expr(rhs, apps);
@@ -18674,7 +19954,12 @@ pub fn collect_generic_apps_in_expr(expr: &AstExpr, apps: &mut std::collections:
         AstExpr::UnaryOp { expr: inner, .. } => {
             collect_generic_apps_in_expr(inner, apps);
         }
-        AstExpr::If { cond, then_block, else_block, .. } => {
+        AstExpr::If {
+            cond,
+            then_block,
+            else_block,
+            ..
+        } => {
             collect_generic_apps_in_expr(cond, apps);
             collect_generic_apps_in_block(then_block, apps);
             if let Some(ref eb) = else_block {
@@ -18688,7 +19973,9 @@ pub fn collect_generic_apps_in_expr(expr: &AstExpr, apps: &mut std::collections:
                 collect_generic_apps_in_expr(i, apps);
             }
         }
-        AstExpr::Cast { expr: inner, ty, .. } => {
+        AstExpr::Cast {
+            expr: inner, ty, ..
+        } => {
             collect_generic_apps_in_expr(inner, apps);
             collect_generic_apps_in_type(ty, apps);
         }
@@ -18703,7 +19990,9 @@ pub fn collect_generic_apps_in_expr(expr: &AstExpr, apps: &mut std::collections:
         AstExpr::FieldAccess { base, .. } => {
             collect_generic_apps_in_expr(base, apps);
         }
-        AstExpr::When { scrutinee, arms, .. } => {
+        AstExpr::When {
+            scrutinee, arms, ..
+        } => {
             collect_generic_apps_in_expr(scrutinee, apps);
             for arm in arms {
                 collect_generic_apps_in_expr(&arm.body, apps);
@@ -18743,7 +20032,12 @@ pub fn collect_generic_apps_in_expr(expr: &AstExpr, apps: &mut std::collections:
         AstExpr::Mask { body, .. } => {
             collect_generic_apps_in_block(body, apps);
         }
-        AstExpr::Handle { expr: inner, arms, return_ty, .. } => {
+        AstExpr::Handle {
+            expr: inner,
+            arms,
+            return_ty,
+            ..
+        } => {
             collect_generic_apps_in_expr(inner, apps);
             collect_generic_apps_in_type(return_ty, apps);
             for arm in arms {
@@ -18773,7 +20067,9 @@ pub fn collect_generic_apps_in_expr(expr: &AstExpr, apps: &mut std::collections:
                 collect_generic_apps_in_expr(a, apps);
             }
         }
-        AstExpr::TryCatch { body, catch_body, .. } => {
+        AstExpr::TryCatch {
+            body, catch_body, ..
+        } => {
             collect_generic_apps_in_expr(body, apps);
             collect_generic_apps_in_expr(catch_body, apps);
         }
@@ -18785,7 +20081,10 @@ pub fn collect_generic_apps_in_expr(expr: &AstExpr, apps: &mut std::collections:
     }
 }
 
-pub fn collect_generic_apps_in_stmt(stmt: &AstStmt, apps: &mut std::collections::HashSet<(String, Vec<AstType>)>) {
+pub fn collect_generic_apps_in_stmt(
+    stmt: &AstStmt,
+    apps: &mut std::collections::HashSet<(String, Vec<AstType>)>,
+) {
     match stmt {
         AstStmt::Let { ty, init, .. } => {
             if let Some(t) = ty {
@@ -18802,7 +20101,9 @@ pub fn collect_generic_apps_in_stmt(stmt: &AstStmt, apps: &mut std::collections:
             collect_generic_apps_in_block(body, apps);
         }
         AstStmt::Break { .. } | AstStmt::Continue { .. } => {}
-        AstStmt::ForRange { start, end, body, .. } => {
+        AstStmt::ForRange {
+            start, end, body, ..
+        } => {
             collect_generic_apps_in_expr(start, apps);
             collect_generic_apps_in_expr(end, apps);
             collect_generic_apps_in_block(body, apps);
@@ -18827,7 +20128,9 @@ pub fn collect_generic_apps_in_stmt(stmt: &AstStmt, apps: &mut std::collections:
                 collect_generic_apps_in_expr(g, apps);
             }
         }
-        AstStmt::ParFor { start, end, body, .. } => {
+        AstStmt::ParFor {
+            start, end, body, ..
+        } => {
             collect_generic_apps_in_expr(start, apps);
             collect_generic_apps_in_expr(end, apps);
             collect_generic_apps_in_block(body, apps);
@@ -18839,7 +20142,12 @@ pub fn collect_generic_apps_in_stmt(stmt: &AstStmt, apps: &mut std::collections:
         AstStmt::MaskStmt { body, .. } => {
             collect_generic_apps_in_block(body, apps);
         }
-        AstStmt::HandleStmt { expr, arms, return_ty, .. } => {
+        AstStmt::HandleStmt {
+            expr,
+            arms,
+            return_ty,
+            ..
+        } => {
             collect_generic_apps_in_expr(expr, apps);
             collect_generic_apps_in_type(return_ty, apps);
             for arm in arms {
@@ -18864,7 +20172,10 @@ pub fn collect_generic_apps_in_stmt(stmt: &AstStmt, apps: &mut std::collections:
     }
 }
 
-pub fn collect_generic_apps_in_block(block: &AstBlock, apps: &mut std::collections::HashSet<(String, Vec<AstType>)>) {
+pub fn collect_generic_apps_in_block(
+    block: &AstBlock,
+    apps: &mut std::collections::HashSet<(String, Vec<AstType>)>,
+) {
     for stmt in &block.stmts {
         collect_generic_apps_in_stmt(stmt, apps);
     }

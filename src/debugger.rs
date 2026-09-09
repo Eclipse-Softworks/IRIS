@@ -68,6 +68,7 @@ pub struct BreakpointInfo {
 /// ```
 pub struct DebugSession {
     source: String,
+    entry_function: Option<String>,
     breakpoints: HashMap<u32, BreakpointInfo>, // line -> info
     trace: Vec<TraceEntry>,
     cursor: usize,
@@ -90,6 +91,7 @@ impl DebugSession {
     pub fn new() -> Self {
         Self {
             source: String::new(),
+            entry_function: None,
             breakpoints: HashMap::new(),
             trace: Vec::new(),
             cursor: 0,
@@ -105,6 +107,15 @@ impl DebugSession {
         self.trace.clear();
         self.cursor = 0;
         self.exception_message = None;
+    }
+
+    /// Selects a zero-argument function as the debug entry point. Passing
+    /// `None` restores the normal `main` (or first zero-argument function)
+    /// behavior.
+    pub fn set_entry_function(&mut self, entry_function: Option<&str>) {
+        self.entry_function = entry_function.map(str::to_owned);
+        self.trace.clear();
+        self.cursor = 0;
     }
 
     /// Registers a breakpoint at `line` (1-based) with optional metadata.
@@ -131,6 +142,7 @@ impl DebugSession {
         self.exception_message = None;
 
         let source = &self.source;
+        let entry_function = self.entry_function.as_deref();
 
         // Run the compilation and trace collection inside a spawned thread with a larger stack size.
         // This prevents stack overflow when running under cargo-tarpaulin or other instrumented
@@ -146,7 +158,9 @@ impl DebugSession {
                 let mut exception_msg = None;
                 {
                     let t = std::rc::Rc::clone(&trace);
-                    if let Err(e) = crate::interp::collect_trace(&module, source, t) {
+                    if let Err(e) =
+                        crate::interp::collect_trace_function(&module, source, entry_function, t)
+                    {
                         exception_msg = Some(format!("{}", e));
                     }
                 }
@@ -166,7 +180,12 @@ impl DebugSession {
                     let mut exception_msg = None;
                     {
                         let t = std::rc::Rc::clone(&trace);
-                        if let Err(e) = crate::interp::collect_trace(&module, source, t) {
+                        if let Err(e) = crate::interp::collect_trace_function(
+                            &module,
+                            source,
+                            entry_function,
+                            t,
+                        ) {
                             exception_msg = Some(format!("{}", e));
                         }
                     }
@@ -488,6 +507,30 @@ mod tests {
         let s = started_session();
         assert!(s.trace_len() > 0);
         assert!(s.current_frame().is_some());
+    }
+
+    #[test]
+    fn named_zero_argument_function_can_be_debug_entry() {
+        let src = "def test_selected() -> i64 {\n    val selected = 7;\n    selected\n}\ndef main() -> i64 { 0 }\n";
+        let mut session = DebugSession::new();
+        session.set_source(src);
+        session.set_entry_function(Some("test_selected"));
+        session.start().expect("named debug entry should compile");
+
+        assert!(
+            session
+                .all_frames()
+                .iter()
+                .any(|frame| frame.func_name == "test_selected"),
+            "trace should execute the selected test entry"
+        );
+        assert!(
+            session
+                .all_frames()
+                .iter()
+                .all(|frame| frame.func_name != "main"),
+            "main must not replace an explicitly selected entry"
+        );
     }
 
     #[test]

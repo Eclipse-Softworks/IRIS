@@ -1,0 +1,22 @@
+bring std.meta
+
+def test_meta_program_and_edit() -> i64 effect reflect, alloc {
+    if meta_available() == false {
+        return 0
+    }
+    val source = "def main() -> i64 { return 0 }"
+    val program = meta_program(source)
+    val analysis = meta_analyze(program)
+    assert(is_ok(analysis));
+
+    val edit = MetaEdit { start_byte: 27, end_byte: 28, replacement: "7" }
+    val edited = meta_apply(program, edit)
+    assert(is_ok(edited));
+    assert(unwrap(edited) == "def main() -> i64 { return 7 }");
+    return 0
+}
+
+def main() -> i64 effect reflect, alloc {
+    assert(test_meta_program_and_edit() == 0);
+    return 0
+}

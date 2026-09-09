@@ -1,0 +1,16 @@
+const LIMIT : i64 = 4 /// val is immutable; var can be rebound. An annotation is optional here.
+def main() -> i64 {
+    val price = 12;
+    var quantity : i64 = 1;
+    quantity = quantity + 2;
+    val total = price * quantity;
+    val discounted = if quantity<LIMIT {
+        total - 3
+    } else {
+        total - 6
+    };
+    assert(total == 36);
+    assert(discounted == 33);
+    println("bindings: ok");
+    return 0
+}

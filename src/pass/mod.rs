@@ -1,3 +1,5 @@
+pub mod ast_exhaustive;
+pub mod borrow_checker;
 pub mod const_fold;
 pub mod copy_prop;
 pub mod dead_node;
@@ -13,15 +15,14 @@ pub mod loop_unroll;
 pub mod opt;
 pub mod shape_check;
 pub mod shape_infer_graph;
-pub mod tail_call;
 pub mod strength_reduce;
+pub mod tail_call;
 pub mod type_infer;
 pub mod type_infer_hm;
 pub mod validate;
-pub mod ast_exhaustive;
 pub mod variance_checker;
-pub mod borrow_checker;
 
+pub use ast_exhaustive::AstExhaustivenessPass;
 pub use const_fold::ConstFoldPass;
 pub use copy_prop::CopyPropPass;
 pub use dead_node::DeadNodePass;
@@ -30,19 +31,18 @@ pub use gc_annotate::GcAnnotatePass;
 pub use graph_pass::{GraphPass, GraphPassManager};
 pub use inline::InlinePass;
 pub use licm::LicmPass;
-pub use lint::{find_unused_vars, IrWarning};
+pub use lint::{find_source_warnings, find_unused_vars, IrWarning};
 pub use loop_unroll::LoopUnrollPass;
 pub use opt::{CsePass, DcePass, OpExpandPass};
 pub use shape_check::ShapeCheckPass;
 pub use shape_infer_graph::infer_shapes;
 pub use strength_reduce::StrengthReducePass;
 pub use type_infer_hm::HmTypeInferPass;
-pub use ast_exhaustive::AstExhaustivenessPass;
 
-use std::collections::HashSet;
 use crate::error::PassError;
 use crate::ir::module::IrModule;
 use crate::ir::value::ValueId;
+use std::collections::HashSet;
 
 /// A compiler pass that operates on an `IrModule` in place.
 ///
@@ -104,17 +104,23 @@ impl PassManager {
             }
             // Debug: verify all Br/CondBr args are defined after each pass.
             if let Err(e) = verify_uses_defined(module, pass.name()) {
-                return Err((pass.name().to_owned(), PassError::TypeError {
-                    func: "verify_uses_defined".into(),
-                    detail: e,
-                }));
+                return Err((
+                    pass.name().to_owned(),
+                    PassError::TypeError {
+                        func: "verify_uses_defined".into(),
+                        detail: e,
+                    },
+                ));
             }
             if pass.name() == "GcAnnotate" {
                 if let Err(e) = verify_release_dominance(module) {
-                    return Err((pass.name().to_owned(), PassError::TypeError {
-                        func: "verify_release_dominance".into(),
-                        detail: e,
-                    }));
+                    return Err((
+                        pass.name().to_owned(),
+                        PassError::TypeError {
+                            func: "verify_release_dominance".into(),
+                            detail: e,
+                        },
+                    ));
                 }
             }
         }
@@ -344,7 +350,10 @@ pub fn verify_release_dominance(module: &IrModule) -> Result<(), String> {
         }
 
         // 1. Find definition block for every value
-        let mut def_blocks: std::collections::HashMap<crate::ir::value::ValueId, crate::ir::block::BlockId> = std::collections::HashMap::new();
+        let mut def_blocks: std::collections::HashMap<
+            crate::ir::value::ValueId,
+            crate::ir::block::BlockId,
+        > = std::collections::HashMap::new();
         for block in &func.blocks {
             for param in &block.params {
                 def_blocks.insert(param.id, block.id);
@@ -359,22 +368,36 @@ pub fn verify_release_dominance(module: &IrModule) -> Result<(), String> {
         // 2. Compute dominators
         let block_ids: Vec<crate::ir::block::BlockId> = func.blocks.iter().map(|b| b.id).collect();
         let all_ids: HashSet<crate::ir::block::BlockId> = block_ids.iter().cloned().collect();
-        let mut preds: std::collections::HashMap<crate::ir::block::BlockId, Vec<crate::ir::block::BlockId>> =
-            block_ids.iter().map(|&b| (b, Vec::new())).collect();
-            
+        let mut preds: std::collections::HashMap<
+            crate::ir::block::BlockId,
+            Vec<crate::ir::block::BlockId>,
+        > = block_ids.iter().map(|&b| (b, Vec::new())).collect();
+
         for block in &func.blocks {
             // Find successors
             let mut succs = Vec::new();
             for instr in &block.instrs {
                 match instr {
                     crate::ir::instr::IrInstr::Br { target, .. } => succs.push(*target),
-                    crate::ir::instr::IrInstr::CondBr { then_block, else_block, .. } => {
+                    crate::ir::instr::IrInstr::CondBr {
+                        then_block,
+                        else_block,
+                        ..
+                    } => {
                         succs.push(*then_block);
                         succs.push(*else_block);
                     }
-                    crate::ir::instr::IrInstr::SwitchVariant { arms, default_block, .. } => {
-                        for (_, t) in arms { succs.push(*t); }
-                        if let Some(def) = default_block { succs.push(*def); }
+                    crate::ir::instr::IrInstr::SwitchVariant {
+                        arms,
+                        default_block,
+                        ..
+                    } => {
+                        for (_, t) in arms {
+                            succs.push(*t);
+                        }
+                        if let Some(def) = default_block {
+                            succs.push(*def);
+                        }
                     }
                     _ => {}
                 }
@@ -387,7 +410,10 @@ pub fn verify_release_dominance(module: &IrModule) -> Result<(), String> {
         }
 
         let entry_id = block_ids[0];
-        let mut dom: std::collections::HashMap<crate::ir::block::BlockId, HashSet<crate::ir::block::BlockId>> = std::collections::HashMap::new();
+        let mut dom: std::collections::HashMap<
+            crate::ir::block::BlockId,
+            HashSet<crate::ir::block::BlockId>,
+        > = std::collections::HashMap::new();
         let mut entry_set = HashSet::new();
         entry_set.insert(entry_id);
         dom.insert(entry_id, entry_set);
@@ -434,4 +460,3 @@ pub fn verify_release_dominance(module: &IrModule) -> Result<(), String> {
     }
     Ok(())
 }
-

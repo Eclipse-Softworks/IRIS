@@ -23,47 +23,78 @@ use std::process::Command;
 
 /// Files the compiler is *supposed* to reject. Here, passing is the failure.
 const MUST_FAIL: &[(&str, &str)] = &[
-    ("test_borrow_error.iris",
-     "the borrow checker must reject it"),
-    ("test_exhaustiveness.iris",
-     "a non-exhaustive match must be rejected"),
-    ("test_exhaustiveness_simple.iris",
-     "a non-exhaustive match must be rejected"),
-    ("test_move_borrow_error.iris",
-     "borrow of a moved value must be rejected"),
-    ("test_move_error.iris",
-     "use after move must be rejected"),
+    (
+        "test_borrow_error.iris",
+        "the borrow checker must reject it",
+    ),
+    (
+        "test_exhaustiveness.iris",
+        "a non-exhaustive match must be rejected",
+    ),
+    (
+        "test_exhaustiveness_simple.iris",
+        "a non-exhaustive match must be rejected",
+    ),
+    (
+        "test_move_borrow_error.iris",
+        "borrow of a moved value must be rejected",
+    ),
+    ("test_move_error.iris", "use after move must be rejected"),
+];
+
+/// Import-only fixtures used by standalone corpus tests. These are valid IRIS
+/// modules, but intentionally have no entry point and are not tests themselves.
+const SUPPORT_MODULES: &[(&str, &str)] = &[
+    (
+        "issue9_mid.iris",
+        "re-export layer imported by test_issue9_pub_bring_types.iris",
+    ),
+    (
+        "issue9_types.iris",
+        "type-definition module imported through issue9_mid.iris",
+    ),
 ];
 
 /// Files that do not currently run, each with why. A debt register, not a
 /// permission slip: every entry names a cause, and the list should only shrink.
 const KNOWN_BROKEN: &[(&str, &str)] = &[
-    ("test_doc_comments.iris",
-     "no zero-argument function, so there is nothing to evaluate"),
-    ("test_features_11_14.iris",
-     "parse error: uses syntax the compiler does not accept"),
-    ("test_ffi_full.iris",
-     "requires iris_ffitest.dll in the working directory"),
-    ("test_generic_set.iris",
-     "a type param only in the return type needs an annotation -- #14"),
-    ("test_mod_min.iris",
-     "parse error: uses syntax the compiler does not accept"),
-    ("test_mod_simple.iris",
-     "parse error: uses syntax the compiler does not accept"),
-    ("test_nursery.iris",
-     "print() arity"),
-    ("test_par_map.iris",
-     "parse error: uses syntax the compiler does not accept"),
-    ("test_refine_fail.iris",
-     "parse error: fails at parse, not at the refinement it is named for"),
-    ("test_struct_update_simple.iris",
-     "parse error: uses syntax the compiler does not accept"),
+    (
+        "test_doc_comments.iris",
+        "no zero-argument function, so there is nothing to evaluate",
+    ),
+    (
+        "test_features_11_14.iris",
+        "parse error: uses syntax the compiler does not accept",
+    ),
+    (
+        "test_generic_set.iris",
+        "a type param only in the return type needs an annotation -- #14",
+    ),
+    (
+        "test_mod_min.iris",
+        "parse error: uses syntax the compiler does not accept",
+    ),
+    (
+        "test_mod_simple.iris",
+        "parse error: uses syntax the compiler does not accept",
+    ),
+    ("test_nursery.iris", "print() arity"),
+    (
+        "test_par_map.iris",
+        "parse error: uses syntax the compiler does not accept",
+    ),
+    (
+        "test_refine_fail.iris",
+        "parse error: fails at parse, not at the refinement it is named for",
+    ),
+    (
+        "test_struct_update_simple.iris",
+        "parse error: uses syntax the compiler does not accept",
+    ),
 ];
 
 /// Files that do not yet assert their results. Shrinking; see #4.
-const NEEDS_ASSERTIONS: &[&str] = &[
-
-];
+const NEEDS_ASSERTIONS: &[&str] = &[];
 
 /// Files whose two backends disagree, each with why. The gate below asserts
 /// that *everything else* agrees, so a new divergence fails rather than joining
@@ -101,13 +132,12 @@ fn run(name: &str) -> (Option<i32>, String) {
 /// Runs a corpus file, optionally forcing the interpreter.
 fn run_with(name: &str, force_interp: bool) -> (Option<i32>, String) {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_iris"));
-    cmd.args(["--emit", "eval"]).arg(Path::new("tests").join(name));
+    cmd.args(["--emit", "eval"])
+        .arg(Path::new("tests").join(name));
     if force_interp {
         cmd.env("IRIS_FORCE_INTERP", "1");
     }
-    let out = cmd
-        .output()
-        .expect("failed to launch the iris binary");
+    let out = cmd.output().expect("failed to launch the iris binary");
     let text = format!(
         "{}{}",
         String::from_utf8_lossy(&out.stdout),
@@ -116,19 +146,23 @@ fn run_with(name: &str, force_interp: bool) -> (Option<i32>, String) {
     (out.status.code(), text)
 }
 
-/// Just the program's stdout, with the compiler's diagnostics excluded.
+/// The program exit status and stdout, with compiler diagnostics excluded.
 ///
 /// The divergence check must compare what the *program* printed. The native
 /// path legitimately writes build notices to stderr that the interpreter never
 /// emits, so comparing combined output reports every file as divergent.
-fn stdout_of(name: &str, force_interp: bool) -> String {
+fn outcome_of(name: &str, force_interp: bool) -> (Option<i32>, String) {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_iris"));
-    cmd.args(["--emit", "eval"]).arg(Path::new("tests").join(name));
+    cmd.args(["--emit", "eval"])
+        .arg(Path::new("tests").join(name));
     if force_interp {
         cmd.env("IRIS_FORCE_INTERP", "1");
     }
     let out = cmd.output().expect("failed to launch the iris binary");
-    String::from_utf8_lossy(&out.stdout).into_owned()
+    (
+        out.status.code(),
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+    )
 }
 
 // -- The assertion gate (#4) ----------------------------------------------
@@ -145,6 +179,7 @@ fn every_iris_test_asserts_or_is_listed() {
         .iter()
         .map(|(f, _)| *f)
         .chain(KNOWN_BROKEN.iter().map(|(f, _)| *f))
+        .chain(SUPPORT_MODULES.iter().map(|(f, _)| *f))
         .collect();
     let unlisted: Vec<String> = corpus()
         .into_iter()
@@ -166,7 +201,11 @@ fn every_iris_test_asserts_or_is_listed() {
 /// list, or the remaining count stops meaning anything.
 #[test]
 fn the_needs_assertions_list_is_accurate() {
-    let stale: Vec<&str> = NEEDS_ASSERTIONS.iter().copied().filter(|f| asserts(f)).collect();
+    let stale: Vec<&str> = NEEDS_ASSERTIONS
+        .iter()
+        .copied()
+        .filter(|f| asserts(f))
+        .collect();
     assert!(
         stale.is_empty(),
         "these files now assert and must be removed from NEEDS_ASSERTIONS:\n  {}",
@@ -185,6 +224,28 @@ fn the_needs_assertions_list_is_accurate() {
     );
 }
 
+#[test]
+fn the_support_module_list_is_accurate() {
+    let wrong: Vec<String> = SUPPORT_MODULES
+        .iter()
+        .filter_map(|(file, _)| {
+            let path = Path::new("tests").join(file);
+            if !path.exists() {
+                return Some(format!("{} is listed as support but does not exist", file));
+            }
+            let source = std::fs::read_to_string(path).unwrap_or_default();
+            if source.contains("def main(") {
+                return Some(format!(
+                    "{} now has an entry point and must leave SUPPORT_MODULES",
+                    file
+                ));
+            }
+            None
+        })
+        .collect();
+    assert!(wrong.is_empty(), "{}", wrong.join("\n  "));
+}
+
 // -- The execution gate ---------------------------------------------------
 
 /// Every corpus file must run, unless it is a negative test or listed breakage.
@@ -193,10 +254,14 @@ fn the_needs_assertions_list_is_accurate() {
 fn every_iris_test_runs() {
     let broken: Vec<&str> = KNOWN_BROKEN.iter().map(|(f, _)| *f).collect();
     let must_fail: Vec<&str> = MUST_FAIL.iter().map(|(f, _)| *f).collect();
+    let support: Vec<&str> = SUPPORT_MODULES.iter().map(|(f, _)| *f).collect();
 
     let mut failures = Vec::new();
     for f in corpus() {
-        if broken.contains(&f.as_str()) || must_fail.contains(&f.as_str()) {
+        if broken.contains(&f.as_str())
+            || must_fail.contains(&f.as_str())
+            || support.contains(&f.as_str())
+        {
             continue;
         }
         match run(&f) {
@@ -205,7 +270,10 @@ fn every_iris_test_runs() {
                 "{} exited {}: {}",
                 f,
                 c,
-                out.lines().find(|l| l.contains("error")).unwrap_or("").trim()
+                out.lines()
+                    .find(|l| l.contains("error"))
+                    .unwrap_or("")
+                    .trim()
             )),
             (None, _) => failures.push(format!("{} was killed by a signal (crash)", f)),
         }
@@ -253,6 +321,7 @@ fn the_two_backends_agree() {
         .map(|(f, _)| *f)
         .chain(KNOWN_BROKEN.iter().map(|(f, _)| *f))
         .chain(KNOWN_DIVERGENT.iter().map(|(f, _)| *f))
+        .chain(SUPPORT_MODULES.iter().map(|(f, _)| *f))
         .collect();
 
     let mut disagree = Vec::new();
@@ -260,16 +329,18 @@ fn the_two_backends_agree() {
         if exempt.contains(&f.as_str()) {
             continue;
         }
-        let native = stdout_of(&f, false);
-        let interp = stdout_of(&f, true);
+        let native = outcome_of(&f, false);
+        let interp = outcome_of(&f, true);
         if native != interp {
             disagree.push(format!(
                 "{}
-      native: {}
-      interp: {}",
+      native (exit {:?}): {}
+      interp (exit {:?}): {}",
                 f,
-                native.lines().last().unwrap_or("(no output)"),
-                interp.lines().last().unwrap_or("(no output)")
+                native.0,
+                native.1.lines().last().unwrap_or("(no output)"),
+                interp.0,
+                interp.1.lines().last().unwrap_or("(no output)")
             ));
         }
     }
@@ -277,8 +348,10 @@ fn the_two_backends_agree() {
         disagree.is_empty(),
         "these files produce different output on the two backends:
   {}",
-        disagree.join("
-  ")
+        disagree.join(
+            "
+  "
+        )
     );
 }
 
@@ -291,14 +364,23 @@ fn the_known_divergent_list_is_accurate() {
             wrong.push(format!("{} is listed as divergent but does not exist", f));
             continue;
         }
-        let native = stdout_of(f, false);
-        let interp = stdout_of(f, true);
+        let native = outcome_of(f, false);
+        let interp = outcome_of(f, true);
         if native == interp {
-            wrong.push(format!("{} now agrees and must come off KNOWN_DIVERGENT", f));
+            wrong.push(format!(
+                "{} now agrees and must come off KNOWN_DIVERGENT",
+                f
+            ));
         }
     }
-    assert!(wrong.is_empty(), "{}", wrong.join("
-  "));
+    assert!(
+        wrong.is_empty(),
+        "{}",
+        wrong.join(
+            "
+  "
+        )
+    );
 }
 
 /// The debt register must describe reality: a file that has been fixed comes off

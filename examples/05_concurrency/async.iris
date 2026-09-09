@@ -1,0 +1,11 @@
+async def square(value : i64) -> i64 {
+    return value * value
+}
+def main() -> i64 {
+    val first = square(3);
+    val second = square(4);
+    val total = await first + await second;
+    assert(total == 25);
+    println("async: ok");
+    return 0
+}

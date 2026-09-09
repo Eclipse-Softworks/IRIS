@@ -1,0 +1,17 @@
+bring std.tensor
+bring std.nn
+def main() -> i64 {
+    val input = tensor_ad_from_data(list(1.0, 2.0), list(1, 2));
+    val weights = tensor_ad_parameter(tensor_ad_from_data(list(3.0, 4.0), list(2, 1)));
+    val bias = tensor_ad_from_data(list(1.0), list(1, 1));
+    val target = tensor_ad_from_data(list(0.0), list(1, 1));
+    val prediction = nn_ad_linear(input, weights, bias);
+    val loss = nn_ad_squared_error(prediction, target);
+    tensor_ad_backward(loss);
+    val gradient = tensor_ad_data(tensor_ad_grad(weights));
+    assert(list_get(tensor_ad_data(prediction), 0) == 12.0);
+    assert(list_get(gradient, 0) == 24.0);
+    assert(list_get(gradient, 1) == 48.0);
+    println("neural layer: ok");
+    return 0
+}

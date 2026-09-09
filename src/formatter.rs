@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 
-use crate::parser::lexer::{Lexer, Token};
+use crate::parser::lexer::{Lexer, Spanned, Token};
+use crate::parser::Parser;
 
 /// Options controlling code formatting.
 #[derive(Debug, Clone)]
@@ -25,18 +26,21 @@ impl Default for FormatOptions {
 // ---------------------------------------------------------------------------
 
 /// Formats an IRIS source string according to style rules.
-/// Returns `Err` only on lexer error; on parse errors the original source is returned.
+/// Invalid input is never rewritten: lexing or parsing errors are returned to
+/// the caller so editors can leave the document untouched.
 pub fn format_source(source: &str, options: &FormatOptions) -> Result<String, String> {
-    Ok(format_iris(source, options))
+    let tokens = Lexer::new(source)
+        .tokenize()
+        .map_err(|error| format!("cannot format invalid IRIS source: {}", error))?;
+    Parser::new(&tokens)
+        .parse_module()
+        .map_err(|error| format!("cannot format invalid IRIS source: {}", error))?;
+    Ok(format_iris(source, options, &tokens))
 }
 
 /// Formats a single file.  When `check_only` is true the file is not modified;
 /// returns `Ok(true)` if the file would change.
-pub fn format_file(
-    path: &Path,
-    options: &FormatOptions,
-    check_only: bool,
-) -> Result<bool, String> {
+pub fn format_file(path: &Path, options: &FormatOptions, check_only: bool) -> Result<bool, String> {
     let source = std::fs::read_to_string(path)
         .map_err(|e| format!("cannot read '{}': {}", path.display(), e))?;
     let formatted = format_source(&source, options)?;
@@ -63,11 +67,9 @@ pub fn format_directory(
         .filter_map(|e| e.ok())
         .map(|e| e.path())
         .filter(|p| {
-            p.extension()
-                .map_or(false, |ext| ext == "iris")
-                && p.file_name().map_or(false, |n| {
-                    n.to_str().map_or(false, |s| !s.starts_with('.'))
-                })
+            p.extension().is_some_and(|ext| ext == "iris")
+                && p.file_name()
+                    .is_some_and(|n| n.to_str().is_some_and(|s| !s.starts_with('.')))
         })
         .collect();
     files.sort();
@@ -88,11 +90,9 @@ pub fn format_directory(
 // ---------------------------------------------------------------------------
 
 /// Token-stream based IRIS formatter.  Normalises indentation and spacing.
-fn format_iris(source: &str, options: &FormatOptions) -> String {
-    let spanned_tokens = match Lexer::new(source).tokenize() {
-        Ok(t) => t,
-        Err(_) => return source.to_owned(),
-    };
+fn format_iris(source: &str, options: &FormatOptions, spanned_tokens: &[Spanned<Token>]) -> String {
+    let comments = scan_comments(source);
+    let mut comment_index = 0usize;
 
     let indent_width = options.indent;
     let indent_str = |depth: usize| " ".repeat(indent_width * depth);
@@ -139,7 +139,19 @@ fn format_iris(source: &str, options: &FormatOptions) -> String {
 
     for (idx, spanned) in spanned_tokens.iter().enumerate() {
         let tok = &spanned.node;
-        let tok_str = token_to_str(tok, source);
+        while comment_index < comments.len()
+            && comments[comment_index].start < spanned.span.start.0 as usize
+        {
+            emit_comment(
+                &mut out,
+                &comments[comment_index],
+                indent,
+                indent_width,
+                &mut at_line_start,
+            );
+            comment_index += 1;
+        }
+        let tok_str = token_to_str(tok, source, spanned.span.start.0, spanned.span.end.0);
         if tok_str.is_empty() {
             continue;
         }
@@ -186,8 +198,16 @@ fn format_iris(source: &str, options: &FormatOptions) -> String {
             }
             out.push_str(&indent_str(indent));
             out.push('}');
-            out.push('\n');
-            at_line_start = true;
+            let joins_next = spanned_tokens
+                .get(idx + 1)
+                .is_some_and(|next| matches!(next.node, Token::Else | Token::Catch | Token::With));
+            if joins_next {
+                out.push(' ');
+                at_line_start = false;
+            } else {
+                out.push('\n');
+                at_line_start = true;
+            }
             blank_lines = 0;
             prev_was_newline = true;
             continue;
@@ -207,7 +227,13 @@ fn format_iris(source: &str, options: &FormatOptions) -> String {
                 out.pop();
             }
             out.push(',');
-            out.push(' ');
+            let projected_width = projected_group_width(spanned_tokens, idx + 1, source);
+            if current_line_width(&out).saturating_add(projected_width) >= options.max_line_width {
+                out.push('\n');
+                out.push_str(&indent_str(indent));
+            } else {
+                out.push(' ');
+            }
             prev_was_newline = false;
             continue;
         }
@@ -261,14 +287,181 @@ fn format_iris(source: &str, options: &FormatOptions) -> String {
         prev_tok_was_pub = matches!(tok, Token::Pub);
     }
 
+    while comment_index < comments.len() {
+        emit_comment(
+            &mut out,
+            &comments[comment_index],
+            indent,
+            indent_width,
+            &mut at_line_start,
+        );
+        comment_index += 1;
+    }
+
     if !out.ends_with('\n') {
         out.push('\n');
     }
     out
 }
 
+#[derive(Debug)]
+struct SourceComment {
+    start: usize,
+    text: String,
+    inline: bool,
+}
+
+fn scan_comments(source: &str) -> Vec<SourceComment> {
+    let bytes = source.as_bytes();
+    let mut comments = Vec::new();
+    let mut i = 0usize;
+    let mut line_has_code = false;
+
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\n' => {
+                line_has_code = false;
+                i += 1;
+            }
+            b' ' | b'\t' | b'\r' => i += 1,
+            b'"' | b'\'' => {
+                let quote = bytes[i];
+                line_has_code = true;
+                i += 1;
+                while i < bytes.len() {
+                    if bytes[i] == b'\\' {
+                        i = (i + 2).min(bytes.len());
+                    } else if bytes[i] == quote {
+                        i += 1;
+                        break;
+                    } else {
+                        i += 1;
+                    }
+                }
+            }
+            b'/' if i + 1 < bytes.len() && bytes[i + 1] == b'/' => {
+                let start = i;
+                i += 2;
+                while i < bytes.len() && bytes[i] != b'\n' {
+                    i += 1;
+                }
+                // Documentation comments are real lexer tokens and must not be
+                // emitted a second time as trivia.
+                if bytes.get(start + 2) != Some(&b'/') {
+                    comments.push(SourceComment {
+                        start,
+                        text: source[start..i].to_owned(),
+                        inline: line_has_code,
+                    });
+                }
+            }
+            b'/' if i + 1 < bytes.len() && bytes[i + 1] == b'*' => {
+                let start = i;
+                let inline = line_has_code;
+                i += 2;
+                let mut depth = 1usize;
+                while i < bytes.len() && depth > 0 {
+                    if i + 1 < bytes.len() && bytes[i] == b'/' && bytes[i + 1] == b'*' {
+                        depth += 1;
+                        i += 2;
+                    } else if i + 1 < bytes.len() && bytes[i] == b'*' && bytes[i + 1] == b'/' {
+                        depth -= 1;
+                        i += 2;
+                    } else {
+                        i += 1;
+                    }
+                }
+                comments.push(SourceComment {
+                    start,
+                    text: source[start..i].to_owned(),
+                    inline,
+                });
+                line_has_code = true;
+            }
+            _ => {
+                line_has_code = true;
+                i += 1;
+            }
+        }
+    }
+
+    comments
+}
+
+fn emit_comment(
+    out: &mut String,
+    comment: &SourceComment,
+    indent: usize,
+    indent_width: usize,
+    at_line_start: &mut bool,
+) {
+    let is_line = comment.text.starts_with("//");
+    let is_single_line_block = comment.text.starts_with("/*") && !comment.text.contains('\n');
+
+    if comment.inline && is_single_line_block && !*at_line_start {
+        if !out.ends_with(' ') && !out.ends_with('\n') {
+            out.push(' ');
+        }
+        out.push_str(comment.text.trim_end());
+        out.push(' ');
+        *at_line_start = false;
+        return;
+    }
+
+    if !*at_line_start {
+        if comment.inline && is_line {
+            out.push(' ');
+        } else {
+            out.push('\n');
+        }
+    }
+    if out.ends_with('\n') || out.is_empty() {
+        out.push_str(&" ".repeat(indent * indent_width));
+    }
+
+    let mut lines = comment.text.lines().peekable();
+    while let Some(line) = lines.next() {
+        out.push_str(line.trim_end());
+        if lines.peek().is_some() {
+            out.push('\n');
+            out.push_str(&" ".repeat(indent * indent_width));
+        }
+    }
+    out.push('\n');
+    *at_line_start = true;
+}
+
+fn current_line_width(text: &str) -> usize {
+    text.rsplit_once('\n')
+        .map(|(_, line)| line.chars().count())
+        .unwrap_or_else(|| text.chars().count())
+}
+
+/// Estimate the width of the next comma-delimited group. This lets the
+/// formatter break before adding an argument that would exceed the configured
+/// line width instead of waiting until the line is already too long.
+fn projected_group_width(tokens: &[Spanned<Token>], start: usize, source: &str) -> usize {
+    let mut width = 1usize;
+    for spanned in tokens.iter().skip(start) {
+        if matches!(
+            spanned.node,
+            Token::Comma | Token::RParen | Token::RBracket | Token::RBrace | Token::Eof
+        ) {
+            break;
+        }
+        let token = token_to_str(
+            &spanned.node,
+            source,
+            spanned.span.start.0,
+            spanned.span.end.0,
+        );
+        width = width.saturating_add(token.chars().count() + 1);
+    }
+    width
+}
+
 /// Returns the source text for a token (for formatting).
-fn token_to_str(tok: &Token, _source: &str) -> String {
+fn token_to_str(tok: &Token, source: &str, start: u32, end: u32) -> String {
     match tok {
         Token::Def => "def".into(),
         Token::DefMacro => "defmacro".into(),
@@ -373,9 +566,10 @@ fn token_to_str(tok: &Token, _source: &str) -> String {
                 f.to_string()
             }
         }
-        Token::StringLit(s) => format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"")),
-        Token::CharLit(c) => format!("'{}'", *c as u8 as char),
-        Token::FStringLit(s) => format!("f\"{}\"", s),
+        Token::StringLit(_) | Token::CharLit(_) | Token::FStringLit(_) => source
+            .get(start as usize..end as usize)
+            .unwrap_or_default()
+            .to_owned(),
         Token::Eof => String::new(),
         Token::Effect => "effect".to_owned(),
         Token::With => "with".to_owned(),
@@ -391,6 +585,67 @@ fn token_to_str(tok: &Token, _source: &str) -> String {
         Token::Move => "move".to_owned(),
         Token::Unsafe => "unsafe".to_owned(),
         Token::Select => "select".to_owned(),
-        Token::DocComment(s) => format!("/// {}", s),
+        // The lexer deliberately trims documentation comment whitespace and
+        // advances past the newline, so its span is not a faithful source
+        // slice. Reconstruct only this comment token from its preserved text.
+        Token::DocComment(text) => {
+            if text.is_empty() {
+                "///".to_owned()
+            } else {
+                format!("/// {}", text)
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn preserves_all_comment_forms_and_literal_spelling() {
+        let source = r#"// leading
+/// docs
+def main() -> i64 {
+    val url = "https://example.test/a//b"; // trailing
+    /* outer /* nested */ block */
+    val quote = "a\\n\\\"b";
+    assert(len(url) > 0);
+    assert(len(quote) > 0);
+    return 0
+}
+"#;
+        let formatted = format_source(source, &FormatOptions::default()).unwrap();
+        assert!(formatted.contains("// leading"));
+        assert!(formatted.contains("/// docs"));
+        assert!(formatted.contains("// trailing"));
+        assert!(formatted.contains("/* outer /* nested */ block */"));
+        assert!(formatted.contains(r#""https://example.test/a//b""#));
+        assert!(formatted.contains(r#""a\\n\\\"b""#));
+    }
+
+    #[test]
+    fn formatting_is_idempotent() {
+        let source = "def main()->i64{/* keep */ val x=1;assert(x==1);return 0}\n";
+        let once = format_source(source, &FormatOptions::default()).unwrap();
+        let twice = format_source(&once, &FormatOptions::default()).unwrap();
+        assert_eq!(once, twice);
+    }
+
+    #[test]
+    fn invalid_source_is_not_rewritten() {
+        assert!(format_source("def broken( -> {", &FormatOptions::default()).is_err());
+    }
+
+    #[test]
+    fn configured_line_width_wraps_at_safe_comma_boundaries() {
+        let options = FormatOptions {
+            indent: 4,
+            max_line_width: 32,
+        };
+        let source =
+            "def f(first_parameter: i64, second_parameter: i64) -> i64 { first_parameter }\n";
+        let formatted = format_source(source, &options).unwrap();
+        assert!(formatted.contains(",\n"));
     }
 }

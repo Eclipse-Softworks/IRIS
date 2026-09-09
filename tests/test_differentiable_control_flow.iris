@@ -1,0 +1,39 @@
+def loss_fn(w : f64, x : f64) -> f64 {
+    val pred = w * x;
+    return pred * pred
+}
+def test_autodiff_loop_accumulation() -> i64 {
+    val w = tape(1.0);
+    var total = tape(0.0);
+    for s in 1 .. 5 {
+        val x = to_f64(s);
+        total = total + loss_fn(w, x);
+        
+    }
+    val _ = backward(total);
+    val dw = grad(w);
+    assert(dw == 60.0);
+    return 0
+}
+def test_autodiff_branching() -> i64 {
+    val a = tape(3.0);
+    val flag = true;
+    val res = if flag {
+        a * a
+    }
+    else {
+        a + 1.0
+    }
+    val _ = backward(res);
+    val da = grad(a);
+    assert(da == 6.0);
+    return 0
+}
+def main() -> i64 {
+    val loop_status = test_autodiff_loop_accumulation();
+    val branch_status = test_autodiff_branching();
+    assert(loop_status == 0);
+    assert(branch_status == 0);
+    println("differentiable control flow: ok");
+    return 0
+}

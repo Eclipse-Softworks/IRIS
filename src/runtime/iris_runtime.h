@@ -44,52 +44,63 @@ int iris_wasm_pthread_create(void* t, const void* a, void*(*fn)(void*), void* ar
 #if defined(__MINGW32__) || defined(__MINGW64__) || defined(_PTHREAD_H)
 #include <pthread.h>
 #else
-typedef struct { long state; } pthread_mutex_t;
-typedef struct { long state; } pthread_cond_t;
-typedef void* pthread_t;
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+typedef SRWLOCK pthread_mutex_t;
+typedef CONDITION_VARIABLE pthread_cond_t;
+typedef HANDLE pthread_t;
 
 #ifndef PTHREAD_MUTEX_INITIALIZER
-#define PTHREAD_MUTEX_INITIALIZER {0}
+#define PTHREAD_MUTEX_INITIALIZER SRWLOCK_INIT
 #endif
 #ifndef PTHREAD_COND_INITIALIZER
-#define PTHREAD_COND_INITIALIZER {0}
+#define PTHREAD_COND_INITIALIZER CONDITION_VARIABLE_INIT
 #endif
 
 static inline int pthread_mutex_init(pthread_mutex_t* mu, const void* attr) {
-    (void)mu; (void)attr; return 0;
+    (void)attr; InitializeSRWLock(mu); return 0;
 }
 static inline int pthread_mutex_destroy(pthread_mutex_t* mu) {
     (void)mu; return 0;
 }
 static inline int pthread_mutex_lock(pthread_mutex_t* mu) {
-    (void)mu; return 0;
+    AcquireSRWLockExclusive(mu); return 0;
 }
 static inline int pthread_mutex_unlock(pthread_mutex_t* mu) {
-    (void)mu; return 0;
+    ReleaseSRWLockExclusive(mu); return 0;
 }
 static inline int pthread_cond_init(pthread_cond_t* cond, const void* attr) {
-    (void)cond; (void)attr; return 0;
+    (void)attr; InitializeConditionVariable(cond); return 0;
 }
 static inline int pthread_cond_destroy(pthread_cond_t* cond) {
     (void)cond; return 0;
 }
 static inline int pthread_cond_wait(pthread_cond_t* cond, pthread_mutex_t* mu) {
-    (void)cond; (void)mu; return 0;
+    return SleepConditionVariableSRW(cond, mu, INFINITE, 0) ? 0 : -1;
 }
 static inline int pthread_cond_signal(pthread_cond_t* cond) {
-    (void)cond; return 0;
+    WakeConditionVariable(cond); return 0;
 }
 static inline int pthread_cond_timedwait(pthread_cond_t* cond, pthread_mutex_t* mu, const struct timespec* ts) {
     (void)cond; (void)mu; (void)ts; return 0;
 }
 static inline int pthread_create(pthread_t* t, const void* attr, void* (*fn)(void*), void* arg) {
-    (void)attr; if (t) *t = NULL; if (fn) fn(arg); return 0;
+    (void)attr;
+    HANDLE handle = CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)fn, arg, 0, NULL);
+    if (t) *t = handle;
+    return handle ? 0 : -1;
 }
 static inline int pthread_detach(pthread_t t) {
-    (void)t; return 0;
+    return t && CloseHandle(t) ? 0 : -1;
 }
 static inline int pthread_join(pthread_t t, void** ret) {
-    (void)t; if (ret) *ret = NULL; return 0;
+    if (ret) *ret = NULL;
+    if (!t) return -1;
+    DWORD status = WaitForSingleObject(t, INFINITE);
+    CloseHandle(t);
+    return status == WAIT_OBJECT_0 ? 0 : -1;
 }
 #endif
 #else
@@ -108,6 +119,14 @@ extern "C" {
 int64_t iris_add_checked(int64_t a, int64_t b);
 int64_t iris_sub_checked(int64_t a, int64_t b);
 int64_t iris_mul_checked(int64_t a, int64_t b);
+
+/* Allocation boundary used by generated native/JIT code. Keeping both sides
+ * in the runtime prevents cross-CRT malloc/free pairs on Windows ORC. */
+void* iris_alloc_bytes(uint64_t bytes);
+void  iris_free_bytes(void* ptr);
+void  iris_chkstk_ms(void);
+/* ORC supplies this no-op for MinGW's synthetic `main` initializer. */
+void  iris_mingw_main(void);
 
 // ---------------------------------------------------------------------------
 // Tagged value type — used for boxed heap values (lists, maps, closures, etc.)
@@ -135,6 +154,8 @@ typedef enum {
     IRIS_TAG_MUTEX   = 19,
     IRIS_TAG_TASK_GROUP = 20,
     IRIS_TAG_WEAK_REF = 21,
+    /* Flat LLVM record pointer stored in a type-erased collection. */
+    IRIS_TAG_NATIVE_OBJECT = 22,
 } IrisTag;
 
 typedef struct IrisVal {
@@ -223,13 +244,13 @@ typedef struct {
     IrisVal*        val;
 } IrisMutex;
 
-// TaskGroup: structured concurrency group of spawned threads.
+// TaskGroup: structured concurrency scope scheduled by the shared executor.
 typedef struct {
-    pthread_t*      handles;
-    size_t          count;
-    size_t          cap;
-    volatile int    cancelled;
+    size_t          active;
+    int             cancelled;
+    int             closed;
     pthread_mutex_t mu;
+    pthread_cond_t  done;
 } IrisTaskGroup;
 
 typedef struct IrisWeakRef {
@@ -251,6 +272,7 @@ typedef enum {
     IRIS_RC_SPARSE = 10,
     IRIS_RC_TASK_GROUP = 11,
     IRIS_RC_WEAK_REF   = 12,
+    IRIS_RC_NATIVE_OBJECT = 13,
 } IrisRcKind;
 
 // ---------------------------------------------------------------------------
@@ -264,6 +286,7 @@ IrisVal* iris_box_bool(int v);
 IrisVal* iris_box_str(const char* s);
 IrisVal* iris_box_list(IrisList* list);
 IrisVal* iris_box_struct(IrisList* fields);
+IrisVal* iris_box_native_object(void* object);
 IrisVal* iris_box_map(IrisMap* map);
 IrisVal* iris_box_option(IrisOption* opt);
 IrisVal* iris_box_result(IrisResult* res);
@@ -289,6 +312,7 @@ IrisAtomic*   iris_unbox_atomic(IrisVal* v);
 IrisMutex*    iris_unbox_mutex(IrisVal* v);
 IrisGrad*     iris_unbox_grad(IrisVal* v);
 IrisSparse*   iris_unbox_sparse(IrisVal* v);
+void*         iris_unbox_native_object(IrisVal* v);
 
 // ---------------------------------------------------------------------------
 // Print
@@ -398,6 +422,14 @@ void     iris_map_remove(IrisMap* map, IrisVal* key);
 int64_t  iris_map_len(IrisMap* map);
 
 // ---------------------------------------------------------------------------
+// Transactional speculation (thread-local, nestable)
+// ---------------------------------------------------------------------------
+int64_t iris_transaction_begin(void);
+int64_t iris_transaction_commit(void);
+int64_t iris_transaction_rollback(void);
+int64_t iris_transaction_depth(void);
+
+// ---------------------------------------------------------------------------
 // Extended list operations
 // ---------------------------------------------------------------------------
 int      iris_list_contains(IrisList* list, IrisVal* val);
@@ -453,6 +485,8 @@ IrisOption*  iris_chan_try_recv(IrisChannel* c);
 int64_t      iris_select(int64_t n, ...);
 int          iris_timeout(int64_t ms);
 void         iris_spawn_fn(void* fn, void* arg);
+int64_t      iris_async_worker_count(void);
+int64_t      iris_async_queued_tasks(void);
 void         iris_par_for(void (*fn)(int64_t, void*), int64_t start, int64_t end, void* arg);
 IrisList*    iris_par_map(IrisList* list, void* (*fn)(IrisVal*));
 void         iris_barrier(void);
@@ -460,6 +494,10 @@ IrisTaskGroup* iris_task_group_new(void);
 void         iris_task_group_spawn(IrisTaskGroup* tg, void* fn, void* arg);
 void         iris_task_group_join(IrisTaskGroup* tg);
 void         iris_task_group_cancel(IrisTaskGroup* tg);
+int32_t      iris_task_group_is_cancelled(IrisTaskGroup* tg);
+int32_t      iris_current_task_cancelled(void);
+int64_t      iris_task_group_is_cancelled_i64(IrisTaskGroup* tg);
+int64_t      iris_current_task_cancelled_i64(void);
 int32_t      iris_task_group_join_timeout(IrisTaskGroup* tg, int64_t timeout_ms);
 IrisOption*  iris_chan_recv_timeout(IrisChannel* c, int64_t timeout_ms);
 
@@ -587,6 +625,11 @@ struct IrisTensor {
     int64_t* shape;   // shape array (heap-allocated)
     int32_t  ndim;    // number of dimensions
     int64_t  numel;   // total number of elements (product of shape)
+    float*   grad;    // lazily allocated reverse-mode gradient
+    uint8_t  requires_grad;
+    int32_t  ad_op;
+    struct IrisTensor* ad_parent0;
+    struct IrisTensor* ad_parent1;
 };
 
 IrisTensor* iris_tensor_alloc(int32_t ndim, const int64_t* shape);
@@ -615,6 +658,13 @@ IrisTensor* iris_tensor_transpose(IrisTensor* t, const int32_t* axes);
 IrisTensor* iris_tensor_reduce_sum(IrisTensor* t, int32_t axis, int keepdims);
 IrisTensor* iris_tensor_reduce_max(IrisTensor* t, int32_t axis, int keepdims);
 IrisTensor* iris_tensor_reduce_mean(IrisTensor* t, int32_t axis, int keepdims);
+IrisTensor* iris_tensor_from_lists(IrisList* data, IrisList* shape);
+IrisList*   iris_tensor_to_list(IrisTensor* t);
+IrisTensor* iris_tensor_tape(IrisTensor* t);
+IrisTensor* iris_tensor_sum_all(IrisTensor* t);
+int64_t     iris_tensor_backward(IrisTensor* loss);
+IrisTensor* iris_tensor_grad(IrisTensor* t);
+double      iris_tensor_item(IrisTensor* t);
 
 // Legacy stubs (kept for backward compat, deprecated)
 void* iris_tensor_op(void);
@@ -687,6 +737,9 @@ IrisVal* iris_get_element(IrisVal* t, int32_t idx);
 IrisVal* iris_make_closure(void* fn, int ncaptures, ...);
 IrisVal* iris_call_closure(IrisVal* closure, ...);
 void     iris_call_closure_void(IrisVal* closure, ...);
+void*    iris_closure_fn(IrisVal* closure);
+int      iris_closure_ncaptures(IrisVal* closure);
+IrisVal* iris_closure_get_capture(IrisVal* closure, int idx);
 
 // ---------------------------------------------------------------------------
 // Trait Object Helpers (Phase 91)
@@ -732,6 +785,9 @@ void    iris_udp_close(int64_t fd);
 // HTTP (extended)
 // ---------------------------------------------------------------------------
 char*     iris_http_request(const char* method, const char* url, const char* body);
+char*     iris_http_request_headers(const char* method, const char* url, const char* body, const char* headers, int64_t timeout_ms);
+int64_t   iris_http_last_status(void);
+int64_t   iris_http_tls_available(void);
 
 // ---------------------------------------------------------------------------
 // TCP Networking
@@ -742,6 +798,10 @@ int64_t iris_tcp_accept(int64_t listener);
 char*   iris_tcp_read(int64_t conn);
 void    iris_tcp_write(int64_t conn, const char* data);
 void    iris_tcp_close(int64_t conn);
+int64_t iris_tcp_set_timeout(int64_t conn, int64_t read_timeout_ms, int64_t write_timeout_ms);
+int64_t iris_tcp_write_all(int64_t conn, const char* data);
+char*   iris_tcp_read_max(int64_t conn, int64_t max_bytes);
+int64_t iris_tcp_shutdown(int64_t conn);
 
 // ---------------------------------------------------------------------------
 // HTTP
@@ -755,6 +815,7 @@ char*   iris_http_post_json(const char* url, const char* json_body);
 // ---------------------------------------------------------------------------
 IrisVal* iris_json_parse(const char* str);
 char*    iris_json_stringify(IrisVal* val);
+char*    iris_json_query(const char* json, const char* path);
 
 // ---------------------------------------------------------------------------
 // Set collection (backed by a sorted list)
@@ -920,6 +981,7 @@ void      iris_retain(void* ptr);
 void      iris_release(void* ptr);
 void      iris_retain_kind(void* ptr, int32_t kind);
 void      iris_release_kind(void* ptr, int32_t kind);
+void      iris_drop_box(IrisVal* value);
 int64_t   iris_refcount(void* ptr);
 void      iris_gc_collect(void);   // Force collection of zero-refcount objects.
 int64_t   iris_gc_stats_allocated(void);  // Total live allocations.
@@ -1020,6 +1082,15 @@ int64_t      iris_adaptive_reset_stats(int64_t handle);
 double       iris_adaptive_uncertainty_bayes_update(int64_t handle,
                                                      double prior_mean, double prior_var,
                                                      double observation, double obs_var);
+
+// Dynamic Reflection & Evaluation
+int32_t      iris_reflection_available(void);
+int32_t      iris_validate(const char* source);
+IrisResult*  iris_eval(const char* source);
+IrisResult*  iris_eval_i64(const char* source);
+IrisResult*  iris_meta_analyze(const char* source);
+IrisResult*  iris_meta_emit_ir(const char* source);
+IrisResult*  iris_meta_apply_edit(const char* source, int64_t start_byte, int64_t end_byte, const char* replacement);
 
 #ifdef __cplusplus
 }

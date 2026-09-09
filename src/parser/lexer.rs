@@ -92,8 +92,6 @@ pub enum Token {
     /// `with` keyword for effect mask blocks (`with pure { ... }`)
     With,
 
-
-
     /// `dyn` keyword for trait objects (`dyn Trait`)
     Dyn,
 
@@ -152,31 +150,31 @@ pub enum Token {
     Ident(String),
 
     // Punctuation
-    LParen,   // (
-    RParen,   // )
-    LBrace,   // {
-    RBrace,   // }
-    LBracket, // [
-    RBracket, // ]
-    LAngle,   // <
-    RAngle,   // >
-    Comma,    // ,
-    Colon,    // :
+    LParen,      // (
+    RParen,      // )
+    LBrace,      // {
+    RBrace,      // }
+    LBracket,    // [
+    RBracket,    // ]
+    LAngle,      // <
+    RAngle,      // >
+    Comma,       // ,
+    Colon,       // :
     DoubleColon, // ::
-    Semi,     // ;
-    Arrow,    // ->
-    Eq,       // =
-    EqEq,     // ==
-    NotEq,    // !=
-    LtEq,     // <=
-    GtEq,     // >=
-    LtGt,     // <>
+    Semi,        // ;
+    Arrow,       // ->
+    Eq,          // =
+    EqEq,        // ==
+    NotEq,       // !=
+    LtEq,        // <=
+    GtEq,        // >=
+    LtGt,        // <>
 
     // Compound assignment operators
-    PlusEq,   // +=
-    MinusEq,  // -=
-    StarEq,   // *=
-    SlashEq,  // /=
+    PlusEq,    // +=
+    MinusEq,   // -=
+    StarEq,    // *=
+    SlashEq,   // /=
     PercentEq, // %=
 
     // Arithmetic operators
@@ -408,7 +406,7 @@ impl<'src> Lexer<'src> {
             if self.src[self.pos..].starts_with("///") {
                 // Doc comment: capture the text and return it as a token.
                 self.pos += 3; // skip the three slashes
-                // Capture text until end of line, stripping leading whitespace.
+                               // Capture text until end of line, stripping leading whitespace.
                 let mut text = String::new();
                 let mut first_non_ws = true;
                 while self.pos < self.src.len() && self.src.as_bytes()[self.pos] != b'\n' {
@@ -657,7 +655,7 @@ impl<'src> Lexer<'src> {
                 } else {
                     Some(Token::Question)
                 }
-            },
+            }
             b'@' => Some(Token::At),
             _ => None,
         };
@@ -786,12 +784,30 @@ impl<'src> Lexer<'src> {
             Some(b'\\') => {
                 self.advance();
                 match self.peek() {
-                    Some(b'n') => { self.advance(); b'\n' as i64 }
-                    Some(b't') => { self.advance(); b'\t' as i64 }
-                    Some(b'r') => { self.advance(); b'\r' as i64 }
-                    Some(b'\\') => { self.advance(); b'\\' as i64 }
-                    Some(b'\'') => { self.advance(); b'\'' as i64 }
-                    Some(b'0') => { self.advance(); 0i64 }
+                    Some(b'n') => {
+                        self.advance();
+                        b'\n' as i64
+                    }
+                    Some(b't') => {
+                        self.advance();
+                        b'\t' as i64
+                    }
+                    Some(b'r') => {
+                        self.advance();
+                        b'\r' as i64
+                    }
+                    Some(b'\\') => {
+                        self.advance();
+                        b'\\' as i64
+                    }
+                    Some(b'\'') => {
+                        self.advance();
+                        b'\'' as i64
+                    }
+                    Some(b'0') => {
+                        self.advance();
+                        0i64
+                    }
                     other => {
                         return Err(ParseError::InvalidEscape {
                             ch: other.map(|b| b as char),
@@ -800,10 +816,7 @@ impl<'src> Lexer<'src> {
                     }
                 }
             }
-            Some(_c) => {
-                let val = self.advance_char().unwrap_or(' ') as i64;
-                val
-            }
+            Some(_c) => self.advance_char().unwrap_or(' ') as i64,
         };
         if self.peek() != Some(b'\'') {
             return Err(ParseError::UnexpectedToken {

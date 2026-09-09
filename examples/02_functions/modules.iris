@@ -1,0 +1,12 @@
+mod arithmetic {
+    pub def triple(value : i64) -> i64 {
+        return value * 3
+    }
+}
+
+bring arithmetic
+def main() -> i64 {
+    assert(triple(14) == 42);
+    println("modules: ok");
+    return 0
+}

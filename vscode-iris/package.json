@@ -1,8 +1,8 @@
 {
   "name": "iris-lang",
   "displayName": "IRIS Language",
-  "description": "IRIS compiler: syntax highlighting, LSP, debugging, and REPL — Go-like developer experience",
-  "version": "1.0.3",
+  "description": "Complete IRIS RC1 developer experience: language server, formatter, Test Explorer, debugger, safety diagnostics, and REPL",
+  "version": "1.0.5",
   "publisher": "iris-lang",
   "engines": {
     "vscode": "^1.85.0"
@@ -32,7 +32,7 @@
   "license": "GPL-2.0-or-later",
   "repository": {
     "type": "git",
-    "url": "https://github.com/moon9t/iris"
+    "url": "https://github.com/Eclipse-Softworks/IRIS.git"
   },
   "activationEvents": [],
   "main": "./out/extension.js",
@@ -74,6 +74,10 @@
                 "type": "boolean",
                 "description": "Stop at the first line on launch.",
                 "default": false
+              },
+              "entryFunction": {
+                "type": "string",
+                "description": "Optional zero-argument function to debug instead of main (used by Test Explorer)."
               }
             }
           }
@@ -93,13 +97,13 @@
             "description": "Debug the currently open .iris file",
             "body": {
               "type": "iris",
-            "request": "launch",
-            "name": "Debug ${1:File}",
-            "program": "${file}",
-            "stopOnEntry": false
+              "request": "launch",
+              "name": "Debug ${1:File}",
+              "program": "${file}",
+              "stopOnEntry": false
+            }
           }
-        }
-      ]
+        ]
       }
     ],
     "problemMatchers": [
@@ -226,6 +230,16 @@
         "icon": "$(beaker)"
       },
       {
+        "command": "iris.runWorkspaceTests",
+        "title": "IRIS: Run All Workspace Tests",
+        "icon": "$(beaker)"
+      },
+      {
+        "command": "iris.fmtWorkspace",
+        "title": "IRIS: Format All Workspace Files",
+        "icon": "$(wand)"
+      },
+      {
         "command": "iris.runBench",
         "title": "IRIS: Run Benchmarks",
         "icon": "$(dashboard)"
@@ -320,6 +334,12 @@
           "when": "resourceExtname == .iris"
         },
         {
+          "command": "iris.runWorkspaceTests"
+        },
+        {
+          "command": "iris.fmtWorkspace"
+        },
+        {
           "command": "iris.runBench",
           "when": "resourceExtname == .iris"
         },
@@ -360,6 +380,20 @@
           "type": "boolean",
           "default": true,
           "description": "Automatically format .iris files on save."
+        },
+        "iris.format.indentSize": {
+          "type": "integer",
+          "default": 4,
+          "minimum": 1,
+          "maximum": 16,
+          "description": "Spaces per indentation level used by the deterministic IRIS formatter."
+        },
+        "iris.format.maxLineWidth": {
+          "type": "integer",
+          "default": 100,
+          "minimum": 40,
+          "maximum": 240,
+          "description": "Preferred formatter line width; lists and parameter groups wrap at safe comma boundaries."
         },
         "iris.trace.server": {
           "type": "string",

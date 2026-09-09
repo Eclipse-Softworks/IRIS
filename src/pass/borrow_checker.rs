@@ -114,32 +114,16 @@ impl std::fmt::Display for BorrowError {
                 )
             }
             BorrowError::MoveWhileBorrowed { var, .. } => {
-                write!(
-                    f,
-                    "cannot move `{}` because it is currently borrowed",
-                    var
-                )
+                write!(f, "cannot move `{}` because it is currently borrowed", var)
             }
             BorrowError::UseAfterMove { var, .. } => {
-                write!(
-                    f,
-                    "use of moved value `{}`",
-                    var
-                )
+                write!(f, "use of moved value `{}`", var)
             }
             BorrowError::BorrowAfterMove { var, .. } => {
-                write!(
-                    f,
-                    "cannot borrow `{}` because it has been moved",
-                    var
-                )
+                write!(f, "cannot borrow `{}` because it has been moved", var)
             }
             BorrowError::MoveAfterMove { var, .. } => {
-                write!(
-                    f,
-                    "cannot move `{}` because it has already been moved",
-                    var
-                )
+                write!(f, "cannot move `{}` because it has already been moved", var)
             }
         }
     }
@@ -152,6 +136,12 @@ pub struct BorrowChecker {
     errors: Vec<(BorrowError, Span)>,
     has_ref_types: bool,
     source: Option<String>,
+}
+
+impl Default for BorrowChecker {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl BorrowChecker {
@@ -209,7 +199,13 @@ impl BorrowChecker {
         let col = start - line_start;
         let len = end - start;
         let line_num = src[..start].bytes().filter(|&b| b == b'\n').count() + 1;
-        let underline = format!("{: >width$}{:^^len$}", "", "", width = col, len = len.max(1));
+        let underline = format!(
+            "{: >width$}{:^^len$}",
+            "",
+            "",
+            width = col,
+            len = len.max(1)
+        );
         Some(format!(
             "  --> {}:{}\n       |\n {: >4} | {}\n       | {}",
             line_num,
@@ -282,11 +278,14 @@ impl BorrowChecker {
                 self.has_ref_types = true;
                 self.scan_type_for_refs(inner);
             }
-            AstType::Option(inner, _) | AstType::Chan(inner, _) | AstType::Atomic(inner, _)
-            | AstType::Mutex(inner, _) | AstType::Grad(inner, _) | AstType::Sparse(inner, _)
-            | AstType::List(inner, _) | AstType::WeakRef(inner, _) => {
-                self.scan_type_for_refs(inner)
-            }
+            AstType::Option(inner, _)
+            | AstType::Chan(inner, _)
+            | AstType::Atomic(inner, _)
+            | AstType::Mutex(inner, _)
+            | AstType::Grad(inner, _)
+            | AstType::Sparse(inner, _)
+            | AstType::List(inner, _)
+            | AstType::WeakRef(inner, _) => self.scan_type_for_refs(inner),
             AstType::Result(ok, err, _) => {
                 self.scan_type_for_refs(ok);
                 self.scan_type_for_refs(err);
@@ -370,7 +369,9 @@ impl BorrowChecker {
             AstStmt::Loop { body, .. } => {
                 self.check_block(body);
             }
-            AstStmt::ForRange { start, end, body, .. } => {
+            AstStmt::ForRange {
+                start, end, body, ..
+            } => {
                 self.check_expr(start);
                 self.check_expr(end);
                 self.check_block(body);
@@ -379,7 +380,9 @@ impl BorrowChecker {
                 self.check_expr(iter);
                 self.check_block(body);
             }
-            AstStmt::ParFor { start, end, body, .. } => {
+            AstStmt::ParFor {
+                start, end, body, ..
+            } => {
                 self.check_expr(start);
                 self.check_expr(end);
                 self.check_block(body);
@@ -493,8 +496,10 @@ impl BorrowChecker {
             AstExpr::Ident(ident) => {
                 self.check_use_after_move(&ident.name, ident.span);
             }
-            AstExpr::IntLit { .. } | AstExpr::FloatLit { .. }
-            | AstExpr::BoolLit { .. } | AstExpr::StringLit { .. } => {}
+            AstExpr::IntLit { .. }
+            | AstExpr::FloatLit { .. }
+            | AstExpr::BoolLit { .. }
+            | AstExpr::StringLit { .. } => {}
             AstExpr::BinOp { lhs, rhs, .. } => {
                 self.check_expr(lhs);
                 self.check_expr(rhs);
@@ -502,7 +507,9 @@ impl BorrowChecker {
             AstExpr::UnaryOp { expr, .. } => {
                 self.check_expr(expr);
             }
-            AstExpr::Call { args, named_args, .. } => {
+            AstExpr::Call {
+                args, named_args, ..
+            } => {
                 for arg in args {
                     self.check_expr(arg);
                 }
@@ -543,11 +550,7 @@ impl BorrowChecker {
             AstExpr::Cast { expr, .. } => {
                 self.check_expr(expr);
             }
-            AstExpr::StructLit {
-                fields,
-                spread,
-                ..
-            } => {
+            AstExpr::StructLit { fields, spread, .. } => {
                 for (_, v) in fields {
                     self.check_expr(v);
                 }
@@ -604,7 +607,9 @@ impl BorrowChecker {
                 self.check_expr(expr);
                 self.check_expr(default);
             }
-            AstExpr::TryCatch { body, catch_body, .. } => {
+            AstExpr::TryCatch {
+                body, catch_body, ..
+            } => {
                 self.check_expr(body);
                 self.check_expr(catch_body);
             }

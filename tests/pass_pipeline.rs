@@ -147,10 +147,7 @@ fn test_llvm_ir_contains_expected_tokens() {
     pm.run(&mut module).unwrap();
 
     let output = iris::codegen::emit_llvm_ir(&module).unwrap();
-    assert!(
-        output.contains("define"),
-        "LLVM IR should contain 'define'"
-    );
+    assert!(output.contains("define"), "LLVM IR should contain 'define'");
     assert!(output.contains("@add"), "LLVM IR should contain '@add'");
     assert!(
         output.contains("double"),

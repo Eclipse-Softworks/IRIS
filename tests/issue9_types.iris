@@ -1,0 +1,5 @@
+pub choice Health { Nominal, Degraded }
+pub record Device { name: str, health: Health }
+pub def nominal_device(name: str) -> Device {
+    Device { name: name, health: Health.Nominal }
+}

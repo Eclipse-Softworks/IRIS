@@ -2,24 +2,24 @@ bring std.tensorx
 
 pub type MLTensor = (list<f64>, list<i64>)
 
-extern def iris_mlrt_onnx_load(path : str) -> i64
-extern def iris_mlrt_onnx_run(handle : i64, input : MLTensor) -> MLTensor
-extern def iris_mlrt_onnx_run_multi(handle : i64, inputs : list<MLTensor>) -> list<MLTensor>
-extern def iris_mlrt_onnx_free(handle : i64) -> i64
-extern def iris_mlrt_pytorch_load(path : str) -> i64
-extern def iris_mlrt_pytorch_run(handle : i64, input : MLTensor) -> MLTensor
-extern def iris_mlrt_pytorch_run_multi(handle : i64, inputs : list<MLTensor>) -> list<MLTensor>
-extern def iris_mlrt_pytorch_train_step(handle : i64, inputs : list<MLTensor>, targets : list<MLTensor>, lr : f64) -> f64
-extern def iris_mlrt_pytorch_free(handle : i64) -> i64
-extern def iris_mlrt_tf_load(path : str) -> i64
-extern def iris_mlrt_tf_run(handle : i64, input : MLTensor) -> MLTensor
-extern def iris_mlrt_tf_run_multi(handle : i64, inputs : list<MLTensor>) -> list<MLTensor>
-extern def iris_mlrt_tf_free(handle : i64) -> i64
+extern def iris_mlrt_onnx_load(path : str) -> i64 effect ffi, fs, alloc
+extern def iris_mlrt_onnx_run(handle : i64, input : MLTensor) -> MLTensor effect ffi, alloc
+extern def iris_mlrt_onnx_run_multi(handle : i64, inputs : list<MLTensor>) -> list<MLTensor> effect ffi, alloc
+extern def iris_mlrt_onnx_free(handle : i64) -> i64 effect ffi
+extern def iris_mlrt_pytorch_load(path : str) -> i64 effect ffi, fs, alloc
+extern def iris_mlrt_pytorch_run(handle : i64, input : MLTensor) -> MLTensor effect ffi, alloc
+extern def iris_mlrt_pytorch_run_multi(handle : i64, inputs : list<MLTensor>) -> list<MLTensor> effect ffi, alloc
+extern def iris_mlrt_pytorch_train_step(handle : i64, inputs : list<MLTensor>, targets : list<MLTensor>, lr : f64) -> f64 effect ffi, alloc
+extern def iris_mlrt_pytorch_free(handle : i64) -> i64 effect ffi
+extern def iris_mlrt_tf_load(path : str) -> i64 effect ffi, fs, alloc
+extern def iris_mlrt_tf_run(handle : i64, input : MLTensor) -> MLTensor effect ffi, alloc
+extern def iris_mlrt_tf_run_multi(handle : i64, inputs : list<MLTensor>) -> list<MLTensor> effect ffi, alloc
+extern def iris_mlrt_tf_free(handle : i64) -> i64 effect ffi
 
-extern def iris_onnx_get_input_count(handle : i64) -> i64
-extern def iris_onnx_get_output_count(handle : i64) -> i64
-extern def iris_onnx_get_input_name(handle : i64, idx : i64) -> str
-extern def iris_onnx_get_output_name(handle : i64, idx : i64) -> str
+extern def iris_onnx_get_input_count(handle : i64) -> i64 effect ffi
+extern def iris_onnx_get_output_count(handle : i64) -> i64 effect ffi
+extern def iris_onnx_get_input_name(handle : i64, idx : i64) -> str effect ffi, alloc
+extern def iris_onnx_get_output_name(handle : i64, idx : i64) -> str effect ffi, alloc
 
 pub def tensor_pair(data : list<f64>, shape : list<i64>) -> MLTensor {
     (data, shape)
@@ -870,5 +870,142 @@ pub def predict_next_telemetry(history: list<f64>, window: i64) -> f64 {
 
     // Project 1 step ahead (which corresponds to index w)
     slope * wf + intercept
+}
+
+// ---------------------------------------------------------------------------
+// Production model lifecycle
+// ---------------------------------------------------------------------------
+
+pub record ModelSession {
+    handle: i64,
+    backend: str,
+    model_name: str,
+    version: str,
+    input_count: i64,
+    output_count: i64,
+}
+
+pub record ModelHealth {
+    requests: i64,
+    failures: i64,
+    total_latency_ms: i64,
+    consecutive_failures: i64,
+    healthy: bool,
+    last_error: str,
+}
+
+pub record ModelRegistry {
+    names: list<str>,
+    versions: list<str>,
+    backends: list<str>,
+    paths: list<str>,
+}
+
+pub def model_health_new() -> ModelHealth {
+    return ModelHealth {
+        requests: 0,
+        failures: 0,
+        total_latency_ms: 0,
+        consecutive_failures: 0,
+        healthy: true,
+        last_error: "",
+    }
+}
+
+pub def model_health_observe(health: ModelHealth, succeeded: bool, latency_ms: i64, error: str, failure_limit: i64) -> ModelHealth {
+    val next_failures = health.failures + if succeeded { 0 } else { 1 }
+    val next_consecutive = if succeeded { 0 } else { health.consecutive_failures + 1 }
+    return ModelHealth {
+        requests: health.requests + 1,
+        failures: next_failures,
+        total_latency_ms: health.total_latency_ms + if latency_ms < 0 { 0 } else { latency_ms },
+        consecutive_failures: next_consecutive,
+        healthy: next_consecutive < failure_limit,
+        last_error: if succeeded { "" } else { error },
+    }
+}
+
+pub def model_health_error_rate(health: ModelHealth) -> f64 {
+    if health.requests == 0 { return 0.0 }
+    return (health.failures to f64) / (health.requests to f64)
+}
+
+pub def model_health_mean_latency_ms(health: ModelHealth) -> f64 {
+    if health.requests == 0 { return 0.0 }
+    return (health.total_latency_ms to f64) / (health.requests to f64)
+}
+
+pub def model_registry_new() -> ModelRegistry {
+    val names: list<str> = list()
+    val versions: list<str> = list()
+    val backends: list<str> = list()
+    val paths: list<str> = list()
+    return ModelRegistry { names: names, versions: versions, backends: backends, paths: paths }
+}
+
+pub def model_registry_add(registry: ModelRegistry, name: str, version: str, backend: str, path: str) -> ModelRegistry {
+    list_push(registry.names, name);
+    list_push(registry.versions, version);
+    list_push(registry.backends, backend);
+    list_push(registry.paths, path);
+    return registry
+}
+
+pub def model_registry_find(registry: ModelRegistry, name: str, version: str) -> i64 {
+    for i in 0..list_len(registry.names) {
+        if list_get(registry.names, i) == name && list_get(registry.versions, i) == version {
+            return i
+        }
+    }
+    return 0 - 1
+}
+
+pub def model_session_open(path: str, backend: str, model_name: str, version: str) -> result<ModelSession, str> effect ffi, fs, alloc {
+    val handle = if backend == "onnx" {
+        onnx_load(path)
+    } else if backend == "pytorch" {
+        pytorch_load(path)
+    } else if backend == "tensorflow" {
+        tensorflow_load(path)
+    } else {
+        0
+    }
+    if handle == 0 { return err(concat("failed to open model backend: ", backend)) }
+    val inputs = if backend == "onnx" { onnx_get_input_count(handle) } else { 0 }
+    val outputs = if backend == "onnx" { onnx_get_output_count(handle) } else { 0 }
+    return ok(ModelSession {
+        handle: handle,
+        backend: backend,
+        model_name: model_name,
+        version: version,
+        input_count: inputs,
+        output_count: outputs,
+    })
+}
+
+pub def model_session_run(session: ModelSession, input: MLTensor) -> result<MLTensor, str> effect ffi, alloc {
+    if session.backend == "onnx" { return ok(onnx_run(session.handle, input)) }
+    if session.backend == "pytorch" { return ok(pytorch_run(session.handle, input)) }
+    if session.backend == "tensorflow" { return ok(tensorflow_run(session.handle, input)) }
+    return err(concat("unsupported model backend: ", session.backend))
+}
+
+pub def model_session_run_batch(session: ModelSession, inputs: list<MLTensor>) -> result<list<MLTensor>, str> effect ffi, alloc {
+    if session.backend == "onnx" { return ok(onnx_run_multi(session.handle, inputs)) }
+    if session.backend == "pytorch" { return ok(pytorch_run_multi(session.handle, inputs)) }
+    if session.backend == "tensorflow" { return ok(tensorflow_run_multi(session.handle, inputs)) }
+    return err(concat("unsupported model backend: ", session.backend))
+}
+
+pub def model_session_train_step(session: ModelSession, inputs: list<MLTensor>, targets: list<MLTensor>, learning_rate: f64) -> result<f64, str> effect ffi, alloc {
+    if session.backend != "pytorch" { return err("training requires the PyTorch backend") }
+    return ok(pytorch_train_step(session.handle, inputs, targets, learning_rate))
+}
+
+pub def model_session_close(session: ModelSession) -> i64 effect ffi {
+    if session.backend == "onnx" { return onnx_free(session.handle) }
+    if session.backend == "pytorch" { return pytorch_free(session.handle) }
+    if session.backend == "tensorflow" { return tensorflow_free(session.handle) }
+    return 0 - 1
 }
 

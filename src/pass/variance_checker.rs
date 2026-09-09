@@ -1,5 +1,7 @@
 use crate::error::PassError;
-use crate::parser::ast::{AstFunction, AstGenericParam, AstModule, AstStructDef, AstType, Variance};
+use crate::parser::ast::{
+    AstFunction, AstGenericParam, AstModule, AstStructDef, AstType, Variance,
+};
 
 pub struct VarianceChecker;
 
@@ -25,12 +27,17 @@ impl VarianceChecker {
 
     fn check_function_variance(&self, func: &AstFunction) -> Result<(), PassError> {
         for param in &func.type_params {
-            if let AstGenericParam::Type(name, _, variance) | AstGenericParam::Hkt(name, _, _, variance) = param {
+            if let AstGenericParam::Type(name, _, variance)
+            | AstGenericParam::Hkt(name, _, _, variance) = param
+            {
                 let name = name.as_str();
                 match variance {
                     Variance::Covariant => {
-                        let in_ret = self.type_uses_param(&func.return_ty, name);
-                        let in_params = func.params.iter().any(|p| self.type_uses_param(&p.ty, name));
+                        let in_ret = Self::type_uses_param(&func.return_ty, name);
+                        let in_params = func
+                            .params
+                            .iter()
+                            .any(|p| Self::type_uses_param(&p.ty, name));
                         if in_params && !in_ret {
                             return Err(PassError::TypeError {
                                 func: func.name.name.clone(),
@@ -41,8 +48,11 @@ impl VarianceChecker {
                         }
                     }
                     Variance::Contravariant => {
-                        let in_ret = self.type_uses_param(&func.return_ty, name);
-                        let in_params = func.params.iter().any(|p| self.type_uses_param(&p.ty, name));
+                        let in_ret = Self::type_uses_param(&func.return_ty, name);
+                        let in_params = func
+                            .params
+                            .iter()
+                            .any(|p| Self::type_uses_param(&p.ty, name));
                         if in_ret && !in_params {
                             return Err(PassError::TypeError {
                                 func: func.name.name.clone(),
@@ -61,16 +71,18 @@ impl VarianceChecker {
 
     fn check_struct_variance(&self, s: &AstStructDef) -> Result<(), PassError> {
         for param in &s.type_params {
-            if let AstGenericParam::Type(name, _, variance) | AstGenericParam::Hkt(name, _, _, variance) = param {
+            if let AstGenericParam::Type(name, _, variance)
+            | AstGenericParam::Hkt(name, _, _, variance) = param
+            {
                 let name = name.as_str();
                 match variance {
                     Variance::Covariant => {
                         for field in &s.fields {
                             if let AstType::Fn { params, ret, .. } = &field.ty {
-                                if self.type_uses_param(&ret, name) {
+                                if Self::type_uses_param(ret, name) {
                                     // In return type of a fn-typed field — positive position, ok
                                 }
-                                if params.iter().any(|p| self.type_uses_param(p, name)) {
+                                if params.iter().any(|p| Self::type_uses_param(p, name)) {
                                     return Err(PassError::TypeError {
                                         func: s.name.name.clone(),
                                         detail: format!(
@@ -85,7 +97,7 @@ impl VarianceChecker {
                     Variance::Contravariant => {
                         for field in &s.fields {
                             if let AstType::Fn { params: _, ret, .. } = &field.ty {
-                                if self.type_uses_param(&ret, name) {
+                                if Self::type_uses_param(ret, name) {
                                     return Err(PassError::TypeError {
                                         func: s.name.name.clone(),
                                         detail: format!(
@@ -94,7 +106,7 @@ impl VarianceChecker {
                                         ),
                                     });
                                 }
-                            } else if self.type_uses_param(&field.ty, name) {
+                            } else if Self::type_uses_param(&field.ty, name) {
                                 return Err(PassError::TypeError {
                                     func: s.name.name.clone(),
                                     detail: format!(
@@ -112,32 +124,32 @@ impl VarianceChecker {
         Ok(())
     }
 
-    fn type_uses_param(&self, ty: &AstType, param_name: &str) -> bool {
+    fn type_uses_param(ty: &AstType, param_name: &str) -> bool {
         match ty {
             AstType::Named(n, _) => n == param_name,
             AstType::AssocType { base, .. } => base == param_name,
             AstType::Generic { name, args, .. } => {
-                name == param_name || args.iter().any(|a| self.type_uses_param(a, param_name))
+                name == param_name || args.iter().any(|a| Self::type_uses_param(a, param_name))
             }
-            AstType::Option(inner, _) => self.type_uses_param(inner, param_name),
+            AstType::Option(inner, _) => Self::type_uses_param(inner, param_name),
             AstType::Result(ok, err, _) => {
-                self.type_uses_param(ok, param_name) || self.type_uses_param(err, param_name)
+                Self::type_uses_param(ok, param_name) || Self::type_uses_param(err, param_name)
             }
-            AstType::List(inner, _) => self.type_uses_param(inner, param_name),
+            AstType::List(inner, _) => Self::type_uses_param(inner, param_name),
             AstType::Map(k, v, _) => {
-                self.type_uses_param(k, param_name) || self.type_uses_param(v, param_name)
+                Self::type_uses_param(k, param_name) || Self::type_uses_param(v, param_name)
             }
-            AstType::Chan(inner, _) => self.type_uses_param(inner, param_name),
-            AstType::Atomic(inner, _) => self.type_uses_param(inner, param_name),
-            AstType::Mutex(inner, _) => self.type_uses_param(inner, param_name),
-            AstType::Grad(inner, _) => self.type_uses_param(inner, param_name),
-            AstType::Sparse(inner, _) => self.type_uses_param(inner, param_name),
+            AstType::Chan(inner, _) => Self::type_uses_param(inner, param_name),
+            AstType::Atomic(inner, _) => Self::type_uses_param(inner, param_name),
+            AstType::Mutex(inner, _) => Self::type_uses_param(inner, param_name),
+            AstType::Grad(inner, _) => Self::type_uses_param(inner, param_name),
+            AstType::Sparse(inner, _) => Self::type_uses_param(inner, param_name),
             AstType::Fn { params, ret, .. } => {
-                params.iter().any(|p| self.type_uses_param(p, param_name))
-                    || self.type_uses_param(ret, param_name)
+                params.iter().any(|p| Self::type_uses_param(p, param_name))
+                    || Self::type_uses_param(ret, param_name)
             }
-            AstType::Tuple(elems, _) => elems.iter().any(|e| self.type_uses_param(e, param_name)),
-            AstType::Array { elem, .. } => self.type_uses_param(elem, param_name),
+            AstType::Tuple(elems, _) => elems.iter().any(|e| Self::type_uses_param(e, param_name)),
+            AstType::Array { elem, .. } => Self::type_uses_param(elem, param_name),
             _ => false,
         }
     }

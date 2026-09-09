@@ -1,0 +1,108 @@
+bring std.reflect bring std.speculation
+def test_reflection_eval_arithmetic() -> i64 {
+    val src = "def main() -> i64 { 20 + 22 }";
+    val res = reflect_eval_i64(src);
+    if reflect_available() == false {
+        return when res {
+            err(_) => 0, ok(_) => 1
+        }
+        ;
+        
+    }
+    when res {
+        ok(val_i64) => {
+            assert(val_i64 == 42);
+            return 0
+        }
+       , err(e) => {
+            println(concat("reflection error: ", e));
+            return 1
+        }
+       , 
+    }
+    
+}
+def test_reflection_eval_string() -> i64 {
+    val src = "def main() -> str { \"hello \" + \"world\" }";
+    val res = reflect_eval(src);
+    if reflect_available() == false {
+        return when res {
+            err(_) => 0, ok(_) => 1
+        }
+        ;
+        
+    }
+    when res {
+        ok(s) => {
+            assert(s == "hello world");
+            return 0
+        }
+       , err(e) => {
+            println(concat("reflection error: ", e));
+            return 1
+        }
+       , 
+    }
+    
+}
+def test_reflection_validate() -> i64 {
+    val valid_code = "def main() -> i64 { 100 }";
+    val invalid_code = "def main() -> i64 { syntax error 123 }";
+    if reflect_available() == false {
+        assert(reflect_validate(valid_code) == false);
+        return 0;
+        
+    }
+    assert(reflect_validate(valid_code) == true);
+    assert(reflect_validate(invalid_code) == false);
+    return 0;
+    
+}
+def test_speculation_success() -> i64 {
+    val candidate = || 40 + 2;
+    val validator = |x : i64 |x>0 && x<100;
+    val outcome : option<i64> = speculate(candidate, validator);
+    when outcome {
+        some(v) => {
+            assert(v == 42);
+            return 0
+        }
+       , none => {
+            return 1
+        },
+    }
+    
+}
+def test_speculation_fallback() -> i64 {
+    val candidate = || 500;
+    val fallback = || 10;
+    val validator = |x : i64 |x<100;
+    val final_val : i64 = speculate_with_fallback(candidate, fallback, validator);
+    assert(final_val == 10);
+    return 0
+}
+def test_speculation_envelope() -> i64 {
+    val candidate = || 25.5;
+    val extractor = |x : f64 |x;
+    val res : option<f64> = speculate_envelope(candidate, 0.0, 50.0, extractor);
+    when res {
+        some(v) => {
+            assert(v == 25.5);
+            return 0
+        }
+       , none => {
+            return 1
+        },
+    }
+    
+}
+def main() -> i64 {
+    assert(test_reflection_eval_arithmetic() == 0);
+    assert(test_reflection_eval_string() == 0);
+    assert(test_reflection_validate() == 0);
+    assert(test_speculation_success() == 0);
+    assert(test_speculation_fallback() == 0);
+    assert(test_speculation_envelope() == 0);
+    println("All reflection and speculation tests passed!");
+    return 0
+}

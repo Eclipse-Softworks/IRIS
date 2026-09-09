@@ -1,5 +1,43 @@
 # IRIS Language Extension Changelog
 
+## 1.0.5
+
+### New Features
+
+- Native Test Explorer discovery, run, cancellation, output, duration, and
+  debug profiles for zero-argument `test_*` functions.
+- Named-function DAP launches so Debug Test runs the selected test instead of
+  `main`.
+- Rich hovers for functions, traits, algebraic effects, fields, and builtins,
+  including docs, generics, declared/inferred effects, and unsafe status.
+- Dead/unused, unreachable, unsafe, and possible-infinite-loop diagnostics with
+  exact ranges, fading tags, and matching semantic-token modifiers.
+- Complete standard-library module completions and snippets for structured
+  concurrency, tensor autodiff, AIS, LLM integration, typed metaprogramming,
+  checked networking, ownership, ROS 2, and assertion-backed tests.
+
+### Formatting
+
+- The compiler formatter now preserves line/doc/nested block comments and
+  literal spelling, refuses to rewrite invalid source, is idempotence tested,
+  and wraps at safe comma boundaries.
+- Added configurable indentation and preferred line width settings.
+
+### Compatibility
+
+- Targets IRIS compiler `1.0.0-rc1`; this extension release does not rename the
+  compiler release to RC2.
+- Debugging remains interpreter-trace based rather than native-process attach.
+
+## 1.0.4
+
+### New Features
+
+- Added workspace test and formatting commands, per-test CodeLens actions, the
+  complete compiler-output picker, toolchain diagnostics, and expanded current
+  syntax/stdlib snippets.
+- Added editor-title run/debug actions and safer process-based command launch.
+
 ## 1.0.3
 
 ### Bug Fixes

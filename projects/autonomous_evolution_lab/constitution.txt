@@ -1,0 +1,3 @@
+Preserve policy(i64) -> i64. Outputs must stay between -1000 and 1000.
+Candidate tests and the transaction rollback probe must pass.
+Promote only after the seven coordinator gates; persist both audit and head.

@@ -1,0 +1,11 @@
+def main() -> i64 {
+    val total = atomic(0);
+    par
+    for index in 1 .. 101 {
+        atomic_add(total, index);
+    };
+
+    assert(atomic_load(total) == 5050);
+    println("parallel: ok");
+    return 0
+}

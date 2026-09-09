@@ -15,11 +15,11 @@ use crate::cache::BuildCache;
 use crate::error::Error;
 use crate::lower::substitute_ast_type;
 use crate::parser::ast::{
-    AstBlock, AstExpr, AstFunction, AstMacroDef, AstModule, AstModuleDef, AstStmt, AstTraitDef, AstType,
-    AstWhenPattern, BringPath, Ident,
+    AstBlock, AstExpr, AstFunction, AstMacroDef, AstModule, AstModuleDef, AstStmt, AstTraitDef,
+    AstType, AstWhenPattern, BringPath, Ident,
 };
-use crate::parser::lexer::Span;
 use crate::parser::lexer::Lexer;
+use crate::parser::lexer::Span;
 use crate::parser::parse::Parser;
 
 /// Compiles `.iris` files from disk, resolving all `bring` declarations.
@@ -150,11 +150,13 @@ impl FileCompiler {
                             let path_str = resolved.to_string_lossy();
                             let marker_fwd = "iris_packages/";
                             let marker_bwd = "iris_packages\\";
-                            let marker_pos = path_str.rfind(marker_fwd)
+                            let marker_pos = path_str
+                                .rfind(marker_fwd)
                                 .or_else(|| path_str.rfind(marker_bwd));
                             if let Some(pos) = marker_pos {
                                 let after = &path_str[pos + "iris_packages/".len()..];
-                                after.split(|c: char| c == '/' || c == '\\')
+                                after
+                                    .split(['/', '\\'])
                                     .next()
                                     .unwrap_or("module")
                                     .replace(['.', '-'], "_")
@@ -381,7 +383,11 @@ fn rewrite_type(ty: &mut AstType, symbols: &HashSet<String>, prefix: &str) {
             rewrite_type(k, symbols, prefix);
             rewrite_type(v, symbols, prefix);
         }
-        AstType::Generic { ref mut name, ref mut args, .. } => {
+        AstType::Generic {
+            ref mut name,
+            ref mut args,
+            ..
+        } => {
             if symbols.contains(name) {
                 *name = format!("{}__{}", prefix, name);
             }
@@ -404,7 +410,9 @@ fn rewrite_type(ty: &mut AstType, symbols: &HashSet<String>, prefix: &str) {
         AstType::WeakRef(ref mut elem, _) => {
             rewrite_type(elem, symbols, prefix);
         }
-        AstType::DynTrait { ref mut trait_name, .. } => {
+        AstType::DynTrait {
+            ref mut trait_name, ..
+        } => {
             if symbols.contains(trait_name) {
                 *trait_name = format!("{}__{}", prefix, trait_name);
             }
@@ -585,8 +593,7 @@ fn rewrite_expr(expr: &mut AstExpr, symbols: &HashSet<String>, prefix: &str) {
             rewrite_expr(default, symbols, prefix);
         }
         AstExpr::MapLiteral {
-            ref mut entries,
-            ..
+            ref mut entries, ..
         } => {
             for (k, v) in entries {
                 rewrite_expr(k, symbols, prefix);
@@ -607,9 +614,7 @@ fn rewrite_expr(expr: &mut AstExpr, symbols: &HashSet<String>, prefix: &str) {
             rewrite_expr(body, symbols, prefix);
             rewrite_expr(catch_body, symbols, prefix);
         }
-        AstExpr::Raise {
-            ref mut args, ..
-        } => {
+        AstExpr::Raise { ref mut args, .. } => {
             for a in args {
                 rewrite_expr(a, symbols, prefix);
             }
@@ -662,12 +667,17 @@ fn rewrite_when_pattern(pat: &mut AstWhenPattern, symbols: &HashSet<String>, pre
                 rewrite_when_pattern(p, symbols, prefix);
             }
         }
-        AstWhenPattern::Slice { prefix: ref mut prefix_pats, .. } => {
+        AstWhenPattern::Slice {
+            prefix: ref mut prefix_pats,
+            ..
+        } => {
             for p in prefix_pats {
                 rewrite_when_pattern(p, symbols, prefix);
             }
         }
-        AstWhenPattern::Binding { ref mut pattern, .. } => {
+        AstWhenPattern::Binding {
+            ref mut pattern, ..
+        } => {
             rewrite_when_pattern(pattern, symbols, prefix);
         }
         AstWhenPattern::Struct { .. } => {}
@@ -778,7 +788,11 @@ fn rewrite_stmt(stmt: &mut AstStmt, symbols: &HashSet<String>, prefix: &str) {
         AstStmt::Defer { ref mut expr, .. } => {
             rewrite_expr(expr, symbols, prefix);
         }
-        AstStmt::Select { ref mut arms, ref mut default, .. } => {
+        AstStmt::Select {
+            ref mut arms,
+            ref mut default,
+            ..
+        } => {
             for arm in arms {
                 rewrite_expr(&mut arm.channel, symbols, prefix);
                 rewrite_block(&mut arm.body, symbols, prefix);
@@ -943,7 +957,7 @@ fn block_has_yield(block: &AstBlock) -> bool {
 }
 
 fn stmts_have_yield(stmts: &[AstStmt]) -> bool {
-    stmts.iter().any(|s| stmt_has_yield(s))
+    stmts.iter().any(stmt_has_yield)
 }
 
 fn stmt_has_yield(stmt: &AstStmt) -> bool {
@@ -954,7 +968,7 @@ fn stmt_has_yield(stmt: &AstStmt) -> bool {
         AstStmt::ForRange { body, .. } => block_has_yield(body),
         AstStmt::ForEach { body, .. } => block_has_yield(body),
         AstStmt::ParFor { body, .. } => block_has_yield(body),
-        AstStmt::Spawn { body, .. } => body.iter().any(|s| stmt_has_yield(s)),
+        AstStmt::Spawn { body, .. } => body.iter().any(stmt_has_yield),
         AstStmt::MaskStmt { body, .. } => block_has_yield(body),
         AstStmt::Expr(e) => expr_has_yield(e),
         AstStmt::Return { value, .. } => value.as_ref().is_some_and(|e| expr_has_yield(e)),
@@ -964,8 +978,9 @@ fn stmt_has_yield(stmt: &AstStmt) -> bool {
         AstStmt::Defer { expr, .. } => expr_has_yield(expr),
         AstStmt::HandleStmt { expr, .. } => expr_has_yield(expr),
         AstStmt::Select { arms, default, .. } => {
-            arms.iter().any(|a| block_has_yield(&a.body) || expr_has_yield(&a.channel))
-            || default.as_ref().is_some_and(|d| block_has_yield(d))
+            arms.iter()
+                .any(|a| block_has_yield(&a.body) || expr_has_yield(&a.channel))
+                || default.as_ref().is_some_and(|d| block_has_yield(d))
         }
         AstStmt::Break { .. } | AstStmt::Continue { .. } => false,
     }
@@ -974,38 +989,56 @@ fn stmt_has_yield(stmt: &AstStmt) -> bool {
 fn expr_has_yield(expr: &AstExpr) -> bool {
     match expr {
         AstExpr::Block(b) => block_has_yield(b),
-        AstExpr::If { cond, then_block, else_block, .. } => {
-            expr_has_yield(cond) || block_has_yield(then_block)
-            || else_block.as_ref().is_some_and(|b| block_has_yield(b))
+        AstExpr::If {
+            cond,
+            then_block,
+            else_block,
+            ..
+        } => {
+            expr_has_yield(cond)
+                || block_has_yield(then_block)
+                || else_block.as_ref().is_some_and(block_has_yield)
         }
-        AstExpr::When { scrutinee, arms, .. } => {
-            expr_has_yield(scrutinee) || arms.iter().any(|arm| expr_has_yield(&arm.body))
-        }
+        AstExpr::When {
+            scrutinee, arms, ..
+        } => expr_has_yield(scrutinee) || arms.iter().any(|arm| expr_has_yield(&arm.body)),
         AstExpr::BinOp { lhs, rhs, .. } => expr_has_yield(lhs) || expr_has_yield(rhs),
-        AstExpr::Call { args, .. } => args.iter().any(|a| expr_has_yield(a)),
-        AstExpr::MethodCall { args, .. } => args.iter().any(|a| expr_has_yield(a)),
-        AstExpr::Index { base, indices, .. } => expr_has_yield(base) || indices.iter().any(|i| expr_has_yield(i)),
-        AstExpr::Tuple { elements, .. } => elements.iter().any(|e| expr_has_yield(e)),
-        AstExpr::ArrayLit { elems, .. } => elems.iter().any(|e| expr_has_yield(e)),
+        AstExpr::Call { args, .. } => args.iter().any(expr_has_yield),
+        AstExpr::MethodCall { args, .. } => args.iter().any(expr_has_yield),
+        AstExpr::Index { base, indices, .. } => {
+            expr_has_yield(base) || indices.iter().any(expr_has_yield)
+        }
+        AstExpr::Tuple { elements, .. } => elements.iter().any(expr_has_yield),
+        AstExpr::ArrayLit { elems, .. } => elems.iter().any(expr_has_yield),
         AstExpr::StructLit { fields, .. } => fields.iter().any(|(_, e)| expr_has_yield(e)),
         AstExpr::UnaryOp { expr: inner, .. } => expr_has_yield(inner),
         AstExpr::Lambda { body, .. } => expr_has_yield(body),
         AstExpr::Await { expr: inner, .. } => expr_has_yield(inner),
         AstExpr::Cast { expr: inner, .. } => expr_has_yield(inner),
-        AstExpr::NullCoal { expr: inner, default, .. } => expr_has_yield(inner) || expr_has_yield(default),
+        AstExpr::NullCoal {
+            expr: inner,
+            default,
+            ..
+        } => expr_has_yield(inner) || expr_has_yield(default),
         AstExpr::Mask { body, .. } => block_has_yield(body),
-        AstExpr::Handle { expr: inner, arms, .. } => {
-            expr_has_yield(inner) || arms.iter().any(|arm| expr_has_yield(&arm.body))
-        }
-        AstExpr::TryCatch { body, catch_body, .. } => expr_has_yield(body) || expr_has_yield(catch_body),
-        AstExpr::Raise { args, .. } => args.iter().any(|a| expr_has_yield(a)),
+        AstExpr::Handle {
+            expr: inner, arms, ..
+        } => expr_has_yield(inner) || arms.iter().any(|arm| expr_has_yield(&arm.body)),
+        AstExpr::TryCatch {
+            body, catch_body, ..
+        } => expr_has_yield(body) || expr_has_yield(catch_body),
+        AstExpr::Raise { args, .. } => args.iter().any(expr_has_yield),
         AstExpr::Move { expr: inner, .. } => expr_has_yield(inner),
         AstExpr::Unsafe { body, .. } => expr_has_yield(body),
-        AstExpr::Ref { expr: inner, .. } | AstExpr::RefMut { expr: inner, .. } | AstExpr::Deref { expr: inner, .. } => expr_has_yield(inner),
+        AstExpr::Ref { expr: inner, .. }
+        | AstExpr::RefMut { expr: inner, .. }
+        | AstExpr::Deref { expr: inner, .. } => expr_has_yield(inner),
         AstExpr::Try { expr: inner, .. } => expr_has_yield(inner),
         AstExpr::FieldAccess { base, .. } => expr_has_yield(base),
         AstExpr::TupleIndex { base, .. } => expr_has_yield(base),
-        AstExpr::MapLiteral { entries, .. } => entries.iter().any(|(k, v)| expr_has_yield(k) || expr_has_yield(v)),
+        AstExpr::MapLiteral { entries, .. } => entries
+            .iter()
+            .any(|(k, v)| expr_has_yield(k) || expr_has_yield(v)),
         _ => false,
     }
 }
@@ -1018,7 +1051,7 @@ fn replace_yield_in_block(block: &mut AstBlock, acc: &str) {
     }
 }
 
-fn replace_yield_in_stmts(stmts: &mut Vec<AstStmt>, acc: &str) {
+fn replace_yield_in_stmts(stmts: &mut [AstStmt], acc: &str) {
     for stmt in stmts.iter_mut() {
         replace_yield_in_stmt(stmt, acc);
     }
@@ -1027,11 +1060,23 @@ fn replace_yield_in_stmts(stmts: &mut Vec<AstStmt>, acc: &str) {
 fn replace_yield_in_stmt(stmt: &mut AstStmt, acc: &str) {
     match stmt {
         AstStmt::Yield { expr, .. } => {
-            let yielded = std::mem::replace(expr, Box::new(AstExpr::IntLit { value: 0, span: Span::new(0, 0) }));
+            let yielded = std::mem::replace(
+                expr,
+                Box::new(AstExpr::IntLit {
+                    value: 0,
+                    span: Span::new(0, 0),
+                }),
+            );
             *stmt = AstStmt::Expr(Box::new(AstExpr::Call {
-                callee: Ident { name: "push".to_string(), span: Span::new(0, 0) },
+                callee: Ident {
+                    name: "push".to_string(),
+                    span: Span::new(0, 0),
+                },
                 args: vec![
-                    AstExpr::Ident(Ident { name: acc.to_string(), span: Span::new(0, 0) }),
+                    AstExpr::Ident(Ident {
+                        name: acc.to_string(),
+                        span: Span::new(0, 0),
+                    }),
                     *yielded,
                 ],
                 named_args: vec![],
@@ -1078,38 +1123,107 @@ fn replace_yield_in_stmt(stmt: &mut AstStmt, acc: &str) {
 fn replace_yield_in_expr(expr: &mut AstExpr, acc: &str) {
     match expr {
         AstExpr::Block(b) => replace_yield_in_block(b, acc),
-        AstExpr::If { cond, then_block, else_block, .. } => {
+        AstExpr::If {
+            cond,
+            then_block,
+            else_block,
+            ..
+        } => {
             replace_yield_in_expr(cond, acc);
             replace_yield_in_block(then_block, acc);
-            if let Some(ref mut b) = else_block { replace_yield_in_block(b, acc); }
+            if let Some(ref mut b) = else_block {
+                replace_yield_in_block(b, acc);
+            }
         }
-        AstExpr::When { scrutinee, arms, .. } => {
+        AstExpr::When {
+            scrutinee, arms, ..
+        } => {
             replace_yield_in_expr(scrutinee, acc);
-            for arm in arms.iter_mut() { replace_yield_in_expr(&mut arm.body, acc); }
+            for arm in arms.iter_mut() {
+                replace_yield_in_expr(&mut arm.body, acc);
+            }
         }
-        AstExpr::BinOp { lhs, rhs, .. } => { replace_yield_in_expr(lhs, acc); replace_yield_in_expr(rhs, acc); }
-        AstExpr::Call { args, .. } => { for a in args.iter_mut() { replace_yield_in_expr(a, acc); } }
-        AstExpr::MethodCall { args, .. } => { for a in args.iter_mut() { replace_yield_in_expr(a, acc); } }
-        AstExpr::Index { base, indices, .. } => { replace_yield_in_expr(base, acc); for i in indices.iter_mut() { replace_yield_in_expr(i, acc); } }
-        AstExpr::Tuple { elements, .. } => { for e in elements.iter_mut() { replace_yield_in_expr(e, acc); } }
-        AstExpr::ArrayLit { elems, .. } => { for e in elems.iter_mut() { replace_yield_in_expr(e, acc); } }
-        AstExpr::StructLit { fields, .. } => { for (_, e) in fields.iter_mut() { replace_yield_in_expr(e, acc); } }
+        AstExpr::BinOp { lhs, rhs, .. } => {
+            replace_yield_in_expr(lhs, acc);
+            replace_yield_in_expr(rhs, acc);
+        }
+        AstExpr::Call { args, .. } => {
+            for a in args.iter_mut() {
+                replace_yield_in_expr(a, acc);
+            }
+        }
+        AstExpr::MethodCall { args, .. } => {
+            for a in args.iter_mut() {
+                replace_yield_in_expr(a, acc);
+            }
+        }
+        AstExpr::Index { base, indices, .. } => {
+            replace_yield_in_expr(base, acc);
+            for i in indices.iter_mut() {
+                replace_yield_in_expr(i, acc);
+            }
+        }
+        AstExpr::Tuple { elements, .. } => {
+            for e in elements.iter_mut() {
+                replace_yield_in_expr(e, acc);
+            }
+        }
+        AstExpr::ArrayLit { elems, .. } => {
+            for e in elems.iter_mut() {
+                replace_yield_in_expr(e, acc);
+            }
+        }
+        AstExpr::StructLit { fields, .. } => {
+            for (_, e) in fields.iter_mut() {
+                replace_yield_in_expr(e, acc);
+            }
+        }
         AstExpr::UnaryOp { expr: inner, .. } => replace_yield_in_expr(inner, acc),
         AstExpr::Lambda { body, .. } => replace_yield_in_expr(body, acc),
         AstExpr::Await { expr: inner, .. } => replace_yield_in_expr(inner, acc),
         AstExpr::Cast { expr: inner, .. } => replace_yield_in_expr(inner, acc),
-        AstExpr::NullCoal { expr: inner, default, .. } => { replace_yield_in_expr(inner, acc); replace_yield_in_expr(default, acc); }
+        AstExpr::NullCoal {
+            expr: inner,
+            default,
+            ..
+        } => {
+            replace_yield_in_expr(inner, acc);
+            replace_yield_in_expr(default, acc);
+        }
         AstExpr::Mask { body, .. } => replace_yield_in_block(body, acc),
-        AstExpr::Handle { expr: inner, arms, .. } => { replace_yield_in_expr(inner, acc); for arm in arms.iter_mut() { replace_yield_in_expr(&mut arm.body, acc); } }
-        AstExpr::TryCatch { body, catch_body, .. } => { replace_yield_in_expr(body, acc); replace_yield_in_expr(catch_body, acc); }
-        AstExpr::Raise { args, .. } => { for a in args.iter_mut() { replace_yield_in_expr(a, acc); } }
+        AstExpr::Handle {
+            expr: inner, arms, ..
+        } => {
+            replace_yield_in_expr(inner, acc);
+            for arm in arms.iter_mut() {
+                replace_yield_in_expr(&mut arm.body, acc);
+            }
+        }
+        AstExpr::TryCatch {
+            body, catch_body, ..
+        } => {
+            replace_yield_in_expr(body, acc);
+            replace_yield_in_expr(catch_body, acc);
+        }
+        AstExpr::Raise { args, .. } => {
+            for a in args.iter_mut() {
+                replace_yield_in_expr(a, acc);
+            }
+        }
         AstExpr::Move { expr: inner, .. } => replace_yield_in_expr(inner, acc),
         AstExpr::Unsafe { body, .. } => replace_yield_in_expr(body, acc),
-        AstExpr::Ref { expr: inner, .. } | AstExpr::RefMut { expr: inner, .. } | AstExpr::Deref { expr: inner, .. } => replace_yield_in_expr(inner, acc),
+        AstExpr::Ref { expr: inner, .. }
+        | AstExpr::RefMut { expr: inner, .. }
+        | AstExpr::Deref { expr: inner, .. } => replace_yield_in_expr(inner, acc),
         AstExpr::Try { expr: inner, .. } => replace_yield_in_expr(inner, acc),
         AstExpr::FieldAccess { base, .. } => replace_yield_in_expr(base, acc),
         AstExpr::TupleIndex { base, .. } => replace_yield_in_expr(base, acc),
-        AstExpr::MapLiteral { entries, .. } => { for (k, v) in entries.iter_mut() { replace_yield_in_expr(k, acc); replace_yield_in_expr(v, acc); } }
+        AstExpr::MapLiteral { entries, .. } => {
+            for (k, v) in entries.iter_mut() {
+                replace_yield_in_expr(k, acc);
+                replace_yield_in_expr(v, acc);
+            }
+        }
         _ => {}
     }
 }
@@ -1122,18 +1236,27 @@ pub(crate) fn desugar_yield(ast: &mut AstModule) {
     let acc_name = "__iris_yield";
     let mk_list_call = || -> AstExpr {
         AstExpr::Call {
-            callee: Ident { name: "list".to_string(), span: Span::new(0, 0) },
+            callee: Ident {
+                name: "list".to_string(),
+                span: Span::new(0, 0),
+            },
             args: vec![],
             named_args: vec![],
             span: Span::new(0, 0),
         }
     };
     let mk_acc_ident = || -> AstExpr {
-        AstExpr::Ident(Ident { name: acc_name.to_string(), span: Span::new(0, 0) })
+        AstExpr::Ident(Ident {
+            name: acc_name.to_string(),
+            span: Span::new(0, 0),
+        })
     };
     let mk_init_stmt = || -> AstStmt {
         AstStmt::Let {
-            name: Ident { name: acc_name.to_string(), span: Span::new(0, 0) },
+            name: Ident {
+                name: acc_name.to_string(),
+                span: Span::new(0, 0),
+            },
             ty: None,
             init: Box::new(mk_list_call()),
             is_var: false,
@@ -1141,20 +1264,32 @@ pub(crate) fn desugar_yield(ast: &mut AstModule) {
         }
     };
     for f in &mut ast.functions {
-        if stmts_have_yield(&f.body.stmts) || f.body.tail.as_ref().is_some_and(|e| expr_has_yield(e)) {
+        if stmts_have_yield(&f.body.stmts)
+            || f.body.tail.as_ref().is_some_and(|e| expr_has_yield(e))
+        {
             f.body.stmts.insert(0, mk_init_stmt());
             replace_yield_in_stmts(&mut f.body.stmts, acc_name);
-            if let Some(ref mut tail) = f.body.tail { replace_yield_in_expr(tail, acc_name); }
-            if f.body.tail.is_none() { f.body.tail = Some(Box::new(mk_acc_ident())); }
+            if let Some(ref mut tail) = f.body.tail {
+                replace_yield_in_expr(tail, acc_name);
+            }
+            if f.body.tail.is_none() {
+                f.body.tail = Some(Box::new(mk_acc_ident()));
+            }
         }
     }
     for i in &mut ast.impls {
         for f in &mut i.methods {
-            if stmts_have_yield(&f.body.stmts) || f.body.tail.as_ref().is_some_and(|e| expr_has_yield(e)) {
+            if stmts_have_yield(&f.body.stmts)
+                || f.body.tail.as_ref().is_some_and(|e| expr_has_yield(e))
+            {
                 f.body.stmts.insert(0, mk_init_stmt());
                 replace_yield_in_stmts(&mut f.body.stmts, acc_name);
-                if let Some(ref mut tail) = f.body.tail { replace_yield_in_expr(tail, acc_name); }
-                if f.body.tail.is_none() { f.body.tail = Some(Box::new(mk_acc_ident())); }
+                if let Some(ref mut tail) = f.body.tail {
+                    replace_yield_in_expr(tail, acc_name);
+                }
+                if f.body.tail.is_none() {
+                    f.body.tail = Some(Box::new(mk_acc_ident()));
+                }
             }
         }
     }
@@ -1162,9 +1297,12 @@ pub(crate) fn desugar_yield(ast: &mut AstModule) {
 
 /// Walk every expression in a block, replacing `Self` type references with `concrete`.
 fn replace_self_in_block(block: &mut AstBlock, concrete: &str) {
-    let type_subs = [(String::from("Self"), AstType::Named(concrete.to_string(), Span::new(0, 0)))]
-        .into_iter()
-        .collect::<HashMap<_, _>>();
+    let type_subs = [(
+        String::from("Self"),
+        AstType::Named(concrete.to_string(), Span::new(0, 0)),
+    )]
+    .into_iter()
+    .collect::<HashMap<_, _>>();
     for stmt in &mut block.stmts {
         replace_self_in_stmt(stmt, &type_subs, concrete);
     }
@@ -1189,7 +1327,13 @@ fn replace_self_in_stmt(stmt: &mut AstStmt, type_subs: &HashMap<String, AstType>
         AstStmt::Loop { body, .. } => {
             replace_self_in_block(body, concrete);
         }
-        AstStmt::ForRange { start, end, step, body, .. } => {
+        AstStmt::ForRange {
+            start,
+            end,
+            step,
+            body,
+            ..
+        } => {
             replace_self_in_expr(start, type_subs, concrete);
             replace_self_in_expr(end, type_subs, concrete);
             if let Some(ref mut s) = step {
@@ -1232,7 +1376,12 @@ fn replace_self_in_stmt(stmt: &mut AstStmt, type_subs: &HashMap<String, AstType>
         AstStmt::MaskStmt { body, .. } => {
             replace_self_in_block(body, concrete);
         }
-        AstStmt::HandleStmt { expr, arms: _, return_ty, .. } => {
+        AstStmt::HandleStmt {
+            expr,
+            arms: _,
+            return_ty,
+            ..
+        } => {
             replace_self_in_expr(expr, type_subs, concrete);
             **return_ty = substitute_ast_type(return_ty, type_subs, &HashMap::new());
         }
@@ -1257,7 +1406,12 @@ fn replace_self_in_stmt(stmt: &mut AstStmt, type_subs: &HashMap<String, AstType>
 
 fn replace_self_in_expr(expr: &mut AstExpr, type_subs: &HashMap<String, AstType>, concrete: &str) {
     match expr {
-        AstExpr::StructLit { name, fields, spread, .. } => {
+        AstExpr::StructLit {
+            name,
+            fields,
+            spread,
+            ..
+        } => {
             if name == "Self" {
                 *name = concrete.to_string();
             }
@@ -1272,7 +1426,9 @@ fn replace_self_in_expr(expr: &mut AstExpr, type_subs: &HashMap<String, AstType>
             replace_self_in_expr(lhs, type_subs, concrete);
             replace_self_in_expr(rhs, type_subs, concrete);
         }
-        AstExpr::Call { args, named_args, .. } => {
+        AstExpr::Call {
+            args, named_args, ..
+        } => {
             for a in args.iter_mut() {
                 replace_self_in_expr(a, type_subs, concrete);
             }
@@ -1281,7 +1437,12 @@ fn replace_self_in_expr(expr: &mut AstExpr, type_subs: &HashMap<String, AstType>
             }
         }
         AstExpr::UnaryOp { expr: e, .. } => replace_self_in_expr(e, type_subs, concrete),
-        AstExpr::If { cond, then_block, else_block, .. } => {
+        AstExpr::If {
+            cond,
+            then_block,
+            else_block,
+            ..
+        } => {
             replace_self_in_expr(cond, type_subs, concrete);
             replace_self_in_block(then_block, concrete);
             if let Some(ref mut eb) = else_block {
@@ -1300,7 +1461,9 @@ fn replace_self_in_expr(expr: &mut AstExpr, type_subs: &HashMap<String, AstType>
             *ty = substitute_ast_type(ty, type_subs, &HashMap::new());
         }
         AstExpr::FieldAccess { base, .. } => replace_self_in_expr(base, type_subs, concrete),
-        AstExpr::When { scrutinee, arms, .. } => {
+        AstExpr::When {
+            scrutinee, arms, ..
+        } => {
             replace_self_in_expr(scrutinee, type_subs, concrete);
             for arm in arms.iter_mut() {
                 if let Some(ref mut g) = arm.guard {
@@ -1328,7 +1491,9 @@ fn replace_self_in_expr(expr: &mut AstExpr, type_subs: &HashMap<String, AstType>
         }
         AstExpr::Await { expr: e, .. } => replace_self_in_expr(e, type_subs, concrete),
         AstExpr::Try { expr: e, .. } => replace_self_in_expr(e, type_subs, concrete),
-        AstExpr::NullCoal { expr: e, default, .. } => {
+        AstExpr::NullCoal {
+            expr: e, default, ..
+        } => {
             replace_self_in_expr(e, type_subs, concrete);
             replace_self_in_expr(default, type_subs, concrete);
         }
@@ -1339,7 +1504,12 @@ fn replace_self_in_expr(expr: &mut AstExpr, type_subs: &HashMap<String, AstType>
             }
         }
         AstExpr::Mask { body, .. } => replace_self_in_block(body, concrete),
-        AstExpr::Handle { expr: e, arms: _, return_ty, .. } => {
+        AstExpr::Handle {
+            expr: e,
+            arms: _,
+            return_ty,
+            ..
+        } => {
             replace_self_in_expr(e, type_subs, concrete);
             **return_ty = substitute_ast_type(return_ty, type_subs, &HashMap::new());
         }
@@ -1352,7 +1522,9 @@ fn replace_self_in_expr(expr: &mut AstExpr, type_subs: &HashMap<String, AstType>
         AstExpr::Ref { expr: e, .. } => replace_self_in_expr(e, type_subs, concrete),
         AstExpr::RefMut { expr: e, .. } => replace_self_in_expr(e, type_subs, concrete),
         AstExpr::Deref { expr: e, .. } => replace_self_in_expr(e, type_subs, concrete),
-        AstExpr::TryCatch { body, catch_body, .. } => {
+        AstExpr::TryCatch {
+            body, catch_body, ..
+        } => {
             replace_self_in_expr(body, type_subs, concrete);
             replace_self_in_expr(catch_body, type_subs, concrete);
         }
@@ -1369,16 +1541,22 @@ fn replace_self_in_expr(expr: &mut AstExpr, type_subs: &HashMap<String, AstType>
                 replace_self_in_expr(a, type_subs, concrete);
             }
         }
-        AstExpr::Ident(_) | AstExpr::IntLit { .. } | AstExpr::FloatLit { .. }
-        | AstExpr::BoolLit { .. } | AstExpr::StringLit { .. } => {}
+        AstExpr::Ident(_)
+        | AstExpr::IntLit { .. }
+        | AstExpr::FloatLit { .. }
+        | AstExpr::BoolLit { .. }
+        | AstExpr::StringLit { .. } => {}
     }
 }
 
 /// For each `impl TraitName for TypeName { ... }`, inject default method bodies from the trait
 /// definition for any methods the impl does not provide. Runs after parsing but before lowering.
 pub(crate) fn inject_default_impl_methods(ast: &mut AstModule) {
-    let trait_map: HashMap<String, &AstTraitDef> =
-        ast.traits.iter().map(|t| (t.name.name.clone(), t)).collect();
+    let trait_map: HashMap<String, &AstTraitDef> = ast
+        .traits
+        .iter()
+        .map(|t| (t.name.name.clone(), t))
+        .collect();
     for impl_def in &mut ast.impls {
         if impl_def.trait_name.is_empty() {
             continue;
@@ -1409,17 +1587,15 @@ pub(crate) fn inject_default_impl_methods(ast: &mut AstModule) {
                 if param.name.name == "self" {
                     if let AstType::Named(ref n, _) = param.ty {
                         if n == "self" || n == "Self" {
-                            param.ty = AstType::Named(
-                                concrete_ty_name.clone(),
-                                param.ty.span(),
-                            );
+                            param.ty = AstType::Named(concrete_ty_name.clone(), param.ty.span());
                             continue;
                         }
                     }
                 }
                 param.ty = substitute_ast_type(&param.ty, &type_subs, &HashMap::new());
             }
-            let return_ty = substitute_ast_type(&trait_method.return_ty, &type_subs, &HashMap::new());
+            let return_ty =
+                substitute_ast_type(&trait_method.return_ty, &type_subs, &HashMap::new());
             let mut method_body = body.clone();
             replace_self_in_block(&mut method_body, &concrete_ty_name);
             impl_def.methods.push(AstFunction {
@@ -1428,7 +1604,7 @@ pub(crate) fn inject_default_impl_methods(ast: &mut AstModule) {
                 type_params: vec![],
                 params,
                 return_ty,
-                effects: vec![],
+                effects: trait_method.effects.clone(),
                 body: method_body,
                 span: trait_method.span,
                 is_async: false,
@@ -1450,7 +1626,10 @@ fn substitute_macro_args(body: &AstExpr, params: &[String], args: &[AstExpr]) ->
                 body.clone()
             }
         }
-        AstExpr::IntLit { .. } | AstExpr::FloatLit { .. } | AstExpr::BoolLit { .. } | AstExpr::StringLit { .. } => body.clone(),
+        AstExpr::IntLit { .. }
+        | AstExpr::FloatLit { .. }
+        | AstExpr::BoolLit { .. }
+        | AstExpr::StringLit { .. } => body.clone(),
         AstExpr::BinOp { op, lhs, rhs, span } => AstExpr::BinOp {
             op: *op,
             lhs: Box::new(substitute_macro_args(lhs, params, args)),
@@ -1462,22 +1641,47 @@ fn substitute_macro_args(body: &AstExpr, params: &[String], args: &[AstExpr]) ->
             expr: Box::new(substitute_macro_args(expr, params, args)),
             span: *span,
         },
-        AstExpr::Call { callee, args: call_args, named_args, span } => AstExpr::Call {
+        AstExpr::Call {
+            callee,
+            args: call_args,
+            named_args,
+            span,
+        } => AstExpr::Call {
             callee: callee.clone(),
-            args: call_args.iter().map(|a| substitute_macro_args(a, params, args)).collect(),
-            named_args: named_args.iter().map(|(n, a)| (n.clone(), substitute_macro_args(a, params, args))).collect(),
+            args: call_args
+                .iter()
+                .map(|a| substitute_macro_args(a, params, args))
+                .collect(),
+            named_args: named_args
+                .iter()
+                .map(|(n, a)| (n.clone(), substitute_macro_args(a, params, args)))
+                .collect(),
             span: *span,
         },
-        AstExpr::If { cond, then_block, else_block, span } => AstExpr::If {
+        AstExpr::If {
+            cond,
+            then_block,
+            else_block,
+            span,
+        } => AstExpr::If {
             cond: Box::new(substitute_macro_args(cond, params, args)),
             then_block: substitute_macro_block(then_block, params, args),
-            else_block: else_block.as_ref().map(|b| substitute_macro_block(b, params, args)),
+            else_block: else_block
+                .as_ref()
+                .map(|b| substitute_macro_block(b, params, args)),
             span: *span,
         },
         AstExpr::Block(block) => AstExpr::Block(substitute_macro_block(block, params, args)),
-        AstExpr::Index { base, indices, span } => AstExpr::Index {
+        AstExpr::Index {
+            base,
+            indices,
+            span,
+        } => AstExpr::Index {
             base: Box::new(substitute_macro_args(base, params, args)),
-            indices: indices.iter().map(|i| substitute_macro_args(i, params, args)).collect(),
+            indices: indices
+                .iter()
+                .map(|i| substitute_macro_args(i, params, args))
+                .collect(),
             span: *span,
         },
         AstExpr::Cast { expr, ty, span } => AstExpr::Cast {
@@ -1485,10 +1689,20 @@ fn substitute_macro_args(body: &AstExpr, params: &[String], args: &[AstExpr]) ->
             ty: ty.clone(),
             span: *span,
         },
-        AstExpr::StructLit { name, fields, spread, span } => AstExpr::StructLit {
+        AstExpr::StructLit {
+            name,
+            fields,
+            spread,
+            span,
+        } => AstExpr::StructLit {
             name: name.clone(),
-            fields: fields.iter().map(|(n, f)| (n.clone(), substitute_macro_args(f, params, args))).collect(),
-            spread: spread.as_ref().map(|s| Box::new(substitute_macro_args(s, params, args))),
+            fields: fields
+                .iter()
+                .map(|(n, f)| (n.clone(), substitute_macro_args(f, params, args)))
+                .collect(),
+            spread: spread
+                .as_ref()
+                .map(|s| Box::new(substitute_macro_args(s, params, args))),
             span: *span,
         },
         AstExpr::FieldAccess { base, field, span } => AstExpr::FieldAccess {
@@ -1496,20 +1710,33 @@ fn substitute_macro_args(body: &AstExpr, params: &[String], args: &[AstExpr]) ->
             field: field.clone(),
             span: *span,
         },
-        AstExpr::When { scrutinee, arms, span } => AstExpr::When {
+        AstExpr::When {
+            scrutinee,
+            arms,
+            span,
+        } => AstExpr::When {
             scrutinee: Box::new(substitute_macro_args(scrutinee, params, args)),
-            arms: arms.iter().map(|arm| crate::parser::ast::AstWhenArm {
-                pattern: arm.pattern.clone(),
-                guard: arm.guard.as_ref().map(|g| Box::new(substitute_macro_args(g, params, args))),
-                body: Box::new(substitute_macro_args(&arm.body, params, args)),
-                span: arm.span,
-                enum_name: arm.enum_name.clone(),
-                variant_name: arm.variant_name.clone(),
-            }).collect(),
+            arms: arms
+                .iter()
+                .map(|arm| crate::parser::ast::AstWhenArm {
+                    pattern: arm.pattern.clone(),
+                    guard: arm
+                        .guard
+                        .as_ref()
+                        .map(|g| Box::new(substitute_macro_args(g, params, args))),
+                    body: Box::new(substitute_macro_args(&arm.body, params, args)),
+                    span: arm.span,
+                    enum_name: arm.enum_name.clone(),
+                    variant_name: arm.variant_name.clone(),
+                })
+                .collect(),
             span: *span,
         },
         AstExpr::Tuple { elements, span } => AstExpr::Tuple {
-            elements: elements.iter().map(|e| substitute_macro_args(e, params, args)).collect(),
+            elements: elements
+                .iter()
+                .map(|e| substitute_macro_args(e, params, args))
+                .collect(),
             span: *span,
         },
         AstExpr::TupleIndex { base, index, span } => AstExpr::TupleIndex {
@@ -1518,10 +1745,17 @@ fn substitute_macro_args(body: &AstExpr, params: &[String], args: &[AstExpr]) ->
             span: *span,
         },
         AstExpr::ArrayLit { elems, span } => AstExpr::ArrayLit {
-            elems: elems.iter().map(|e| substitute_macro_args(e, params, args)).collect(),
+            elems: elems
+                .iter()
+                .map(|e| substitute_macro_args(e, params, args))
+                .collect(),
             span: *span,
         },
-        AstExpr::Lambda { params: lam_params, body: lam_body, span } => AstExpr::Lambda {
+        AstExpr::Lambda {
+            params: lam_params,
+            body: lam_body,
+            span,
+        } => AstExpr::Lambda {
             params: lam_params.clone(),
             body: Box::new(substitute_macro_args(lam_body, params, args)),
             span: *span,
@@ -1534,30 +1768,59 @@ fn substitute_macro_args(body: &AstExpr, params: &[String], args: &[AstExpr]) ->
             expr: Box::new(substitute_macro_args(expr, params, args)),
             span: *span,
         },
-        AstExpr::NullCoal { expr, default, span } => AstExpr::NullCoal {
+        AstExpr::NullCoal {
+            expr,
+            default,
+            span,
+        } => AstExpr::NullCoal {
             expr: Box::new(substitute_macro_args(expr, params, args)),
             default: Box::new(substitute_macro_args(default, params, args)),
             span: *span,
         },
-        AstExpr::MethodCall { base, method, args: mc_args, span } => AstExpr::MethodCall {
+        AstExpr::MethodCall {
+            base,
+            method,
+            args: mc_args,
+            span,
+        } => AstExpr::MethodCall {
             base: Box::new(substitute_macro_args(base, params, args)),
             method: method.clone(),
-            args: mc_args.iter().map(|a| substitute_macro_args(a, params, args)).collect(),
+            args: mc_args
+                .iter()
+                .map(|a| substitute_macro_args(a, params, args))
+                .collect(),
             span: *span,
         },
-        AstExpr::Mask { effects, body: mask_body, span } => AstExpr::Mask {
+        AstExpr::Mask {
+            effects,
+            body: mask_body,
+            span,
+        } => AstExpr::Mask {
             effects: effects.clone(),
             body: substitute_macro_block(mask_body, params, args),
             span: *span,
         },
-        AstExpr::Handle { expr, arms, return_ty, span } => AstExpr::Handle {
+        AstExpr::Handle {
+            expr,
+            arms,
+            return_ty,
+            span,
+        } => AstExpr::Handle {
             expr: Box::new(substitute_macro_args(expr, params, args)),
             arms: arms.clone(),
             return_ty: return_ty.clone(),
             span: *span,
         },
         AstExpr::MapLiteral { entries, span } => AstExpr::MapLiteral {
-            entries: entries.iter().map(|(k, v)| (substitute_macro_args(k, params, args), substitute_macro_args(v, params, args))).collect(),
+            entries: entries
+                .iter()
+                .map(|(k, v)| {
+                    (
+                        substitute_macro_args(k, params, args),
+                        substitute_macro_args(v, params, args),
+                    )
+                })
+                .collect(),
             span: *span,
         },
         AstExpr::Ref { expr: e, span } => AstExpr::Ref {
@@ -1572,15 +1835,27 @@ fn substitute_macro_args(body: &AstExpr, params: &[String], args: &[AstExpr]) ->
             expr: Box::new(substitute_macro_args(e, params, args)),
             span: *span,
         },
-        AstExpr::TryCatch { body, catch_param, catch_body, span } => AstExpr::TryCatch {
+        AstExpr::TryCatch {
+            body,
+            catch_param,
+            catch_body,
+            span,
+        } => AstExpr::TryCatch {
             body: Box::new(substitute_macro_args(body, params, args)),
             catch_param: catch_param.clone(),
             catch_body: Box::new(substitute_macro_args(catch_body, params, args)),
             span: *span,
         },
-        AstExpr::Raise { effect_name, args: r_args, span } => AstExpr::Raise {
+        AstExpr::Raise {
+            effect_name,
+            args: r_args,
+            span,
+        } => AstExpr::Raise {
             effect_name: effect_name.clone(),
-            args: r_args.iter().map(|a| substitute_macro_args(a, params, args)).collect(),
+            args: r_args
+                .iter()
+                .map(|a| substitute_macro_args(a, params, args))
+                .collect(),
             span: *span,
         },
         AstExpr::Move { expr, span } => AstExpr::Move {
@@ -1599,69 +1874,149 @@ fn substitute_macro_args(body: &AstExpr, params: &[String], args: &[AstExpr]) ->
     }
 }
 
-fn substitute_macro_block(block: &crate::parser::ast::AstBlock, params: &[String], args: &[AstExpr]) -> crate::parser::ast::AstBlock {
+fn substitute_macro_block(
+    block: &crate::parser::ast::AstBlock,
+    params: &[String],
+    args: &[AstExpr],
+) -> crate::parser::ast::AstBlock {
     crate::parser::ast::AstBlock {
-        stmts: block.stmts.iter().map(|s| substitute_macro_stmt(s, params, args)).collect(),
-        tail: block.tail.as_ref().map(|t| Box::new(substitute_macro_args(t, params, args))),
+        stmts: block
+            .stmts
+            .iter()
+            .map(|s| substitute_macro_stmt(s, params, args))
+            .collect(),
+        tail: block
+            .tail
+            .as_ref()
+            .map(|t| Box::new(substitute_macro_args(t, params, args))),
         span: block.span,
     }
 }
 
-fn substitute_macro_stmt(stmt: &crate::parser::ast::AstStmt, params: &[String], args: &[AstExpr]) -> crate::parser::ast::AstStmt {
+fn substitute_macro_stmt(
+    stmt: &crate::parser::ast::AstStmt,
+    params: &[String],
+    args: &[AstExpr],
+) -> crate::parser::ast::AstStmt {
     match stmt {
-        crate::parser::ast::AstStmt::Let { name, ty, init, is_var, span } => crate::parser::ast::AstStmt::Let {
+        crate::parser::ast::AstStmt::Let {
+            name,
+            ty,
+            init,
+            is_var,
+            span,
+        } => crate::parser::ast::AstStmt::Let {
             name: name.clone(),
             ty: ty.clone(),
             init: Box::new(substitute_macro_args(init, params, args)),
             is_var: *is_var,
             span: *span,
         },
-        crate::parser::ast::AstStmt::Expr(expr) => crate::parser::ast::AstStmt::Expr(Box::new(substitute_macro_args(expr, params, args))),
-        crate::parser::ast::AstStmt::While { label, cond, body, span } => crate::parser::ast::AstStmt::While {
+        crate::parser::ast::AstStmt::Expr(expr) => {
+            crate::parser::ast::AstStmt::Expr(Box::new(substitute_macro_args(expr, params, args)))
+        }
+        crate::parser::ast::AstStmt::While {
+            label,
+            cond,
+            body,
+            span,
+        } => crate::parser::ast::AstStmt::While {
             label: label.clone(),
             cond: Box::new(substitute_macro_args(cond, params, args)),
             body: substitute_macro_block(body, params, args),
             span: *span,
         },
-        crate::parser::ast::AstStmt::Loop { label, body, span } => crate::parser::ast::AstStmt::Loop {
+        crate::parser::ast::AstStmt::Loop { label, body, span } => {
+            crate::parser::ast::AstStmt::Loop {
+                label: label.clone(),
+                body: substitute_macro_block(body, params, args),
+                span: *span,
+            }
+        }
+        crate::parser::ast::AstStmt::Break { label, span } => crate::parser::ast::AstStmt::Break {
             label: label.clone(),
-            body: substitute_macro_block(body, params, args),
             span: *span,
         },
-        crate::parser::ast::AstStmt::Break { label, span } => crate::parser::ast::AstStmt::Break { label: label.clone(), span: *span },
-        crate::parser::ast::AstStmt::Continue { label, span } => crate::parser::ast::AstStmt::Continue { label: label.clone(), span: *span },
-        crate::parser::ast::AstStmt::ForRange { label, var, start, end, inclusive, step, body, span } => crate::parser::ast::AstStmt::ForRange {
+        crate::parser::ast::AstStmt::Continue { label, span } => {
+            crate::parser::ast::AstStmt::Continue {
+                label: label.clone(),
+                span: *span,
+            }
+        }
+        crate::parser::ast::AstStmt::ForRange {
+            label,
+            var,
+            start,
+            end,
+            inclusive,
+            step,
+            body,
+            span,
+        } => crate::parser::ast::AstStmt::ForRange {
             label: label.clone(),
             var: var.clone(),
             start: Box::new(substitute_macro_args(start, params, args)),
             end: Box::new(substitute_macro_args(end, params, args)),
             inclusive: *inclusive,
-            step: step.as_ref().map(|s| Box::new(substitute_macro_args(s, params, args))),
+            step: step
+                .as_ref()
+                .map(|s| Box::new(substitute_macro_args(s, params, args))),
             body: substitute_macro_block(body, params, args),
             span: *span,
         },
-        crate::parser::ast::AstStmt::Assign { target, op, value, span } => crate::parser::ast::AstStmt::Assign {
+        crate::parser::ast::AstStmt::Assign {
+            target,
+            op,
+            value,
+            span,
+        } => crate::parser::ast::AstStmt::Assign {
             target: Box::new(substitute_macro_args(target, params, args)),
             op: *op,
             value: Box::new(substitute_macro_args(value, params, args)),
             span: *span,
         },
-        crate::parser::ast::AstStmt::LetTuple { names, init, is_var, span } => crate::parser::ast::AstStmt::LetTuple {
+        crate::parser::ast::AstStmt::LetTuple {
+            names,
+            init,
+            is_var,
+            span,
+        } => crate::parser::ast::AstStmt::LetTuple {
             names: names.clone(),
             init: Box::new(substitute_macro_args(init, params, args)),
             is_var: *is_var,
             span: *span,
         },
-        crate::parser::ast::AstStmt::Return { value, span } => crate::parser::ast::AstStmt::Return {
-            value: value.as_ref().map(|v| Box::new(substitute_macro_args(v, params, args))),
+        crate::parser::ast::AstStmt::Return { value, span } => {
+            crate::parser::ast::AstStmt::Return {
+                value: value
+                    .as_ref()
+                    .map(|v| Box::new(substitute_macro_args(v, params, args))),
+                span: *span,
+            }
+        }
+        crate::parser::ast::AstStmt::Spawn {
+            body: spawn_body,
+            span,
+            group,
+        } => crate::parser::ast::AstStmt::Spawn {
+            body: spawn_body
+                .iter()
+                .map(|s| substitute_macro_stmt(s, params, args))
+                .collect(),
             span: *span,
+            group: group
+                .as_ref()
+                .map(|g| Box::new(substitute_macro_args(g, params, args))),
         },
-        crate::parser::ast::AstStmt::Spawn { body: spawn_body, span, group } => crate::parser::ast::AstStmt::Spawn {
-            body: spawn_body.iter().map(|s| substitute_macro_stmt(s, params, args)).collect(),
-            span: *span,
-            group: group.as_ref().map(|g| Box::new(substitute_macro_args(g, params, args))),
-        },
-        crate::parser::ast::AstStmt::ParFor { label, var, start, end, inclusive, body, span } => crate::parser::ast::AstStmt::ParFor {
+        crate::parser::ast::AstStmt::ParFor {
+            label,
+            var,
+            start,
+            end,
+            inclusive,
+            body,
+            span,
+        } => crate::parser::ast::AstStmt::ParFor {
             label: label.clone(),
             var: var.clone(),
             start: Box::new(substitute_macro_args(start, params, args)),
@@ -1670,19 +2025,34 @@ fn substitute_macro_stmt(stmt: &crate::parser::ast::AstStmt, params: &[String], 
             body: substitute_macro_block(body, params, args),
             span: *span,
         },
-        crate::parser::ast::AstStmt::ForEach { label, var, iter, body, span } => crate::parser::ast::AstStmt::ForEach {
+        crate::parser::ast::AstStmt::ForEach {
+            label,
+            var,
+            iter,
+            body,
+            span,
+        } => crate::parser::ast::AstStmt::ForEach {
             label: label.clone(),
             var: var.clone(),
             iter: Box::new(substitute_macro_args(iter, params, args)),
             body: substitute_macro_block(body, params, args),
             span: *span,
         },
-        crate::parser::ast::AstStmt::MaskStmt { effects, body, span } => crate::parser::ast::AstStmt::MaskStmt {
+        crate::parser::ast::AstStmt::MaskStmt {
+            effects,
+            body,
+            span,
+        } => crate::parser::ast::AstStmt::MaskStmt {
             effects: effects.clone(),
             body: substitute_macro_block(body, params, args),
             span: *span,
         },
-        crate::parser::ast::AstStmt::HandleStmt { expr, arms, return_ty, span } => crate::parser::ast::AstStmt::HandleStmt {
+        crate::parser::ast::AstStmt::HandleStmt {
+            expr,
+            arms,
+            return_ty,
+            span,
+        } => crate::parser::ast::AstStmt::HandleStmt {
             expr: Box::new(substitute_macro_args(expr, params, args)),
             arms: arms.clone(),
             return_ty: return_ty.clone(),
@@ -1692,7 +2062,11 @@ fn substitute_macro_stmt(stmt: &crate::parser::ast::AstStmt, params: &[String], 
             expr: Box::new(substitute_macro_args(expr, params, args)),
             span: *span,
         },
-        crate::parser::ast::AstStmt::Select { arms, default, span } => crate::parser::ast::AstStmt::Select {
+        crate::parser::ast::AstStmt::Select {
+            arms,
+            default,
+            span,
+        } => crate::parser::ast::AstStmt::Select {
             arms: arms.clone(),
             default: default.clone(),
             span: *span,
@@ -1708,7 +2082,9 @@ fn substitute_macro_stmt(stmt: &crate::parser::ast::AstStmt, params: &[String], 
 /// Keeps iterating until no more MacroCall nodes remain (handles nested macros).
 pub(crate) fn expand_macros(ast: &mut AstModule) {
     // Build macro lookup table
-    let macros: std::collections::HashMap<String, &AstMacroDef> = ast.macros.iter()
+    let macros: std::collections::HashMap<String, &AstMacroDef> = ast
+        .macros
+        .iter()
         .map(|m| (m.name.name.clone(), m))
         .collect();
 
@@ -1716,7 +2092,10 @@ pub(crate) fn expand_macros(ast: &mut AstModule) {
         return;
     }
 
-    fn expand_in_expr(expr: &mut AstExpr, macros: &std::collections::HashMap<String, &AstMacroDef>) {
+    fn expand_in_expr(
+        expr: &mut AstExpr,
+        macros: &std::collections::HashMap<String, &AstMacroDef>,
+    ) {
         match expr {
             AstExpr::MacroCall { name, args, .. } => {
                 if let Some(macro_def) = macros.get(&name.name) {
@@ -1736,16 +2115,24 @@ pub(crate) fn expand_macros(ast: &mut AstModule) {
         }
     }
 
-    fn expand_in_expr_recurse(expr: &mut AstExpr, macros: &std::collections::HashMap<String, &AstMacroDef>) {
+    fn expand_in_expr_recurse(
+        expr: &mut AstExpr,
+        macros: &std::collections::HashMap<String, &AstMacroDef>,
+    ) {
         match expr {
-            AstExpr::Ident(_) | AstExpr::IntLit { .. } | AstExpr::FloatLit { .. }
-            | AstExpr::BoolLit { .. } | AstExpr::StringLit { .. } => {}
+            AstExpr::Ident(_)
+            | AstExpr::IntLit { .. }
+            | AstExpr::FloatLit { .. }
+            | AstExpr::BoolLit { .. }
+            | AstExpr::StringLit { .. } => {}
             AstExpr::BinOp { lhs, rhs, .. } => {
                 expand_in_expr(lhs, macros);
                 expand_in_expr(rhs, macros);
             }
-            AstExpr::UnaryOp { expr: e, .. } | AstExpr::Cast { expr: e, .. }
-            | AstExpr::Await { expr: e, .. } | AstExpr::Try { expr: e, .. } => {
+            AstExpr::UnaryOp { expr: e, .. }
+            | AstExpr::Cast { expr: e, .. }
+            | AstExpr::Await { expr: e, .. }
+            | AstExpr::Try { expr: e, .. } => {
                 expand_in_expr(e, macros);
             }
             AstExpr::Call { args, .. } | AstExpr::Tuple { elements: args, .. } => {
@@ -1759,7 +2146,12 @@ pub(crate) fn expand_macros(ast: &mut AstModule) {
                     expand_in_expr(a, macros);
                 }
             }
-            AstExpr::If { cond, then_block, else_block, .. } => {
+            AstExpr::If {
+                cond,
+                then_block,
+                else_block,
+                ..
+            } => {
                 expand_in_expr(cond, macros);
                 for s in then_block.stmts.iter_mut() {
                     expand_in_stmt(s, macros);
@@ -1801,7 +2193,9 @@ pub(crate) fn expand_macros(ast: &mut AstModule) {
             AstExpr::FieldAccess { base, .. } | AstExpr::TupleIndex { base, .. } => {
                 expand_in_expr(base, macros);
             }
-            AstExpr::When { scrutinee, arms, .. } => {
+            AstExpr::When {
+                scrutinee, arms, ..
+            } => {
                 expand_in_expr(scrutinee, macros);
                 for arm in arms.iter_mut() {
                     if let Some(g) = &mut arm.guard {
@@ -1818,7 +2212,9 @@ pub(crate) fn expand_macros(ast: &mut AstModule) {
             AstExpr::Lambda { body, .. } => {
                 expand_in_expr(body, macros);
             }
-            AstExpr::NullCoal { expr: e, default, .. } => {
+            AstExpr::NullCoal {
+                expr: e, default, ..
+            } => {
                 expand_in_expr(e, macros);
                 expand_in_expr(default, macros);
             }
@@ -1842,8 +2238,10 @@ pub(crate) fn expand_macros(ast: &mut AstModule) {
                     expand_in_expr(&mut arm.body, macros);
                 }
             }
-            AstExpr::Ref { expr: e, .. } | AstExpr::RefMut { expr: e, .. }
-            | AstExpr::Deref { expr: e, .. } | AstExpr::Move { expr: e, .. } => {
+            AstExpr::Ref { expr: e, .. }
+            | AstExpr::RefMut { expr: e, .. }
+            | AstExpr::Deref { expr: e, .. }
+            | AstExpr::Move { expr: e, .. } => {
                 expand_in_expr(e, macros);
             }
             AstExpr::Unsafe { body, .. } => {
@@ -1852,7 +2250,9 @@ pub(crate) fn expand_macros(ast: &mut AstModule) {
             AstExpr::Splat { expr: e, .. } => {
                 expand_in_expr(e, macros);
             }
-            AstExpr::TryCatch { body, catch_body, .. } => {
+            AstExpr::TryCatch {
+                body, catch_body, ..
+            } => {
                 expand_in_expr(body, macros);
                 expand_in_expr(catch_body, macros);
             }
@@ -1867,25 +2267,43 @@ pub(crate) fn expand_macros(ast: &mut AstModule) {
         }
     }
 
-    fn expand_in_stmt(stmt: &mut crate::parser::ast::AstStmt, macros: &std::collections::HashMap<String, &AstMacroDef>) {
+    fn expand_in_stmt(
+        stmt: &mut crate::parser::ast::AstStmt,
+        macros: &std::collections::HashMap<String, &AstMacroDef>,
+    ) {
         match stmt {
             crate::parser::ast::AstStmt::Let { init, .. } => expand_in_expr(init, macros),
             crate::parser::ast::AstStmt::Expr(expr) => expand_in_expr(expr, macros),
             crate::parser::ast::AstStmt::While { cond, body, .. } => {
                 expand_in_expr(cond, macros);
-                for s in body.stmts.iter_mut() { expand_in_stmt(s, macros); }
-                if let Some(t) = &mut body.tail { expand_in_expr(t, macros); }
+                for s in body.stmts.iter_mut() {
+                    expand_in_stmt(s, macros);
+                }
+                if let Some(t) = &mut body.tail {
+                    expand_in_expr(t, macros);
+                }
             }
             crate::parser::ast::AstStmt::Loop { body, .. } => {
-                for s in body.stmts.iter_mut() { expand_in_stmt(s, macros); }
-                if let Some(t) = &mut body.tail { expand_in_expr(t, macros); }
+                for s in body.stmts.iter_mut() {
+                    expand_in_stmt(s, macros);
+                }
+                if let Some(t) = &mut body.tail {
+                    expand_in_expr(t, macros);
+                }
             }
-            crate::parser::ast::AstStmt::Break { .. } | crate::parser::ast::AstStmt::Continue { .. } => {}
-            crate::parser::ast::AstStmt::ForRange { start, end, body, .. } => {
+            crate::parser::ast::AstStmt::Break { .. }
+            | crate::parser::ast::AstStmt::Continue { .. } => {}
+            crate::parser::ast::AstStmt::ForRange {
+                start, end, body, ..
+            } => {
                 expand_in_expr(start, macros);
                 expand_in_expr(end, macros);
-                for s in body.stmts.iter_mut() { expand_in_stmt(s, macros); }
-                if let Some(t) = &mut body.tail { expand_in_expr(t, macros); }
+                for s in body.stmts.iter_mut() {
+                    expand_in_stmt(s, macros);
+                }
+                if let Some(t) = &mut body.tail {
+                    expand_in_expr(t, macros);
+                }
             }
             crate::parser::ast::AstStmt::Assign { target, value, .. } => {
                 expand_in_expr(target, macros);
@@ -1893,37 +2311,65 @@ pub(crate) fn expand_macros(ast: &mut AstModule) {
             }
             crate::parser::ast::AstStmt::LetTuple { init, .. } => expand_in_expr(init, macros),
             crate::parser::ast::AstStmt::Return { value, .. } => {
-                if let Some(v) = value { expand_in_expr(v, macros); }
+                if let Some(v) = value {
+                    expand_in_expr(v, macros);
+                }
             }
             crate::parser::ast::AstStmt::Spawn { body, group, .. } => {
-                if let Some(g) = group { expand_in_expr(g, macros); }
-                for s in body.iter_mut() { expand_in_stmt(s, macros); }
+                if let Some(g) = group {
+                    expand_in_expr(g, macros);
+                }
+                for s in body.iter_mut() {
+                    expand_in_stmt(s, macros);
+                }
             }
-            crate::parser::ast::AstStmt::ParFor { start, end, body, .. } => {
+            crate::parser::ast::AstStmt::ParFor {
+                start, end, body, ..
+            } => {
                 expand_in_expr(start, macros);
                 expand_in_expr(end, macros);
-                for s in body.stmts.iter_mut() { expand_in_stmt(s, macros); }
-                if let Some(t) = &mut body.tail { expand_in_expr(t, macros); }
+                for s in body.stmts.iter_mut() {
+                    expand_in_stmt(s, macros);
+                }
+                if let Some(t) = &mut body.tail {
+                    expand_in_expr(t, macros);
+                }
             }
             crate::parser::ast::AstStmt::ForEach { iter, body, .. } => {
                 expand_in_expr(iter, macros);
-                for s in body.stmts.iter_mut() { expand_in_stmt(s, macros); }
-                if let Some(t) = &mut body.tail { expand_in_expr(t, macros); }
+                for s in body.stmts.iter_mut() {
+                    expand_in_stmt(s, macros);
+                }
+                if let Some(t) = &mut body.tail {
+                    expand_in_expr(t, macros);
+                }
             }
             crate::parser::ast::AstStmt::MaskStmt { body, .. } => {
-                for s in body.stmts.iter_mut() { expand_in_stmt(s, macros); }
-                if let Some(t) = &mut body.tail { expand_in_expr(t, macros); }
+                for s in body.stmts.iter_mut() {
+                    expand_in_stmt(s, macros);
+                }
+                if let Some(t) = &mut body.tail {
+                    expand_in_expr(t, macros);
+                }
             }
             crate::parser::ast::AstStmt::HandleStmt { expr, arms, .. } => {
                 expand_in_expr(expr, macros);
-                for arm in arms.iter_mut() { expand_in_expr(&mut arm.body, macros); }
+                for arm in arms.iter_mut() {
+                    expand_in_expr(&mut arm.body, macros);
+                }
             }
             crate::parser::ast::AstStmt::Defer { expr, .. } => expand_in_expr(expr, macros),
             crate::parser::ast::AstStmt::Select { arms, default, .. } => {
-                for arm in arms.iter_mut() { expand_in_expr(&mut arm.channel, macros); }
+                for arm in arms.iter_mut() {
+                    expand_in_expr(&mut arm.channel, macros);
+                }
                 if let Some(d) = default {
-                    for s in d.stmts.iter_mut() { expand_in_stmt(s, macros); }
-                    if let Some(t) = &mut d.tail { expand_in_expr(t, macros); }
+                    for s in d.stmts.iter_mut() {
+                        expand_in_stmt(s, macros);
+                    }
+                    if let Some(t) = &mut d.tail {
+                        expand_in_expr(t, macros);
+                    }
                 }
             }
             crate::parser::ast::AstStmt::Yield { expr, .. } => expand_in_expr(expr, macros),
@@ -2015,7 +2461,7 @@ fn flatten_inline_modules_for(m: &mut AstModuleDef) {
 
     // Build a module-level AstModule from this module's items for mangling.
     let mut mod_ast = AstModule {
-            private_items: std::collections::HashSet::new(),
+        private_items: std::collections::HashSet::new(),
         enums: std::mem::take(&mut m.enums),
         structs: std::mem::take(&mut m.structs),
         functions: std::mem::take(&mut m.functions),
@@ -2056,9 +2502,7 @@ fn resolve_inline_module_bring(ast: &mut AstModule) {
             crate::parser::ast::BringPath::File(p) => {
                 p.trim_end_matches(".iris").replace(['.', '-'], "_")
             }
-            crate::parser::ast::BringPath::Stdlib(name) => {
-                name.replace(['.', '-'], "_")
-            }
+            crate::parser::ast::BringPath::Stdlib(name) => name.replace(['.', '-'], "_"),
         };
         // Check if this bring references an inline module.
         if let Some(pos) = ast.modules.iter().position(|m| m.name.name == mod_name) {
@@ -2067,7 +2511,7 @@ fn resolve_inline_module_bring(ast: &mut AstModule) {
             flatten_inline_modules_for(&mut mod_def);
             // Mangle symbols with module name.
             let mut mod_ast = AstModule {
-            private_items: std::collections::HashSet::new(),
+                private_items: std::collections::HashSet::new(),
                 enums: std::mem::take(&mut mod_def.enums),
                 structs: std::mem::take(&mut mod_def.structs),
                 functions: std::mem::take(&mut mod_def.functions),

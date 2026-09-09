@@ -1,11 +1,11 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
-use crate::parser::ast::AstExpr;
 use crate::ir::block::{BlockId, IrBlock};
 use crate::ir::function::{FunctionId, IrFunction, Param, SpanTable};
 use crate::ir::instr::{InstrId, IrInstr};
 use crate::ir::types::{IrType, TraitMethodSig};
 use crate::ir::value::{BlockParam, ValueDef, ValueId};
+use crate::parser::ast::AstExpr;
 
 /// The top-level IR container.
 ///
@@ -21,8 +21,8 @@ pub struct IrExternFn {
     pub name: String,
     pub param_types: Vec<IrType>,
     pub ret_ty: IrType,
-    pub abi: Option<String>,       // e.g. Some("C") for C calling convention
-    pub link_lib: Option<String>,  // e.g. Some("m") for -lm
+    pub abi: Option<String>,      // e.g. Some("C") for C calling convention
+    pub link_lib: Option<String>, // e.g. Some("m") for -lm
 }
 
 #[derive(Debug, Default, Clone)]
@@ -49,6 +49,8 @@ pub struct IrModule {
     /// Default values for struct fields: struct_name → Vec<default_expr_or_none>.
     /// Indexed in parallel with `struct_defs[name]`.
     pub(crate) struct_defaults: HashMap<String, Vec<Option<AstExpr>>>,
+    /// Names of generic struct templates that require monomorphization.
+    pub(crate) generic_struct_names: HashSet<String>,
 }
 
 impl IrModule {
@@ -64,6 +66,7 @@ impl IrModule {
             trait_defs: HashMap::new(),
             trait_impl_methods: HashMap::new(),
             struct_defaults: HashMap::new(),
+            generic_struct_names: HashSet::new(),
         }
     }
 
@@ -132,11 +135,7 @@ impl IrModule {
     }
 
     /// Registers a trait definition (method signatures only — bodies live in impl fns).
-    pub fn add_trait_def(
-        &mut self,
-        name: impl Into<String>,
-        methods: Vec<TraitMethodSig>,
-    ) {
+    pub fn add_trait_def(&mut self, name: impl Into<String>, methods: Vec<TraitMethodSig>) {
         self.trait_defs.insert(name.into(), methods);
     }
 
@@ -326,6 +325,9 @@ impl IrFunctionBuilder {
                 .span_table
                 .entries
                 .insert((block_id.0, instr_idx), byte);
+            if let Some(res_id) = result {
+                self.func.span_table.value_spans.insert(res_id, byte);
+            }
         }
 
         self.func.blocks[block_id.0 as usize].instrs.push(instr);
@@ -350,12 +352,7 @@ impl IrFunctionBuilder {
     /// Needed because a branch's arguments are emitted before its sibling has
     /// been lowered, so whether a value carries an autodiff tape handle is not
     /// known until both arms exist. See known-issues #50.
-    pub(crate) fn append_br_arg(
-        &mut self,
-        block: BlockId,
-        target: BlockId,
-        arg: ValueId,
-    ) -> bool {
+    pub(crate) fn append_br_arg(&mut self, block: BlockId, target: BlockId, arg: ValueId) -> bool {
         let Some(b) = self.func.blocks.get_mut(block.0 as usize) else {
             return false;
         };

@@ -1,0 +1,16 @@
+/// Pass --strict-effects to check the declared effect rows.
+def apply(value : i64, operation : |i64 | -> i64 effect E) -> i64 effect E {
+    return operation(value)
+}
+def increment(value : i64) -> i64 {
+    return value + 1
+}
+def main() -> i64 effect io, alloc,
+throw {
+    val operation = |value : i64 |value + 1;
+    assert(apply(41, operation) == 42);
+    assert(apply(41, increment) == 42);
+    assert(increment(41) == 42);
+    println("effects: ok");
+    return 0
+}
