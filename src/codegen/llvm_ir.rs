@@ -3679,7 +3679,7 @@ fn emit_instr_ir(
                     )?;
                     writeln!(
                         out,
-                        "  {} = getelementptr inbounds [{} x {}], ptr %v{}, i64 0, i64 {}",
+                        "  {} = getelementptr [{} x {}], ptr %v{}, i64 0, i64 {}",
                         gep,
                         sz,
                         ety_s,
@@ -3740,7 +3740,7 @@ fn emit_instr_ir(
                     )?;
                     writeln!(
                         out,
-                        "  {} = getelementptr inbounds [{} x {}], ptr %v{}, i64 0, i64 {}",
+                        "  {} = getelementptr [{} x {}], ptr %v{}, i64 0, i64 {}",
                         gep,
                         sz,
                         ety_s,
