@@ -2,7 +2,7 @@
 
 choice Color { Red, Green, Blue }
 
-def test_guard() -> i64 {
+def guard_value() -> i64 {
     val x = some(5)
     when x {
         some(v) if v > 3 => 1,
@@ -11,7 +11,7 @@ def test_guard() -> i64 {
     }
 }
 
-def test_guard_else() -> i64 {
+def guard_else_value() -> i64 {
     val x = some(2)
     when x {
         some(v) if v > 3 => 1,
@@ -20,7 +20,7 @@ def test_guard_else() -> i64 {
     }
 }
 
-def test_guard_multiple() -> i64 {
+def guard_multiple_value() -> i64 {
     val x = some(10)
     when x {
         some(v) if v < 5 => 1,
@@ -30,7 +30,7 @@ def test_guard_multiple() -> i64 {
     }
 }
 
-def test_guard_enum() -> i64 {
+def guard_enum_value() -> i64 {
     val c = Color.Green
     when c {
         Color.Red => 1,
@@ -39,7 +39,7 @@ def test_guard_enum() -> i64 {
     }
 }
 
-def test_guard_false() -> i64 {
+def guard_false_value() -> i64 {
     val x = some(5)
     when x {
         some(v) if v > 10 => 1,
@@ -48,14 +48,39 @@ def test_guard_false() -> i64 {
     }
 }
 
+def test_guard() -> i64 {
+    assert(guard_value() == 1);
+    return 0
+}
+
+def test_guard_else() -> i64 {
+    assert(guard_else_value() == 2);
+    return 0
+}
+
+def test_guard_multiple() -> i64 {
+    assert(guard_multiple_value() == 2);
+    return 0
+}
+
+def test_guard_enum() -> i64 {
+    assert(guard_enum_value() == 2);
+    return 0
+}
+
+def test_guard_false() -> i64 {
+    assert(guard_false_value() == 2);
+    return 0
+}
+
 def main() -> i64 {
     // Each helper must select the arm its guard admits. The file summed all
     // five and checked nothing, so any arms totalling 9 would have passed.
-    assert(test_guard() == 1);           // guard true, first arm
-    assert(test_guard_else() == 2);      // guard false, falls to the next arm
-    assert(test_guard_multiple() == 2);  // second guard is the one that holds
-    assert(test_guard_enum() == 2);      // guard on an enum variant
-    assert(test_guard_false() == 2);     // guard false, binding arm instead
+    assert(test_guard() == 0);           // guard true, first arm
+    assert(test_guard_else() == 0);      // guard false, falls to the next arm
+    assert(test_guard_multiple() == 0);  // second guard is the one that holds
+    assert(test_guard_enum() == 0);      // guard on an enum variant
+    assert(test_guard_false() == 0);     // guard false, binding arm instead
     println("pattern guards ok");
-    0
+    return 0
 }

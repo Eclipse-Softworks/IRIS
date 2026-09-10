@@ -1,11 +1,18 @@
 mod math {
-    val x: i64 = 42
+    pub def answer() -> i64 {
+        return 42
+    }
 }
 
-use math
+bring math
 
-def main() {
-    println(to_str(x))
+def test_module_bring() -> i64 {
+    assert(math__answer() == 42);
+    return 0
 }
 
-main()
+def main() -> i64 {
+    assert(test_module_bring() == 0);
+    println("simple module: ok");
+    return 0
+}

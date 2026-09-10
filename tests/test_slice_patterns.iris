@@ -6,7 +6,7 @@
 // return value anyway (known-issues #53), so every check silently passed.
 def check(b: bool) -> i64 { assert(b); 0 }
 
-def test_exact_match() -> i64 {
+def exact_match_value() -> i64 {
     val lst: list<i64> = list();
     list_push(lst, 1);
     list_push(lst, 2);
@@ -18,7 +18,7 @@ def test_exact_match() -> i64 {
     result
 }
 
-def test_rest_binding() -> i64 {
+def rest_binding_value() -> i64 {
     val lst: list<i64> = list();
     list_push(lst, 1);
     list_push(lst, 2);
@@ -32,7 +32,7 @@ def test_rest_binding() -> i64 {
     result
 }
 
-def test_mixed_match() -> i64 {
+def mixed_match_value() -> i64 {
     val lst: list<i64> = list();
     list_push(lst, 1);
     list_push(lst, 2);
@@ -45,7 +45,7 @@ def test_mixed_match() -> i64 {
     result
 }
 
-def test_wildcard_elements() -> i64 {
+def wildcard_elements_value() -> i64 {
     val lst: list<i64> = list();
     list_push(lst, 1);
     list_push(lst, 2);
@@ -58,7 +58,7 @@ def test_wildcard_elements() -> i64 {
     result
 }
 
-def test_exact_no_match_longer() -> i64 {
+def exact_no_match_longer_value() -> i64 {
     val lst: list<i64> = list();
     list_push(lst, 1);
     list_push(lst, 2);
@@ -71,7 +71,7 @@ def test_exact_no_match_longer() -> i64 {
     result
 }
 
-def test_empty_list() -> i64 {
+def empty_list_value() -> i64 {
     val lst: list<i64> = list();
     val result = when lst {
         [] => 0,
@@ -81,7 +81,7 @@ def test_empty_list() -> i64 {
     result
 }
 
-def test_bind_prefix_elements() -> i64 {
+def bind_prefix_elements_value() -> i64 {
     val lst: list<i64> = list();
     list_push(lst, 3);
     list_push(lst, 4);
@@ -93,18 +93,26 @@ def test_bind_prefix_elements() -> i64 {
     result
 }
 
+def test_exact_match() -> i64 { assert(exact_match_value() == 1); return 0 }
+def test_rest_binding() -> i64 { assert(rest_binding_value() == 3); return 0 }
+def test_mixed_match() -> i64 { assert(mixed_match_value() == 2); return 0 }
+def test_wildcard_elements() -> i64 { assert(wildcard_elements_value() == 3); return 0 }
+def test_exact_no_match_longer() -> i64 { assert(exact_no_match_longer_value() == 0); return 0 }
+def test_empty_list() -> i64 { assert(empty_list_value() == 0); return 0 }
+def test_bind_prefix_elements() -> i64 { assert(bind_prefix_elements_value() == 7); return 0 }
+
 def main() -> i64 {
     // Each helper returns the arm its list matched. main used to return the
     // *sum* (16), which meant nothing and -- until #53 -- was discarded by
     // `--emit eval`, so the file could not fail whatever the arms did.
-    assert(test_exact_match() == 1);
-    assert(test_rest_binding() == 3);
-    assert(test_mixed_match() == 2);
-    assert(test_wildcard_elements() == 3);
+    assert(test_exact_match() == 0);
+    assert(test_rest_binding() == 0);
+    assert(test_mixed_match() == 0);
+    assert(test_wildcard_elements() == 0);
     // A list longer than the exact pattern must NOT match it.
     assert(test_exact_no_match_longer() == 0);
     assert(test_empty_list() == 0);
-    assert(test_bind_prefix_elements() == 7);
+    assert(test_bind_prefix_elements() == 0);
     println("slice patterns ok");
-    0
+    return 0
 }

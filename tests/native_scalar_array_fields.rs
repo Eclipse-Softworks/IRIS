@@ -15,10 +15,7 @@ def main() -> i64 {
 "#;
     let llvm = compile(source, "record_array_native", EmitKind::LlvmComplete).unwrap();
     assert!(!llvm.contains("= call ptr @iris_array_load("), "{llvm}");
-    assert!(
-        llvm.contains("call void @iris_bounds_check_abort("),
-        "{llvm}"
-    );
+    assert!(llvm.contains("call void @iris_bounds_check("), "{llvm}");
     let module = compile_to_module(source, "record_array_native").unwrap();
     execute_binary_for_eval(&module).expect("record scalar array must execute natively");
 }

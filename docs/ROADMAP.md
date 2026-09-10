@@ -39,7 +39,7 @@ line through the stable 1.0 release and beyond.
   exists for autonomous hosts. It intentionally carries no behavioral safety
   claim; governed `iris evolve` remains the recommended public path.
 
-Note: Some items below are marked as completed on `main` but are not part of
+Note: Some items below are marked as completed on `master` but are not part of
 the latest tagged release yet.
 
 ---

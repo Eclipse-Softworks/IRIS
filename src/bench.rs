@@ -3,13 +3,13 @@
 //! `iris bench <file.iris>` compiles and executes a file multiple times,
 //! reporting statistics: min, max, mean, median, and standard deviation.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::Instant;
 
 /// Number of warm-up iterations before measurement.
 const WARMUP_ITERS: usize = 3;
 /// Default number of measured iterations.
-const DEFAULT_ITERS: usize = 10;
+pub(crate) const DEFAULT_ITERS: usize = 10;
 
 /// Single benchmark result for one iteration.
 #[derive(Debug, Clone)]
@@ -193,50 +193,14 @@ fn run_single(source: &str, module_name: &str) -> Result<Sample, String> {
 // CLI dispatcher
 // ---------------------------------------------------------------------------
 
-/// Parse `iris bench [options] <file.iris>` and run.
-pub fn run_bench_command(args: &[String]) -> Result<(), String> {
-    let mut file: Option<PathBuf> = None;
-    let mut iterations = DEFAULT_ITERS;
-    let mut i = 2; // skip "iris bench"
-    while i < args.len() {
-        match args[i].as_str() {
-            "--iterations" | "-n" => {
-                i += 1;
-                iterations = args
-                    .get(i)
-                    .ok_or("--iterations requires a number")?
-                    .parse::<usize>()
-                    .map_err(|_| "--iterations: not a valid number")?;
-            }
-            "--help" | "-h" => {
-                eprintln!("{}", bench_help_text());
-                return Ok(());
-            }
-            arg if !arg.starts_with('-') => {
-                file = Some(PathBuf::from(arg));
-            }
-            other => return Err(format!("unknown bench option: '{}'", other)),
-        }
-        i += 1;
+/// Run a benchmark after clap has validated the command-line arguments.
+pub fn run_bench_command(file: &Path, iterations: usize) -> Result<(), String> {
+    if iterations == 0 {
+        return Err("--iterations must be greater than zero".to_owned());
     }
-
-    let file = file.ok_or("usage: iris bench <file.iris>")?;
     if !file.exists() {
         return Err(format!("file not found: {}", file.display()));
     }
 
-    bench_file(&file, iterations)
-}
-
-fn bench_help_text() -> &'static str {
-    "IRIS Benchmark Runner\n\
-     \n\
-     Usage: iris bench [options] <file.iris>\n\
-     \n\
-     Options:\n\
-       -n, --iterations <N>  Number of measured iterations (default: 10)\n\
-       --help, -h             Show this help\n\
-     \n\
-     The benchmark measures parse, compile, and native execution times separately,\n\
-     reporting min/max/mean/median/stddev for each phase.\n"
+    bench_file(file, iterations)
 }

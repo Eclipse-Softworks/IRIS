@@ -1,6 +1,6 @@
 //! The `.iris` corpus: executed, and gated on asserting its results.
 //!
-//! Two problems, both named in `CLAUDE.md`, both addressed here.
+//! Two release-gate problems are addressed here.
 //!
 //! **Nothing globbed `tests/*.iris`.** The corpus was never executed by
 //! `cargo test`, so a file could rot indefinitely with no run noticing.
@@ -10,7 +10,7 @@
 //! `test_pattern_guards`), plus a file that passes natively while failing
 //! interpreted. These tests drive the real CLI, so codegen is exercised.
 //!
-//! **Most files assert nothing.** 0 of 139 print results without
+//! **Most files assert nothing.** 0 of 155 print results without
 //! checking them, so they pass whenever the program compiles and exits 0,
 //! regardless of whether the output is right (known-issues #4). Converting them
 //! is mechanical but has to be done by *running* each file and reading its real
@@ -57,41 +57,10 @@ const SUPPORT_MODULES: &[(&str, &str)] = &[
 
 /// Files that do not currently run, each with why. A debt register, not a
 /// permission slip: every entry names a cause, and the list should only shrink.
-const KNOWN_BROKEN: &[(&str, &str)] = &[
-    (
-        "test_doc_comments.iris",
-        "no zero-argument function, so there is nothing to evaluate",
-    ),
-    (
-        "test_features_11_14.iris",
-        "parse error: uses syntax the compiler does not accept",
-    ),
-    (
-        "test_generic_set.iris",
-        "a type param only in the return type needs an annotation -- #14",
-    ),
-    (
-        "test_mod_min.iris",
-        "parse error: uses syntax the compiler does not accept",
-    ),
-    (
-        "test_mod_simple.iris",
-        "parse error: uses syntax the compiler does not accept",
-    ),
-    ("test_nursery.iris", "print() arity"),
-    (
-        "test_par_map.iris",
-        "parse error: uses syntax the compiler does not accept",
-    ),
-    (
-        "test_refine_fail.iris",
-        "parse error: fails at parse, not at the refinement it is named for",
-    ),
-    (
-        "test_struct_update_simple.iris",
-        "parse error: uses syntax the compiler does not accept",
-    ),
-];
+const KNOWN_BROKEN: &[(&str, &str)] = &[(
+    "test_doc_comments.iris",
+    "no zero-argument function, so there is nothing to evaluate",
+)];
 
 /// Files that do not yet assert their results. Shrinking; see #4.
 const NEEDS_ASSERTIONS: &[&str] = &[];

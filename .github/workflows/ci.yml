@@ -51,6 +51,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install MinGW UCRT64 sysroot (Windows x86_64)
+        if: runner.os == 'Windows' && matrix.arch == 'x86_64'
+        shell: bash
+        run: |
+          C:/msys64/usr/bin/pacman.exe -S --noconfirm --needed \
+            mingw-w64-ucrt-x86_64-gcc
+
       - name: Install system dependencies (Linux)
         if: runner.os == 'Linux'
         run: |

@@ -84,6 +84,39 @@ This project follows [Keep a Changelog](https://keepachangelog.com/) conventions
 
 ### Fixed
 
+- Native `par_map` now carries the list element/result types through lowering
+  and calls IRIS closures through generated ABI adapters. Results retain input
+  order, and worker-creation failure falls back to safe inline execution.
+- Channel `select` now preserves the selected channel's element type instead of
+  leaking an unresolved inference type into native code.
+- Nested native task-group captures use the correct runtime boxing helper, and
+  Windows timed channel receive now converts the system clock epoch correctly.
+- The source test runner now supports checked compile-fail directives and
+  diagnostic substrings. Legacy result-returning fixtures were converted to
+  zero-status assertion wrappers, and the stale syntax/known-broken backlog was
+  reduced to the single import-only documentation fixture.
+- LSP integration tests now distinguish error diagnostics from unused-code
+  hints, preserving dead-code highlighting without classifying valid programs
+  as compiler failures.
+- `iris test` now preserves a program's own `main` under an internal symbol
+  when running any other `test_*` function, preventing duplicate LLVM `main`
+  definitions. Named native eval entries use the same collision-free wrapper,
+  and native test processes now use the configured execution timeout instead
+  of being able to freeze the full suite indefinitely.
+- `iris bench <file> [-n N]` now reaches the benchmark runner instead of
+  evaluating the file once, restoring numeric performance-gate output.
+- Public compiler-to-module APIs now run lowering and optimization on the same
+  guaranteed 64 MiB stack as CLI compilation, removing Linux/macOS test-thread
+  stack overflows for larger integration programs.
+- Parser recovery treats an empty token slice as EOF instead of indexing past
+  the stream, closing the fuzz-discovered panic.
+- UDP numeric-address validation no longer depends on the non-portable
+  `INADDR_NONE` macro, allowing the C runtime to compile on current macOS SDKs.
+- Scalar fixed-array checks now call a checked runtime boundary without
+  splitting the surrounding IR block. This preserves valid LLVM phi
+  predecessors for array access inside `while` and `for` loops.
+- Windows CI installs the UCRT64 sysroot used by the required direct MinGW
+  `ld.lld` regression test.
 - Parser recovery now guarantees forward progress at every module nesting
   level, so an unexpected declaration separator or closing brace reports a
   diagnostic instead of hanging the compiler or language server.

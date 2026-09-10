@@ -21,12 +21,12 @@ def main() -> i64 {
     val int_result = test_int_set()
     if int_result != 0 { return int_result }
 
-    0
+    return 0
 }
 
 def test_str_set() -> i64 {
     // Test 1: Set<str> basic operations
-    var s = set.set_new("a")
+    var s = set.set_of("a")
     s = set.set_add(s, "a");
     s = set.set_add(s, "b");
     s = set.set_add(s, "c");
@@ -45,10 +45,10 @@ def test_str_set() -> i64 {
     assert(has_b == false);
 
     // Test 3: Set<str> union, intersection, difference
-    var a = set.set_new("x")
+    var a = set.set_of("x")
     a = set.set_add(a, "y");
     a = set.set_add(a, "z");
-    var b = set.set_new("y")
+    var b = set.set_of("y")
     b = set.set_add(b, "w");
     val union = set.set_union(a, b)
     val union_len = set.set_len(union)
@@ -70,12 +70,12 @@ def test_str_set() -> i64 {
     val dedup_len = set.set_len(s7)
     assert(dedup_len == 3);
 
-    0
+    return 0
 }
 
 def test_int_set() -> i64 {
     // Test 5: Set<i64> basic operations
-    var s = set.set_new(10)
+    var s = set.set_of(10)
     s = set.set_add(s, 20);
     s = set.set_add(s, 30);
     s = set.set_add(s, 20);
@@ -87,10 +87,10 @@ def test_int_set() -> i64 {
     assert(has99 == false);
 
     // Test 6: Set<i64> union, intersection, difference
-    var ia = set.set_new(1)
+    var ia = set.set_of(1)
     ia = set.set_add(ia, 2);
     ia = set.set_add(ia, 3);
-    var ib = set.set_new(2)
+    var ib = set.set_of(2)
     ib = set.set_add(ib, 3);
     ib = set.set_add(ib, 4);
     val iunion = set.set_union(ia, ib)
@@ -104,9 +104,9 @@ def test_int_set() -> i64 {
     assert(idiff_len == 1);
 
     // Test 7: Set<i64> is_subset, is_superset
-    var sub_a = set.set_new(1)
+    var sub_a = set.set_of(1)
     sub_a = set.set_add(sub_a, 2);
-    var sub_b = set.set_new(1)
+    var sub_b = set.set_of(1)
     sub_b = set.set_add(sub_b, 2);
     sub_b = set.set_add(sub_b, 3);
     val is_sub = set.set_is_subset(sub_a, sub_b)
@@ -117,17 +117,17 @@ def test_int_set() -> i64 {
     assert(not_sub == false);
 
     // Test 8: Set<i64> symmetric_difference, is_disjoint
-    var sd_a = set.set_new(1)
+    var sd_a = set.set_of(1)
     sd_a = set.set_add(sd_a, 2);
-    var sd_b = set.set_new(2)
+    var sd_b = set.set_of(2)
     sd_b = set.set_add(sd_b, 3);
     val sym_diff = set.set_symmetric_difference(sd_a, sd_b)
     val sym_len = set.set_len(sym_diff)
     assert(sym_len == 2);
 
-    var dis_a = set.set_new(1)
+    var dis_a = set.set_of(1)
     dis_a = set.set_add(dis_a, 2);
-    var dis_b = set.set_new(3)
+    var dis_b = set.set_of(3)
     dis_b = set.set_add(dis_b, 4);
     val is_disjoint = set.set_is_disjoint(dis_a, dis_b)
     assert(is_disjoint == true);
@@ -141,5 +141,5 @@ def test_int_set() -> i64 {
     val ie2 = set.set_is_empty(s)
     assert(ie2 == false);
 
-    0
+    return 0
 }

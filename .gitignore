@@ -80,6 +80,19 @@ vscode-iris/*.vsix
 # AI / agent state
 # ────────────────────────────────────────────────────────────
 .claude/
+/.agents/
+/.antigravity/
+/AGENTS.md
+/CLAUDE.md
+
+# Internal engineering notes are kept locally, not shipped in the public tree.
+/AUDIT.md
+/docs/language-hardening-plan.md
+/docs/rc1-release-plan.md
+
+# Generated TeX bookkeeping (the public `.tex` source remains tracked).
+*.aux
+*.toc
 
 # ────────────────────────────────────────────────────────────
 # Test output

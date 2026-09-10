@@ -318,7 +318,15 @@ pub(crate) fn run_native_test_capture(
     )?;
     let run_path = std::fs::canonicalize(&bin_path).unwrap_or(bin_path.clone());
     let _exe_guard = TempExeGuard(run_path.clone());
-    let output = Command::new(&run_path).output().map_err(CodegenError::Io)?;
+    let timeout_secs = native_timeout_secs();
+    let output = run_with_timeout(&run_path, std::time::Duration::from_secs(timeout_secs)).map_err(
+        |_| CodegenError::Unsupported {
+            backend: "native-test".into(),
+            detail: format!(
+                "native test timed out after {timeout_secs}s; raise IRIS_NATIVE_TIMEOUT to allow a longer test"
+            ),
+        },
+    )?;
     Ok(output)
 }
 
@@ -1783,6 +1791,7 @@ pub(crate) fn msys2_gcc_lib() -> Option<String> {
     }
 }
 
+#[cfg(any(target_os = "windows", test))]
 fn mingw_gcc_version_key(path: &Path) -> Vec<u32> {
     path.file_name()
         .and_then(|name| name.to_str())

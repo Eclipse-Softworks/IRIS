@@ -8365,6 +8365,67 @@ impl<'m> Lowerer<'m> {
                 return Ok((result, ret_ty));
             }
 
+            // `par_map(list<T>, fn(T) -> U)` preserves both generic element
+            // types in IR. The old builtin table returned `list<Infer>`, so
+            // native code could not generate a correctly typed callback
+            // adapter and consumers guessed at the result ABI.
+            if dispatch_name == "par_map" {
+                if args.len() != 2 {
+                    return Err(LowerError::Unsupported {
+                        detail: "par_map() requires a list and a mapping function".into(),
+                        span,
+                    });
+                }
+                let (list, list_ty) = self.lower_expr(&args[0])?;
+                let (mapper, mapper_ty) = self.lower_expr(&args[1])?;
+                let input_ty = match &list_ty {
+                    IrType::List(elem) => (**elem).clone(),
+                    other => {
+                        return Err(LowerError::TypeMismatch {
+                            expected: "list".into(),
+                            found: format!("{}", other),
+                            span,
+                        })
+                    }
+                };
+                let output_ty = match &mapper_ty {
+                    IrType::Fn { params, ret } => {
+                        if let Some(parameter_ty) = params.last() {
+                            if !matches!(input_ty, IrType::Infer)
+                                && !matches!(parameter_ty, IrType::Infer)
+                                && parameter_ty != &input_ty
+                            {
+                                return Err(LowerError::TypeMismatch {
+                                    expected: format!("fn({}) -> _", input_ty),
+                                    found: format!("{}", mapper_ty),
+                                    span,
+                                });
+                            }
+                        }
+                        (**ret).clone()
+                    }
+                    other => {
+                        return Err(LowerError::TypeMismatch {
+                            expected: format!("fn({}) -> _", input_ty),
+                            found: format!("{}", other),
+                            span,
+                        })
+                    }
+                };
+                let ret_ty = IrType::List(Box::new(output_ty));
+                let result = self.builder.fresh_value();
+                self.builder.push_instr(
+                    IrInstr::BuiltinCall {
+                        result,
+                        name: "par_map".to_owned(),
+                        args: vec![list, mapper],
+                        result_ty: ret_ty.clone(),
+                    },
+                    Some(ret_ty.clone()),
+                );
+                return Ok((result, ret_ty));
+            }
+
             if let Some((rt_name, ret_ty)) = builtin_info {
                 let mut arg_vals = Vec::with_capacity(args.len());
                 for arg in args {
@@ -17948,13 +18009,15 @@ impl<'m> Lowerer<'m> {
 
                 // -- loop_bb: call select(ch0, ch1, ...)
                 self.builder.set_current_block(loop_bb);
-                let channels: Vec<ValueId> = arms
+                let channels: Vec<(ValueId, IrType)> = arms
                     .iter()
                     .map(|arm| {
-                        let (v, _) = self.lower_expr(&arm.channel)?;
-                        Ok(v)
+                        let (value, ty) = self.lower_expr(&arm.channel)?;
+                        Ok((value, ty))
                     })
                     .collect::<Result<Vec<_>, LowerError>>()?;
+                let channel_values: Vec<ValueId> =
+                    channels.iter().map(|(value, _)| *value).collect();
 
                 // Emit select(ch0, ch1, ...) builtin call
                 let select_result = self.builder.fresh_value();
@@ -17962,7 +18025,7 @@ impl<'m> Lowerer<'m> {
                     IrInstr::BuiltinCall {
                         result: select_result,
                         name: "select".to_string(),
-                        args: channels.clone(),
+                        args: channel_values,
                         result_ty: IrType::Scalar(DType::I64),
                     },
                     Some(IrType::Scalar(DType::I64)),
@@ -18014,18 +18077,27 @@ impl<'m> Lowerer<'m> {
                     // arm_body_bb: recv from channel and execute body
                     self.builder.set_current_block(arm_body_bb);
                     self.scope = outer_scope.clone();
+                    let (channel, channel_ty) = &channels[i];
+                    let elem_ty = self
+                        .chan_elem_types
+                        .get(channel)
+                        .cloned()
+                        .unwrap_or_else(|| match channel_ty {
+                            IrType::Chan(elem) => (**elem).clone(),
+                            _ => IrType::Infer,
+                        });
                     let recv_result = self.builder.fresh_value();
                     self.builder.push_instr(
                         IrInstr::ChanRecv {
                             result: recv_result,
-                            chan: channels[i],
-                            elem_ty: IrType::Infer,
+                            chan: *channel,
+                            elem_ty: elem_ty.clone(),
                         },
-                        Some(IrType::Infer),
+                        Some(elem_ty.clone()),
                     );
                     // Bind the received value
                     self.scope
-                        .insert(arm.binding.clone(), (recv_result, IrType::Infer));
+                        .insert(arm.binding.clone(), (recv_result, elem_ty));
                     for stmt in &arm.body.stmts {
                         self.lower_stmt(stmt)?;
                     }

@@ -1,49 +1,47 @@
-/// Test: Feature 11-14 (pub use, doc comments, refinement types, HKT)
+/// Documentation, type-alias, and higher-kinded-type coverage.
+///
+/// Refinement `where` clauses are not part of the RC1 grammar, so this public
+/// test exercises the supported type surface instead of preserving stale
+/// syntax that could never compile.
 
-// ---- Feature 12: Doc Comments ----
-/// This function has a doc comment.
-/// It should appear in LSP hover tooltips.
-def doc_test() -> i64 {
-    42
+type Positive = i64
+
+record Box[T] {
+    item: T
 }
 
-// ---- Feature 13: Refinement Types ----
-type Positive = i64 where x > 0
-type NonNeg = i64 where x >= 0
-type SmallInt = i64 where x > 0 and x < 100
-
-/// A documented function using refinement types.
-def test_refinement() -> i64 {
-    val a: Positive = 10;
-    val b: NonNeg = 0;
-    val c: SmallInt = 50;
-    println("refinement types PASSED");
-    a + b + c
+record Wrapper[F[_], A] {
+    value: F<A>
 }
 
-// ---- Feature 14: Higher-Kinded Types ----
-record Pair[T, U] {
-    first: T,
-    second: U,
+/// A documented function whose comment is available to docs and LSP hover.
+def documented_value() -> i64 {
+    return 42
 }
 
-/// F[T] HKT syntax in generic parameter.
-def apply_wrap[F[T], T](x: T) -> F<T> {
-    x
+def test_documented_function() -> i64 {
+    assert(documented_value() == 42);
+    return 0
 }
 
-def test_hkt() -> i64 {
-    val p: Pair<i64, str> = Pair { first: 10, second: "hello" };
-    println("HKT PASSED");
-    p.first
+def test_type_alias() -> i64 {
+    val value: Positive = 10;
+    assert(value == 10);
+    return 0
 }
 
-// ---- Feature 11: pub use re-exports ----
-// pub bring std.string;  // syntax accepted (re-exports string module)
-// pub bring "utils.iris"; // syntax accepted
+def test_higher_kinded_wrapper() -> i64 {
+    val wrapped: Wrapper<Box, i64> = Wrapper {
+        value: Box { item: 100 }
+    };
+    assert(wrapped.value.item == 100);
+    return 0
+}
 
 def main() -> i64 {
-    test_refinement();
-    test_hkt();
-    0
+    assert(test_documented_function() == 0);
+    assert(test_type_alias() == 0);
+    assert(test_higher_kinded_wrapper() == 0);
+    println("docs, aliases, and HKT: ok");
+    return 0
 }

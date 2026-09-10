@@ -378,8 +378,8 @@ fn run() {
                 process::exit(1);
             }
         }
-        Ok(ParseArgsResult::Bench) => {
-            if let Err(e) = iris::bench::run_bench_command(&args) {
+        Ok(ParseArgsResult::Bench { file, iterations }) => {
+            if let Err(e) = iris::bench::run_bench_command(&file, iterations) {
                 eprintln!("error: {}", e);
                 process::exit(1);
             }

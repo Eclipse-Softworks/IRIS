@@ -436,6 +436,10 @@ void iris_bounds_check_abort(int64_t index, int64_t size) {
     abort();
 }
 
+void iris_bounds_check(int64_t index, int64_t size) {
+    if (index < 0 || index >= size) iris_bounds_check_abort(index, size);
+}
+
 /* iris_panic_at — like iris_panic but includes a compile-time source location
  * string (e.g. "in function 'foo'") embedded by the IRIS LLVM codegen. */
 void iris_panic_at(const char* msg, const char* location) {
@@ -2168,39 +2172,43 @@ void iris_par_for(void (*fn)(int64_t, void*), int64_t start, int64_t end, void* 
 }
 
 typedef struct {
-    void* (*fn)(IrisVal*);
+    IrisVal* (*invoke)(IrisVal*, IrisVal*);
+    IrisVal* closure;
     IrisVal* arg;
     IrisVal* result;
-    pthread_mutex_t* mu;
 } ParMapArg;
 
 static void* par_map_worker(void* arg) {
     ParMapArg* a = (ParMapArg*)arg;
-    a->result = a->fn(a->arg);
+    a->result = a->invoke(a->closure, a->arg);
     return NULL;
 }
 
-IrisList* iris_par_map(IrisList* list, void* (*fn)(IrisVal*)) {
+IrisList* iris_par_map(IrisList* list, IrisVal* closure,
+                       IrisVal* (*invoke)(IrisVal*, IrisVal*)) {
     int64_t n = iris_list_len(list);
     IrisList* results = iris_list_new();
     if (n <= 0) return results;
     pthread_t* threads = xmalloc(sizeof(pthread_t) * (size_t)n);
     ParMapArg* args = xmalloc(sizeof(ParMapArg) * (size_t)n);
-    /* Pre-size results list */
+    unsigned char* created = xmalloc((size_t)n);
     for (int64_t i = 0; i < n; i++) {
-        iris_list_push(results, iris_box_i64(0)); /* placeholder */
-    }
-    for (int64_t i = 0; i < n; i++) {
-        args[i].fn = fn;
+        args[i].invoke = invoke;
+        args[i].closure = closure;
         args[i].arg = iris_list_get(list, i);
         args[i].result = NULL;
-        pthread_create(&threads[i], NULL, par_map_worker, &args[i]);
+        if (pthread_create(&threads[i], NULL, par_map_worker, &args[i]) == 0) {
+            created[i] = 1;
+        } else {
+            created[i] = 0;
+            par_map_worker(&args[i]);
+        }
     }
     for (int64_t i = 0; i < n; i++) {
-        pthread_join(threads[i], NULL);
-        /* Replace placeholder at index i with actual result */
-        ((IrisVal**)results->data)[i] = args[i].result;
+        if (created[i]) pthread_join(threads[i], NULL);
+        iris_list_push(results, args[i].result);
     }
+    free(created);
     free(threads);
     free(args);
     return results;
@@ -4390,7 +4398,10 @@ void iris_udp_send(int64_t fd, const char* addr_port, int64_t data_len) {
     struct sockaddr_in dst = {0};
     dst.sin_family = AF_INET;
     dst.sin_port = htons(port);
-    if (inet_pton(AF_INET, host, &dst.sin_addr) != 1) dst.sin_addr.s_addr = INADDR_NONE;
+    if (inet_pton(AF_INET, host, &dst.sin_addr) != 1) {
+        free(p);
+        return;
+    }
     size_t dlen = data_len > 0 ? (size_t)data_len : strlen(data);
 #ifdef _WIN32
     sendto((SOCKET)fd, data, (int)dlen, 0, (struct sockaddr*)&dst, sizeof(dst));
@@ -8258,7 +8269,11 @@ IrisOption* iris_chan_recv_timeout(IrisChannel* c, int64_t timeout_ms) {
         ULARGE_INTEGER uli;
         uli.LowPart = ft.dwLowDateTime;
         uli.HighPart = ft.dwHighDateTime;
-        uint64_t ns_total = uli.QuadPart * 100 + (uint64_t)timeout_ms * 1000000;
+        /* FILETIME is measured from 1601; pthread absolute timeouts use the
+         * Unix epoch. Without this subtraction a millisecond timeout waits
+         * roughly 369 years. */
+        uint64_t unix_100ns = uli.QuadPart - 116444736000000000ULL;
+        uint64_t ns_total = unix_100ns * 100 + (uint64_t)timeout_ms * 1000000;
         ts.tv_sec = (time_t)(ns_total / 1000000000);
         ts.tv_nsec = (long)(ns_total % 1000000000);
 #else
@@ -8341,9 +8356,8 @@ IrisVal* iris_map_entries(IrisVal* map_val) {
     return iris_box_list(entries);
 }
 
-IrisVal* iris_recv_timeout(IrisVal* chan_val, int64_t timeout_ms) {
-    IrisChannel* c = iris_unbox_chan(chan_val);
-    IrisOption* opt = iris_chan_recv_timeout(c, timeout_ms);
+IrisVal* iris_recv_timeout(IrisChannel* chan, int64_t timeout_ms) {
+    IrisOption* opt = iris_chan_recv_timeout(chan, timeout_ms);
     return (IrisVal*)opt;
 }
 

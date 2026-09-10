@@ -141,6 +141,28 @@ struct FileResult {
     results: Vec<(String, Outcome)>,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct CompileFailExpectation {
+    message: Option<String>,
+}
+
+fn compile_fail_expectation(source: &str) -> Option<CompileFailExpectation> {
+    let mut enabled = false;
+    let mut message = None;
+    for line in source.lines().take(32) {
+        let Some(directive) = line.trim().strip_prefix("// iris-test:") else {
+            continue;
+        };
+        let directive = directive.trim();
+        if directive == "compile-fail" {
+            enabled = true;
+        } else if let Some(expected) = directive.strip_prefix("error=") {
+            message = Some(expected.trim().to_owned());
+        }
+    }
+    enabled.then_some(CompileFailExpectation { message })
+}
+
 #[cfg(test)]
 #[allow(clippy::items_after_test_module)]
 mod tests {
@@ -194,6 +216,23 @@ mod tests {
     }
 
     #[test]
+    fn native_test_wrapper_coexists_with_source_main() {
+        let source = r#"
+            def test_ok() -> i64 { return 0 }
+            def main() -> i64 { return test_ok() }
+        "#;
+        let module = crate::compile_to_module(source, "test_mod").unwrap();
+        let output = crate::codegen::build::run_native_test_capture(&module, "test_ok", None)
+            .expect("native test wrapper should preserve the source main");
+        assert!(
+            output.status.success(),
+            "source main collided with test wrapper:\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
     fn native_test_wrapper_reports_nonzero_return() {
         let module = crate::compile_to_module("def test_fail() -> i64 { 7 }", "test_mod").unwrap();
         let output = crate::codegen::build::run_native_test_capture(&module, "test_fail", None)
@@ -201,12 +240,84 @@ mod tests {
         assert!(!output.status.success(), "expected failing status");
         assert_eq!(normalized_output(&output.stdout), "7");
     }
+
+    #[test]
+    fn parses_compile_fail_directives() {
+        let expectation = compile_fail_expectation(
+            "// iris-test: compile-fail\n// iris-test: error=borrow error\ndef main() -> i64 { 0 }",
+        );
+        assert_eq!(
+            expectation,
+            Some(CompileFailExpectation {
+                message: Some("borrow error".to_owned()),
+            })
+        );
+        assert_eq!(compile_fail_expectation("def main() -> i64 { 0 }"), None);
+    }
 }
 
 fn test_file(path: &Path, filter: Option<&str>) -> Result<FileResult, String> {
+    let source = std::fs::read_to_string(path)
+        .map_err(|e| format!("failed to read {}: {}", path.display(), e))?;
+    let compile_fail = compile_fail_expectation(&source);
+    let compile_started = Instant::now();
+
     // Compile with bring resolution.
-    let module =
-        crate::compile_file_to_module(path).map_err(|e| format!("{}: {}", path.display(), e))?;
+    let module = match crate::compile_file_to_module(path) {
+        Ok(module) => {
+            if compile_fail.is_some() {
+                return Ok(FileResult {
+                    path: path.to_path_buf(),
+                    results: vec![(
+                        "compile_fail".to_owned(),
+                        Outcome::Fail {
+                            reason: "expected compilation to fail, but it succeeded".to_owned(),
+                            elapsed_ms: compile_started.elapsed().as_secs_f64() * 1000.0,
+                        },
+                    )],
+                });
+            }
+            module
+        }
+        Err(error) => {
+            let Some(expectation) = compile_fail else {
+                return Err(format!("{}: {}", path.display(), error));
+            };
+            if filter
+                .map(|value| !"compile_fail".contains(value))
+                .unwrap_or(false)
+            {
+                return Ok(FileResult {
+                    path: path.to_path_buf(),
+                    results: Vec::new(),
+                });
+            }
+            let diagnostic = format!("{}", error);
+            let outcome = if expectation
+                .message
+                .as_ref()
+                .map(|expected| diagnostic.contains(expected))
+                .unwrap_or(true)
+            {
+                Outcome::Pass {
+                    elapsed_ms: compile_started.elapsed().as_secs_f64() * 1000.0,
+                }
+            } else {
+                Outcome::Fail {
+                    reason: format!(
+                        "compilation failed with the wrong diagnostic; expected `{}`, got `{}`",
+                        expectation.message.unwrap_or_default(),
+                        diagnostic
+                    ),
+                    elapsed_ms: compile_started.elapsed().as_secs_f64() * 1000.0,
+                }
+            };
+            return Ok(FileResult {
+                path: path.to_path_buf(),
+                results: vec![("compile_fail".to_owned(), outcome)],
+            });
+        }
+    };
 
     // Collect test functions: zero-arg, name starts with "test_".
     let test_fns: Vec<String> = module

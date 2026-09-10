@@ -1,3 +1,5 @@
+// iris-test: compile-fail
+// iris-test: error=non-exhaustive match
 // Test: Exhaustiveness Checking - Non-exhaustive enum match
 
 choice Color { Red, Green, Blue }
