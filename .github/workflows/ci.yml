@@ -103,10 +103,13 @@ jobs:
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -yq build-essential pkg-config clang lld
           echo "IRIS_CLANG=/usr/bin/clang" >> "$GITHUB_ENV"
 
-      - name: Configure clang (macOS)
+      - name: Install LLVM toolchain (macOS)
         if: runner.os == 'macOS'
         run: |
-          echo "IRIS_CLANG=/usr/bin/clang" >> "$GITHUB_ENV"
+          brew install llvm
+          LLVM_PREFIX="$(brew --prefix llvm)"
+          echo "$LLVM_PREFIX/bin" >> "$GITHUB_PATH"
+          echo "IRIS_CLANG=$LLVM_PREFIX/bin/clang" >> "$GITHUB_ENV"
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
