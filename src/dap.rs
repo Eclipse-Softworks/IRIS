@@ -269,7 +269,7 @@ pub fn run_dap_server() -> std::io::Result<()> {
                         } else {
                             let hit = session.continue_to_breakpoint().is_some();
                             // Flush any log-point messages accumulated during continue.
-                            let logs: Vec<String> = session.pending_logs.drain(..).collect();
+                            let logs: Vec<String> = std::mem::take(&mut session.pending_logs);
                             for log_msg in logs {
                                 send(serde_json::json!({
                                     "seq": seq, "type": "event", "event": "output",
@@ -333,7 +333,7 @@ pub fn run_dap_server() -> std::io::Result<()> {
                 }))?;
                 seq += 1;
                 let hit = session.continue_to_breakpoint().is_some();
-                let logs: Vec<String> = session.pending_logs.drain(..).collect();
+                let logs: Vec<String> = std::mem::take(&mut session.pending_logs);
                 for log_msg in logs {
                     send(serde_json::json!({
                         "seq": seq, "type": "event", "event": "output",
@@ -646,7 +646,7 @@ pub fn run_dap_server() -> std::io::Result<()> {
                             }))?;
                         } else {
                             let hit = session.continue_to_breakpoint().is_some();
-                            let logs: Vec<String> = session.pending_logs.drain(..).collect();
+                            let logs: Vec<String> = std::mem::take(&mut session.pending_logs);
                             for log_msg in logs {
                                 send(serde_json::json!({
                                     "seq": seq, "type": "event", "event": "output",

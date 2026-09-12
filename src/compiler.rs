@@ -2496,7 +2496,7 @@ fn flatten_inline_modules_for(m: &mut AstModuleDef) {
 /// Resolve `bring` declarations that reference inline modules.
 /// `bring math` → if `mod math { ... }` exists in the AST, flatten and merge it.
 fn resolve_inline_module_bring(ast: &mut AstModule) {
-    let brings: Vec<_> = ast.brings.drain(..).collect();
+    let brings = std::mem::take(&mut ast.brings);
     for bring in brings {
         let mod_name = match &bring.path {
             crate::parser::ast::BringPath::File(p) => {

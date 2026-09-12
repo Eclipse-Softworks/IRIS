@@ -1,3 +1,5 @@
+// iris-test: compile-fail
+// iris-test: error=borrow error
 // This should trigger a borrow error: mutable borrow while immutable borrow is alive
 def main() -> i64 {
     val x: i64 = 10;

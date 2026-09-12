@@ -137,42 +137,59 @@ impl LlvmCApi {
         #[cfg(not(any(target_os = "windows", target_os = "macos")))]
         let lib_name = "libLLVM.so";
 
-        let lib = (|| -> Result<Library, CodegenError> {
-            // Try system PATH first (avoids DLL conflicts with TensorFlow/other loaded LLVMs)
-            #[cfg(target_os = "windows")]
-            {
-                if let Ok(lib) = unsafe { Library::new(lib_name) } {
-                    return Ok(lib);
-                }
-            }
-            // Fall back to well-known install paths (prefer LLVM 20 over 17)
-            #[cfg(target_os = "windows")]
-            {
-                let candidates = [
-                    r"C:\llvm-20\bin\LLVM-C.dll",
-                    r"C:\llvm-19\bin\LLVM-C.dll",
-                    r"C:\llvm-18\bin\LLVM-C.dll",
-                    r"C:\Program Files\LLVM\bin\LLVM-C.dll",
-                ];
-                for path in &candidates {
-                    if std::path::Path::new(path).exists() {
-                        return unsafe { Library::new::<&str>(path) }.map_err(|e| {
-                            CodegenError::Unsupported {
-                                backend: "llvm_c_api".into(),
-                                detail: format!("failed to load '{}': {}", path, e),
+        // Try system PATH / dynamic loader first
+        let lib = match unsafe { Library::new(lib_name) } {
+            Ok(lib) => lib,
+            Err(_) => {
+                #[cfg(target_os = "windows")]
+                {
+                    let candidates = [
+                        r"C:\llvm-20\bin\LLVM-C.dll",
+                        r"C:\llvm-19\bin\LLVM-C.dll",
+                        r"C:\llvm-18\bin\LLVM-C.dll",
+                        r"C:\Program Files\LLVM\bin\LLVM-C.dll",
+                    ];
+                    let mut found = None;
+                    for path in &candidates {
+                        if std::path::Path::new(path).exists() {
+                            match unsafe { Library::new::<&str>(path) } {
+                                Ok(lib) => {
+                                    found = Some(lib);
+                                    break;
+                                }
+                                Err(e) => {
+                                    return Err(CodegenError::Unsupported {
+                                        backend: "llvm_c_api".into(),
+                                        detail: format!("failed to load '{}': {}", path, e),
+                                    });
+                                }
                             }
+                        }
+                    }
+                    if let Some(lib) = found {
+                        lib
+                    } else {
+                        return Err(CodegenError::Unsupported {
+                            backend: "llvm_c_api".into(),
+                            detail: format!(
+                                "failed to load '{}' via PATH or any known install path. Is LLVM installed?",
+                                lib_name
+                            ),
                         });
                     }
                 }
+                #[cfg(not(target_os = "windows"))]
+                {
+                    return Err(CodegenError::Unsupported {
+                        backend: "llvm_c_api".into(),
+                        detail: format!(
+                            "failed to load '{}' via standard library paths. Is LLVM installed?",
+                            lib_name
+                        ),
+                    });
+                }
             }
-            Err(CodegenError::Unsupported {
-                backend: "llvm_c_api".into(),
-                detail: format!(
-                    "failed to load '{}' via PATH or any known install path. Is LLVM installed?",
-                    lib_name
-                ),
-            })
-        })()?;
+        };
 
         // Helper to load a function symbol
         macro_rules! load {
@@ -548,6 +565,18 @@ fn compile_llvm_ir_to_object_bytes_with_pipeline(
 /// Check if the LLVM C API library is available on this system.
 pub fn is_llvm_c_api_available() -> bool {
     llvm_c_api().is_ok()
+}
+
+/// Return whether the loaded LLVM distribution contains the backend for a
+/// specific target triple.
+///
+/// LLVM packages are commonly built with only a subset of targets. In
+/// particular, the stock Windows package exposes LLVM-C but omits AVR. A
+/// library-level availability check cannot distinguish that case.
+pub fn is_llvm_target_available(triple: &str) -> bool {
+    llvm_c_api()
+        .and_then(|api| api.initialize_target(triple))
+        .is_ok()
 }
 
 /// Initialize the LLVM target components needed for the host JIT.

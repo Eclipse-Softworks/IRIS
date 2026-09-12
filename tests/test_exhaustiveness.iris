@@ -1,3 +1,5 @@
+// iris-test: compile-fail
+// iris-test: error=non-exhaustive match
 choice Color { Red, Green, Blue }
 
 def test_exhaustive_match() -> i64 {

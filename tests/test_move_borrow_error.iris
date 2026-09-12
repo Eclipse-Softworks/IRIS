@@ -1,3 +1,5 @@
+// iris-test: compile-fail
+// iris-test: error=borrow error
 // Test borrow-after-move error detection
 // This file should FAIL to compile with a borrow error.
 

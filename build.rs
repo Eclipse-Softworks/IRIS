@@ -323,8 +323,8 @@ fn llvm_host_triple() -> String {
     match (os.as_str(), arch.as_str()) {
         ("windows", "x86_64") => "x86_64-pc-windows-gnu",
         ("windows", "aarch64") => "aarch64-pc-windows-gnu",
-        ("macos", "x86_64") => "x86_64-apple-macosx14.0",
-        ("macos", "aarch64") => "aarch64-apple-macosx14.0",
+        ("macos", "x86_64") => "x86_64-apple-macosx11.0",
+        ("macos", "aarch64") => "aarch64-apple-macosx11.0",
         ("linux", "x86_64") => "x86_64-unknown-linux-gnu",
         ("linux", "aarch64") => "aarch64-unknown-linux-gnu",
         ("linux", "riscv64") => "riscv64gc-unknown-linux-gnu",

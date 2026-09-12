@@ -672,6 +672,19 @@ entry:
   unreachable
 }}
 
+define void @iris_bounds_check(i64 %index, i64 %size) nounwind section ".text.iris_bounds_check" {{
+entry:
+  %negative = icmp slt i64 %index, 0
+  %past_end = icmp sge i64 %index, %size
+  %invalid = or i1 %negative, %past_end
+  br i1 %invalid, label %fault, label %ok
+fault:
+  call void @iris_bounds_check_abort(i64 %index, i64 %size)
+  unreachable
+ok:
+  ret void
+}}
+
 define i64 @iris_pow_i64(i64 %base, i64 %exp) nounwind section ".text.iris_pow_i64" {{
 entry:
   %negative = icmp slt i64 %exp, 0

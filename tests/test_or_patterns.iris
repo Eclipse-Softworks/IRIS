@@ -3,7 +3,7 @@
 choice Color { Red, Green, Blue }
 choice Dir { Up, Down, Left, Right }
 
-def test_or_enum() -> i64 {
+def or_enum_value() -> i64 {
     val c = Color.Red
     when c {
         Color.Red | Color.Green => 1,
@@ -11,7 +11,7 @@ def test_or_enum() -> i64 {
     }
 }
 
-def test_or_literal() -> i64 {
+def or_literal_value() -> i64 {
     val x = 3
     when x {
         1 | 2 | 3 => 10,
@@ -20,7 +20,7 @@ def test_or_literal() -> i64 {
     }
 }
 
-def test_or_tuple() -> i64 {
+def or_tuple_value() -> i64 {
     val t = (1, 2)
     when t {
         (1, _) | (_, 1) => 1,
@@ -28,7 +28,7 @@ def test_or_tuple() -> i64 {
     }
 }
 
-def test_or_range() -> i64 {
+def or_range_value() -> i64 {
     val x = 7
     when x {
         1..=3 | 5..=7 => 1,
@@ -36,14 +36,34 @@ def test_or_range() -> i64 {
     }
 }
 
+def test_or_enum() -> i64 {
+    assert(or_enum_value() == 1);
+    return 0
+}
+
+def test_or_literal() -> i64 {
+    assert(or_literal_value() == 10);
+    return 0
+}
+
+def test_or_tuple() -> i64 {
+    assert(or_tuple_value() == 1);
+    return 0
+}
+
+def test_or_range() -> i64 {
+    assert(or_range_value() == 1);
+    return 0
+}
+
 def main() -> i64 {
     // Each function must pick the arm its value belongs to. The file summed
     // the four results and checked nothing, so any combination totalling the
     // same number would have passed.
-    assert(test_or_enum() == 1);      // Color.Red, first alternative
-    assert(test_or_literal() == 10);  // 3, third alternative of the first arm
-    assert(test_or_tuple() == 1);     // (1, 2) matches (1, _)
-    assert(test_or_range() == 1);     // 7 falls in 5..=7
+    assert(test_or_enum() == 0);      // Color.Red, first alternative
+    assert(test_or_literal() == 0);   // 3, third alternative of the first arm
+    assert(test_or_tuple() == 0);     // (1, 2) matches (1, _)
+    assert(test_or_range() == 0);     // 7 falls in 5..=7
     println("or patterns ok");
-    0
+    return 0
 }

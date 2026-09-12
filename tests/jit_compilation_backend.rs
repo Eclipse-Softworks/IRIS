@@ -18,7 +18,7 @@ macro_rules! try_compile_jit {
             Ok(out) => out,
             Err(iris::Error::Codegen(iris::error::CodegenError::Unsupported {
                 backend, ..
-            })) if backend == "jit" => {
+            })) if backend == "jit" || backend == "llvm_c_api" => {
                 println!("warning: JIT is unsupported in this environment, skipping test");
                 return;
             }

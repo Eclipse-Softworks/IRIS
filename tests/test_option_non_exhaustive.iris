@@ -7,7 +7,7 @@
 // This file is listed in MUST_FAIL in tests/iris_corpus.rs: it is expected to
 // fail today. When the defect is fixed -- either by rejecting the match at
 // compile time, or by evaluating the covered arm -- it comes off that list.
-def test_option_non_exhaustive() -> i64 {
+def option_non_exhaustive_value() -> i64 {
     val o = some(42)
     when o {
         some(x) => x,
@@ -15,9 +15,14 @@ def test_option_non_exhaustive() -> i64 {
     }
 }
 
+def test_option_non_exhaustive() -> i64 {
+    assert(option_non_exhaustive_value() == 42);
+    return 0
+}
+
 def main() -> i64 {
     // `some(42)` is covered by the arm that is present, so the answer is 42
     // whichever way exhaustiveness is ultimately enforced.
-    assert(test_option_non_exhaustive() == 42);
-    0
+    assert(test_option_non_exhaustive() == 0);
+    return 0
 }

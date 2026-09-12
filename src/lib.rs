@@ -334,6 +334,22 @@ pub fn compile_ast_to_module_with_effect_mode(
     dump_ir_after: Option<&str>,
     strict_effects: bool,
 ) -> Result<IrModule, Error> {
+    with_compiler_stack(|| {
+        compile_ast_to_module_with_effect_mode_inner(
+            ast_module,
+            module_name,
+            dump_ir_after,
+            strict_effects,
+        )
+    })
+}
+
+fn compile_ast_to_module_with_effect_mode_inner(
+    ast_module: &mut crate::parser::ast::AstModule,
+    module_name: &str,
+    dump_ir_after: Option<&str>,
+    strict_effects: bool,
+) -> Result<IrModule, Error> {
     use crate::lower::{lower, lower_graph_to_ir, lower_model};
     use crate::pass::ast_exhaustive::AstExhaustivenessPass;
     use crate::pass::infer_shapes;

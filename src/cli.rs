@@ -223,7 +223,14 @@ pub enum Command {
     /// Run performance benchmarks
     Bench {
         /// Input file
-        file: Option<PathBuf>,
+        file: PathBuf,
+        /// Number of measured iterations
+        #[arg(
+            short = 'n',
+            long = "iterations",
+            default_value_t = crate::bench::DEFAULT_ITERS
+        )]
+        iterations: usize,
     },
     /// Run the profiler
     Profile {
@@ -342,7 +349,10 @@ pub enum ParseArgsResult {
         /// Raw arguments after `pkg` subcommand
         args: Vec<String>,
     },
-    Bench,
+    Bench {
+        file: PathBuf,
+        iterations: usize,
+    },
     Profile,
     Test {
         /// Input file (optional — scans current directory)
@@ -473,25 +483,8 @@ pub fn parse_args(args: &[String]) -> Result<ParseArgsResult, String> {
         Some(Command::Lsp { .. }) => Ok(ParseArgsResult::Lsp),
         Some(Command::Dap { .. }) => Ok(ParseArgsResult::Dap),
         Some(Command::Pkg { args }) => Ok(ParseArgsResult::Pkg { args }),
-        Some(Command::Bench { file }) => {
-            if let Some(path) = file {
-                // bench <file.iris> — treat as a compilation request
-                Ok(ParseArgsResult::Args(CliArgs {
-                    emit: EmitKind::Eval,
-                    path,
-                    output: cli.output,
-                    run_after_build: false,
-                    target: cli.target,
-                    dump_ir_after: cli.dump_ir_after,
-                    max_steps: cli.max_steps,
-                    max_depth: cli.max_depth,
-                    no_cache: cli.no_cache,
-                    sandbox: cli.sandbox,
-                    strict_effects: cli.strict_effects,
-                }))
-            } else {
-                Ok(ParseArgsResult::Bench)
-            }
+        Some(Command::Bench { file, iterations }) => {
+            Ok(ParseArgsResult::Bench { file, iterations })
         }
         Some(Command::Profile { file }) => {
             if let Some(path) = file {

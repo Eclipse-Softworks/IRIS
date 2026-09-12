@@ -867,7 +867,7 @@ offers, so this is worth fixing before the capability is described anywhere.
 > compiling invalid IR silently. Across all 125 `.iris` files, zero invalid IR
 > remains.
 >
-> This is the third instance of the pattern in `language-hardening-plan.md`: **a
+> This is another instance of the recurring hardening pattern: **a
 > guard that existed and could not fire.** It is also the third defect that
 > produced correct answers on every run that happened to work.
 >
@@ -1965,6 +1965,14 @@ having TCO.
 ---
 
 ## Test-suite audit, 2026-08-16
+
+> **Resolved for RC1 on 2026-09-10.** The historical counts and categories
+> below describe the audit that found this debt. The current corpus contains
+> 155 `.iris` files, has an empty non-asserting backlog, and is executed by the
+> Rust corpus gate. Five intentional negative programs use checked compile-fail
+> directives. The obsolete module, `par_map`, nursery, and refinement-syntax
+> fixtures were either rewritten to supported RC1 syntax or removed; native
+> typed `par_map`, task groups, `select`, and timed receive now pass end to end.
 
 Of 154 `.iris` files under `tests/`, 33 asserted anything. Converting them
 surfaced something the count alone hid: **20 of the 121 non-asserting files do

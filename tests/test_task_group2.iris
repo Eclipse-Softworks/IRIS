@@ -4,7 +4,7 @@
 // it would have passed identically if the tasks had never run or if join had
 // returned immediately. The tasks now report through a channel, which makes
 // both properties observable.
-def test_basic_join() -> i64 {
+def joined_sum() -> i64 {
     val ch = channel();
     val tg = task_group();
     spawn(tg) { send(ch, 10) };
@@ -16,16 +16,26 @@ def test_basic_join() -> i64 {
     a + b
 }
 
-def test_detached() -> i64 {
+def detached_value() -> i64 {
     val ch = channel();
     spawn { send(ch, 5) };
     // A detached task still runs; recv blocks until it does.
     recv(ch)
 }
 
+def test_basic_join() -> i64 {
+    assert(joined_sum() == 30);
+    return 0
+}
+
+def test_detached() -> i64 {
+    assert(detached_value() == 5);
+    return 0
+}
+
 def main() -> i64 {
-    assert(test_basic_join() == 30);
-    assert(test_detached() == 5);
+    assert(test_basic_join() == 0);
+    assert(test_detached() == 0);
     println("task groups ok");
-    0
+    return 0
 }

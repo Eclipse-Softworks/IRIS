@@ -318,7 +318,15 @@ pub(crate) fn run_native_test_capture(
     )?;
     let run_path = std::fs::canonicalize(&bin_path).unwrap_or(bin_path.clone());
     let _exe_guard = TempExeGuard(run_path.clone());
-    let output = Command::new(&run_path).output().map_err(CodegenError::Io)?;
+    let timeout_secs = native_timeout_secs();
+    let output = run_with_timeout(&run_path, std::time::Duration::from_secs(timeout_secs)).map_err(
+        |_| CodegenError::Unsupported {
+            backend: "native-test".into(),
+            detail: format!(
+                "native test timed out after {timeout_secs}s; raise IRIS_NATIVE_TIMEOUT to allow a longer test"
+            ),
+        },
+    )?;
     Ok(output)
 }
 
@@ -582,32 +590,30 @@ fn build_binary_impl(
         );
     } else {
         let cache_dir = runtime_cache_dir();
-        let cached_rt = cache_dir.join("iris_runtime.o");
-        let use_cache = std::fs::metadata(&cached_rt)
-            .ok()
-            .and_then(|m| m.modified().ok())
-            .and_then(|cache_mtime| {
-                std::env::current_exe()
-                    .ok()
-                    .and_then(|exe| {
-                        std::fs::metadata(exe)
-                            .ok()
-                            .and_then(|em| em.modified().ok())
-                    })
-                    .map(|exe_mtime| exe_mtime <= cache_mtime)
-                    .or(Some(false))
-            })
-            .unwrap_or(false);
-        if use_cache {
+        let cached_rt = cache_dir.join(runtime_cache_object_name(&resolved_target));
+        if cached_rt.is_file() {
             std::fs::copy(&cached_rt, &rt_obj).map_err(|e| CodegenError::Unsupported {
                 backend: "binary".into(),
                 detail: format!("failed to copy cached iris_runtime.o: {}", e),
             })?;
         } else {
             compile_rt(&c_path, &rt_obj)?;
-            // Populate cache (best-effort)
+            // Populate the content-addressed cache atomically (best-effort).
+            // An interrupted copy must not leave an object that a later
+            // compiler invocation mistakes for valid.
             if std::fs::create_dir_all(&cache_dir).is_ok() {
-                let _ = std::fs::copy(&rt_obj, &cached_rt);
+                let pending = cache_dir.join(format!(
+                    ".iris_runtime_{}_{}.tmp",
+                    std::process::id(),
+                    now_nanos
+                ));
+                if std::fs::copy(&rt_obj, &pending).is_ok()
+                    && std::fs::rename(&pending, &cached_rt).is_err()
+                    && !cached_rt.is_file()
+                {
+                    let _ = std::fs::copy(&pending, &cached_rt);
+                }
+                let _ = std::fs::remove_file(pending);
             }
         }
     }
@@ -744,39 +750,43 @@ fn build_binary_impl(
     }
 
     // 6. Link module.o + iris_runtime.o → native binary.
-    //    Try ld.lld directly first (avoids clang subprocess), fall back to clang.
-    //    MinGW is supported through ld.lld's GNU driver using the MSYS2 UCRT
-    //    startup objects and import libraries.
+    //    MinGW uses ld.lld directly with the MSYS2 UCRT startup objects and
+    //    import libraries. Unix linking goes through clang because the compiler
+    //    driver owns SDK/sysroot and default-library discovery.
     // `IRIS_NO_CLANG=1` requires both LLVM-C object emission and direct linking.
     // `IRIS_REQUIRE_DIRECT_LLD=1` is narrower: clang may emit objects, but must
     // not be used as the linker driver. CI uses it to ensure the direct-link
     // path cannot silently regress behind the clang fallback.
     let require_direct_lld = no_clang || std::env::var("IRIS_REQUIRE_DIRECT_LLD").is_ok();
-    let lld_path = crate::codegen::build::find_lld();
-    let link_result = if let Some(lld) = lld_path {
-        link_with_lld(
-            &lld,
-            &resolved_target,
-            &mod_obj,
-            &support_objs,
-            output_path,
-            &target_args,
-            &msys2_lib,
-            &gcc_lib,
-            &onnx_sdk,
-            &tf_sdk,
-            &libtorch_sdk,
-            &openblas_dir,
-            use_blas,
-            &link_libs,
-        )
+    let direct_mingw = resolved_target.contains("windows") && !resolved_target.contains("msvc");
+    let link_result = if direct_mingw {
+        if let Some(lld) = crate::codegen::build::find_lld() {
+            link_with_lld(
+                &lld,
+                &resolved_target,
+                &mod_obj,
+                &support_objs,
+                output_path,
+                &target_args,
+                &msys2_lib,
+                &gcc_lib,
+                &onnx_sdk,
+                &tf_sdk,
+                &libtorch_sdk,
+                &openblas_dir,
+                use_blas,
+                &link_libs,
+            )
+        } else {
+            Err(CodegenError::Unsupported {
+                backend: "binary".into(),
+                detail: "ld.lld is not available for direct MinGW linking".into(),
+            })
+        }
     } else {
         Err(CodegenError::Unsupported {
             backend: "binary".into(),
-            detail: format!(
-                "ld.lld not available (skipped for MinGW target {})",
-                resolved_target
-            ),
+            detail: format!("direct ld.lld is only supported for MinGW, not {resolved_target}"),
         })
     };
 
@@ -801,7 +811,7 @@ fn build_binary_impl(
             // Fallback: link via clang
             let mut link_cmd = Command::new(&clang);
             link_cmd.args(&target_args);
-            if cfg!(target_os = "macos") {
+            if cfg!(target_os = "macos") || resolved_target.contains("apple") {
                 link_cmd.args(["-O2", path_str(&mod_obj)?]);
             } else {
                 link_cmd.args(["-fuse-ld=lld", "-O2", path_str(&mod_obj)?]);
@@ -810,7 +820,7 @@ fn build_binary_impl(
                 link_cmd.arg(path_str(obj)?);
             }
             link_cmd.args(["-o", path_str(output_path)?]);
-            if !resolved_target.contains("msvc") {
+            if !resolved_target.contains("msvc") && !resolved_target.contains("apple") {
                 link_cmd.args(["-lm", "-lpthread"]);
             }
             if resolved_target.contains("windows") {
@@ -834,7 +844,9 @@ fn build_binary_impl(
                 }
                 link_cmd.arg("-lopenblas");
             }
-            for lib in &link_libs {
+            for lib in link_libs.iter().filter(|lib| {
+                !(resolved_target.contains("apple") && matches!(lib.as_str(), "m" | "pthread"))
+            }) {
                 link_cmd.arg(format!("-l{}", lib));
             }
             link_cmd.output()
@@ -1281,11 +1293,15 @@ fn find_sqlite_dll() -> Option<PathBuf> {
             dirs.push(parent.to_path_buf());
         }
     }
+    let ucrt_bin = PathBuf::from(r"C:\msys64\ucrt64\bin");
+    if ucrt_bin.is_dir() {
+        dirs.push(ucrt_bin);
+    }
     if let Some(path) = std::env::var_os("PATH") {
         dirs.extend(std::env::split_paths(&path));
     }
     for dir in dirs {
-        for file_name in ["sqlite3.dll", "SQLite3.dll"] {
+        for file_name in ["sqlite3.dll", "SQLite3.dll", "libsqlite3-0.dll"] {
             let candidate = dir.join(file_name);
             if candidate.is_file() {
                 return Some(candidate);
@@ -1300,9 +1316,27 @@ fn stage_sqlite_dll_next_to(output_path: &Path) {
         return;
     };
 
-    if let Some(parent) = output_path.parent() {
-        let target = parent.join(source_path.file_name().unwrap_or_default());
-        let _ = std::fs::copy(&source_path, target);
+    let out_dir = output_path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let _ = std::fs::copy(&source_path, out_dir.join("sqlite3.dll"));
+    let _ = std::fs::copy(
+        &source_path,
+        out_dir.join(source_path.file_name().unwrap_or_default()),
+    );
+    if let Some(src_parent) = source_path.parent() {
+        for companion in [
+            "libwinpthread-1.dll",
+            "libgcc_s_seh-1.dll",
+            "libstdc++-6.dll",
+            "zlib1.dll",
+        ] {
+            let p = src_parent.join(companion);
+            if p.is_file() {
+                let _ = std::fs::copy(&p, out_dir.join(companion));
+            }
+        }
     }
 }
 
@@ -1312,13 +1346,14 @@ fn stage_onnxruntime_dll_next_to(output_path: &Path) {
     let root = std::env::var("ONNXRUNTIME_DIR").unwrap_or_else(|_| r"C:\onnxruntime".to_owned());
     let lib_dir = Path::new(&root).join("lib");
 
-    let Some(parent) = output_path.parent() else {
-        return;
-    };
+    let out_dir = output_path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
     for name in ["onnxruntime.dll", "onnxruntime_providers_shared.dll"] {
         let candidate = lib_dir.join(name);
         if candidate.is_file() {
-            let _ = std::fs::copy(&candidate, parent.join(name));
+            let _ = std::fs::copy(&candidate, out_dir.join(name));
         }
     }
 }
@@ -1567,7 +1602,7 @@ fn link_with_lld(
             cmd.arg(path_str(obj)?);
         }
         append_optional_lld_libraries(&mut cmd, openblas_dir, use_blas, link_libs);
-        append_mingw_default_libraries(&mut cmd);
+        append_mingw_default_libraries(&mut cmd, msys2_lib);
 
         if let Some(ref gcc) = gcc_lib {
             let crt_end = Path::new(gcc).join("crtend.o");
@@ -1648,13 +1683,18 @@ fn append_optional_lld_libraries(
     }
 }
 
-fn append_mingw_default_libraries(cmd: &mut std::process::Command) {
+fn append_mingw_default_libraries(cmd: &mut std::process::Command, msys2_lib: &Option<String>) {
+    let has_ucrt = msys2_lib
+        .as_ref()
+        .map(|lib| Path::new(lib).join("libucrt.a").is_file())
+        .unwrap_or(false);
+    let crt_lib = if has_ucrt { "ucrt" } else { "msvcrt" };
     // The second MinGW/GCC group resolves dependencies introduced by the
     // Windows import libraries in the first group, matching clang's driver.
     for lib in [
-        "mingw32", "gcc", "gcc_eh", "moldname", "mingwex", "msvcrt", "advapi32", "shell32",
+        "mingw32", "gcc", "gcc_eh", "moldname", "mingwex", crt_lib, "advapi32", "shell32",
         "user32", "kernel32", "ws2_32", "winhttp", "pthread", "m", "mingw32", "gcc", "gcc_eh",
-        "moldname", "mingwex", "msvcrt", "kernel32",
+        "moldname", "mingwex", crt_lib, "kernel32",
     ] {
         cmd.arg(format!("-l{}", lib));
     }
@@ -1783,6 +1823,7 @@ pub(crate) fn msys2_gcc_lib() -> Option<String> {
     }
 }
 
+#[cfg(any(target_os = "windows", test))]
 fn mingw_gcc_version_key(path: &Path) -> Vec<u32> {
     path.file_name()
         .and_then(|name| name.to_str())
@@ -1810,6 +1851,20 @@ fn runtime_cache_dir() -> PathBuf {
         }
     }
     std::env::temp_dir().join("iris_cache")
+}
+
+/// Name a cached runtime object by both target and exact embedded C sources.
+///
+/// The former `iris_runtime.o` cache was shared by every target and considered
+/// valid solely from filesystem mtimes. Restored CI caches could therefore
+/// feed an older or wrong-architecture object into a native link. The source
+/// hash is generated by the same build script that validates prebuilts.
+fn runtime_cache_object_name(target: &str) -> String {
+    let target = target
+        .chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
+        .collect::<String>();
+    format!("iris_runtime_{target}_{RUNTIME_SOURCES_HASH}.o")
 }
 
 /// Build the optional LibTorch plugin (`iris_torch_plugin`).
@@ -1927,7 +1982,7 @@ pub fn runtime_h_source() -> &'static str {
 
 #[cfg(test)]
 mod direct_link_tests {
-    use super::mingw_gcc_version_key;
+    use super::{mingw_gcc_version_key, runtime_cache_object_name, RUNTIME_SOURCES_HASH};
     use std::path::Path;
 
     #[test]
@@ -1939,5 +1994,14 @@ mod direct_link_tests {
             mingw_gcc_version_key(Path::new("14.10.1"))
                 > mingw_gcc_version_key(Path::new("14.2.0"))
         );
+    }
+
+    #[test]
+    fn runtime_cache_is_target_and_source_specific() {
+        let windows = runtime_cache_object_name("x86_64-pc-windows-gnu");
+        let linux = runtime_cache_object_name("x86_64-unknown-linux-gnu");
+        assert_ne!(windows, linux);
+        assert!(windows.contains(RUNTIME_SOURCES_HASH));
+        assert!(!windows.contains('-'));
     }
 }

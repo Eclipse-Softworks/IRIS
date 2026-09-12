@@ -4,9 +4,15 @@ mod math {
     }
 }
 
-def main() {
-    val sum = math::add(2, 3)
-    println(to_str(sum))
+bring math
+
+def test_module_add() -> i64 {
+    assert(math__add(2, 3) == 5);
+    return 0
 }
 
-main()
+def main() -> i64 {
+    assert(test_module_add() == 0);
+    println("minimal module: ok");
+    return 0
+}

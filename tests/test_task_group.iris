@@ -13,7 +13,7 @@ def test_basic_spawn_join() -> i64 {
         return 1
     };
     println("PASS: basic spawn-join");
-    0
+    return 0
 }
 
 // Test 2: Multiple tasks in a group
@@ -42,7 +42,7 @@ def test_multiple_tasks() -> i64 {
         return 1
     };
     println("PASS: multiple tasks");
-    0
+    return 0
 }
 
 // Test 3: Cancel task group
@@ -57,7 +57,7 @@ def test_cancel_group() -> i64 {
     // After cancel + join, all tasks should have completed
     // (cancel is a signal, not hard kill)
     println("PASS: cancel group (no crash)");
-    0
+    return 0
 }
 
 // Test 4: Nested task groups
@@ -80,7 +80,7 @@ def test_nested_groups() -> i64 {
         return 1
     };
     println("PASS: nested groups");
-    0
+    return 0
 }
 
 // Test 5: Detached spawn still works (backward compatibility)
@@ -95,7 +95,7 @@ def test_detached_spawn() -> i64 {
         return 1
     };
     println("PASS: detached spawn");
-    0
+    return 0
 }
 
 def main() -> i64 {
@@ -108,5 +108,5 @@ def main() -> i64 {
     assert(test_nested_groups() == 0);
     assert(test_detached_spawn() == 0);
     println("task group ok: 5/5");
-    0
+    return 0
 }

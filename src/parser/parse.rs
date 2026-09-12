@@ -127,11 +127,17 @@ impl<'t> Parser<'t> {
     // -----------------------------------------------------------------------
 
     fn peek_tok(&self) -> &Token {
-        &self.tokens[self.pos].node
+        self.tokens
+            .get(self.pos)
+            .map(|token| &token.node)
+            .unwrap_or(&Token::Eof)
     }
 
     fn current_span(&self) -> Span {
-        self.tokens[self.pos].span
+        self.tokens
+            .get(self.pos)
+            .map(|token| token.span)
+            .unwrap_or_else(|| Span::at(0))
     }
 
     fn advance(&mut self) -> &Spanned<Token> {
@@ -5161,6 +5167,14 @@ mod tests {
     #[test]
     fn parse_missing_closing_brace() {
         let _ = parse_err("def f() -> i64 { 0");
+    }
+
+    #[test]
+    fn empty_token_slice_is_treated_as_eof() {
+        let mut parser = Parser::new(&[]);
+        let (module, errors) = parser.parse_module_recovering();
+        assert!(errors.is_empty());
+        assert!(module.functions.is_empty());
     }
 
     #[test]

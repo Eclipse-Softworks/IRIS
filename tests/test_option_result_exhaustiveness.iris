@@ -1,5 +1,5 @@
 // Test Option exhaustiveness
-def test_option_exhaustive() -> i64 {
+def option_exhaustive_value() -> i64 {
     val o = some(42)
     when o {
         some(x) => x,
@@ -8,7 +8,7 @@ def test_option_exhaustive() -> i64 {
 }
 
 // Test Option non-exhaustive (missing None)
-def test_option_non_exhaustive() -> i64 {
+def known_option_non_exhaustive() -> i64 {
     val o = some(42)
     when o {
         some(x) => x,
@@ -17,7 +17,7 @@ def test_option_non_exhaustive() -> i64 {
 }
 
 // Test Result exhaustive
-def test_result_exhaustive() -> i64 {
+def result_exhaustive_value() -> i64 {
     val r = ok(42)
     when r {
         ok(x) => x,
@@ -26,7 +26,7 @@ def test_result_exhaustive() -> i64 {
 }
 
 // Test Result non-exhaustive (missing Err)
-def test_result_non_exhaustive() -> i64 {
+def known_result_non_exhaustive() -> i64 {
     val r = ok(42)
     when r {
         ok(x) => x,
@@ -34,10 +34,20 @@ def test_result_non_exhaustive() -> i64 {
     }
 }
 
+def test_option_exhaustive() -> i64 {
+    assert(option_exhaustive_value() == 42);
+    return 0
+}
+
+def test_result_exhaustive() -> i64 {
+    assert(result_exhaustive_value() == 42);
+    return 0
+}
+
 def main() -> i64 {
     // Exhaustive matches must yield the covered arm's value.
-    assert(test_option_exhaustive() == 42);
-    assert(test_result_exhaustive() == 42);
+    assert(test_option_exhaustive() == 0);
+    assert(test_result_exhaustive() == 0);
 
     // The non-exhaustive versions are declared above and deliberately NOT
     // called: both are accepted by the compiler and return 0 rather than the
@@ -45,5 +55,5 @@ def main() -> i64 {
     // file fail for a defect that already has its own regression test in
     // tests/test_option_non_exhaustive.iris.
     println("option/result exhaustiveness ok");
-    0
+    return 0
 }

@@ -93,6 +93,16 @@ iris test file.iris --no-color
 iris docs file.iris --output api.html
 ```
 
+`iris test` discovers zero-argument `test_*` functions. A `bool` test passes
+when it returns `true`; an `i32`/`i64` test passes when it returns `0`. Test
+programs may also define their normal `main` entry point—the runner isolates it
+from the native test wrapper.
+
+Intentional compiler failures are first-class tests. Put
+`// iris-test: compile-fail` at the top of the file and optionally add
+`// iris-test: error=expected diagnostic text`; a successful compilation or a
+different diagnostic then fails the test.
+
 Install the [VS Code extension](vscode-iris/README.md) and point
 `iris.executablePath` at an installed compiler copy. The debugger uses interpreter
 traces; native process attachment and register inspection are not provided.

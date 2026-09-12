@@ -21,7 +21,7 @@ fn test_data_layout_x86_64() {
 #[test]
 fn test_data_layout_macos_arm64_differs() {
     let x64 = target_data_layout("x86_64-unknown-linux-gnu");
-    let arm = target_data_layout("aarch64-apple-macosx14.0");
+    let arm = target_data_layout("aarch64-apple-macosx11.0");
     assert_ne!(
         x64, arm,
         "aarch64-apple and x86_64 should have different data layouts"
@@ -45,7 +45,7 @@ fn test_llvm_ir_macos_arm64_triple() {
     let module = compile_to_module("def f() -> i64 { 0 }", "m").unwrap();
     let ir = emit_llvm_ir_with_target(&module, Some("macos-arm64")).unwrap();
     assert!(
-        ir.contains("aarch64-apple-macosx14.0"),
+        ir.contains("aarch64-apple-macosx11.0"),
         "macos-arm64 IR should contain aarch64-apple triple"
     );
 }
@@ -80,7 +80,17 @@ fn test_emit_with_no_target() {
 #[test]
 fn test_preset_macos_arm64_triple() {
     let triple = target_preset_to_triple("macos-arm64");
-    assert_eq!(triple, Some("aarch64-apple-macosx14.0"));
+    assert_eq!(triple, Some("aarch64-apple-macosx11.0"));
+}
+
+#[test]
+fn test_macos_x64_uses_mach_o_layout_and_supported_floor() {
+    let triple = target_preset_to_triple("macos-x64").expect("macOS x64 preset");
+    assert_eq!(triple, "x86_64-apple-macosx11.0");
+    assert!(
+        target_data_layout(triple).contains("m:o"),
+        "macOS x64 must use Mach-O rather than ELF mangling"
+    );
 }
 
 // ── 8. All 7 presets produce distinct target triples ─────────────────────────

@@ -436,6 +436,10 @@ void iris_bounds_check_abort(int64_t index, int64_t size) {
     abort();
 }
 
+void iris_bounds_check(int64_t index, int64_t size) {
+    if (index < 0 || index >= size) iris_bounds_check_abort(index, size);
+}
+
 /* iris_panic_at — like iris_panic but includes a compile-time source location
  * string (e.g. "in function 'foo'") embedded by the IRIS LLVM codegen. */
 void iris_panic_at(const char* msg, const char* location) {
@@ -1680,11 +1684,30 @@ static fn_sqlite3_bind_int64   p_sqlite3_bind_int64 = NULL;
 static int iris_load_sqlite3(void) {
     if (p_sqlite3_open) return 1; // already loaded
 #ifdef _WIN32
-    sqlite3_lib = LoadLibraryA("sqlite3.dll");
+    char exe_path[MAX_PATH];
+    if (GetModuleFileNameA(NULL, exe_path, MAX_PATH)) {
+        char* last_slash = strrchr(exe_path, '\\');
+        if (!last_slash) last_slash = strrchr(exe_path, '/');
+        if (last_slash) {
+            *last_slash = '\0';
+            char dll_path[MAX_PATH];
+            snprintf(dll_path, sizeof(dll_path), "%s\\sqlite3.dll", exe_path);
+            sqlite3_lib = LoadLibraryExA(dll_path, NULL, 0x00000008 /* LOAD_WITH_ALTERED_SEARCH_PATH */);
+            if (!sqlite3_lib) {
+                snprintf(dll_path, sizeof(dll_path), "%s\\libsqlite3-0.dll", exe_path);
+                sqlite3_lib = LoadLibraryExA(dll_path, NULL, 0x00000008 /* LOAD_WITH_ALTERED_SEARCH_PATH */);
+            }
+        }
+    }
+    if (!sqlite3_lib) sqlite3_lib = LoadLibraryA("sqlite3.dll");
+    if (!sqlite3_lib) sqlite3_lib = LoadLibraryA("libsqlite3-0.dll");
+    if (!sqlite3_lib) sqlite3_lib = LoadLibraryExA("C:\\msys64\\ucrt64\\bin\\libsqlite3-0.dll", NULL, 0x00000008 /* LOAD_WITH_ALTERED_SEARCH_PATH */);
+    if (!sqlite3_lib) sqlite3_lib = LoadLibraryExA("C:\\msys64\\mingw64\\bin\\libsqlite3-0.dll", NULL, 0x00000008 /* LOAD_WITH_ALTERED_SEARCH_PATH */);
     if (!sqlite3_lib) return 0;
     #define LOAD(name) p_##name = (fn_##name)GetProcAddress(sqlite3_lib, #name)
 #else
     sqlite3_lib = dlopen("libsqlite3.so", 1 /* RTLD_LAZY */);
+    if (!sqlite3_lib) sqlite3_lib = dlopen("libsqlite3.so.0", 1);
     if (!sqlite3_lib) sqlite3_lib = dlopen("libsqlite3.dylib", 1);
     if (!sqlite3_lib) return 0;
     #define LOAD(name) p_##name = (fn_##name)dlsym(sqlite3_lib, #name)
@@ -1760,7 +1783,7 @@ IrisList* iris_db_query_params(int64_t db, const char* sql, IrisList* params) {
         } else if (p_sqlite3_bind_text) {
             char* s = iris_value_to_str(v);
             p_sqlite3_bind_text(stmt, i + 1, s ? s : "", -1, SQLITE_TRANSIENT);
-            if (s) p_sqlite3_free(s);
+            if (s) free(s);
         }
     }
     int ncols = p_sqlite3_column_count(stmt);
@@ -1795,7 +1818,7 @@ int64_t iris_db_exec_params(int64_t db, const char* sql, IrisList* params) {
         } else if (p_sqlite3_bind_text) {
             char* s = iris_value_to_str(v);
             p_sqlite3_bind_text(stmt, i + 1, s ? s : "", -1, SQLITE_TRANSIENT);
-            if (s) p_sqlite3_free(s);
+            if (s) free(s);
         }
     }
     int rc = SQLITE_OK;
@@ -2168,39 +2191,43 @@ void iris_par_for(void (*fn)(int64_t, void*), int64_t start, int64_t end, void* 
 }
 
 typedef struct {
-    void* (*fn)(IrisVal*);
+    IrisVal* (*invoke)(IrisVal*, IrisVal*);
+    IrisVal* closure;
     IrisVal* arg;
     IrisVal* result;
-    pthread_mutex_t* mu;
 } ParMapArg;
 
 static void* par_map_worker(void* arg) {
     ParMapArg* a = (ParMapArg*)arg;
-    a->result = a->fn(a->arg);
+    a->result = a->invoke(a->closure, a->arg);
     return NULL;
 }
 
-IrisList* iris_par_map(IrisList* list, void* (*fn)(IrisVal*)) {
+IrisList* iris_par_map(IrisList* list, IrisVal* closure,
+                       IrisVal* (*invoke)(IrisVal*, IrisVal*)) {
     int64_t n = iris_list_len(list);
     IrisList* results = iris_list_new();
     if (n <= 0) return results;
     pthread_t* threads = xmalloc(sizeof(pthread_t) * (size_t)n);
     ParMapArg* args = xmalloc(sizeof(ParMapArg) * (size_t)n);
-    /* Pre-size results list */
+    unsigned char* created = xmalloc((size_t)n);
     for (int64_t i = 0; i < n; i++) {
-        iris_list_push(results, iris_box_i64(0)); /* placeholder */
-    }
-    for (int64_t i = 0; i < n; i++) {
-        args[i].fn = fn;
+        args[i].invoke = invoke;
+        args[i].closure = closure;
         args[i].arg = iris_list_get(list, i);
         args[i].result = NULL;
-        pthread_create(&threads[i], NULL, par_map_worker, &args[i]);
+        if (pthread_create(&threads[i], NULL, par_map_worker, &args[i]) == 0) {
+            created[i] = 1;
+        } else {
+            created[i] = 0;
+            par_map_worker(&args[i]);
+        }
     }
     for (int64_t i = 0; i < n; i++) {
-        pthread_join(threads[i], NULL);
-        /* Replace placeholder at index i with actual result */
-        ((IrisVal**)results->data)[i] = args[i].result;
+        if (created[i]) pthread_join(threads[i], NULL);
+        iris_list_push(results, args[i].result);
     }
+    free(created);
     free(threads);
     free(args);
     return results;
@@ -2404,6 +2431,12 @@ void* iris_find_handler_fn(const char* name) {
     return arm ? arm->handler_fn : NULL;
 }
 
+void iris_unhandled_effect_abort(const char* effect_name) {
+    fprintf(stderr, "error: no handler for effect '%s' and no real implementation\n", effect_name ? effect_name : "(unknown)");
+    fflush(stderr);
+    abort();
+}
+
 int64_t iris_effect_dispatch_or_call(
     const char* effect_name,
     void* real_fn,
@@ -2444,8 +2477,7 @@ int64_t iris_effect_dispatch_or_call(
 call_real:
     if (!real_fn) {
         /* No handler and no real function — panic. */
-        fprintf(stderr, "error: no handler for effect '%s' and no real implementation\n", effect_name);
-        abort();
+        iris_unhandled_effect_abort(effect_name);
     }
     {
         /* Real extern signature: i64 real_fn(i64, i64, i64, i64, i64, i64, i64) */
@@ -4390,7 +4422,10 @@ void iris_udp_send(int64_t fd, const char* addr_port, int64_t data_len) {
     struct sockaddr_in dst = {0};
     dst.sin_family = AF_INET;
     dst.sin_port = htons(port);
-    if (inet_pton(AF_INET, host, &dst.sin_addr) != 1) dst.sin_addr.s_addr = INADDR_NONE;
+    if (inet_pton(AF_INET, host, &dst.sin_addr) != 1) {
+        free(p);
+        return;
+    }
     size_t dlen = data_len > 0 ? (size_t)data_len : strlen(data);
 #ifdef _WIN32
     sendto((SOCKET)fd, data, (int)dlen, 0, (struct sockaddr*)&dst, sizeof(dst));
@@ -5252,7 +5287,7 @@ static void json_stringify_val(IrisVal* v, char** out, size_t* len, size_t* cap)
             if (fields) {
                 for (size_t i = 0; i < fields->len; i++) {
                     if (i > 0) JSON_APPEND_CHAR(',');
-                    char idx_buf[16]; snprintf(idx_buf, sizeof(idx_buf), "\"%zu\":", i);
+                    char idx_buf[32]; snprintf(idx_buf, sizeof(idx_buf), "\"%zu\":", i);
                     JSON_APPEND(idx_buf);
                     json_stringify_val(fields->data[i], out, len, cap);
                 }
@@ -5447,7 +5482,6 @@ static int match_here(const char* re, const char* text) {
         group[group_len] = '\0';
 
         /* Check for alternation inside the group */
-        const char* alt = group;
         int found_alt = 0;
         int adepth = 0;
         for (size_t i = 0; i < group_len; i++) {
@@ -6160,7 +6194,10 @@ char* iris_base64_decode(const char* str) {
         int b = (i+1 < slen) ? b64_decode_char(str[i+1]) : 0;
         int c = (i+2 < slen) ? b64_decode_char(str[i+2]) : 0;
         int d = (i+3 < slen) ? b64_decode_char(str[i+3]) : 0;
-        if (a < 0) a = 0; if (b < 0) b = 0; if (c < 0) c = 0; if (d < 0) d = 0;
+        if (a < 0) a = 0;
+        if (b < 0) b = 0;
+        if (c < 0) c = 0;
+        if (d < 0) d = 0;
         uint32_t triple = ((uint32_t)a << 18) | ((uint32_t)b << 12) | ((uint32_t)c << 6) | (uint32_t)d;
         if (j < olen) out[j++] = (triple >> 16) & 0xFF;
         if (j < olen && str[i+2] != '=') out[j++] = (triple >> 8) & 0xFF;
@@ -8258,7 +8295,11 @@ IrisOption* iris_chan_recv_timeout(IrisChannel* c, int64_t timeout_ms) {
         ULARGE_INTEGER uli;
         uli.LowPart = ft.dwLowDateTime;
         uli.HighPart = ft.dwHighDateTime;
-        uint64_t ns_total = uli.QuadPart * 100 + (uint64_t)timeout_ms * 1000000;
+        /* FILETIME is measured from 1601; pthread absolute timeouts use the
+         * Unix epoch. Without this subtraction a millisecond timeout waits
+         * roughly 369 years. */
+        uint64_t unix_100ns = uli.QuadPart - 116444736000000000ULL;
+        uint64_t ns_total = unix_100ns * 100 + (uint64_t)timeout_ms * 1000000;
         ts.tv_sec = (time_t)(ns_total / 1000000000);
         ts.tv_nsec = (long)(ns_total % 1000000000);
 #else
@@ -8341,9 +8382,8 @@ IrisVal* iris_map_entries(IrisVal* map_val) {
     return iris_box_list(entries);
 }
 
-IrisVal* iris_recv_timeout(IrisVal* chan_val, int64_t timeout_ms) {
-    IrisChannel* c = iris_unbox_chan(chan_val);
-    IrisOption* opt = iris_chan_recv_timeout(c, timeout_ms);
+IrisVal* iris_recv_timeout(IrisChannel* chan, int64_t timeout_ms) {
+    IrisOption* opt = iris_chan_recv_timeout(chan, timeout_ms);
     return (IrisVal*)opt;
 }
 

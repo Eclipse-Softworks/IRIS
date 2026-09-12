@@ -37,14 +37,20 @@ fn test_lsp_lower_error_diagnostic() {
 // ── 3. Valid source → empty diagnostics ─────────────────────────────────────
 
 #[test]
-fn test_lsp_valid_source_no_diagnostics() {
+fn test_lsp_valid_source_has_no_errors_and_reports_unused_code() {
     let mut lsp = LspState::new();
     let src = "def add(a: i64, b: i64) -> i64 { a + b }";
     let diags = lsp.open_document(URI, src);
     assert!(
-        diags.is_empty(),
-        "valid source should produce no diagnostics, got: {:?}",
+        diags.iter().all(|diag| diag.severity != 1),
+        "valid source should produce no errors, got: {:?}",
         diags.iter().map(|d| &d.message).collect::<Vec<_>>()
+    );
+    assert!(
+        diags
+            .iter()
+            .any(|diag| diag.severity == 4 && diag.message.contains("never used")),
+        "unused functions should produce an unnecessary-code hint"
     );
 }
 
@@ -129,8 +135,12 @@ fn test_lsp_update_document_refreshes_diagnostics() {
     // Then: fix the source → no errors.
     let good_diags = lsp.update_document(URI, "def f() -> i64 { 42 }");
     assert!(
-        good_diags.is_empty(),
-        "expected no errors after fixing source"
+        good_diags.iter().all(|diag| diag.severity != 1),
+        "expected no errors after fixing source, got: {:?}",
+        good_diags
+            .iter()
+            .map(|diag| &diag.message)
+            .collect::<Vec<_>>()
     );
 }
 

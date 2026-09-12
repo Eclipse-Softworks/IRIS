@@ -378,8 +378,8 @@ fn run() {
                 process::exit(1);
             }
         }
-        Ok(ParseArgsResult::Bench) => {
-            if let Err(e) = iris::bench::run_bench_command(&args) {
+        Ok(ParseArgsResult::Bench { file, iterations }) => {
+            if let Err(e) = iris::bench::run_bench_command(&file, iterations) {
                 eprintln!("error: {}", e);
                 process::exit(1);
             }
@@ -605,6 +605,15 @@ fn run() {
                                     eprintln!("error: could not run binary: {}", e);
                                     process::exit(1);
                                 });
+                            #[cfg(unix)]
+                            if !status.success() {
+                                use std::os::unix::process::ExitStatusExt;
+                                if let Some(signal) = status.signal() {
+                                    eprintln!(
+                                        "error: native program terminated by signal {signal}"
+                                    );
+                                }
+                            }
                             process::exit(status.code().unwrap_or(1));
                         }
                     }

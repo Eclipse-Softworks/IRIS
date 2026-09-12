@@ -1,6 +1,6 @@
 //! The `.iris` corpus: executed, and gated on asserting its results.
 //!
-//! Two problems, both named in `CLAUDE.md`, both addressed here.
+//! Two release-gate problems are addressed here.
 //!
 //! **Nothing globbed `tests/*.iris`.** The corpus was never executed by
 //! `cargo test`, so a file could rot indefinitely with no run noticing.
@@ -10,7 +10,7 @@
 //! `test_pattern_guards`), plus a file that passes natively while failing
 //! interpreted. These tests drive the real CLI, so codegen is exercised.
 //!
-//! **Most files assert nothing.** 0 of 139 print results without
+//! **Most files assert nothing.** 0 of 155 print results without
 //! checking them, so they pass whenever the program compiles and exits 0,
 //! regardless of whether the output is right (known-issues #4). Converting them
 //! is mechanical but has to be done by *running* each file and reading its real
@@ -20,6 +20,9 @@
 
 use std::path::Path;
 use std::process::Command;
+use std::sync::OnceLock;
+
+static FFI_FIXTURE_DIR: OnceLock<Result<std::path::PathBuf, String>> = OnceLock::new();
 
 /// Files the compiler is *supposed* to reject. Here, passing is the failure.
 const MUST_FAIL: &[(&str, &str)] = &[
@@ -57,41 +60,10 @@ const SUPPORT_MODULES: &[(&str, &str)] = &[
 
 /// Files that do not currently run, each with why. A debt register, not a
 /// permission slip: every entry names a cause, and the list should only shrink.
-const KNOWN_BROKEN: &[(&str, &str)] = &[
-    (
-        "test_doc_comments.iris",
-        "no zero-argument function, so there is nothing to evaluate",
-    ),
-    (
-        "test_features_11_14.iris",
-        "parse error: uses syntax the compiler does not accept",
-    ),
-    (
-        "test_generic_set.iris",
-        "a type param only in the return type needs an annotation -- #14",
-    ),
-    (
-        "test_mod_min.iris",
-        "parse error: uses syntax the compiler does not accept",
-    ),
-    (
-        "test_mod_simple.iris",
-        "parse error: uses syntax the compiler does not accept",
-    ),
-    ("test_nursery.iris", "print() arity"),
-    (
-        "test_par_map.iris",
-        "parse error: uses syntax the compiler does not accept",
-    ),
-    (
-        "test_refine_fail.iris",
-        "parse error: fails at parse, not at the refinement it is named for",
-    ),
-    (
-        "test_struct_update_simple.iris",
-        "parse error: uses syntax the compiler does not accept",
-    ),
-];
+const KNOWN_BROKEN: &[(&str, &str)] = &[(
+    "test_doc_comments.iris",
+    "no zero-argument function, so there is nothing to evaluate",
+)];
 
 /// Files that do not yet assert their results. Shrinking; see #4.
 const NEEDS_ASSERTIONS: &[&str] = &[];
@@ -132,8 +104,8 @@ fn run(name: &str) -> (Option<i32>, String) {
 /// Runs a corpus file, optionally forcing the interpreter.
 fn run_with(name: &str, force_interp: bool) -> (Option<i32>, String) {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_iris"));
-    cmd.args(["--emit", "eval"])
-        .arg(Path::new("tests").join(name));
+    cmd.args(["--emit", "eval"]).arg(corpus_path(name));
+    configure_fixture_environment(&mut cmd, name);
     if force_interp {
         cmd.env("IRIS_FORCE_INTERP", "1");
     }
@@ -153,8 +125,8 @@ fn run_with(name: &str, force_interp: bool) -> (Option<i32>, String) {
 /// emits, so comparing combined output reports every file as divergent.
 fn outcome_of(name: &str, force_interp: bool) -> (Option<i32>, String) {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_iris"));
-    cmd.args(["--emit", "eval"])
-        .arg(Path::new("tests").join(name));
+    cmd.args(["--emit", "eval"]).arg(corpus_path(name));
+    configure_fixture_environment(&mut cmd, name);
     if force_interp {
         cmd.env("IRIS_FORCE_INTERP", "1");
     }
@@ -163,6 +135,83 @@ fn outcome_of(name: &str, force_interp: bool) -> (Option<i32>, String) {
         out.status.code(),
         String::from_utf8_lossy(&out.stdout).into_owned(),
     )
+}
+
+fn corpus_path(name: &str) -> std::path::PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join(name)
+}
+
+fn configure_fixture_environment(command: &mut Command, name: &str) {
+    if name != "test_ffi_full.iris" {
+        return;
+    }
+    let fixture_dir = FFI_FIXTURE_DIR
+        .get_or_init(build_ffi_fixture)
+        .as_ref()
+        .unwrap_or_else(|error| panic!("could not build the FFI corpus fixture: {error}"));
+    command.current_dir(fixture_dir);
+}
+
+/// Build the C fixture that `test_ffi_full.iris` dynamically loads.
+///
+/// The old corpus gate accidentally depended on an untracked DLL in one
+/// developer checkout. Producing the fixture in an isolated process directory
+/// makes the native/interpreter agreement test portable across CI hosts.
+fn build_ffi_fixture() -> Result<std::path::PathBuf, String> {
+    let fixture_dir = std::env::temp_dir().join(format!("iris_ffi_fixture_{}", std::process::id()));
+    std::fs::create_dir_all(&fixture_dir)
+        .map_err(|error| format!("create {}: {error}", fixture_dir.display()))?;
+    let output_path = fixture_dir.join("iris_ffitest.dll");
+    let source_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join("ffitest.c");
+    let compiler = ffi_fixture_compiler();
+    let mut command = Command::new(&compiler);
+    if cfg!(target_os = "macos") {
+        command.arg("-dynamiclib");
+    } else {
+        command.arg("-shared");
+    }
+    if cfg!(unix) {
+        command.arg("-fPIC");
+    }
+    let result = command
+        .arg(&source_path)
+        .arg("-o")
+        .arg(&output_path)
+        .output()
+        .map_err(|error| format!("start '{compiler}': {error}"))?;
+    if !result.status.success() {
+        return Err(format!(
+            "'{compiler}' exited {}: {}",
+            result.status,
+            String::from_utf8_lossy(&result.stderr).trim()
+        ));
+    }
+    Ok(fixture_dir)
+}
+
+fn ffi_fixture_compiler() -> String {
+    if let Ok(compiler) = std::env::var("IRIS_FFI_CC") {
+        if !compiler.is_empty() {
+            return compiler;
+        }
+    }
+    if cfg!(target_os = "windows") {
+        // The CI image's clang defaults to the MSVC driver and cannot always
+        // find a usable link.exe. CI installs this UCRT toolchain for IRIS's
+        // direct MinGW gate, so use its compiler for the portable fixture too.
+        let mingw = r"C:\msys64\ucrt64\bin\gcc.exe";
+        if Path::new(mingw).is_file() {
+            return mingw.to_owned();
+        }
+    }
+    std::env::var("CC")
+        .or_else(|_| std::env::var("IRIS_CLANG"))
+        .unwrap_or_else(|_| "clang".to_owned())
 }
 
 // -- The assertion gate (#4) ----------------------------------------------

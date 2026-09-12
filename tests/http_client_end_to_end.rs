@@ -1,9 +1,14 @@
 //! End-to-end typed HTTP client coverage against a local, deterministic server.
 
+#[cfg(target_os = "windows")]
 use iris::codegen::build::execute_binary_for_eval;
+#[cfg(target_os = "windows")]
 use iris::compile_file_to_module;
+#[cfg(target_os = "windows")]
 use std::io::{Read, Write};
+#[cfg(target_os = "windows")]
 use std::net::TcpListener;
+#[cfg(target_os = "windows")]
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 #[cfg(target_os = "windows")]

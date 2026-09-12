@@ -4,30 +4,30 @@ def double(x: i64) -> i64 {
 
 def main() -> i64 {
     val nums = list()
-    list_push(nums, 1)
-    list_push(nums, 2)
-    list_push(nums, 3)
-    list_push(nums, 4)
-    list_push(nums, 5)
+    list_push(nums, 1);
+    list_push(nums, 2);
+    list_push(nums, 3);
+    list_push(nums, 4);
+    list_push(nums, 5);
 
     val results = par_map(nums, double)
-    print("result len: " + to_str(list_len(results)))
+    print("result len: " + to_str(list_len(results)));
 
     // Verify all elements are doubled
     var sum = 0
     var i = 0
     while i < list_len(results) {
-        sum = sum + list_get(results, i)
+        sum = sum + list_get(results, i);
         i = i + 1
     }
-    print("sum of doubled: " + to_str(sum))
+    print("sum of doubled: " + to_str(sum));
 
     // Expected: (1+2+3+4+5)*2 = 30
-    if sum == 30 {
-        print("par_map test PASSED")
-        0
-    } else {
-        print("par_map test FAILED: expected 30, got " + to_str(sum))
-        1
-    }
+    assert(sum == 30);
+    println("par_map: ok");
+    return 0
+}
+
+def test_par_map() -> i64 {
+    return main()
 }

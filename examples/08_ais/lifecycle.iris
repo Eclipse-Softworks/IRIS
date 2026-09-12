@@ -1,5 +1,4 @@
-bring std.ml
-bring std.ais
+bring std.ml bring std.ais
 def main() -> i64 {
     var health = model_health_new();
     health = model_health_observe(health, true, 12, "", 3);

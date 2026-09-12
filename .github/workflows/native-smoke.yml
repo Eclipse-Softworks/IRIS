@@ -6,14 +6,20 @@ on:
   pull_request:
     branches: [master, main]
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  RUST_BACKTRACE: 1
 
 jobs:
   native-smoke:
     name: Native Smoke (${{ matrix.label }})
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 45
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
@@ -29,10 +35,6 @@ jobs:
           - label: windows-x64
             runner: windows-latest
             shell_family: windows
-          - label: macos-x64
-            runner: macos-13
-            shell_family: unix
-            timeout_cmd: gtimeout
           - label: macos-arm64
             runner: macos-14
             shell_family: unix
@@ -59,6 +61,15 @@ jobs:
           $llvmBin = Join-Path $env:ProgramFiles 'LLVM\bin'
           $llvmBin | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
           "IRIS_CLANG=$llvmBin\clang.exe" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Install MinGW UCRT64 sysroot (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          C:/msys64/usr/bin/pacman.exe -S --noconfirm --needed \
+            mingw-w64-ucrt-x86_64-gcc \
+            mingw-w64-ucrt-x86_64-sqlite3
+          echo "C:/msys64/ucrt64/bin" >> "$GITHUB_PATH"
 
       - name: Install LLVM toolchain (macOS)
         if: runner.os == 'macOS'

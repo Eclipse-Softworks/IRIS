@@ -542,3 +542,8 @@ iris pkg init                   # create iris.toml manifest
 iris pkg add <name>             # add dependency
 iris pkg install                # install dependencies
 ```
+
+`iris test` discovers zero-argument `test_*` functions. Integer tests pass on
+`0`; boolean tests pass on `true`. An intentional compiler rejection can be
+checked with `// iris-test: compile-fail` and an optional
+`// iris-test: error=expected text` directive at the top of the source file.

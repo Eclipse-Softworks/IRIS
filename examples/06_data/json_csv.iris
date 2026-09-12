@@ -1,4 +1,5 @@
-bring std.json bring std.csv
+bring std.json
+bring std.csv
 def main() -> i64 {
     val row = csv_parse_row("sensor,21,ready");
     assert(list_get(row, 0) == "sensor");

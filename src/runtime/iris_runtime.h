@@ -326,6 +326,7 @@ void iris_print_bool(int v);
 void iris_print_str(const char* s);
 void iris_panic(const char* msg);
 void iris_panic_at(const char* msg, const char* location);
+void iris_bounds_check(int64_t index, int64_t size);
 void iris_bounds_check_abort(int64_t index, int64_t size);
 
 // ---------------------------------------------------------------------------
@@ -488,7 +489,8 @@ void         iris_spawn_fn(void* fn, void* arg);
 int64_t      iris_async_worker_count(void);
 int64_t      iris_async_queued_tasks(void);
 void         iris_par_for(void (*fn)(int64_t, void*), int64_t start, int64_t end, void* arg);
-IrisList*    iris_par_map(IrisList* list, void* (*fn)(IrisVal*));
+IrisList*    iris_par_map(IrisList* list, IrisVal* closure,
+                          IrisVal* (*invoke)(IrisVal*, IrisVal*));
 void         iris_barrier(void);
 IrisTaskGroup* iris_task_group_new(void);
 void         iris_task_group_spawn(IrisTaskGroup* tg, void* fn, void* arg);
@@ -510,7 +512,7 @@ void         iris_gc_stats(int64_t* out_alloc, int64_t* out_freed, int64_t* out_
 int64_t      iris_list_remove(IrisList* list, int64_t idx);
 int64_t      iris_list_insert(IrisList* list, int64_t idx, IrisVal* val);
 IrisVal*     iris_map_entries(IrisVal* map);
-IrisVal*     iris_recv_timeout(IrisVal* chan, int64_t timeout_ms);
+IrisVal*     iris_recv_timeout(IrisChannel* chan, int64_t timeout_ms);
 void         iris_chan_send_b(IrisVal* chan, IrisVal* val);
 IrisWeakRef* iris_weak_ref(IrisVal* val);
 int32_t      iris_weak_alive(IrisWeakRef* w);
@@ -563,6 +565,7 @@ int64_t      iris_effect_dispatch_or_call(
                  void* cont,
                  int nargs,
                  const int64_t* args);
+void         iris_unhandled_effect_abort(const char* effect_name);
 
 // ---------------------------------------------------------------------------
 // Atomics and mutexes
