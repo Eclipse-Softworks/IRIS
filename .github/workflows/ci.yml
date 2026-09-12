@@ -95,6 +95,7 @@ jobs:
           C:/msys64/usr/bin/pacman.exe -S --noconfirm --needed \
             mingw-w64-ucrt-x86_64-gcc \
             mingw-w64-ucrt-x86_64-sqlite3
+          cp -f /c/msys64/ucrt64/bin/libsqlite3-0.dll /c/msys64/ucrt64/bin/sqlite3.dll || true
           echo "C:/msys64/ucrt64/bin" >> "$GITHUB_PATH"
 
       - name: Install system dependencies (Linux)
@@ -104,13 +105,10 @@ jobs:
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -yq build-essential pkg-config clang lld
           echo "IRIS_CLANG=/usr/bin/clang" >> "$GITHUB_ENV"
 
-      - name: Install LLVM toolchain (macOS)
+      - name: Configure clang (macOS)
         if: runner.os == 'macOS'
         run: |
-          brew install llvm
-          LLVM_PREFIX="$(brew --prefix llvm)"
-          echo "$LLVM_PREFIX/bin" >> "$GITHUB_PATH"
-          echo "IRIS_CLANG=$LLVM_PREFIX/bin/clang" >> "$GITHUB_ENV"
+          echo "IRIS_CLANG=/usr/bin/clang" >> "$GITHUB_ENV"
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable

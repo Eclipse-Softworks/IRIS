@@ -1684,7 +1684,22 @@ static fn_sqlite3_bind_int64   p_sqlite3_bind_int64 = NULL;
 static int iris_load_sqlite3(void) {
     if (p_sqlite3_open) return 1; // already loaded
 #ifdef _WIN32
-    sqlite3_lib = LoadLibraryA("sqlite3.dll");
+    char exe_path[MAX_PATH];
+    if (GetModuleFileNameA(NULL, exe_path, MAX_PATH)) {
+        char* last_slash = strrchr(exe_path, '\\');
+        if (!last_slash) last_slash = strrchr(exe_path, '/');
+        if (last_slash) {
+            *last_slash = '\0';
+            char dll_path[MAX_PATH];
+            snprintf(dll_path, sizeof(dll_path), "%s\\sqlite3.dll", exe_path);
+            sqlite3_lib = LoadLibraryExA(dll_path, NULL, 0x00000008 /* LOAD_WITH_ALTERED_SEARCH_PATH */);
+            if (!sqlite3_lib) {
+                snprintf(dll_path, sizeof(dll_path), "%s\\libsqlite3-0.dll", exe_path);
+                sqlite3_lib = LoadLibraryExA(dll_path, NULL, 0x00000008 /* LOAD_WITH_ALTERED_SEARCH_PATH */);
+            }
+        }
+    }
+    if (!sqlite3_lib) sqlite3_lib = LoadLibraryA("sqlite3.dll");
     if (!sqlite3_lib) sqlite3_lib = LoadLibraryA("libsqlite3-0.dll");
     if (!sqlite3_lib) sqlite3_lib = LoadLibraryExA("C:\\msys64\\ucrt64\\bin\\libsqlite3-0.dll", NULL, 0x00000008 /* LOAD_WITH_ALTERED_SEARCH_PATH */);
     if (!sqlite3_lib) sqlite3_lib = LoadLibraryExA("C:\\msys64\\mingw64\\bin\\libsqlite3-0.dll", NULL, 0x00000008 /* LOAD_WITH_ALTERED_SEARCH_PATH */);

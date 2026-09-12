@@ -1316,18 +1316,25 @@ fn stage_sqlite_dll_next_to(output_path: &Path) {
         return;
     };
 
-    if let Some(parent) = output_path.parent() {
-        let _ = std::fs::copy(&source_path, parent.join("sqlite3.dll"));
-        let _ = std::fs::copy(
-            &source_path,
-            parent.join(source_path.file_name().unwrap_or_default()),
-        );
-        if let Some(src_parent) = source_path.parent() {
-            for companion in ["libwinpthread-1.dll", "libgcc_s_seh-1.dll"] {
-                let p = src_parent.join(companion);
-                if p.is_file() {
-                    let _ = std::fs::copy(&p, parent.join(companion));
-                }
+    let out_dir = output_path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let _ = std::fs::copy(&source_path, out_dir.join("sqlite3.dll"));
+    let _ = std::fs::copy(
+        &source_path,
+        out_dir.join(source_path.file_name().unwrap_or_default()),
+    );
+    if let Some(src_parent) = source_path.parent() {
+        for companion in [
+            "libwinpthread-1.dll",
+            "libgcc_s_seh-1.dll",
+            "libstdc++-6.dll",
+            "zlib1.dll",
+        ] {
+            let p = src_parent.join(companion);
+            if p.is_file() {
+                let _ = std::fs::copy(&p, out_dir.join(companion));
             }
         }
     }
@@ -1339,13 +1346,14 @@ fn stage_onnxruntime_dll_next_to(output_path: &Path) {
     let root = std::env::var("ONNXRUNTIME_DIR").unwrap_or_else(|_| r"C:\onnxruntime".to_owned());
     let lib_dir = Path::new(&root).join("lib");
 
-    let Some(parent) = output_path.parent() else {
-        return;
-    };
+    let out_dir = output_path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
     for name in ["onnxruntime.dll", "onnxruntime_providers_shared.dll"] {
         let candidate = lib_dir.join(name);
         if candidate.is_file() {
-            let _ = std::fs::copy(&candidate, parent.join(name));
+            let _ = std::fs::copy(&candidate, out_dir.join(name));
         }
     }
 }
@@ -1594,7 +1602,7 @@ fn link_with_lld(
             cmd.arg(path_str(obj)?);
         }
         append_optional_lld_libraries(&mut cmd, openblas_dir, use_blas, link_libs);
-        append_mingw_default_libraries(&mut cmd);
+        append_mingw_default_libraries(&mut cmd, msys2_lib);
 
         if let Some(ref gcc) = gcc_lib {
             let crt_end = Path::new(gcc).join("crtend.o");
@@ -1675,13 +1683,18 @@ fn append_optional_lld_libraries(
     }
 }
 
-fn append_mingw_default_libraries(cmd: &mut std::process::Command) {
+fn append_mingw_default_libraries(cmd: &mut std::process::Command, msys2_lib: &Option<String>) {
+    let has_ucrt = msys2_lib
+        .as_ref()
+        .map(|lib| Path::new(lib).join("libucrt.a").is_file())
+        .unwrap_or(false);
+    let crt_lib = if has_ucrt { "ucrt" } else { "msvcrt" };
     // The second MinGW/GCC group resolves dependencies introduced by the
     // Windows import libraries in the first group, matching clang's driver.
     for lib in [
-        "mingw32", "gcc", "gcc_eh", "moldname", "mingwex", "msvcrt", "advapi32", "shell32",
+        "mingw32", "gcc", "gcc_eh", "moldname", "mingwex", crt_lib, "advapi32", "shell32",
         "user32", "kernel32", "ws2_32", "winhttp", "pthread", "m", "mingw32", "gcc", "gcc_eh",
-        "moldname", "mingwex", "msvcrt", "kernel32",
+        "moldname", "mingwex", crt_lib, "kernel32",
     ] {
         cmd.arg(format!("-l{}", lib));
     }
