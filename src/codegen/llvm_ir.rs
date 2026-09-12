@@ -423,6 +423,13 @@ fn emit_llvm_ir_impl(
             }
         }
     }
+    for ext in &module.extern_fns {
+        if !str_table.contains_key(&ext.name) {
+            let idx = str_vec.len();
+            str_table.insert(ext.name.clone(), idx);
+            str_vec.push(ext.name.clone());
+        }
+    }
     for (idx, content) in str_vec.iter().enumerate() {
         let escaped = llvm_escape_string(content);
         let len = content.len() + 1;
@@ -516,42 +523,33 @@ fn emit_llvm_ir_impl(
     // ── Runtime declarations ──────────────────────────────────────────────
     emit_runtime_declares(&mut out)?;
 
-    // ── Extern (FFI) function declarations ───────────────────────────────
+    // ── Extern (FFI) function declarations & weak fallbacks ──────────────
     for ext in &module.extern_fns {
         let ret_s = llvm_type_complete(&ext.ret_ty).unwrap_or_else(|_| "ptr".to_owned());
-        let param_ss: Vec<String> = ext
+        let param_defs: Vec<String> = ext
             .param_types
             .iter()
-            .map(|t| llvm_type_complete(t).unwrap_or_else(|_| "ptr".to_owned()))
+            .enumerate()
+            .map(|(i, t)| {
+                let ty = llvm_type_complete(t).unwrap_or_else(|_| "ptr".to_owned());
+                format!("{} %a{}", ty, i)
+            })
             .collect();
-        // `extern_weak`, not plain external linkage.
-        //
-        // `extern def` serves two purposes that codegen cannot distinguish: a
-        // real FFI symbol (`iris_mlrt_onnx_load`, exported by the C runtime) and
-        // an effect operation that exists only to be intercepted by a handler
-        // (`extern def echo` in the effect tests, which has no implementation
-        // anywhere). Both are dispatched through
-        // `iris_effect_dispatch_or_call`, which takes the real function's
-        // address and falls back to an installed handler when it is null.
-        //
-        // Taking the address of a plain `declare` would make a handler-only
-        // extern an undefined symbol at link time. Weak linkage resolves to the
-        // real function when one is linked in and to null when none is, which is
-        // exactly the distinction the dispatcher already expects.
-        //
-        // Tradeoff, deliberately accepted: a misspelled FFI extern is no longer
-        // a link error. It becomes a runtime "no handler for effect 'x' and no
-        // real implementation", which names the symbol and is clear enough.
+        let name_idx = str_table.get(&ext.name).copied().unwrap_or(0);
         writeln!(
             out,
-            "declare extern_weak {} @{}({})",
+            "define weak {} @{}({}) {{",
             ret_s,
             ext.name,
-            param_ss.join(", ")
+            param_defs.join(", ")
         )?;
-    }
-    if !module.extern_fns.is_empty() {
-        writeln!(out)?;
+        writeln!(
+            out,
+            "  call void @iris_unhandled_effect_abort(ptr @.str.{})",
+            name_idx
+        )?;
+        writeln!(out, "  unreachable")?;
+        writeln!(out, "}}\n")?;
     }
 
     // ── Build function signature map for typed calls ──────────────────────
@@ -7451,6 +7449,7 @@ fn emit_runtime_declares(out: &mut String) -> Result<(), CodegenError> {
         "declare ptr @iris_find_handler_fn(ptr)",
         "declare void @iris_resume_cont(ptr, i64)",
         "declare i64 @iris_effect_dispatch_or_call(ptr, ptr, ptr, i64, ptr)",
+        "declare void @iris_unhandled_effect_abort(ptr)",
         "declare void @iris_release_kind(ptr, i32)",
         // Channels / Concurrency
         "declare ptr @iris_chan_new(i64)",

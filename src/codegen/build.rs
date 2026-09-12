@@ -812,7 +812,7 @@ fn build_binary_impl(
             let mut link_cmd = Command::new(&clang);
             link_cmd.args(&target_args);
             if cfg!(target_os = "macos") || resolved_target.contains("apple") {
-                link_cmd.args(["-O2", "-Wl,-undefined,dynamic_lookup", path_str(&mod_obj)?]);
+                link_cmd.args(["-O2", path_str(&mod_obj)?]);
             } else {
                 link_cmd.args(["-fuse-ld=lld", "-O2", path_str(&mod_obj)?]);
             }
@@ -1301,7 +1301,7 @@ fn find_sqlite_dll() -> Option<PathBuf> {
         dirs.extend(std::env::split_paths(&path));
     }
     for dir in dirs {
-        for file_name in ["sqlite3.dll", "SQLite3.dll"] {
+        for file_name in ["sqlite3.dll", "SQLite3.dll", "libsqlite3-0.dll"] {
             let candidate = dir.join(file_name);
             if candidate.is_file() {
                 return Some(candidate);
@@ -1317,8 +1317,19 @@ fn stage_sqlite_dll_next_to(output_path: &Path) {
     };
 
     if let Some(parent) = output_path.parent() {
-        let target = parent.join(source_path.file_name().unwrap_or_default());
-        let _ = std::fs::copy(&source_path, target);
+        let _ = std::fs::copy(&source_path, parent.join("sqlite3.dll"));
+        let _ = std::fs::copy(
+            &source_path,
+            parent.join(source_path.file_name().unwrap_or_default()),
+        );
+        if let Some(src_parent) = source_path.parent() {
+            for companion in ["libwinpthread-1.dll", "libgcc_s_seh-1.dll"] {
+                let p = src_parent.join(companion);
+                if p.is_file() {
+                    let _ = std::fs::copy(&p, parent.join(companion));
+                }
+            }
+        }
     }
 }
 

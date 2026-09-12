@@ -2416,6 +2416,12 @@ void* iris_find_handler_fn(const char* name) {
     return arm ? arm->handler_fn : NULL;
 }
 
+void iris_unhandled_effect_abort(const char* effect_name) {
+    fprintf(stderr, "error: no handler for effect '%s' and no real implementation\n", effect_name ? effect_name : "(unknown)");
+    fflush(stderr);
+    abort();
+}
+
 int64_t iris_effect_dispatch_or_call(
     const char* effect_name,
     void* real_fn,
@@ -2456,8 +2462,7 @@ int64_t iris_effect_dispatch_or_call(
 call_real:
     if (!real_fn) {
         /* No handler and no real function — panic. */
-        fprintf(stderr, "error: no handler for effect '%s' and no real implementation\n", effect_name);
-        abort();
+        iris_unhandled_effect_abort(effect_name);
     }
     {
         /* Real extern signature: i64 real_fn(i64, i64, i64, i64, i64, i64, i64) */

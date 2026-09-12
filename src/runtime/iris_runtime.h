@@ -565,6 +565,7 @@ int64_t      iris_effect_dispatch_or_call(
                  void* cont,
                  int nargs,
                  const int64_t* args);
+void         iris_unhandled_effect_abort(const char* effect_name);
 
 // ---------------------------------------------------------------------------
 // Atomics and mutexes
