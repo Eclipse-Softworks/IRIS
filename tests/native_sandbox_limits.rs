@@ -1,6 +1,6 @@
 use iris::sandbox::{
-    current_process_is_appcontainer, CommandSpec, LimitViolation, NativeSandbox, ResourceLimits,
-    ResourceSupervisor, SandboxAvailability, SandboxError,
+    CommandSpec, LimitViolation, NativeSandbox, ResourceLimits, ResourceSupervisor,
+    SandboxAvailability, SandboxError,
 };
 use std::path::PathBuf;
 use std::time::Duration;
