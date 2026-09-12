@@ -1,3 +1,5 @@
+#[cfg(windows)]
+use iris::sandbox::current_process_is_appcontainer;
 use iris::sandbox::{
     CommandSpec, LimitViolation, NativeSandbox, ResourceLimits, ResourceSupervisor,
     SandboxAvailability, SandboxError,
