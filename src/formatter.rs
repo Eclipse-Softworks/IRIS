@@ -101,7 +101,7 @@ fn format_iris(source: &str, options: &FormatOptions, spanned_tokens: &[Spanned<
     let mut indent = 0usize;
     let mut at_line_start = true;
     let mut prev_was_newline = false;
-    let mut blank_lines = 0usize;
+    let mut last_emitted_end = 0usize;
     let mut prev_tok_was_pub = false;
 
     let is_top_level_kw = |t: &Token| {
@@ -137,7 +137,14 @@ fn format_iris(source: &str, options: &FormatOptions, spanned_tokens: &[Spanned<
         )
     };
 
+    let mut skip_next = false;
     for (idx, spanned) in spanned_tokens.iter().enumerate() {
+        if skip_next {
+            skip_next = false;
+            last_emitted_end = spanned.span.end.0 as usize;
+            continue;
+        }
+
         let tok = &spanned.node;
         while comment_index < comments.len()
             && comments[comment_index].start < spanned.span.start.0 as usize
@@ -149,6 +156,7 @@ fn format_iris(source: &str, options: &FormatOptions, spanned_tokens: &[Spanned<
                 indent_width,
                 &mut at_line_start,
             );
+            last_emitted_end = comments[comment_index].start + comments[comment_index].text.len();
             comment_index += 1;
         }
         let tok_str = token_to_str(tok, source, spanned.span.start.0, spanned.span.end.0);
@@ -159,13 +167,25 @@ fn format_iris(source: &str, options: &FormatOptions, spanned_tokens: &[Spanned<
         if is_top_level_kw(tok)
             && indent == 0
             && !out.is_empty()
-            && blank_lines == 0
-            && !at_line_start
             && !(matches!(tok, Token::Def) && prev_tok_was_pub)
         {
-            out.push('\n');
-            blank_lines = 1;
+            if !out.ends_with("\n\n") {
+                if out.ends_with('\n') {
+                    out.push('\n');
+                } else {
+                    out.push_str("\n\n");
+                }
+            }
+            at_line_start = true;
+        } else if idx > 0 && at_line_start && !out.ends_with("\n\n") && !out.is_empty() {
+            let curr_start = spanned.span.start.0 as usize;
+            if curr_start >= last_emitted_end && curr_start <= source.len() {
+                if has_blank_line(&source[last_emitted_end..curr_start]) {
+                    out.push('\n');
+                }
+            }
         }
+        last_emitted_end = spanned.span.end.0 as usize;
 
         if indent > 0 && !at_line_start && is_stmt_kw(tok) {
             out.push('\n');
@@ -179,6 +199,19 @@ fn format_iris(source: &str, options: &FormatOptions, spanned_tokens: &[Spanned<
         }
 
         if tok_str == "{" {
+            let next_is_rbrace = spanned_tokens
+                .get(idx + 1)
+                .is_some_and(|next| matches!(next.node, Token::RBrace));
+            if next_is_rbrace {
+                if !out.ends_with(' ') && !out.ends_with('\n') {
+                    out.push(' ');
+                }
+                out.push('{');
+                out.push('}');
+                skip_next = true;
+                prev_was_newline = false;
+                continue;
+            }
             if !out.ends_with(' ') && !out.ends_with('\n') {
                 out.push(' ');
             }
@@ -186,7 +219,6 @@ fn format_iris(source: &str, options: &FormatOptions, spanned_tokens: &[Spanned<
             indent += 1;
             out.push('\n');
             at_line_start = true;
-            blank_lines = 0;
             prev_was_newline = true;
             continue;
         }
@@ -208,16 +240,63 @@ fn format_iris(source: &str, options: &FormatOptions, spanned_tokens: &[Spanned<
                 out.push('\n');
                 at_line_start = true;
             }
-            blank_lines = 0;
             prev_was_newline = true;
             continue;
         }
 
         if tok_str == ";" {
+            if out.ends_with(' ') {
+                out.pop();
+            }
             out.push(';');
             out.push('\n');
             at_line_start = true;
-            blank_lines = 0;
+            prev_was_newline = false;
+            continue;
+        }
+
+        if tok_str == ":" {
+            if out.ends_with(' ') {
+                out.pop();
+            }
+            out.push(':');
+            out.push(' ');
+            prev_was_newline = false;
+            continue;
+        }
+
+        if tok_str == "::" {
+            if out.ends_with(' ') {
+                out.pop();
+            }
+            out.push_str("::");
+            prev_was_newline = false;
+            continue;
+        }
+
+        if tok_str == "." {
+            if out.ends_with(' ') {
+                out.pop();
+            }
+            out.push('.');
+            prev_was_newline = false;
+            continue;
+        }
+
+        if tok_str == "?" {
+            if out.ends_with(' ') {
+                out.pop();
+            }
+            out.push('?');
+            prev_was_newline = false;
+            continue;
+        }
+
+        if tok_str == ".." || tok_str == "..=" {
+            if out.ends_with(' ') {
+                out.pop();
+            }
+            out.push_str(&tok_str);
             prev_was_newline = false;
             continue;
         }
@@ -227,11 +306,154 @@ fn format_iris(source: &str, options: &FormatOptions, spanned_tokens: &[Spanned<
                 out.pop();
             }
             out.push(',');
+            let user_broke_line = if idx + 1 < spanned_tokens.len() {
+                let comma_end = spanned.span.end.0 as usize;
+                let next_start = spanned_tokens[idx + 1].span.start.0 as usize;
+                if next_start >= comma_end && next_start <= source.len() {
+                    source[comma_end..next_start].contains('\n')
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
             let projected_width = projected_group_width(spanned_tokens, idx + 1, source);
-            if current_line_width(&out).saturating_add(projected_width) >= options.max_line_width {
+            if user_broke_line
+                || current_line_width(&out).saturating_add(projected_width) >= options.max_line_width
+            {
                 out.push('\n');
                 out.push_str(&indent_str(indent));
+                at_line_start = false;
             } else {
+                out.push(' ');
+            }
+            prev_was_newline = false;
+            continue;
+        }
+
+        if tok_str == "[" || tok_str == "(" {
+            out.push_str(&tok_str);
+            let user_broke = if idx + 1 < spanned_tokens.len() {
+                let end = spanned.span.end.0 as usize;
+                let next_start = spanned_tokens[idx + 1].span.start.0 as usize;
+                if next_start >= end && next_start <= source.len() {
+                    source[end..next_start].contains('\n')
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+            if user_broke {
+                indent += 1;
+                out.push('\n');
+                out.push_str(&indent_str(indent));
+                at_line_start = false;
+            }
+            prev_was_newline = false;
+            continue;
+        }
+
+        if tok_str == "]" || tok_str == ")" {
+            let user_broke = if idx > 0 {
+                let prev_end = spanned_tokens[idx - 1].span.end.0 as usize;
+                let start = spanned.span.start.0 as usize;
+                if start >= prev_end && start <= source.len() {
+                    source[prev_end..start].contains('\n')
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+            if user_broke {
+                indent = indent.saturating_sub(1);
+                if !out.ends_with('\n') {
+                    out.push('\n');
+                }
+                out.push_str(&indent_str(indent));
+            } else if out.ends_with(' ') {
+                out.pop();
+            }
+            out.push_str(&tok_str);
+            prev_was_newline = false;
+            continue;
+        }
+
+        if tok_str == "<" {
+            let is_generic = idx > 0
+                && spanned_tokens[idx - 1].span.end.0 == spanned.span.start.0
+                && matches!(
+                    spanned_tokens[idx - 1].node,
+                    Token::Ident(_)
+                        | Token::Str
+                        | Token::I64
+                        | Token::I32
+                        | Token::U64
+                        | Token::F64
+                        | Token::Bool
+                        | Token::Tensor
+                        | Token::RAngle
+                );
+            if is_generic {
+                if out.ends_with(' ') {
+                    out.pop();
+                }
+                out.push('<');
+            } else {
+                if !out.ends_with(' ') && !out.ends_with('\n') {
+                    out.push(' ');
+                }
+                out.push('<');
+                out.push(' ');
+            }
+            prev_was_newline = false;
+            continue;
+        }
+
+        if tok_str == ">" {
+            let is_generic_close = idx > 0
+                && matches!(
+                    spanned_tokens[idx - 1].node,
+                    Token::Ident(_)
+                        | Token::Str
+                        | Token::I64
+                        | Token::I32
+                        | Token::I8
+                        | Token::U8
+                        | Token::U32
+                        | Token::U64
+                        | Token::Usize
+                        | Token::F64
+                        | Token::F32
+                        | Token::Bool
+                        | Token::Tensor
+                        | Token::RAngle
+                )
+                && (idx + 1 >= spanned_tokens.len()
+                    || matches!(
+                        spanned_tokens[idx + 1].node,
+                        Token::Comma
+                            | Token::Semi
+                            | Token::RParen
+                            | Token::RBracket
+                            | Token::RBrace
+                            | Token::RAngle
+                            | Token::Arrow
+                            | Token::FatArrow
+                            | Token::Eq
+                            | Token::LBrace
+                    ));
+            if is_generic_close {
+                if out.ends_with(' ') {
+                    out.pop();
+                }
+                out.push('>');
+            } else {
+                if !out.ends_with(' ') && !out.ends_with('\n') {
+                    out.push(' ');
+                }
+                out.push('>');
                 out.push(' ');
             }
             prev_was_newline = false;
@@ -244,6 +466,11 @@ fn format_iris(source: &str, options: &FormatOptions, spanned_tokens: &[Spanned<
                 | "!="
                 | "<="
                 | ">="
+                | "+="
+                | "-="
+                | "*="
+                | "/="
+                | "%="
                 | "+"
                 | "-"
                 | "*"
@@ -253,9 +480,6 @@ fn format_iris(source: &str, options: &FormatOptions, spanned_tokens: &[Spanned<
                 | "||"
                 | "->"
                 | "=>"
-                | ".."
-                | "..="
-                | ":"
                 | "to"
         );
 
@@ -265,13 +489,6 @@ fn format_iris(source: &str, options: &FormatOptions, spanned_tokens: &[Spanned<
             }
             out.push_str(&tok_str);
             out.push(' ');
-        } else if tok_str == "(" || tok_str == "[" || tok_str == "<" {
-            out.push_str(&tok_str);
-        } else if tok_str == ")" || tok_str == "]" || tok_str == ">" {
-            if out.ends_with(' ') {
-                out.pop();
-            }
-            out.push_str(&tok_str);
         } else {
             let last = out.chars().last();
             let needs_sep = matches!(last, Some(c) if c.is_alphanumeric() || c == '_' || c == '"');
@@ -283,7 +500,6 @@ fn format_iris(source: &str, options: &FormatOptions, spanned_tokens: &[Spanned<
 
         let _ = (idx, prev_was_newline, spanned.span);
         prev_was_newline = false;
-        blank_lines = 0;
         prev_tok_was_pub = matches!(tok, Token::Pub);
     }
 
@@ -302,6 +518,21 @@ fn format_iris(source: &str, options: &FormatOptions, spanned_tokens: &[Spanned<
         out.push('\n');
     }
     out
+}
+
+fn has_blank_line(text: &str) -> bool {
+    let mut saw_newline = false;
+    for b in text.bytes() {
+        if b == b'\n' {
+            if saw_newline {
+                return true;
+            }
+            saw_newline = true;
+        } else if b != b' ' && b != b'\t' && b != b'\r' {
+            saw_newline = false;
+        }
+    }
+    false
 }
 
 #[derive(Debug)]
@@ -647,5 +878,50 @@ def main() -> i64 {
             "def f(first_parameter: i64, second_parameter: i64) -> i64 { first_parameter }\n";
         let formatted = format_source(source, &options).unwrap();
         assert!(formatted.contains(",\n"));
+    }
+
+    #[test]
+    fn formats_colons_without_leading_space() {
+        let source = "def add(x: i64, y: i64) -> i64 {\n    val a: i64 = 1;\n    return a + x + y;\n}\n";
+        let formatted = format_source(source, &FormatOptions::default()).unwrap();
+        assert!(formatted.contains("x: i64, y: i64"));
+        assert!(formatted.contains("val a: i64 = 1;"));
+        assert!(!formatted.contains("x : i64"));
+        assert!(!formatted.contains("val a : i64"));
+    }
+
+    #[test]
+    fn formats_double_colons_and_dots_without_spaces() {
+        let source = "def test() -> i64 {\n    val p = Point.new();\n    val x = p.x;\n    return 0;\n}\n";
+        let formatted = format_source(source, &FormatOptions::default()).unwrap();
+        assert!(formatted.contains("Point.new()"));
+        assert!(formatted.contains("p.x"));
+        assert!(!formatted.contains("Point .new()"));
+        assert!(!formatted.contains("p .x"));
+    }
+
+    #[test]
+    fn formats_ranges_compactly() {
+        let source = "def test() -> i64 {\n    for i in 0..10 {\n        assert(i >= 0);\n    }\n    return 0;\n}\n";
+        let formatted = format_source(source, &FormatOptions::default()).unwrap();
+        assert!(formatted.contains("0..10"));
+        assert!(!formatted.contains("0 .. 10"));
+    }
+
+    #[test]
+    fn preserves_user_newlines_and_top_level_separation() {
+        let source = "def foo() -> i64 {\n    val a = 1;\n\n    val b = 2;\n    return a + b;\n}\n\ndef bar() -> i64 {\n    return 0;\n}\n";
+        let formatted = format_source(source, &FormatOptions::default()).unwrap();
+        // Preserves blank line inside function
+        assert!(formatted.contains("val a = 1;\n\n    val b = 2;"));
+        // Preserves blank line between top-level functions
+        assert!(formatted.contains("}\n\ndef bar()"));
+    }
+
+    #[test]
+    fn empty_blocks_kept_compact() {
+        let source = "record Empty {}\n";
+        let formatted = format_source(source, &FormatOptions::default()).unwrap();
+        assert!(formatted.contains("record Empty {}"));
     }
 }

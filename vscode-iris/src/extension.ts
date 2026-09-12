@@ -129,11 +129,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         new IrisTestController(getIrisExe, outputChannel),
     );
 
-    // Format on save
+    // Format on save (opt-in)
     context.subscriptions.push(
         vscode.workspace.onWillSaveTextDocument(e => {
             const cfg = vscode.workspace.getConfiguration('iris');
-            if (cfg.get<boolean>('formatOnSave', true) && e.document.languageId === 'iris') {
+            if (cfg.get<boolean>('formatOnSave', false) && e.document.languageId === 'iris') {
                 e.waitUntil(vscode.commands.executeCommand('editor.action.formatDocument'));
             }
         }),
