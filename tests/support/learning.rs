@@ -50,10 +50,10 @@ pub fn run(relative: &str, mode: &str, expected: &str) {
     let _ = std::fs::remove_dir_all(&work);
     assert!(
         status.is_some_and(|s| s.success()),
-        "{relative} [{mode}]: {status:?}\n{out}\n{err}"
+        "{relative} [{mode}]: {status:?}\nstdout:\n{out}\nstderr:\n{err}"
     );
     assert!(
         out.contains(expected),
-        "{relative} [{mode}]: expected {expected:?}\n{out}\n{err}"
+        "{relative} [{mode}]: expected {expected:?}\nstdout:\n{out}\nstderr:\n{err}"
     );
 }
