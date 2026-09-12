@@ -10,6 +10,6 @@ def main() -> i64 {
     val owned = move items;
     assert(list_get(owned, 2) == 8);
     // Using items here would be a compile-time use-after-move error.
-    println("ownership: ok");
+    print("ownership: ok");
     return 0
 }

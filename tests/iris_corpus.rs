@@ -20,6 +20,9 @@
 
 use std::path::Path;
 use std::process::Command;
+use std::sync::OnceLock;
+
+static FFI_FIXTURE_DIR: OnceLock<Result<std::path::PathBuf, String>> = OnceLock::new();
 
 /// Files the compiler is *supposed* to reject. Here, passing is the failure.
 const MUST_FAIL: &[(&str, &str)] = &[
@@ -101,8 +104,8 @@ fn run(name: &str) -> (Option<i32>, String) {
 /// Runs a corpus file, optionally forcing the interpreter.
 fn run_with(name: &str, force_interp: bool) -> (Option<i32>, String) {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_iris"));
-    cmd.args(["--emit", "eval"])
-        .arg(Path::new("tests").join(name));
+    cmd.args(["--emit", "eval"]).arg(corpus_path(name));
+    configure_fixture_environment(&mut cmd, name);
     if force_interp {
         cmd.env("IRIS_FORCE_INTERP", "1");
     }
@@ -122,8 +125,8 @@ fn run_with(name: &str, force_interp: bool) -> (Option<i32>, String) {
 /// emits, so comparing combined output reports every file as divergent.
 fn outcome_of(name: &str, force_interp: bool) -> (Option<i32>, String) {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_iris"));
-    cmd.args(["--emit", "eval"])
-        .arg(Path::new("tests").join(name));
+    cmd.args(["--emit", "eval"]).arg(corpus_path(name));
+    configure_fixture_environment(&mut cmd, name);
     if force_interp {
         cmd.env("IRIS_FORCE_INTERP", "1");
     }
@@ -132,6 +135,83 @@ fn outcome_of(name: &str, force_interp: bool) -> (Option<i32>, String) {
         out.status.code(),
         String::from_utf8_lossy(&out.stdout).into_owned(),
     )
+}
+
+fn corpus_path(name: &str) -> std::path::PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join(name)
+}
+
+fn configure_fixture_environment(command: &mut Command, name: &str) {
+    if name != "test_ffi_full.iris" {
+        return;
+    }
+    let fixture_dir = FFI_FIXTURE_DIR
+        .get_or_init(build_ffi_fixture)
+        .as_ref()
+        .unwrap_or_else(|error| panic!("could not build the FFI corpus fixture: {error}"));
+    command.current_dir(fixture_dir);
+}
+
+/// Build the C fixture that `test_ffi_full.iris` dynamically loads.
+///
+/// The old corpus gate accidentally depended on an untracked DLL in one
+/// developer checkout. Producing the fixture in an isolated process directory
+/// makes the native/interpreter agreement test portable across CI hosts.
+fn build_ffi_fixture() -> Result<std::path::PathBuf, String> {
+    let fixture_dir = std::env::temp_dir().join(format!("iris_ffi_fixture_{}", std::process::id()));
+    std::fs::create_dir_all(&fixture_dir)
+        .map_err(|error| format!("create {}: {error}", fixture_dir.display()))?;
+    let output_path = fixture_dir.join("iris_ffitest.dll");
+    let source_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join("ffitest.c");
+    let compiler = ffi_fixture_compiler();
+    let mut command = Command::new(&compiler);
+    if cfg!(target_os = "macos") {
+        command.arg("-dynamiclib");
+    } else {
+        command.arg("-shared");
+    }
+    if cfg!(unix) {
+        command.arg("-fPIC");
+    }
+    let result = command
+        .arg(&source_path)
+        .arg("-o")
+        .arg(&output_path)
+        .output()
+        .map_err(|error| format!("start '{compiler}': {error}"))?;
+    if !result.status.success() {
+        return Err(format!(
+            "'{compiler}' exited {}: {}",
+            result.status,
+            String::from_utf8_lossy(&result.stderr).trim()
+        ));
+    }
+    Ok(fixture_dir)
+}
+
+fn ffi_fixture_compiler() -> String {
+    if let Ok(compiler) = std::env::var("IRIS_FFI_CC") {
+        if !compiler.is_empty() {
+            return compiler;
+        }
+    }
+    if cfg!(target_os = "windows") {
+        // The CI image's clang defaults to the MSVC driver and cannot always
+        // find a usable link.exe. CI installs this UCRT toolchain for IRIS's
+        // direct MinGW gate, so use its compiler for the portable fixture too.
+        let mingw = r"C:\msys64\ucrt64\bin\gcc.exe";
+        if Path::new(mingw).is_file() {
+            return mingw.to_owned();
+        }
+    }
+    std::env::var("CC")
+        .or_else(|_| std::env::var("IRIS_CLANG"))
+        .unwrap_or_else(|_| "clang".to_owned())
 }
 
 // -- The assertion gate (#4) ----------------------------------------------

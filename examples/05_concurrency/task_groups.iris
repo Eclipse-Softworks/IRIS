@@ -6,7 +6,6 @@ def main() -> i64 {
         spawn(workers) {
             if !cancellation_requested() {
                 atomic_add(completed, 1);
-
             };
         };
     };
@@ -17,7 +16,6 @@ def main() -> i64 {
     task_group_cancel(cancelled);
     spawn(cancelled) {
         atomic_add(completed, 1000);
-
     };
 
     task_group_join(cancelled);

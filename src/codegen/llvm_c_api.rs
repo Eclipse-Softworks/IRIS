@@ -550,6 +550,18 @@ pub fn is_llvm_c_api_available() -> bool {
     llvm_c_api().is_ok()
 }
 
+/// Return whether the loaded LLVM distribution contains the backend for a
+/// specific target triple.
+///
+/// LLVM packages are commonly built with only a subset of targets. In
+/// particular, the stock Windows package exposes LLVM-C but omits AVR. A
+/// library-level availability check cannot distinguish that case.
+pub fn is_llvm_target_available(triple: &str) -> bool {
+    llvm_c_api()
+        .and_then(|api| api.initialize_target(triple))
+        .is_ok()
+}
+
 /// Initialize the LLVM target components needed for the host JIT.
 pub(crate) fn initialize_native_target() -> Result<(), CodegenError> {
     llvm_c_api()?.initialize_target(crate::codegen::llvm_ir::native_target_triple())

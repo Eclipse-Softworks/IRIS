@@ -35,8 +35,12 @@ pub fn target_preset_to_triple(preset: &str) -> Option<&'static str> {
     match preset {
         "linux-x64" => Some("x86_64-unknown-linux-gnu"),
         "linux-arm64" => Some("aarch64-unknown-linux-gnu"),
-        "macos-x64" => Some("x86_64-apple-macosx14.0"),
-        "macos-arm64" => Some("aarch64-apple-macosx14.0"),
+        // macOS 11 is the first Apple Silicon release and remains a sensible
+        // deployment floor for both architectures. Encoding the CI host's OS
+        // version here produced binaries that could not launch on older
+        // supported runners (notably the macOS 13 x86_64 native-smoke host).
+        "macos-x64" => Some("x86_64-apple-macosx11.0"),
+        "macos-arm64" => Some("aarch64-apple-macosx11.0"),
         "windows-x64" => Some("x86_64-pc-windows-gnu"),
         "windows-arm64" => Some("aarch64-pc-windows-gnu"),
         "riscv64-linux" => Some("riscv64gc-unknown-linux-gnu"),
@@ -53,8 +57,10 @@ pub fn target_preset_to_triple(preset: &str) -> Option<&'static str> {
 pub fn target_data_layout(triple: &str) -> &'static str {
     if triple.starts_with("avr") {
         "e-P1-p:16:8-i8:8-i16:8-i32:8-i64:8-f32:8-f64:8-n8-a:8"
-    } else if triple.starts_with("aarch64-apple") {
+    } else if triple.starts_with("aarch64-apple") || triple.starts_with("arm64-apple") {
         "e-m:o-i64:64-i128:128-n32:64-S128"
+    } else if triple.starts_with("x86_64-apple") {
+        "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-f80:128-n8:16:32:64-S128"
     } else if triple.starts_with("aarch64") {
         "e-m:e-i8:8:32-i16:16:32-i64:64-i128:128-n32:64-S128"
     } else if triple.starts_with("thumb") || triple.starts_with("arm") {
@@ -83,11 +89,11 @@ pub fn native_target_triple() -> &'static str {
     }
     #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
     {
-        "x86_64-apple-macosx14.0"
+        "x86_64-apple-macosx11.0"
     }
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     {
-        "aarch64-apple-macosx14.0"
+        "aarch64-apple-macosx11.0"
     }
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     {
@@ -698,8 +704,7 @@ fn emit_llvm_ir_impl(
         writeln!(out, "  call void @iris_set_argv(i32 %argc, ptr %argv)")?;
         writeln!(out, "  %r = call i64 @iris_main()")?;
         writeln!(out, "  %r32 = trunc i64 %r to i32")?;
-        writeln!(out, "  call void @exit(i32 %r32)")?;
-        writeln!(out, "  unreachable")?;
+        writeln!(out, "  ret i32 %r32")?;
         writeln!(out, "}}\n")?;
     }
     // Post-process emitted IR to correct occasional FP-width mismatches
@@ -3429,7 +3434,7 @@ fn emit_instr_ir(
                 }
                 writeln!(
                     out,
-                    "  %v{} = call ptr @iris_make_struct(i32 {}, {})",
+                    "  %v{} = call ptr (i32, ...) @iris_make_struct(i32 {}, {})",
                     result.0,
                     fields.len(),
                     args_str.join(", ")
@@ -3594,7 +3599,7 @@ fn emit_instr_ir(
             }
             writeln!(
                 out,
-                "  %v{} = call ptr @iris_make_tuple(i32 {}, {})",
+                "  %v{} = call ptr (i32, ...) @iris_make_tuple(i32 {}, {})",
                 result.0,
                 elements.len(),
                 args_str.join(", ")
@@ -3981,7 +3986,7 @@ fn emit_instr_ir(
                     }
                     writeln!(
                         out,
-                        "  %v{} = call {} @iris_tensor_load({})",
+                        "  %v{} = call {} (ptr, ...) @iris_tensor_load({})",
                         result.0,
                         ty_s,
                         args.join(", ")
@@ -4023,7 +4028,11 @@ fn emit_instr_ir(
                     for idx in indices {
                         args.push(format!("i64 {}", val(*idx)));
                     }
-                    writeln!(out, "  call void @iris_tensor_store({})", args.join(", "))?;
+                    writeln!(
+                        out,
+                        "  call void (ptr, ...) @iris_tensor_store({})",
+                        args.join(", ")
+                    )?;
                 }
             }
         }
@@ -4075,7 +4084,7 @@ fn emit_instr_ir(
                 mk_args.extend(cap_args);
                 writeln!(
                     out,
-                    "  {} = call ptr @iris_make_closure({})",
+                    "  {} = call ptr (ptr, i32, ...) @iris_make_closure({})",
                     env_name,
                     mk_args.join(", ")
                 )?;
@@ -5056,7 +5065,7 @@ fn emit_instr_ir(
             args.extend(cap_args);
             writeln!(
                 out,
-                "  %v{} = call ptr @iris_make_closure({})",
+                "  %v{} = call ptr (ptr, i32, ...) @iris_make_closure({})",
                 result.0,
                 args.join(", ")
             )?;
@@ -6733,6 +6742,13 @@ fn emit_instr_ir(
                     out,
                     "  %v{} = call ptr @iris_unbox_list(ptr %v{}_boxed)",
                     result.0, result.0
+                )?;
+            } else if fn_name == "iris_select" {
+                writeln!(
+                    out,
+                    "  %v{} = call i64 (i64, ...) @iris_select({})",
+                    result.0,
+                    arg_strs.join(", ")
                 )?;
             } else {
                 writeln!(

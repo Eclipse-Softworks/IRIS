@@ -14,7 +14,7 @@
 bring std.ffi
 
 def check_open_and_zero_arg() -> i64 {
-    val h = lib_open("iris_ffitest.dll");
+    val h = lib_open("./iris_ffitest.dll");
     assert(h != -1);
     assert(h != 0);
 
@@ -28,7 +28,7 @@ def check_open_and_zero_arg() -> i64 {
 }
 
 def check_integer_args() -> i64 {
-    val h = lib_open("iris_ffitest.dll");
+    val h = lib_open("./iris_ffitest.dll");
     assert(h != -1);
 
     // One, two and three arguments. Each result depends on *every* argument,
@@ -54,7 +54,7 @@ def check_integer_args() -> i64 {
 }
 
 def check_float_returns() -> i64 {
-    val h = lib_open("iris_ffitest.dll");
+    val h = lib_open("./iris_ffitest.dll");
     assert(h != -1);
 
     // A double return travels back in a different register class from an
@@ -70,7 +70,7 @@ def check_float_returns() -> i64 {
 }
 
 def check_string_return() -> i64 {
-    val h = lib_open("iris_ffitest.dll");
+    val h = lib_open("./iris_ffitest.dll");
     assert(h != -1);
     assert(call_str(h, "t_str") == "hello-ffi");
     lib_close(h);
@@ -78,7 +78,7 @@ def check_string_return() -> i64 {
 }
 
 def check_out_cells() -> i64 {
-    val h = lib_open("iris_ffitest.dll");
+    val h = lib_open("./iris_ffitest.dll");
     assert(h != -1);
 
     // An out-parameter: IRIS allocates the buffer, C fills it.
@@ -117,7 +117,7 @@ def check_rust_aliases() -> i64 {
     // documents intent -- a Rust cdylib exports C symbols like any other
     // library. Asserted against the same fixture so the aliasing is proven
     // rather than assumed.
-    val h = rust_open("iris_ffitest.dll");
+    val h = rust_open("./iris_ffitest.dll");
     assert(h != -1);
     assert(rust_i64(h, "t_one", 21) == 42);
     assert(rust_f64(h, "t_f64_one", 9) == 4.5);
@@ -126,7 +126,7 @@ def check_rust_aliases() -> i64 {
 }
 
 def check_missing_symbol_is_not_a_wrong_answer() -> i64 {
-    val h = lib_open("iris_ffitest.dll");
+    val h = lib_open("./iris_ffitest.dll");
     assert(h != -1);
     // A symbol that does not exist must not come back as a plausible number.
     // -1 is the documented sentinel; the important property is that it is not

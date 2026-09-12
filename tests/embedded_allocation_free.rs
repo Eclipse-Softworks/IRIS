@@ -3,7 +3,7 @@
 use iris::codegen::embedded::{
     build_embedded_bundle, validate_embedded_module, verify_hardware_report, EmbeddedTarget,
 };
-use iris::codegen::llvm_c_api::is_llvm_c_api_available;
+use iris::codegen::llvm_c_api::{is_llvm_c_api_available, is_llvm_target_available};
 use iris::codegen::{target_data_layout, target_preset_to_triple};
 use iris::compile_to_module;
 
@@ -116,6 +116,11 @@ fn emits_real_arm_and_riscv_objects_without_allocator_symbols() {
         assert!(manifest.contains(&bundle.proof.fingerprint));
         assert!(bundle.board_support.is_none());
         std::fs::remove_dir_all(output).expect("remove isolated embedded test output");
+    }
+
+    if !is_llvm_target_available(EmbeddedTarget::ArduinoUno.triple()) {
+        eprintln!("LLVM-C has no AVR backend; Arduino Uno object emission skipped");
+        return;
     }
 
     let uno = compile_to_module(
