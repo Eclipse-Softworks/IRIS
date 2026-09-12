@@ -1685,10 +1685,14 @@ static int iris_load_sqlite3(void) {
     if (p_sqlite3_open) return 1; // already loaded
 #ifdef _WIN32
     sqlite3_lib = LoadLibraryA("sqlite3.dll");
+    if (!sqlite3_lib) sqlite3_lib = LoadLibraryA("libsqlite3-0.dll");
+    if (!sqlite3_lib) sqlite3_lib = LoadLibraryExA("C:\\msys64\\ucrt64\\bin\\libsqlite3-0.dll", NULL, 0x00000008 /* LOAD_WITH_ALTERED_SEARCH_PATH */);
+    if (!sqlite3_lib) sqlite3_lib = LoadLibraryExA("C:\\msys64\\mingw64\\bin\\libsqlite3-0.dll", NULL, 0x00000008 /* LOAD_WITH_ALTERED_SEARCH_PATH */);
     if (!sqlite3_lib) return 0;
     #define LOAD(name) p_##name = (fn_##name)GetProcAddress(sqlite3_lib, #name)
 #else
     sqlite3_lib = dlopen("libsqlite3.so", 1 /* RTLD_LAZY */);
+    if (!sqlite3_lib) sqlite3_lib = dlopen("libsqlite3.so.0", 1);
     if (!sqlite3_lib) sqlite3_lib = dlopen("libsqlite3.dylib", 1);
     if (!sqlite3_lib) return 0;
     #define LOAD(name) p_##name = (fn_##name)dlsym(sqlite3_lib, #name)

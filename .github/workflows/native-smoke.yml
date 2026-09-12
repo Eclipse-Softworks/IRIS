@@ -69,6 +69,7 @@ jobs:
           C:/msys64/usr/bin/pacman.exe -S --noconfirm --needed \
             mingw-w64-ucrt-x86_64-gcc \
             mingw-w64-ucrt-x86_64-sqlite3
+          echo "C:/msys64/ucrt64/bin" >> "$GITHUB_PATH"
 
       - name: Install LLVM toolchain (macOS)
         if: runner.os == 'macOS'

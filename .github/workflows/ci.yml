@@ -95,6 +95,7 @@ jobs:
           C:/msys64/usr/bin/pacman.exe -S --noconfirm --needed \
             mingw-w64-ucrt-x86_64-gcc \
             mingw-w64-ucrt-x86_64-sqlite3
+          echo "C:/msys64/ucrt64/bin" >> "$GITHUB_PATH"
 
       - name: Install system dependencies (Linux)
         if: runner.os == 'Linux'
