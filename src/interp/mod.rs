@@ -1999,8 +1999,7 @@ impl<'m> Interpreter<'m> {
                         let tg_val = self.get(*group)?;
                         match tg_val {
                             IrValue::TaskGroup(tg) => {
-                                let handles =
-                                    tg.lock().unwrap().handles.drain(..).collect::<Vec<_>>();
+                                let handles = std::mem::take(&mut tg.lock().unwrap().handles);
                                 for h in handles {
                                     let _ = h.join().map_err(|_| InterpError::Unsupported {
                                         detail: "task panicked during join".into(),

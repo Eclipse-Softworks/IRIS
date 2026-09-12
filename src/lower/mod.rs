@@ -9098,13 +9098,8 @@ impl<'m> Lowerer<'m> {
         for arg in args {
             if let AstExpr::Splat { expr, .. } = arg {
                 let (arr_val, arr_ty) = self.lower_expr(expr)?;
-                let elem_ty;
-                let arr_len;
-                match &arr_ty {
-                    IrType::Array { elem, len } => {
-                        elem_ty = (**elem).clone();
-                        arr_len = *len;
-                    }
+                let (elem_ty, arr_len) = match &arr_ty {
+                    IrType::Array { elem, len } => ((**elem).clone(), *len),
                     _ => {
                         return Err(LowerError::Unsupported {
                             detail: "splat (`..expr`) requires an array expression with known size"
@@ -9112,7 +9107,7 @@ impl<'m> Lowerer<'m> {
                             span: arg.span(),
                         });
                     }
-                }
+                };
                 for i in 0..arr_len {
                     let idx_val = self.builder.fresh_value();
                     let idx_ty = IrType::Scalar(DType::I64);

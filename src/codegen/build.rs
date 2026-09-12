@@ -811,8 +811,8 @@ fn build_binary_impl(
             // Fallback: link via clang
             let mut link_cmd = Command::new(&clang);
             link_cmd.args(&target_args);
-            if cfg!(target_os = "macos") {
-                link_cmd.args(["-O2", path_str(&mod_obj)?]);
+            if cfg!(target_os = "macos") || resolved_target.contains("apple") {
+                link_cmd.args(["-O2", "-Wl,-undefined,dynamic_lookup", path_str(&mod_obj)?]);
             } else {
                 link_cmd.args(["-fuse-ld=lld", "-O2", path_str(&mod_obj)?]);
             }
@@ -1292,6 +1292,10 @@ fn find_sqlite_dll() -> Option<PathBuf> {
         if let Some(parent) = executable.parent() {
             dirs.push(parent.to_path_buf());
         }
+    }
+    let ucrt_bin = PathBuf::from(r"C:\msys64\ucrt64\bin");
+    if ucrt_bin.is_dir() {
+        dirs.push(ucrt_bin);
     }
     if let Some(path) = std::env::var_os("PATH") {
         dirs.extend(std::env::split_paths(&path));

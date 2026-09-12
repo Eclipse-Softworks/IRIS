@@ -1764,7 +1764,7 @@ IrisList* iris_db_query_params(int64_t db, const char* sql, IrisList* params) {
         } else if (p_sqlite3_bind_text) {
             char* s = iris_value_to_str(v);
             p_sqlite3_bind_text(stmt, i + 1, s ? s : "", -1, SQLITE_TRANSIENT);
-            if (s) p_sqlite3_free(s);
+            if (s) free(s);
         }
     }
     int ncols = p_sqlite3_column_count(stmt);
@@ -1799,7 +1799,7 @@ int64_t iris_db_exec_params(int64_t db, const char* sql, IrisList* params) {
         } else if (p_sqlite3_bind_text) {
             char* s = iris_value_to_str(v);
             p_sqlite3_bind_text(stmt, i + 1, s ? s : "", -1, SQLITE_TRANSIENT);
-            if (s) p_sqlite3_free(s);
+            if (s) free(s);
         }
     }
     int rc = SQLITE_OK;
@@ -5263,7 +5263,7 @@ static void json_stringify_val(IrisVal* v, char** out, size_t* len, size_t* cap)
             if (fields) {
                 for (size_t i = 0; i < fields->len; i++) {
                     if (i > 0) JSON_APPEND_CHAR(',');
-                    char idx_buf[16]; snprintf(idx_buf, sizeof(idx_buf), "\"%zu\":", i);
+                    char idx_buf[32]; snprintf(idx_buf, sizeof(idx_buf), "\"%zu\":", i);
                     JSON_APPEND(idx_buf);
                     json_stringify_val(fields->data[i], out, len, cap);
                 }
@@ -5458,7 +5458,6 @@ static int match_here(const char* re, const char* text) {
         group[group_len] = '\0';
 
         /* Check for alternation inside the group */
-        const char* alt = group;
         int found_alt = 0;
         int adepth = 0;
         for (size_t i = 0; i < group_len; i++) {
@@ -6171,7 +6170,10 @@ char* iris_base64_decode(const char* str) {
         int b = (i+1 < slen) ? b64_decode_char(str[i+1]) : 0;
         int c = (i+2 < slen) ? b64_decode_char(str[i+2]) : 0;
         int d = (i+3 < slen) ? b64_decode_char(str[i+3]) : 0;
-        if (a < 0) a = 0; if (b < 0) b = 0; if (c < 0) c = 0; if (d < 0) d = 0;
+        if (a < 0) a = 0;
+        if (b < 0) b = 0;
+        if (c < 0) c = 0;
+        if (d < 0) d = 0;
         uint32_t triple = ((uint32_t)a << 18) | ((uint32_t)b << 12) | ((uint32_t)c << 6) | (uint32_t)d;
         if (j < olen) out[j++] = (triple >> 16) & 0xFF;
         if (j < olen && str[i+2] != '=') out[j++] = (triple >> 8) & 0xFF;

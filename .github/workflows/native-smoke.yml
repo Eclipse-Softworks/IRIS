@@ -67,7 +67,8 @@ jobs:
         shell: bash
         run: |
           C:/msys64/usr/bin/pacman.exe -S --noconfirm --needed \
-            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-gcc \
+            mingw-w64-ucrt-x86_64-sqlite3
 
       - name: Install LLVM toolchain (macOS)
         if: runner.os == 'macOS'

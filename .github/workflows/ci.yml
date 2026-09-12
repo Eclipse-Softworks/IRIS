@@ -70,6 +70,7 @@ jobs:
             runner: macos-14
             arch: x86_64
             target: x86_64-apple-darwin
+            cross: true
           # ARM64 targets
           - os: macOS
             runner: macos-14
@@ -92,7 +93,8 @@ jobs:
         shell: bash
         run: |
           C:/msys64/usr/bin/pacman.exe -S --noconfirm --needed \
-            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-gcc \
+            mingw-w64-ucrt-x86_64-sqlite3
 
       - name: Install system dependencies (Linux)
         if: runner.os == 'Linux'
@@ -101,13 +103,10 @@ jobs:
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -yq build-essential pkg-config clang lld
           echo "IRIS_CLANG=/usr/bin/clang" >> "$GITHUB_ENV"
 
-      - name: Install LLVM toolchain (macOS)
+      - name: Configure clang (macOS)
         if: runner.os == 'macOS'
         run: |
-          brew install llvm
-          LLVM_PREFIX="$(brew --prefix llvm)"
-          echo "$LLVM_PREFIX/bin" >> "$GITHUB_PATH"
-          echo "IRIS_CLANG=$LLVM_PREFIX/bin/clang" >> "$GITHUB_ENV"
+          echo "IRIS_CLANG=/usr/bin/clang" >> "$GITHUB_ENV"
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
