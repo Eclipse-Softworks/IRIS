@@ -614,12 +614,17 @@ fn run() {
                                     );
                                 }
                             }
+                            use std::io::Write;
+                            let _ = std::io::stdout().flush();
+                            let _ = std::io::stderr().flush();
                             process::exit(status.code().unwrap_or(1));
                         }
                     }
                     Err(e) => {
                         eprintln!("\x1b[1;31merror\x1b[0m: native compilation failed: {}", e);
                         eprintln!("hint: ensure clang/LLVM is installed and on PATH (set IRIS_CLANG to override)");
+                        use std::io::Write;
+                        let _ = std::io::stderr().flush();
                         process::exit(1);
                     }
                 }

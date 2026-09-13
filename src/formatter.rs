@@ -179,10 +179,11 @@ fn format_iris(source: &str, options: &FormatOptions, spanned_tokens: &[Spanned<
             at_line_start = true;
         } else if idx > 0 && at_line_start && !out.ends_with("\n\n") && !out.is_empty() {
             let curr_start = spanned.span.start.0 as usize;
-            if curr_start >= last_emitted_end && curr_start <= source.len() {
-                if has_blank_line(&source[last_emitted_end..curr_start]) {
-                    out.push('\n');
-                }
+            if curr_start >= last_emitted_end
+                && curr_start <= source.len()
+                && has_blank_line(&source[last_emitted_end..curr_start])
+            {
+                out.push('\n');
             }
         }
         last_emitted_end = spanned.span.end.0 as usize;
@@ -319,7 +320,8 @@ fn format_iris(source: &str, options: &FormatOptions, spanned_tokens: &[Spanned<
             };
             let projected_width = projected_group_width(spanned_tokens, idx + 1, source);
             if user_broke_line
-                || current_line_width(&out).saturating_add(projected_width) >= options.max_line_width
+                || current_line_width(&out).saturating_add(projected_width)
+                    >= options.max_line_width
             {
                 out.push('\n');
                 out.push_str(&indent_str(indent));
@@ -882,7 +884,8 @@ def main() -> i64 {
 
     #[test]
     fn formats_colons_without_leading_space() {
-        let source = "def add(x: i64, y: i64) -> i64 {\n    val a: i64 = 1;\n    return a + x + y;\n}\n";
+        let source =
+            "def add(x: i64, y: i64) -> i64 {\n    val a: i64 = 1;\n    return a + x + y;\n}\n";
         let formatted = format_source(source, &FormatOptions::default()).unwrap();
         assert!(formatted.contains("x: i64, y: i64"));
         assert!(formatted.contains("val a: i64 = 1;"));
@@ -892,7 +895,8 @@ def main() -> i64 {
 
     #[test]
     fn formats_double_colons_and_dots_without_spaces() {
-        let source = "def test() -> i64 {\n    val p = Point.new();\n    val x = p.x;\n    return 0;\n}\n";
+        let source =
+            "def test() -> i64 {\n    val p = Point.new();\n    val x = p.x;\n    return 0;\n}\n";
         let formatted = format_source(source, &FormatOptions::default()).unwrap();
         assert!(formatted.contains("Point.new()"));
         assert!(formatted.contains("p.x"));

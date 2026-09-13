@@ -767,5 +767,14 @@ impl Drop for OrcJitModule {
 }
 
 pub fn is_orc_jit_available() -> bool {
-    crate::codegen::llvm_c_api::initialize_native_target().is_ok() && orc_api().is_ok()
+    // Apple Silicon enforces W^X memory restrictions that cause in-process ORC
+    // JIT execution to hang without codesigning entitlements / pthread_jit_write_protect_np.
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    {
+        return false;
+    }
+    #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+    {
+        crate::codegen::llvm_c_api::initialize_native_target().is_ok() && orc_api().is_ok()
+    }
 }

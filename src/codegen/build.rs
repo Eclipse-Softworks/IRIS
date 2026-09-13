@@ -478,7 +478,13 @@ fn build_binary_impl(
     let msys2_lib = msys2_ucrt64_lib();
     let gcc_lib = msys2_gcc_lib();
 
-    let target_args = ["-target".to_owned(), resolved_target.clone()];
+    let mut target_args = vec!["-target".to_owned(), resolved_target.clone()];
+    if resolved_target.contains("apple") {
+        if let Some(sdk) = macos_sdk_path() {
+            target_args.push("-isysroot".to_owned());
+            target_args.push(sdk);
+        }
+    }
     let onnx_sdk = if let Ok(dir) = std::env::var("ONNXRUNTIME_DIR") {
         Some(PathBuf::from(dir))
     } else if Path::new("C:\\onnxruntime").exists() {
@@ -871,6 +877,13 @@ fn build_binary_impl(
                 stderr
             ),
         });
+    }
+
+    #[cfg(target_os = "macos")]
+    if resolved_target.contains("apple") {
+        let _ = Command::new("codesign")
+            .args(["-s", "-", "-f", path_str(output_path)?])
+            .output();
     }
 
     Ok(output_path.to_path_buf())
@@ -1358,6 +1371,36 @@ pub(crate) fn find_clang() -> String {
     }
     // Fall back to PATH lookup.
     "clang".to_owned()
+}
+
+/// Locate the macOS SDK sysroot for clang when targeting Apple platforms.
+fn macos_sdk_path() -> Option<String> {
+    if let Ok(sdk) = std::env::var("SDKROOT") {
+        let trimmed = sdk.trim();
+        if !trimmed.is_empty() && Path::new(trimmed).is_dir() {
+            return Some(trimmed.to_owned());
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(output) = Command::new("xcrun").args(["--show-sdk-path"]).output() {
+            if output.status.success() {
+                let sdk = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if !sdk.is_empty() && Path::new(&sdk).is_dir() {
+                    return Some(sdk);
+                }
+            }
+        }
+        for candidate in [
+            "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk",
+            "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk",
+        ] {
+            if Path::new(candidate).is_dir() {
+                return Some(candidate.to_owned());
+            }
+        }
+    }
+    None
 }
 
 /// Find `ld.lld` (LLVM linker) — used as a clang-free alternative for linking.
