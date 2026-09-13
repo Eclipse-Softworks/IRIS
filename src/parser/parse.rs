@@ -49,8 +49,9 @@ use crate::parser::ast::{
 type ParsedCallArgs = (Vec<AstExpr>, Vec<(String, AstExpr)>);
 use crate::parser::lexer::{Span, Spanned, Token};
 
-/// Maximum parser recursion depth to prevent stack overflow on hostile/fuzzed inputs.
-const MAX_PARSER_DEPTH: usize = 32;
+/// Maximum recursion depth allowed during parsing (expressions, blocks, types, patterns).
+/// Prevents stack overflow crashes when parsing deeply nested code (e.g. during fuzzing).
+const MAX_PARSER_DEPTH: usize = 16;
 
 pub struct Parser<'t> {
     tokens: &'t [Spanned<Token>],
@@ -4648,6 +4649,19 @@ impl<'t> Parser<'t> {
 
     /// Parse a sub-pattern inside a tuple pattern: wildcard, int/bool literal, or ident binding.
     fn parse_when_sub_pattern(&mut self) -> Result<AstWhenPattern, ParseError> {
+        if self.depth >= MAX_PARSER_DEPTH {
+            return Err(ParseError::RecursionLimitExceeded {
+                context: "pattern".to_string(),
+                span: self.current_span(),
+            });
+        }
+        self.depth += 1;
+        let res = self.parse_when_sub_pattern_inner();
+        self.depth = self.depth.saturating_sub(1);
+        res
+    }
+
+    fn parse_when_sub_pattern_inner(&mut self) -> Result<AstWhenPattern, ParseError> {
         match self.peek_tok().clone() {
             Token::Ident(ref name) if name == "_" => {
                 self.advance();
@@ -5282,17 +5296,51 @@ mod tests {
 
     #[test]
     fn test_recursion_limit_exceeded() {
-        // Deeply nested parentheses or braces must trigger RecursionLimitExceeded, not panic/overflow
-        let deep = "(".repeat(50) + "1" + &")".repeat(50);
-        let src = format!("def main() -> i64 {{ {deep} }}");
-        let tokens = crate::parser::lexer::Lexer::new(&src).tokenize().unwrap();
+        // Deeply nested parentheses (expressions)
+        let deep_expr = "(".repeat(30) + "1" + &")".repeat(30);
+        let src_expr = format!("def main() -> i64 {{ {deep_expr} }}");
+        let tokens = crate::parser::lexer::Lexer::new(&src_expr)
+            .tokenize()
+            .unwrap();
         let mut parser = Parser::new(&tokens);
         let (_module, errors) = parser.parse_module_recovering();
         assert!(
             errors
                 .iter()
-                .any(|e| matches!(e, ParseError::RecursionLimitExceeded { .. })),
-            "expected RecursionLimitExceeded in errors: {:?}",
+                .any(|e| matches!(e, ParseError::RecursionLimitExceeded { ref context, .. } if context == "expression")),
+            "expected RecursionLimitExceeded for expression, got: {:?}",
+            errors
+        );
+
+        // Deeply nested blocks
+        let deep_blocks = "{ ".repeat(30) + "1" + &" }".repeat(30);
+        let src_block = format!("def main() -> i64 {deep_blocks}");
+        let tokens = crate::parser::lexer::Lexer::new(&src_block)
+            .tokenize()
+            .unwrap();
+        let mut parser = Parser::new(&tokens);
+        let (_module, errors) = parser.parse_module_recovering();
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ParseError::RecursionLimitExceeded { ref context, .. } if context == "block")),
+            "expected RecursionLimitExceeded for block, got: {:?}",
+            errors
+        );
+
+        // Deeply nested types
+        let deep_type = "option<".repeat(30) + "i64" + &">".repeat(30);
+        let src_type = format!("def main(x: {deep_type}) -> i64 {{ 0 }}");
+        let tokens = crate::parser::lexer::Lexer::new(&src_type)
+            .tokenize()
+            .unwrap();
+        let mut parser = Parser::new(&tokens);
+        let (_module, errors) = parser.parse_module_recovering();
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ParseError::RecursionLimitExceeded { ref context, .. } if context == "type")),
+            "expected RecursionLimitExceeded for type, got: {:?}",
             errors
         );
     }
