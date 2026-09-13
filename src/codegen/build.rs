@@ -363,6 +363,14 @@ fn build_binary_impl(
     target: Option<&str>,
     link_libs: Vec<String>,
 ) -> Result<PathBuf, CodegenError> {
+    let output_path_buf = if output_path.is_relative() {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(output_path))
+            .unwrap_or_else(|_| output_path.to_path_buf())
+    } else {
+        output_path.to_path_buf()
+    };
+    let output_path = output_path_buf.as_path();
     let resolved_target = resolve_target_triple(target);
 
     // WASM compilation path — uses WASI sysroot + wasi-libc + compiler-rt.
@@ -799,6 +807,15 @@ fn build_binary_impl(
     let link_output = match link_result {
         Ok(()) => {
             eprintln!("iris_codegen: linked via ld.lld directly");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                if let Ok(metadata) = std::fs::metadata(output_path) {
+                    let mut perms = metadata.permissions();
+                    perms.set_mode(0o755);
+                    let _ = std::fs::set_permissions(output_path, perms);
+                }
+            }
             return Ok(output_path.to_path_buf());
         }
         Err(e) => {
@@ -884,6 +901,16 @@ fn build_binary_impl(
         let _ = Command::new("codesign")
             .args(["-s", "-", "-f", path_str(output_path)?])
             .output();
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(metadata) = std::fs::metadata(output_path) {
+            let mut perms = metadata.permissions();
+            perms.set_mode(0o755);
+            let _ = std::fs::set_permissions(output_path, perms);
+        }
     }
 
     Ok(output_path.to_path_buf())

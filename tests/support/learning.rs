@@ -1,6 +1,9 @@
 use std::path::Path;
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+static LEARNING_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 pub fn run(relative: &str, mode: &str, expected: &str) {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -8,7 +11,12 @@ pub fn run(relative: &str, mode: &str, expected: &str) {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let work = std::env::temp_dir().join(format!("iris_learning_{}_{nonce}", std::process::id()));
+    let count = LEARNING_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let work = std::env::temp_dir().join(format!(
+        "iris_learning_{}_{}_{nonce}",
+        std::process::id(),
+        count
+    ));
     std::fs::create_dir_all(&work).unwrap();
     let mut command = Command::new(env!("CARGO_BIN_EXE_iris"));
     command.current_dir(&work).env_remove("IRIS_FORCE_INTERP");

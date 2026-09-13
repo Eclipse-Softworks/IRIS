@@ -81,6 +81,7 @@ fn extract_span(err: &Error) -> Option<(u32, u32)> {
             ParseError::InvalidLiteral { span, .. } => Some((span.start.0, span.end.0)),
             ParseError::UnexpectedToken { span, .. } => Some((span.start.0, span.end.0)),
             ParseError::UnexpectedEof { .. } => None,
+            ParseError::RecursionLimitExceeded { span, .. } => Some((span.start.0, span.end.0)),
         },
         Error::Lower(le) => match le {
             LowerError::UndefinedVariable { span, .. } => Some((span.start.0, span.end.0)),

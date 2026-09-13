@@ -103,6 +103,9 @@ pub enum ParseError {
 
     #[error("unexpected end of file while parsing {context} — you may be missing a closing brace '}}', parenthesis ')', or semicolon ';'")]
     UnexpectedEof { context: String },
+
+    #[error("recursion limit exceeded while parsing {context} — expression or block nesting is too deep")]
+    RecursionLimitExceeded { context: String, span: Span },
 }
 
 // ---------------------------------------------------------------------------
@@ -261,6 +264,7 @@ impl Error {
                 ParseError::InvalidLiteral { .. } => "E0004",
                 ParseError::UnexpectedToken { .. } => "E0005",
                 ParseError::UnexpectedEof { .. } => "E0006",
+                ParseError::RecursionLimitExceeded { .. } => "E0007",
             },
             Error::Lower(l) => match l {
                 LowerError::UndefinedVariable { .. } => "E0100",
@@ -572,6 +576,14 @@ mod tests {
         assert_eq!(
             Error::Parse(ParseError::UnexpectedEof { context: "".into() }).diagnostic_code(),
             "E0006"
+        );
+        assert_eq!(
+            Error::Parse(ParseError::RecursionLimitExceeded {
+                context: "".into(),
+                span: dummy_span()
+            })
+            .diagnostic_code(),
+            "E0007"
         );
     }
 
