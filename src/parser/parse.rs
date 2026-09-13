@@ -49,6 +49,10 @@ use crate::parser::ast::{
 type ParsedCallArgs = (Vec<AstExpr>, Vec<(String, AstExpr)>);
 use crate::parser::lexer::{Span, Spanned, Token};
 
+/// Maximum recursion depth allowed during parsing (expressions, blocks, types, patterns).
+/// Prevents stack overflow crashes when parsing deeply nested code (e.g. during fuzzing).
+const MAX_PARSER_DEPTH: usize = 16;
+
 pub struct Parser<'t> {
     tokens: &'t [Spanned<Token>],
     pos: usize,
@@ -56,6 +60,8 @@ pub struct Parser<'t> {
     errors: Vec<ParseError>,
     /// Maximum number of errors before aborting.
     max_errors: usize,
+    /// Current recursion depth.
+    depth: usize,
 }
 
 impl<'t> Parser<'t> {
@@ -65,6 +71,7 @@ impl<'t> Parser<'t> {
             pos: 0,
             errors: Vec::new(),
             max_errors: 50,
+            depth: 0,
         }
     }
 
@@ -1930,6 +1937,19 @@ impl<'t> Parser<'t> {
     // -----------------------------------------------------------------------
 
     fn parse_type(&mut self) -> Result<AstType, ParseError> {
+        if self.depth >= MAX_PARSER_DEPTH {
+            return Err(ParseError::RecursionLimitExceeded {
+                context: "type".to_string(),
+                span: self.current_span(),
+            });
+        }
+        self.depth += 1;
+        let res = self.parse_type_inner();
+        self.depth = self.depth.saturating_sub(1);
+        res
+    }
+
+    fn parse_type_inner(&mut self) -> Result<AstType, ParseError> {
         let span = self.current_span();
         match self.peek_tok().clone() {
             Token::F32 => {
@@ -2354,6 +2374,19 @@ impl<'t> Parser<'t> {
     // -----------------------------------------------------------------------
 
     fn parse_block(&mut self) -> Result<AstBlock, ParseError> {
+        if self.depth >= MAX_PARSER_DEPTH {
+            return Err(ParseError::RecursionLimitExceeded {
+                context: "block".to_string(),
+                span: self.current_span(),
+            });
+        }
+        self.depth += 1;
+        let res = self.parse_block_inner();
+        self.depth = self.depth.saturating_sub(1);
+        res
+    }
+
+    fn parse_block_inner(&mut self) -> Result<AstBlock, ParseError> {
         let start = self.expect(&Token::LBrace)?;
         let mut stmts = Vec::new();
         let mut tail: Option<Box<AstExpr>> = None;
@@ -2874,11 +2907,20 @@ impl<'t> Parser<'t> {
     // -----------------------------------------------------------------------
 
     fn parse_expr(&mut self) -> Result<AstExpr, ParseError> {
+        if self.depth >= MAX_PARSER_DEPTH {
+            return Err(ParseError::RecursionLimitExceeded {
+                context: "expression".to_string(),
+                span: self.current_span(),
+            });
+        }
+        self.depth += 1;
         // Skip doc comments inside expressions (only meaningful at top level).
         while matches!(self.peek_tok(), Token::DocComment(_)) {
             self.advance();
         }
-        self.parse_or_expr()
+        let res = self.parse_or_expr();
+        self.depth = self.depth.saturating_sub(1);
+        res
     }
 
     fn parse_or_expr(&mut self) -> Result<AstExpr, ParseError> {
@@ -4607,6 +4649,19 @@ impl<'t> Parser<'t> {
 
     /// Parse a sub-pattern inside a tuple pattern: wildcard, int/bool literal, or ident binding.
     fn parse_when_sub_pattern(&mut self) -> Result<AstWhenPattern, ParseError> {
+        if self.depth >= MAX_PARSER_DEPTH {
+            return Err(ParseError::RecursionLimitExceeded {
+                context: "pattern".to_string(),
+                span: self.current_span(),
+            });
+        }
+        self.depth += 1;
+        let res = self.parse_when_sub_pattern_inner();
+        self.depth = self.depth.saturating_sub(1);
+        res
+    }
+
+    fn parse_when_sub_pattern_inner(&mut self) -> Result<AstWhenPattern, ParseError> {
         match self.peek_tok().clone() {
             Token::Ident(ref name) if name == "_" => {
                 self.advance();
@@ -5237,5 +5292,56 @@ mod tests {
         assert_eq!(m.enums.len(), 1);
         assert_eq!(m.consts.len(), 1);
         assert_eq!(m.functions.len(), 2);
+    }
+
+    #[test]
+    fn test_recursion_limit_exceeded() {
+        // Deeply nested parentheses (expressions)
+        let deep_expr = "(".repeat(30) + "1" + &")".repeat(30);
+        let src_expr = format!("def main() -> i64 {{ {deep_expr} }}");
+        let tokens = crate::parser::lexer::Lexer::new(&src_expr)
+            .tokenize()
+            .unwrap();
+        let mut parser = Parser::new(&tokens);
+        let (_module, errors) = parser.parse_module_recovering();
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ParseError::RecursionLimitExceeded { ref context, .. } if context == "expression")),
+            "expected RecursionLimitExceeded for expression, got: {:?}",
+            errors
+        );
+
+        // Deeply nested blocks
+        let deep_blocks = "{ ".repeat(30) + "1" + &" }".repeat(30);
+        let src_block = format!("def main() -> i64 {deep_blocks}");
+        let tokens = crate::parser::lexer::Lexer::new(&src_block)
+            .tokenize()
+            .unwrap();
+        let mut parser = Parser::new(&tokens);
+        let (_module, errors) = parser.parse_module_recovering();
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ParseError::RecursionLimitExceeded { ref context, .. } if context == "block")),
+            "expected RecursionLimitExceeded for block, got: {:?}",
+            errors
+        );
+
+        // Deeply nested types
+        let deep_type = "option<".repeat(30) + "i64" + &">".repeat(30);
+        let src_type = format!("def main(x: {deep_type}) -> i64 {{ 0 }}");
+        let tokens = crate::parser::lexer::Lexer::new(&src_type)
+            .tokenize()
+            .unwrap();
+        let mut parser = Parser::new(&tokens);
+        let (_module, errors) = parser.parse_module_recovering();
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ParseError::RecursionLimitExceeded { ref context, .. } if context == "type")),
+            "expected RecursionLimitExceeded for type, got: {:?}",
+            errors
+        );
     }
 }

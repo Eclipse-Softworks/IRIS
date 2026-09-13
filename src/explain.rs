@@ -91,6 +91,18 @@ The file ended abruptly while the parser was still expecting more input. This is
 - Check your delimiters. Ensure every opening brace `{`, bracket `[`, and parenthesis `(` has a matching closing counterpart.
         "#
         }
+        "E0007" => {
+            r#"
+# E0007: Recursion Limit Exceeded
+
+## Explanation
+The parser encountered syntax nesting that exceeds the maximum recursion depth limit.
+
+## How to Fix
+- Simplify deeply nested expressions or split them into separate statements.
+- Check for unbalanced opening braces, brackets, or parentheses.
+        "#
+        }
         "E0100" => {
             r#"
 # E0100: Undefined Variable

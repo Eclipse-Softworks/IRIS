@@ -599,6 +599,15 @@ fn run() {
                             // without ".\" are not searched).
                             let run_path =
                                 std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+                            #[cfg(unix)]
+                            {
+                                use std::os::unix::fs::PermissionsExt;
+                                if let Ok(metadata) = std::fs::metadata(&run_path) {
+                                    let mut perms = metadata.permissions();
+                                    perms.set_mode(0o755);
+                                    let _ = std::fs::set_permissions(&run_path, perms);
+                                }
+                            }
                             let status = std::process::Command::new(&run_path)
                                 .status()
                                 .unwrap_or_else(|e| {
