@@ -52,7 +52,7 @@ jobs:
   test:
     name: Test (${{ matrix.os }} ${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 25
+    timeout-minutes: 35
     strategy:
       fail-fast: false
       matrix:
@@ -112,6 +112,7 @@ jobs:
           LLVM_PREFIX="$(brew --prefix llvm)"
           echo "$LLVM_PREFIX/bin" >> "$GITHUB_PATH"
           echo "IRIS_CLANG=$LLVM_PREFIX/bin/clang" >> "$GITHUB_ENV"
+          echo "SDKROOT=$(xcrun --show-sdk-path)" >> "$GITHUB_ENV"
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable

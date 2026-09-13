@@ -478,7 +478,13 @@ fn build_binary_impl(
     let msys2_lib = msys2_ucrt64_lib();
     let gcc_lib = msys2_gcc_lib();
 
-    let target_args = ["-target".to_owned(), resolved_target.clone()];
+    let mut target_args = vec!["-target".to_owned(), resolved_target.clone()];
+    if resolved_target.contains("apple") {
+        if let Some(sdk) = macos_sdk_path() {
+            target_args.push("-isysroot".to_owned());
+            target_args.push(sdk);
+        }
+    }
     let onnx_sdk = if let Ok(dir) = std::env::var("ONNXRUNTIME_DIR") {
         Some(PathBuf::from(dir))
     } else if Path::new("C:\\onnxruntime").exists() {
@@ -793,8 +799,6 @@ fn build_binary_impl(
     let link_output = match link_result {
         Ok(()) => {
             eprintln!("iris_codegen: linked via ld.lld directly");
-            stage_sqlite_dll_next_to(output_path);
-            stage_onnxruntime_dll_next_to(output_path);
             return Ok(output_path.to_path_buf());
         }
         Err(e) => {
@@ -875,8 +879,13 @@ fn build_binary_impl(
         });
     }
 
-    stage_sqlite_dll_next_to(output_path);
-    stage_onnxruntime_dll_next_to(output_path);
+    #[cfg(target_os = "macos")]
+    if resolved_target.contains("apple") {
+        let _ = Command::new("codesign")
+            .args(["-s", "-", "-f", path_str(output_path)?])
+            .output();
+    }
+
     Ok(output_path.to_path_buf())
 }
 
@@ -1273,91 +1282,6 @@ fn resolve_target_triple(target: Option<&str>) -> String {
     .to_owned()
 }
 
-/// Locate `sqlite3.dll` to stage beside a built binary.
-///
-/// Explicit `SQLITE3_DIR` first, then the compiler's own directory, then any
-/// directory on `PATH`. Looking beside the compiler makes a release bundle
-/// self-contained even when compilation happens from a clean scratch directory.
-/// No install locations are hardcoded: this previously listed absolute paths to
-/// unrelated third-party applications that happen to ship a `sqlite3.dll`, which
-/// resolve on a single machine and disclose what was installed on it.
-fn find_sqlite_dll() -> Option<PathBuf> {
-    let mut dirs: Vec<PathBuf> = Vec::new();
-    if let Some(dir) = std::env::var_os("SQLITE3_DIR") {
-        if !dir.is_empty() {
-            dirs.push(PathBuf::from(dir));
-        }
-    }
-    if let Ok(executable) = std::env::current_exe() {
-        if let Some(parent) = executable.parent() {
-            dirs.push(parent.to_path_buf());
-        }
-    }
-    let ucrt_bin = PathBuf::from(r"C:\msys64\ucrt64\bin");
-    if ucrt_bin.is_dir() {
-        dirs.push(ucrt_bin);
-    }
-    if let Some(path) = std::env::var_os("PATH") {
-        dirs.extend(std::env::split_paths(&path));
-    }
-    for dir in dirs {
-        for file_name in ["sqlite3.dll", "SQLite3.dll", "libsqlite3-0.dll"] {
-            let candidate = dir.join(file_name);
-            if candidate.is_file() {
-                return Some(candidate);
-            }
-        }
-    }
-    None
-}
-
-fn stage_sqlite_dll_next_to(output_path: &Path) {
-    let Some(source_path) = find_sqlite_dll() else {
-        return;
-    };
-
-    let out_dir = output_path
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    let _ = std::fs::copy(&source_path, out_dir.join("sqlite3.dll"));
-    let _ = std::fs::copy(
-        &source_path,
-        out_dir.join(source_path.file_name().unwrap_or_default()),
-    );
-    if let Some(src_parent) = source_path.parent() {
-        for companion in [
-            "libwinpthread-1.dll",
-            "libgcc_s_seh-1.dll",
-            "libstdc++-6.dll",
-            "zlib1.dll",
-        ] {
-            let p = src_parent.join(companion);
-            if p.is_file() {
-                let _ = std::fs::copy(&p, out_dir.join(companion));
-            }
-        }
-    }
-}
-
-fn stage_onnxruntime_dll_next_to(output_path: &Path) {
-    // `ONNXRUNTIME_DIR` overrides; the conventional install root is only the
-    // fallback, so a non-standard location no longer requires editing the source.
-    let root = std::env::var("ONNXRUNTIME_DIR").unwrap_or_else(|_| r"C:\onnxruntime".to_owned());
-    let lib_dir = Path::new(&root).join("lib");
-
-    let out_dir = output_path
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    for name in ["onnxruntime.dll", "onnxruntime_providers_shared.dll"] {
-        let candidate = lib_dir.join(name);
-        if candidate.is_file() {
-            let _ = std::fs::copy(&candidate, out_dir.join(name));
-        }
-    }
-}
-
 /// Find clang — required for compiling LLVM IR, C code, and linking.
 /// Search order: IRIS_CLANG env var, next to iris binary (bundled),
 /// Inno Setup install dir, system LLVM, PATH.
@@ -1447,6 +1371,36 @@ pub(crate) fn find_clang() -> String {
     }
     // Fall back to PATH lookup.
     "clang".to_owned()
+}
+
+/// Locate the macOS SDK sysroot for clang when targeting Apple platforms.
+fn macos_sdk_path() -> Option<String> {
+    if let Ok(sdk) = std::env::var("SDKROOT") {
+        let trimmed = sdk.trim();
+        if !trimmed.is_empty() && Path::new(trimmed).is_dir() {
+            return Some(trimmed.to_owned());
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(output) = Command::new("xcrun").args(["--show-sdk-path"]).output() {
+            if output.status.success() {
+                let sdk = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if !sdk.is_empty() && Path::new(&sdk).is_dir() {
+                    return Some(sdk);
+                }
+            }
+        }
+        for candidate in [
+            "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk",
+            "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk",
+        ] {
+            if Path::new(candidate).is_dir() {
+                return Some(candidate.to_owned());
+            }
+        }
+    }
+    None
 }
 
 /// Find `ld.lld` (LLVM linker) — used as a clang-free alternative for linking.

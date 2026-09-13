@@ -378,7 +378,7 @@
         },
         "iris.formatOnSave": {
           "type": "boolean",
-          "default": true,
+          "default": false,
           "description": "Automatically format .iris files on save."
         },
         "iris.format.indentSize": {
