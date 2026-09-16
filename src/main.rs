@@ -59,6 +59,36 @@ fn resolved_target(target: Option<&str>) -> String {
     .to_owned()
 }
 
+fn print_compiler_error(
+    source: &str,
+    err: &iris::error::Error,
+    file_path: Option<&str>,
+    format: iris::cli::ErrorFormatCli,
+) {
+    match format {
+        iris::cli::ErrorFormatCli::Json => {
+            let diag = iris::diagnostics::error_to_diagnostic(err);
+            eprintln!("{}", diag.render_json(source, file_path));
+        }
+        iris::cli::ErrorFormatCli::Human => {
+            if is_stderr_tty() {
+                if let Some(path) = file_path {
+                    eprint!("{}", render_error_colored_with_file(source, err, path));
+                } else {
+                    eprint!("{}", render_error_colored(source, err));
+                }
+            } else if let Some(path) = file_path {
+                eprint!(
+                    "{}",
+                    iris::diagnostics::render_error_with_file(source, err, path)
+                );
+            } else {
+                eprint!("{}", render_error(source, err));
+            }
+        }
+    }
+}
+
 fn is_native_run_target(target: Option<&str>) -> bool {
     resolved_target(target) == iris::codegen::native_target_triple()
 }
@@ -342,6 +372,249 @@ fn run() {
                 }
             }
         }
+        Ok(ParseArgsResult::EvolveSearch {
+            baseline,
+            cases,
+            generations,
+            pop_size,
+            mutation_rate,
+            crossover_rate,
+            tournament_size,
+            elite_count,
+            max_depth,
+            parsimony_weight,
+            target_loss,
+            seed,
+            out_candidate,
+            promote,
+            constitution,
+            constitution_sha256,
+            audit,
+            audit_head,
+            min_output,
+            max_output,
+        }) => {
+            if min_output > max_output {
+                eprintln!("error: --min-output cannot exceed --max-output");
+                process::exit(1);
+            }
+            let canary_cases: Vec<iris::evolution::CanaryCase> =
+                match std::fs::read_to_string(&cases)
+                    .map_err(|error| error.to_string())
+                    .and_then(|json| serde_json::from_str(&json).map_err(|error| error.to_string()))
+                {
+                    Ok(cases) => cases,
+                    Err(error) => {
+                        eprintln!("error: invalid canary cases '{}': {error}", cases.display());
+                        process::exit(1);
+                    }
+                };
+
+            let fitness_config = iris::evolution::FitnessConfig {
+                parsimony_weight,
+                min_output,
+                max_output,
+                ..Default::default()
+            };
+            let evaluator =
+                iris::evolution::FitnessEvaluator::from_canary_cases(&canary_cases, fitness_config);
+
+            let evo_config = iris::evolution::EvolutionConfig {
+                population_size: pop_size,
+                generations,
+                crossover_rate,
+                mutation_rate,
+                tournament_size,
+                elite_count,
+                max_depth,
+                target_loss,
+                seed,
+                gradient_refinement: true,
+            };
+            let search = iris::evolution::EvolutionarySearch::new(evo_config, "input".to_string());
+
+            println!("== IRIS Evolutionary Search ==");
+            println!(
+                "Generations: {}, Population: {}, Canary Cases: {}",
+                generations,
+                pop_size,
+                canary_cases.len()
+            );
+
+            let result = search.run(&evaluator, None, |summary| {
+                println!(
+                    "Gen {:02}/{:02} | Best Loss: {:.4} (Exact: {}/{}, Nodes: {}, Depth: {}) | Div: {:.0}% | Expr: {}",
+                    summary.generation,
+                    generations,
+                    summary.best_loss,
+                    summary.best_exact_matches,
+                    summary.total_cases,
+                    summary.best_node_count,
+                    summary.best_tree_depth,
+                    summary.diversity_ratio * 100.0,
+                    summary.best_expression
+                );
+            });
+
+            println!("\n=== Evolution Outcome ===");
+            println!(
+                "Discovered Genome Expression: {}",
+                result.best_genome.to_iris_expr()
+            );
+            println!(
+                "Fitness: Loss = {:.4}, Exact Matches = {}/{}, Converged = {}",
+                result.best_score.loss,
+                result.best_score.exact_matches,
+                result.best_score.total_cases,
+                result.converged
+            );
+
+            let candidate_source = result.best_genome.to_iris_source("policy", "input");
+
+            if let Some(out_path) = &out_candidate {
+                if let Err(error) = std::fs::write(out_path, &candidate_source) {
+                    eprintln!(
+                        "error: cannot write candidate to '{}': {error}",
+                        out_path.display()
+                    );
+                    process::exit(1);
+                }
+                println!("Saved candidate source to '{}'", out_path.display());
+            }
+
+            if promote {
+                let constitution_path = match &constitution {
+                    Some(path) => path,
+                    None => {
+                        eprintln!("error: --constitution is required when --promote is set");
+                        process::exit(1);
+                    }
+                };
+                let constitution_sha256 = match &constitution_sha256 {
+                    Some(hash) => hash,
+                    None => {
+                        eprintln!("error: --constitution-sha256 is required when --promote is set");
+                        process::exit(1);
+                    }
+                };
+                let audit_path = match &audit {
+                    Some(path) => path,
+                    None => {
+                        eprintln!("error: --audit is required when --promote is set");
+                        process::exit(1);
+                    }
+                };
+                let audit_head_path = match &audit_head {
+                    Some(path) => path,
+                    None => {
+                        eprintln!("error: --audit-head is required when --promote is set");
+                        process::exit(1);
+                    }
+                };
+
+                let baseline_module = match &baseline {
+                    Some(b_path) => match iris::evolution::compile_candidate_file(b_path) {
+                        Ok(module) => module,
+                        Err(error) => {
+                            eprintln!("error: baseline compile: {error}");
+                            process::exit(1);
+                        }
+                    },
+                    None => {
+                        eprintln!("error: --baseline is required when --promote is set");
+                        process::exit(1);
+                    }
+                };
+
+                let candidate_module = match iris::evolution::compile_candidate(
+                    &candidate_source,
+                    "evolved_candidate",
+                ) {
+                    Ok(module) => module,
+                    Err(error) => {
+                        eprintln!("error: candidate compile: {error}");
+                        process::exit(1);
+                    }
+                };
+
+                let constitution_source = match std::fs::read(constitution_path) {
+                    Ok(source) => source,
+                    Err(error) => {
+                        eprintln!(
+                            "error: cannot read constitution '{}': {error}",
+                            constitution_path.display()
+                        );
+                        process::exit(1);
+                    }
+                };
+
+                let trusted_constitution = iris::evolution::TrustedConstitution {
+                    source: constitution_source,
+                    expected_sha256: constitution_sha256.clone(),
+                };
+
+                let coordinator = match iris::evolution::EvolutionCoordinator::new(
+                    iris::evolution::EvolutionPolicy::default(),
+                ) {
+                    Ok(coordinator) => coordinator,
+                    Err(error) => {
+                        eprintln!("error: {error}");
+                        process::exit(1);
+                    }
+                };
+
+                if let Err(error) = coordinator.install_baseline(&baseline_module) {
+                    eprintln!("error: baseline activation: {error}");
+                    process::exit(1);
+                }
+
+                let mut audit_log =
+                    match iris::evolution::audit::EvolutionAuditLog::open_with_checkpoint(
+                        audit_path,
+                        audit_head_path,
+                    ) {
+                        Ok(log) => log,
+                        Err(error) => {
+                            eprintln!("error: cannot open audit: {error}");
+                            process::exit(1);
+                        }
+                    };
+
+                match coordinator.evaluate_and_promote(
+                    &candidate_source,
+                    &candidate_module,
+                    &canary_cases,
+                    &trusted_constitution,
+                    |_, output| output >= min_output && output <= max_output,
+                    Some(&mut audit_log),
+                ) {
+                    Ok(receipt) => {
+                        println!(
+                            "promoted {} generation {} after {}/7 gates",
+                            receipt.swap.function_name,
+                            receipt.swap.generation,
+                            receipt.gates.len()
+                        );
+                        println!(
+                            "canary exact: candidate {}/{}; baseline {}/{}",
+                            receipt.canary.candidate_exact,
+                            receipt.canary.cases,
+                            receipt.canary.baseline_exact,
+                            receipt.canary.cases
+                        );
+                        println!(
+                            "audit log advanced to generation {} at head {}",
+                            receipt.swap.generation,
+                            audit_log.head().hash
+                        );
+                    }
+                    Err(error) => {
+                        eprintln!("error: promotion failed: {error}");
+                        process::exit(1);
+                    }
+                }
+            }
+        }
         Ok(ParseArgsResult::Meta { file, emit_ir }) => {
             let source = match std::fs::read_to_string(&file) {
                 Ok(source) => source,
@@ -514,6 +787,28 @@ fn run() {
                 }
             }
         }
+        Ok(ParseArgsResult::ServiceDaemon {
+            ticks,
+            target_p99,
+            error_budget,
+            headless,
+            audit,
+            serve,
+            port,
+        }) => {
+            if let Err(e) = iris::evolution::run_service_daemon(
+                ticks,
+                target_p99,
+                error_budget,
+                headless,
+                audit,
+                serve,
+                port,
+            ) {
+                eprintln!("error: {}", e);
+                process::exit(1);
+            }
+        }
         Ok(ParseArgsResult::Args(cli)) => {
             if cli.sandbox {
                 iris::security::set_security_policy(iris::security::SecurityPolicy::sandboxed());
@@ -540,18 +835,12 @@ fn run() {
                 ) {
                     Ok(m) => m,
                     Err(e) => {
-                        if is_stderr_tty() {
-                            eprint!(
-                                "{}",
-                                render_error_colored_with_file(
-                                    &source,
-                                    &e,
-                                    &cli.path.display().to_string()
-                                )
-                            );
-                        } else {
-                            eprint!("{}", render_error(&source, &e));
-                        }
+                        print_compiler_error(
+                            &source,
+                            &e,
+                            Some(&cli.path.display().to_string()),
+                            cli.error_format,
+                        );
                         process::exit(1);
                     }
                 };
@@ -701,18 +990,12 @@ fn run() {
                     }
                 }
                 Err(e) => {
-                    if is_stderr_tty() {
-                        eprint!(
-                            "{}",
-                            render_error_colored_with_file(
-                                &source,
-                                &e,
-                                &cli.path.display().to_string()
-                            )
-                        );
-                    } else {
-                        eprint!("{}", render_error(&source, &e));
-                    }
+                    print_compiler_error(
+                        &source,
+                        &e,
+                        Some(&cli.path.display().to_string()),
+                        cli.error_format,
+                    );
                     process::exit(1);
                 }
             }

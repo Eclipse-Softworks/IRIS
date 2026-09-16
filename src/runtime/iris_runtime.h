@@ -181,10 +181,17 @@ typedef struct IrisEnum {
 // Complex heap types
 // ---------------------------------------------------------------------------
 
+typedef struct IrisValChunk {
+    struct IrisValChunk* next;
+    size_t               count;
+    IrisVal              items[1024];
+} IrisValChunk;
+
 typedef struct {
-    IrisVal** data;
-    size_t    len;
-    size_t    cap;
+    IrisVal**     data;
+    size_t        len;
+    size_t        cap;
+    IrisValChunk* chunks;
 } IrisList;
 
 typedef struct IrisMapEntry {
@@ -407,9 +414,15 @@ IrisVal*    iris_result_unwrap_err(IrisResult* res);
 // ---------------------------------------------------------------------------
 IrisList* iris_list_new(void);
 void      iris_list_push(IrisList* list, IrisVal* val);
+void      iris_list_push_i64(IrisList* list, int64_t val);
+void      iris_list_push_f64(IrisList* list, double val);
 int64_t   iris_list_len(IrisList* list);
 IrisVal*  iris_list_get(IrisList* list, int64_t idx);
+int64_t   iris_list_get_i64(IrisList* list, int64_t idx);
+double    iris_list_get_f64(IrisList* list, int64_t idx);
 void      iris_list_set(IrisList* list, int64_t idx, IrisVal* val);
+void      iris_list_set_i64(IrisList* list, int64_t idx, int64_t val);
+void      iris_list_set_f64(IrisList* list, int64_t idx, double val);
 IrisVal*  iris_list_pop(IrisList* list);
 
 // ---------------------------------------------------------------------------
@@ -437,12 +450,15 @@ int      iris_list_contains(IrisList* list, IrisVal* val);
 void     iris_list_sort(IrisList* list);
 IrisList* iris_list_concat(IrisList* a, IrisList* b);
 IrisList* iris_list_slice(IrisList* list, int64_t start, int64_t end);
+int      iris_list_eq(IrisList* a, IrisList* b);
 
 // ---------------------------------------------------------------------------
 // Extended map operations
 // ---------------------------------------------------------------------------
 IrisList* iris_map_keys(IrisMap* map);
 IrisList* iris_map_values(IrisMap* map);
+int      iris_map_eq(IrisMap* a, IrisMap* b);
+int      iris_option_eq(IrisOption* a, IrisOption* b);
 
 // ---------------------------------------------------------------------------
 // File I/O
@@ -584,6 +600,11 @@ void        iris_mutex_unlock(IrisMutex* mu);
 IrisGrad* iris_make_grad(double value, double tangent);
 double    iris_grad_value(IrisGrad* g);
 double    iris_grad_tangent(IrisGrad* g);
+IrisGrad* iris_grad_add(IrisGrad* a, IrisGrad* b);
+IrisGrad* iris_grad_sub(IrisGrad* a, IrisGrad* b);
+IrisGrad* iris_grad_mul(IrisGrad* a, IrisGrad* b);
+IrisGrad* iris_grad_div(IrisGrad* a, IrisGrad* b);
+IrisGrad* iris_grad_neg(IrisGrad* a);
 
 // Forward declaration so sparse-tensor prototypes can reference it.
 typedef struct IrisTensor IrisTensor;
@@ -596,6 +617,9 @@ IrisSparse* iris_sparsify_i64_array(int64_t* data, int64_t len);
 IrisSparse* iris_sparsify_f64_array(double* data, int64_t len);
 IrisList*   iris_densify(IrisSparse* sparse);
 int64_t     iris_sparse_nnz(IrisSparse* sparse);
+IrisSparse* iris_sparse_add(IrisSparse* a, IrisSparse* b);
+IrisSparse* iris_sparse_sub(IrisSparse* a, IrisSparse* b);
+IrisSparse* iris_sparse_mul_scalar(IrisSparse* a, double s);
 
 /// Sparsify a dense tensor: extract non-zero (index, value) pairs.
 IrisSparse* iris_tensor_sparsify(IrisTensor* t);
@@ -661,6 +685,9 @@ IrisTensor* iris_tensor_transpose(IrisTensor* t, const int32_t* axes);
 IrisTensor* iris_tensor_reduce_sum(IrisTensor* t, int32_t axis, int keepdims);
 IrisTensor* iris_tensor_reduce_max(IrisTensor* t, int32_t axis, int keepdims);
 IrisTensor* iris_tensor_reduce_mean(IrisTensor* t, int32_t axis, int keepdims);
+IrisTensor* iris_tensor_reduce_multi(IrisTensor* t, const char* op, int32_t n_axes, const int32_t* axes, int32_t keepdims);
+IrisTensor* iris_tensor_einsum(const char* notation, IrisTensor* a, IrisTensor* b);
+IrisTensor* iris_tensor_einsum_single(const char* notation, IrisTensor* a);
 IrisTensor* iris_tensor_from_lists(IrisList* data, IrisList* shape);
 IrisList*   iris_tensor_to_list(IrisTensor* t);
 IrisTensor* iris_tensor_tape(IrisTensor* t);

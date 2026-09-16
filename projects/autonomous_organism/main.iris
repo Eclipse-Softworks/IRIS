@@ -1,0 +1,189 @@
+// projects/autonomous_organism/main.iris
+// Autonomous living organism: cybernetic homeostasis and real-time adaptation in IRIS.
+
+record OrganismState {
+    health: f64,
+    energy: f64,
+    core_temp: f64,
+    age: i64,
+    generation: i64
+}
+
+record WorldState {
+    era_name: str,
+    ambient_temp: f64,
+    resource_density: f64,
+    hazard_intensity: f64
+}
+
+def policy_forage(temp_delta: i64) -> i64 {
+    return 0 // Forage
+}
+
+def policy_heatwave(temp_delta: i64) -> i64 {
+    return 2 // Cool Down
+}
+
+def policy_cryo(temp_delta: i64) -> i64 {
+    return 3 // Heat Up
+}
+
+def policy_storm(temp_delta: i64) -> i64 {
+    return 1 // Shelter
+}
+
+def step_organism(org: OrganismState, world: WorldState, action: i64) -> OrganismState {
+    // Thermal coupling with homeostatic limits
+    var new_temp = org.core_temp + (world.ambient_temp - org.core_temp) * 0.08;
+    if action == 2 {
+        if new_temp > 23.0 {
+            new_temp = new_temp - 2.5; // Cool down
+        }
+    } else {
+        if action == 3 {
+            if new_temp < 27.0 {
+                new_temp = new_temp + 3.5; // Heat up
+            }
+        }
+    };
+
+    // Energy dynamics
+    var energy_change = 0.0 - 0.6; // Basal cost
+    if action == 0 {
+        energy_change = energy_change - 2.0 + (world.resource_density * 9.0);
+    } else {
+        if action == 1 {
+            energy_change = energy_change - 0.2; // Low shelter cost
+        } else {
+            energy_change = energy_change - 1.2; // Thermal control cost
+        }
+    };
+    var new_energy = org.energy + energy_change;
+    if new_energy > 100.0 { new_energy = 100.0 };
+    if new_energy < 0.0 { new_energy = 0.0 };
+
+    // Health damage from stress
+    var damage = 0.0;
+    if action == 1 {
+        damage = damage + (world.hazard_intensity * 1.5); // Sheltered
+    } else {
+        damage = damage + (world.hazard_intensity * 12.0); // Exposed
+    };
+
+    if new_temp < 15.0 {
+        damage = damage + (15.0 - new_temp) * 1.2;
+    } else {
+        if new_temp > 35.0 {
+            damage = damage + (new_temp - 35.0) * 1.5;
+        }
+    };
+
+    var new_health = org.health - damage;
+    if new_health < 0.0 { new_health = 0.0 };
+
+    return OrganismState {
+        health: new_health,
+        energy: new_energy,
+        core_temp: new_temp,
+        age: org.age + 1,
+        generation: org.generation
+    }
+}
+
+def main() -> i64 {
+    println("== IRIS Autonomous Organism Simulation ==");
+    var org = OrganismState {
+        health: 100.0,
+        energy: 80.0,
+        core_temp: 25.0,
+        age: 0,
+        generation: 1
+    };
+
+    // Era 1: Temperate Glade (Spring)
+    println("--- Entering Era 1: Temperate Glade (T=22°C) ---");
+    val world1 = WorldState {
+        era_name: "Temperate Glade",
+        ambient_temp: 22.0,
+        resource_density: 0.9,
+        hazard_intensity: 0.05
+    };
+    for i in 0..15 {
+        val action = policy_forage(0);
+        org = step_organism(org, world1, action);
+    };
+    println(f"Era 1 Complete: Health={org.health}, Energy={org.energy}, Temp={org.core_temp}");
+    assert(org.health > 80.0);
+    assert(org.energy > 60.0);
+
+    // Era 2: Solar Heatwave (Requires adaptation -> Cool Down)
+    println("--- Entering Era 2: Solar Heatwave (T=46°C) -> Hot-swapping Gen 2 ---");
+    org = OrganismState {
+        health: org.health,
+        energy: org.energy,
+        core_temp: org.core_temp,
+        age: org.age,
+        generation: 2
+    };
+    val world2 = WorldState {
+        era_name: "Solar Heatwave",
+        ambient_temp: 46.0,
+        resource_density: 0.2,
+        hazard_intensity: 0.1
+    };
+    for i in 0..15 {
+        val action = policy_heatwave(21);
+        org = step_organism(org, world2, action);
+    };
+    println(f"Era 2 Complete: Health={org.health}, Energy={org.energy}, Temp={org.core_temp}");
+    assert(org.health > 60.0);
+    assert(org.core_temp < 36.0); // Prevented deadly heat stroke
+
+    // Era 3: Cryo Freeze (Requires adaptation -> Heat Up)
+    println("--- Entering Era 3: Cryo Freeze (T=-18°C) -> Hot-swapping Gen 3 ---");
+    org = OrganismState {
+        health: org.health,
+        energy: org.energy,
+        core_temp: org.core_temp,
+        age: org.age,
+        generation: 3
+    };
+    val world3 = WorldState {
+        era_name: "Cryo Freeze",
+        ambient_temp: -18.0,
+        resource_density: 0.1,
+        hazard_intensity: 0.15
+    };
+    for i in 0..15 {
+        val action = policy_cryo(-43);
+        org = step_organism(org, world3, action);
+    };
+    println(f"Era 3 Complete: Health={org.health}, Energy={org.energy}, Temp={org.core_temp}");
+    assert(org.health > 40.0);
+    assert(org.core_temp > 14.0); // Prevented deadly hypothermia
+
+    // Era 4: Toxic Radiation Storm (Requires adaptation -> Shelter)
+    println("--- Entering Era 4: Toxic Storm (Hazard=80%) -> Hot-swapping Gen 4 ---");
+    org = OrganismState {
+        health: org.health,
+        energy: org.energy,
+        core_temp: org.core_temp,
+        age: org.age,
+        generation: 4
+    };
+    val world4 = WorldState {
+        era_name: "Toxic Storm",
+        ambient_temp: 18.0,
+        resource_density: 0.05,
+        hazard_intensity: 0.8
+    };
+    for i in 0..15 {
+        val action = policy_storm(0);
+        org = step_organism(org, world4, action);
+    };
+    println(f"Era 4 Complete: Health={org.health}, Energy={org.energy}, Temp={org.core_temp}");
+    assert(org.health > 20.0);
+
+    println("SUCCESS: Organism survived all 4 extreme environmental shifts via adaptive homeostatic regulation!");
+    return 0
+}

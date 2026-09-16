@@ -184,6 +184,9 @@ pub enum PassError {
 
     #[error("could not determine the type of a value in function '{func}' — try adding an explicit type annotation")]
     UnresolvedInfer { func: String },
+
+    #[error("compile-time evaluation error: {detail}")]
+    ConstEvalError { detail: String },
 }
 
 // ---------------------------------------------------------------------------
@@ -284,6 +287,7 @@ impl Error {
                 PassError::MissingTerminator { .. } => "E0203",
                 PassError::ShapeMismatch { .. } => "E0204",
                 PassError::UnresolvedInfer { .. } => "E0205",
+                PassError::ConstEvalError { .. } => "E0206",
             },
             Error::Codegen(_) => "E0300",
             Error::Interp(ie) => {

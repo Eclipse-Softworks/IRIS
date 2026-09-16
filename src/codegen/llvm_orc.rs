@@ -13,6 +13,7 @@ use std::sync::{Arc, OnceLock};
 
 use libloading::{Library, Symbol};
 
+use crate::codegen::llvm_c_api::{llvm_library_candidates, RECOMMENDED_LLVM_VERSION};
 use crate::error::CodegenError;
 use crate::ir::module::IrModule;
 use crate::ir::types::{DType, IrType};
@@ -224,34 +225,25 @@ impl OrcApi {
 
 fn load_llvm_library() -> Result<Library, CodegenError> {
     #[cfg(target_os = "windows")]
-    let names: &[&str] = &[
-        "LLVM-C.dll",
-        r"C:\llvm-20\bin\LLVM-C.dll",
-        r"C:\llvm-19\bin\LLVM-C.dll",
-        r"C:\llvm-18\bin\LLVM-C.dll",
-        r"C:\Program Files\LLVM\bin\LLVM-C.dll",
-    ];
+    let default_name = "LLVM-C.dll";
     #[cfg(target_os = "macos")]
-    let names: &[&str] = &["libLLVM.dylib"];
+    let default_name = "libLLVM.dylib";
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-    let names: &[&str] = &[
-        "libLLVM.so",
-        "libLLVM-20.so",
-        "libLLVM-19.so",
-        "libLLVM-18.so",
-    ];
+    let default_name = "libLLVM.so";
 
+    let candidates = llvm_library_candidates(default_name);
     let mut failures = Vec::new();
-    for name in names {
-        match unsafe { Library::new(name) } {
+    for candidate in &candidates {
+        match unsafe { Library::new(candidate) } {
             Ok(lib) => return Ok(lib),
-            Err(error) => failures.push(format!("{}: {}", name, error)),
+            Err(error) => failures.push(format!("{}: {}", candidate.display(), error)),
         }
     }
     Err(CodegenError::Unsupported {
         backend: "jit".into(),
         detail: format!(
-            "could not load an LLVM-C library with ORC support ({})",
+            "could not load an LLVM-C library with ORC support for {}. Set IRIS_LLVM_C_API to the shared-library path. Tried: {}",
+            RECOMMENDED_LLVM_VERSION,
             failures.join("; ")
         ),
     })
@@ -776,5 +768,29 @@ pub fn is_orc_jit_available() -> bool {
     #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
     {
         crate::codegen::llvm_c_api::initialize_native_target().is_ok() && orc_api().is_ok()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn orc_loader_tracks_recommended_llvm_23_candidates() {
+        #[cfg(target_os = "windows")]
+        let default_name = "LLVM-C.dll";
+        #[cfg(target_os = "macos")]
+        let default_name = "libLLVM.dylib";
+        #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+        let default_name = "libLLVM.so";
+
+        let candidates = llvm_library_candidates(default_name);
+        assert!(!candidates.is_empty());
+        let rendered = candidates
+            .iter()
+            .map(|path| path.to_string_lossy())
+            .collect::<Vec<_>>();
+        let llvm_23 = rendered.iter().position(|path| path.contains("23"));
+        assert!(llvm_23.is_some(), "candidates should include LLVM 23 paths");
     }
 }

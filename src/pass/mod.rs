@@ -1,5 +1,7 @@
 pub mod ast_exhaustive;
 pub mod borrow_checker;
+pub mod cfg_borrow_checker;
+pub mod const_eval;
 pub mod const_fold;
 pub mod copy_prop;
 pub mod dead_node;
@@ -23,6 +25,8 @@ pub mod validate;
 pub mod variance_checker;
 
 pub use ast_exhaustive::AstExhaustivenessPass;
+pub use cfg_borrow_checker::{CfgBorrowCheckerPass, FunctionLiveness};
+pub use const_eval::{ConstEvalPass, ConstEvaluator, ConstValue};
 pub use const_fold::ConstFoldPass;
 pub use copy_prop::CopyPropPass;
 pub use dead_node::DeadNodePass;
@@ -233,6 +237,7 @@ mod tests {
             LoopUnrollPass::default().name(),
             StrengthReducePass.name(),
             ShapeCheckPass.name(),
+            CfgBorrowCheckerPass.name(),
         ];
         let unique: std::collections::HashSet<&str> = names.iter().copied().collect();
         assert_eq!(names.len(), unique.len(), "pass names must be unique");
@@ -249,12 +254,13 @@ impl Default for PassManager {
 // Standard Pipeline Factory
 // ---------------------------------------------------------------------------
 
-/// Builds the formalized 15-pass SSA pipeline sequence.
+/// Builds the formalized SSA pipeline sequence with CFG liveness checking.
 pub fn build_standard_pipeline() -> PassManager {
     let mut pm = PassManager::new();
     pm.add_pass(crate::pass::validate::ValidatePass);
     pm.add_pass(HmTypeInferPass);
     pm.add_pass(crate::pass::type_infer::TypeInferPass);
+    pm.add_pass(crate::pass::cfg_borrow_checker::CfgBorrowCheckerPass);
     pm.add_pass(ShapeCheckPass);
     pm.add_pass(InlinePass::default());
     pm.add_pass(ConstFoldPass);

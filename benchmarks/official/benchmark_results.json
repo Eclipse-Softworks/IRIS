@@ -1,0 +1,342 @@
+{
+  "fib": {
+    "C (Clang 23)": {
+      "suite": "fib",
+      "lang": "C (Clang 23)",
+      "min_sec": 0.15553499999805354,
+      "median_sec": 0.15600079999421723,
+      "mean_sec": 0.15738536666322034,
+      "std_sec": 0.0022953340594198566,
+      "speedup_vs_c": 1.0,
+      "peak_mem_mb": 3.20703125,
+      "output": "39088169"
+    },
+    "Rust": {
+      "suite": "fib",
+      "lang": "Rust",
+      "min_sec": 0.15652040000713896,
+      "median_sec": 0.1565316000051098,
+      "mean_sec": 0.157474333337935,
+      "std_sec": 0.0013411536538015163,
+      "speedup_vs_c": 1.0034025467235568,
+      "peak_mem_mb": 3.3125,
+      "output": "39088169"
+    },
+    "IRIS (LLVM 23)": {
+      "suite": "fib",
+      "lang": "IRIS (LLVM 23)",
+      "min_sec": 0.16115640000498388,
+      "median_sec": 0.16247939999448135,
+      "mean_sec": 0.1626954333332833,
+      "std_sec": 0.0013534589016122728,
+      "speedup_vs_c": 1.0415292742120827,
+      "peak_mem_mb": 4.35546875,
+      "output": "39088169"
+    },
+    "Go": {
+      "suite": "fib",
+      "lang": "Go",
+      "min_sec": 0.27046149999659974,
+      "median_sec": 0.2719119999965187,
+      "mean_sec": 0.27288333333369036,
+      "std_sec": 0.0024713252344891194,
+      "speedup_vs_c": 1.7430167025207446,
+      "peak_mem_mb": 4.45703125,
+      "output": "39088169"
+    },
+    "Node.js": {
+      "suite": "fib",
+      "lang": "Node.js",
+      "min_sec": 0.721188900002744,
+      "median_sec": 0.7247924999974202,
+      "mean_sec": 0.7248821666629132,
+      "std_sec": 0.003052804354492274,
+      "speedup_vs_c": 4.6460819433252105,
+      "peak_mem_mb": 45.1015625,
+      "output": "39088169"
+    },
+    "Python": {
+      "suite": "fib",
+      "lang": "Python",
+      "min_sec": 10.712906300002942,
+      "median_sec": 11.02213589999883,
+      "mean_sec": 10.92127670000385,
+      "std_sec": 0.14736514733463912,
+      "speedup_vs_c": 70.65435498027836,
+      "peak_mem_mb": 9.984375,
+      "output": "39088169"
+    }
+  },
+  "collatz": {
+    "C (Clang 23)": {
+      "suite": "collatz",
+      "lang": "C (Clang 23)",
+      "min_sec": 0.08847299999615643,
+      "median_sec": 0.08856549998745322,
+      "mean_sec": 0.08876283332938328,
+      "std_sec": 0.00034654253143018195,
+      "speedup_vs_c": 1.0,
+      "peak_mem_mb": 3.20703125,
+      "output": "410011\n448"
+    },
+    "Rust": {
+      "suite": "collatz",
+      "lang": "Rust",
+      "min_sec": 0.08759909999207594,
+      "median_sec": 0.0877699999982724,
+      "mean_sec": 0.08837019999918994,
+      "std_sec": 0.0009721623619711415,
+      "speedup_vs_c": 0.9910179472899321,
+      "peak_mem_mb": 3.3125,
+      "output": "410011\n448"
+    },
+    "IRIS (LLVM 23)": {
+      "suite": "collatz",
+      "lang": "IRIS (LLVM 23)",
+      "min_sec": 0.08691849999013357,
+      "median_sec": 0.08782700001029298,
+      "mean_sec": 0.08776799999759533,
+      "std_sec": 0.0006708257364119479,
+      "speedup_vs_c": 0.9916615388919515,
+      "peak_mem_mb": 4.34765625,
+      "output": "410011\n448"
+    },
+    "Go": {
+      "suite": "collatz",
+      "lang": "Go",
+      "min_sec": 0.17096950000268407,
+      "median_sec": 0.17176219999964815,
+      "mean_sec": 0.1715256666696708,
+      "std_sec": 0.00039472980116574987,
+      "speedup_vs_c": 1.9393804588014647,
+      "peak_mem_mb": 4.40234375,
+      "output": "410011\n448"
+    },
+    "Node.js": {
+      "suite": "collatz",
+      "lang": "Node.js",
+      "min_sec": 0.760583499999484,
+      "median_sec": 0.7672285000007832,
+      "mean_sec": 0.7664762000010038,
+      "std_sec": 0.004535547771970221,
+      "speedup_vs_c": 8.662837110494198,
+      "peak_mem_mb": 45.296875,
+      "output": "410011\n448"
+    },
+    "Python": {
+      "suite": "collatz",
+      "lang": "Python",
+      "min_sec": 8.216001300010248,
+      "median_sec": 8.405489400000079,
+      "mean_sec": 8.4514698000033,
+      "std_sec": 0.213520564960026,
+      "speedup_vs_c": 94.90703943624612,
+      "peak_mem_mb": 10.03515625,
+      "output": "410011\n448"
+    }
+  },
+  "sieve": {
+    "C (Clang 23)": {
+      "suite": "sieve",
+      "lang": "C (Clang 23)",
+      "min_sec": 0.009768399992026389,
+      "median_sec": 0.010341200002585538,
+      "mean_sec": 0.010221100000004904,
+      "std_sec": 0.0003316544745335065,
+      "speedup_vs_c": 1.0,
+      "peak_mem_mb": 3.8046875,
+      "output": "9592"
+    },
+    "Rust": {
+      "suite": "sieve",
+      "lang": "Rust",
+      "min_sec": 0.011741499998606741,
+      "median_sec": 0.012261299998499453,
+      "mean_sec": 0.012144933333426403,
+      "std_sec": 0.0002936590592639405,
+      "speedup_vs_c": 1.185674776180119,
+      "peak_mem_mb": 3.9140625,
+      "output": "9592"
+    },
+    "IRIS (LLVM 23)": {
+      "suite": "sieve",
+      "lang": "IRIS (LLVM 23)",
+      "min_sec": 0.015164500000537373,
+      "median_sec": 0.015302999992854893,
+      "mean_sec": 0.015296733331827758,
+      "std_sec": 0.00010550280716927458,
+      "speedup_vs_c": 1.479808918600239,
+      "peak_mem_mb": 6.59375,
+      "output": "9592"
+    },
+    "Go": {
+      "suite": "sieve",
+      "lang": "Go",
+      "min_sec": 0.012267700003576465,
+      "median_sec": 0.013527200004318729,
+      "mean_sec": 0.01319570000244615,
+      "std_sec": 0.0006650535055069385,
+      "speedup_vs_c": 1.3080880362952674,
+      "peak_mem_mb": 5.18359375,
+      "output": "9592"
+    },
+    "Node.js": {
+      "suite": "sieve",
+      "lang": "Node.js",
+      "min_sec": 0.0715356000000611,
+      "median_sec": 0.07312529999762774,
+      "mean_sec": 0.073537533331546,
+      "std_sec": 0.0018262780067345987,
+      "speedup_vs_c": 7.071258652704206,
+      "peak_mem_mb": 45.58203125,
+      "output": "9592"
+    },
+    "Python": {
+      "suite": "sieve",
+      "lang": "Python",
+      "min_sec": 0.06324010000389535,
+      "median_sec": 0.06751599999552127,
+      "mean_sec": 0.06638129999919329,
+      "std_sec": 0.002249497998664956,
+      "speedup_vs_c": 6.528836109797772,
+      "peak_mem_mb": 10.75390625,
+      "output": "9592"
+    }
+  },
+  "matmul": {
+    "C (Clang 23)": {
+      "suite": "matmul",
+      "lang": "C (Clang 23)",
+      "min_sec": 0.04391820001183078,
+      "median_sec": 0.04431240000121761,
+      "mean_sec": 0.044452433333693385,
+      "std_sec": 0.0005032064180649571,
+      "speedup_vs_c": 1.0,
+      "peak_mem_mb": 4.546875,
+      "output": "0\n122"
+    },
+    "Rust": {
+      "suite": "matmul",
+      "lang": "Rust",
+      "min_sec": 0.0433783000044059,
+      "median_sec": 0.04418509999231901,
+      "mean_sec": 0.04401933333429042,
+      "std_sec": 0.00047056020667349984,
+      "speedup_vs_c": 0.997127214754897,
+      "peak_mem_mb": 4.39453125,
+      "output": "0\n122"
+    },
+    "IRIS (LLVM 23)": {
+      "suite": "matmul",
+      "lang": "IRIS (LLVM 23)",
+      "min_sec": 0.06631840000045486,
+      "median_sec": 0.06778919999487698,
+      "mean_sec": 0.06775266666469786,
+      "std_sec": 0.001156447724935572,
+      "speedup_vs_c": 1.529802041708738,
+      "peak_mem_mb": 8.83203125,
+      "output": "0\n122"
+    },
+    "Go": {
+      "suite": "matmul",
+      "lang": "Go",
+      "min_sec": 0.047943600002327,
+      "median_sec": 0.05013100001087878,
+      "mean_sec": 0.05006523333819738,
+      "std_sec": 0.0017060911468347625,
+      "speedup_vs_c": 1.1313086181182082,
+      "peak_mem_mb": 5.84375,
+      "output": "0\n122"
+    },
+    "Node.js": {
+      "suite": "matmul",
+      "lang": "Node.js",
+      "min_sec": 0.1377675999974599,
+      "median_sec": 0.1399039000098128,
+      "mean_sec": 0.14094190000226567,
+      "std_sec": 0.003103605203186928,
+      "speedup_vs_c": 3.157217844349855,
+      "peak_mem_mb": 48.37890625,
+      "output": "0\n122"
+    },
+    "Python": {
+      "suite": "matmul",
+      "lang": "Python",
+      "min_sec": 3.2613431999925524,
+      "median_sec": 3.584198500000639,
+      "mean_sec": 3.484370399998928,
+      "std_sec": 0.15799240460076414,
+      "speedup_vs_c": 80.88477491406813,
+      "peak_mem_mb": 17.6015625,
+      "output": "0\n122"
+    }
+  },
+  "quicksort": {
+    "C (Clang 23)": {
+      "suite": "quicksort",
+      "lang": "C (Clang 23)",
+      "min_sec": 0.016645399999106303,
+      "median_sec": 0.016946200004895218,
+      "mean_sec": 0.017219199997877393,
+      "std_sec": 0.0006112407220267355,
+      "speedup_vs_c": 1.0,
+      "peak_mem_mb": 3.79296875,
+      "output": "14984\n2147472790"
+    },
+    "Rust": {
+      "suite": "quicksort",
+      "lang": "Rust",
+      "min_sec": 0.018510800000512972,
+      "median_sec": 0.01872850001382176,
+      "mean_sec": 0.01915693334012758,
+      "std_sec": 0.0007650134916366601,
+      "speedup_vs_c": 1.1051740218108892,
+      "peak_mem_mb": 3.63671875,
+      "output": "14984\n2147472790"
+    },
+    "IRIS (LLVM 23)": {
+      "suite": "quicksort",
+      "lang": "IRIS (LLVM 23)",
+      "min_sec": 0.02445090000401251,
+      "median_sec": 0.025130499998340383,
+      "mean_sec": 0.025134133335086517,
+      "std_sec": 0.0005593468825897867,
+      "speedup_vs_c": 1.4829578307278908,
+      "peak_mem_mb": 6.62890625,
+      "output": "14984\n2147472790"
+    },
+    "Go": {
+      "suite": "quicksort",
+      "lang": "Go",
+      "min_sec": 0.021690399997169152,
+      "median_sec": 0.02180200000293553,
+      "mean_sec": 0.02266856666634946,
+      "std_sec": 0.0013052188683920513,
+      "speedup_vs_c": 1.2865421154381291,
+      "peak_mem_mb": 5.11328125,
+      "output": "14984\n2147472790"
+    },
+    "Node.js": {
+      "suite": "quicksort",
+      "lang": "Node.js",
+      "min_sec": 0.09215559999574907,
+      "median_sec": 0.09418499999446794,
+      "mean_sec": 0.09402693333201266,
+      "std_sec": 0.0014676689250614726,
+      "speedup_vs_c": 5.557883181318578,
+      "peak_mem_mb": 47.66015625,
+      "output": "14984\n2147472790"
+    },
+    "Python": {
+      "suite": "quicksort",
+      "lang": "Python",
+      "min_sec": 0.34583579999161884,
+      "median_sec": 0.3701188999984879,
+      "mean_sec": 0.3906190999938796,
+      "std_sec": 0.04721489006265937,
+      "speedup_vs_c": 21.840819764405726,
+      "peak_mem_mb": 13.921875,
+      "output": "14984\n2147472790"
+    }
+  }
+}

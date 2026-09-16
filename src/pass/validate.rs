@@ -27,7 +27,7 @@ fn contains_infer(ty: &IrType) -> bool {
         IrType::Scalar(_) | IrType::Str | IrType::Enum { .. } | IrType::Struct { .. } => false,
         IrType::Tensor { .. } => false,
         IrType::Tuple(elems) => elems.iter().any(contains_infer),
-        IrType::Array { elem, .. } => contains_infer(elem),
+        IrType::Array { elem, .. } | IrType::Slice { elem, .. } => contains_infer(elem),
         IrType::Grad(inner) | IrType::Sparse(inner) | IrType::List(inner) => contains_infer(inner),
         IrType::Map(k, v) => contains_infer(k) || contains_infer(v),
         IrType::Fn { params, ret } => params.iter().any(contains_infer) || contains_infer(ret),

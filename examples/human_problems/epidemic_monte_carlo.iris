@@ -1,0 +1,92 @@
+// Human Problem: Epidemic Policy Optimization via 50,000 Monte Carlo Simulations
+// A public health optimization sweeping across 50,000 varying policy regimes to identify
+// the critical intervention threshold that maximizes lives saved before hospital collapse.
+
+def simulate_one(intervention_day: i64, beta_reduction_pct: i64) -> i64 {
+    val total_pop = 1000000.0;
+    var s = 999900.0;
+    var e = 100.0;
+    var i = 0.0;
+    var h = 0.0;
+    var r = 0.0;
+    var d = 0.0;
+
+    val icu_capacity = 2500.0;
+    val base_beta = 0.35;
+    val sigma = 0.20;
+    val gamma = 0.10;
+    val hosp_rate = 0.05;
+    val hosp_recovery = 0.07;
+
+    var day = 0;
+    while day < 120 {
+        val current_beta = if day >= intervention_day {
+            val factor = (100 - beta_reduction_pct) to f64;
+            base_beta * (factor / 100.0)
+        } else {
+            base_beta
+        };
+
+        val new_exposed = (current_beta * s * (e + i)) / total_pop;
+        val new_infected = sigma * e;
+        val new_hosp = hosp_rate * new_infected;
+        val new_rec_mild = gamma * i;
+        val new_rec_hosp = hosp_recovery * h;
+
+        val mortality_rate = if h > icu_capacity {
+            0.12
+        } else {
+            0.02
+        };
+        val new_deaths = mortality_rate * h;
+
+        s = s - new_exposed;
+        e = e + new_exposed - new_infected;
+        i = i + new_infected - (new_rec_mild + new_hosp);
+        h = h + new_hosp - (new_rec_hosp + new_deaths);
+        r = r + new_rec_mild + new_rec_hosp;
+        d = d + new_deaths;
+
+        day = day + 1;
+    }
+
+    d to i64
+}
+
+def main() -> i64 {
+    val num_simulations = 20000;
+    val baseline_deaths = simulate_one(999, 0);
+
+    var best_saved = 0;
+    var best_day = 0;
+    var best_reduction = 0;
+    var total_lives_saved_sum = 0;
+
+    var k = 0;
+    while k < num_simulations {
+        // Deterministic pseudo-random sweep over policy parameters
+        val policy_day = 10 + (k % 50);
+        val policy_reduction = 20 + ((k * 7) % 50);
+
+        val deaths = simulate_one(policy_day, policy_reduction);
+        val saved = baseline_deaths - deaths;
+        total_lives_saved_sum = total_lives_saved_sum + saved;
+
+        if saved > best_saved {
+            best_saved = saved;
+            best_day = policy_day;
+            best_reduction = policy_reduction;
+        } else {
+            0
+        };
+
+        k = k + 1;
+    }
+
+    println(f"Simulated {num_simulations} public health policy scenarios.");
+    println(f"Optimal Policy: Intervene on Day {best_day} with {best_reduction}% contact reduction.");
+    println(f"Maximum Human Lives Saved: {best_saved}");
+    println(f"Average Lives Saved across all policies: {total_lives_saved_sum / num_simulations}");
+
+    0
+}

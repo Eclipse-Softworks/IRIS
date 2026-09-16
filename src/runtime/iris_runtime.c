@@ -1262,25 +1262,92 @@ IrisList* iris_list_new(void) {
 }
 void iris_list_push(IrisList* l, IrisVal* val) {
     iris_tx_record_list(l);
+    if (!iris_tx_top) {
+        if (l->len == l->cap) {
+            l->cap = l->cap ? l->cap * 2 : 8;
+            l->data = xrealloc(l->data, sizeof(IrisVal*) * l->cap);
+        }
+        if (val) iris_retain(val);
+        l->data[l->len++] = val;
+        return;
+    }
     coll_lock();
     if (l->len == l->cap) {
-        l->cap *= 2;
+        l->cap = l->cap ? l->cap * 2 : 8;
         l->data = xrealloc(l->data, sizeof(IrisVal*) * l->cap);
     }
     if (val) iris_retain(val);
     l->data[l->len++] = val;
     coll_unlock();
 }
+void iris_list_push_i64(IrisList* l, int64_t val) {
+    iris_tx_record_list(l);
+    if (l->len == l->cap) {
+        l->cap = l->cap ? l->cap * 2 : 8;
+        l->data = xrealloc(l->data, sizeof(IrisVal*) * l->cap);
+    }
+    if (!l->chunks || l->chunks->count == 1024) {
+        IrisValChunk* c = xmalloc(sizeof(IrisValChunk));
+        c->count = 0;
+        c->next = l->chunks;
+        l->chunks = c;
+    }
+    IrisVal* r = &l->chunks->items[l->chunks->count++];
+    r->tag = IRIS_TAG_I64;
+    r->i64 = val;
+    l->data[l->len++] = r;
+}
+void iris_list_push_f64(IrisList* l, double val) {
+    iris_tx_record_list(l);
+    if (l->len == l->cap) {
+        l->cap = l->cap ? l->cap * 2 : 8;
+        l->data = xrealloc(l->data, sizeof(IrisVal*) * l->cap);
+    }
+    if (!l->chunks || l->chunks->count == 1024) {
+        IrisValChunk* c = xmalloc(sizeof(IrisValChunk));
+        c->count = 0;
+        c->next = l->chunks;
+        l->chunks = c;
+    }
+    IrisVal* r = &l->chunks->items[l->chunks->count++];
+    r->tag = IRIS_TAG_F64;
+    r->f64 = val;
+    l->data[l->len++] = r;
+}
 int64_t  iris_list_len(IrisList* l) { return (int64_t)l->len; }
 IrisVal* iris_list_get(IrisList* l, int64_t idx) {
-    if (idx < 0 || (size_t)idx >= l->len) {
-        fprintf(stderr, "iris: list index %ld out of bounds (len=%zu)\n", (long)idx, l->len);
+    if (!l || idx < 0 || (size_t)idx >= l->len) {
+        fprintf(stderr, "iris: list index %ld out of bounds (len=%zu)\n", (long)idx, l ? l->len : 0);
         abort();
     }
     return l->data[idx];
 }
+int64_t iris_list_get_i64(IrisList* l, int64_t idx) {
+    if (l && idx >= 0 && (size_t)idx < l->len) {
+        IrisVal* v = l->data[idx];
+        if (v && v->tag == IRIS_TAG_I64) return v->i64;
+    }
+    return iris_unbox_i64(iris_list_get(l, idx));
+}
+double iris_list_get_f64(IrisList* l, int64_t idx) {
+    if (l && idx >= 0 && (size_t)idx < l->len) {
+        IrisVal* v = l->data[idx];
+        if (v && v->tag == IRIS_TAG_F64) return v->f64;
+    }
+    return iris_unbox_f64(iris_list_get(l, idx));
+}
 void iris_list_set(IrisList* l, int64_t idx, IrisVal* val) {
     iris_tx_record_list(l);
+    if (!iris_tx_top && l && idx >= 0 && (size_t)idx < l->len && val && l->data[idx]) {
+        IrisVal* old = l->data[idx];
+        if (old->tag == val->tag) {
+            if (val->tag == IRIS_TAG_I64 || val->tag == IRIS_TAG_F64 || val->tag == IRIS_TAG_I32 || val->tag == IRIS_TAG_F32 || val->tag == IRIS_TAG_BOOL) {
+                old->i64 = val->i64;
+                free(val);
+                return;
+            }
+        }
+    }
     coll_lock();
     if (idx < 0 || (size_t)idx >= l->len) {
         coll_unlock();
@@ -1291,6 +1358,26 @@ void iris_list_set(IrisList* l, int64_t idx, IrisVal* val) {
     if (l->data[idx]) iris_release(l->data[idx]);
     l->data[idx] = val;
     coll_unlock();
+}
+void iris_list_set_i64(IrisList* l, int64_t idx, int64_t val) {
+    if (!iris_tx_top && l && idx >= 0 && (size_t)idx < l->len) {
+        IrisVal* v = l->data[idx];
+        if (v && v->tag == IRIS_TAG_I64) {
+            v->i64 = val;
+            return;
+        }
+    }
+    iris_list_set(l, idx, iris_box_i64(val));
+}
+void iris_list_set_f64(IrisList* l, int64_t idx, double val) {
+    if (!iris_tx_top && l && idx >= 0 && (size_t)idx < l->len) {
+        IrisVal* v = l->data[idx];
+        if (v && v->tag == IRIS_TAG_F64) {
+            v->f64 = val;
+            return;
+        }
+    }
+    iris_list_set(l, idx, iris_box_f64(val));
 }
 IrisVal* iris_list_pop(IrisList* l) {
     iris_tx_record_list(l);
@@ -1400,6 +1487,42 @@ int64_t iris_map_len(IrisMap* m) { return (int64_t)m->len; }
 // Extended list operations
 // ---------------------------------------------------------------------------
 
+static int iris_val_equal(IrisVal* a, IrisVal* b);
+
+int iris_list_eq(IrisList* a, IrisList* b) {
+    if (a == b) return 1;
+    if (!a || !b) return 0;
+    if (a->len != b->len) return 0;
+    for (size_t i = 0; i < a->len; i++) {
+        if (!iris_val_equal(a->data[i], b->data[i])) return 0;
+    }
+    return 1;
+}
+
+int iris_option_eq(IrisOption* a, IrisOption* b) {
+    if (a == b) return 1;
+    if (!a || !b) return 0;
+    if (!a->has_value && !b->has_value) return 1;
+    if (a->has_value != b->has_value) return 0;
+    return iris_val_equal(a->value, b->value);
+}
+
+int iris_map_eq(IrisMap* a, IrisMap* b) {
+    if (a == b) return 1;
+    if (!a || !b) return 0;
+    if (a->len != b->len) return 0;
+    for (size_t i = 0; i < a->n_buckets; i++) {
+        IrisMapEntry* cur = a->buckets[i];
+        while (cur) {
+            IrisOption* opt = iris_map_get(b, (IrisVal*)cur->key);
+            if (!opt || !opt->has_value) return 0;
+            if (!iris_val_equal(cur->val, opt->value)) return 0;
+            cur = cur->next;
+        }
+    }
+    return 1;
+}
+
 static int iris_val_equal(IrisVal* a, IrisVal* b) {
     if (a == b) return 1;
     if (!a || !b) return 0;
@@ -1411,7 +1534,10 @@ static int iris_val_equal(IrisVal* a, IrisVal* b) {
         case IRIS_TAG_F32:  return a->f32 == b->f32;
         case IRIS_TAG_BOOL: return a->boolean == b->boolean;
         case IRIS_TAG_STR:  return (a->str && b->str && strcmp(a->str, b->str) == 0);
-        default: return 0;
+        case IRIS_TAG_LIST: return iris_list_eq((IrisList*)a->ptr, (IrisList*)b->ptr);
+        case IRIS_TAG_MAP:  return iris_map_eq((IrisMap*)a->ptr, (IrisMap*)b->ptr);
+        case IRIS_TAG_OPTION: return iris_option_eq((IrisOption*)a->ptr, (IrisOption*)b->ptr);
+        default: return a->ptr == b->ptr;
     }
 }
 
@@ -2571,6 +2697,37 @@ IrisGrad* iris_make_grad(double value, double tangent) {
 double iris_grad_value(IrisGrad* g)   { return g ? g->value   : 0.0; }
 double iris_grad_tangent(IrisGrad* g) { return g ? g->tangent : 0.0; }
 
+IrisGrad* iris_grad_add(IrisGrad* a, IrisGrad* b) {
+    double av = a ? a->value : 0.0, at = a ? a->tangent : 0.0;
+    double bv = b ? b->value : 0.0, bt = b ? b->tangent : 0.0;
+    return iris_make_grad(av + bv, at + bt);
+}
+
+IrisGrad* iris_grad_sub(IrisGrad* a, IrisGrad* b) {
+    double av = a ? a->value : 0.0, at = a ? a->tangent : 0.0;
+    double bv = b ? b->value : 0.0, bt = b ? b->tangent : 0.0;
+    return iris_make_grad(av - bv, at - bt);
+}
+
+IrisGrad* iris_grad_mul(IrisGrad* a, IrisGrad* b) {
+    double av = a ? a->value : 0.0, at = a ? a->tangent : 0.0;
+    double bv = b ? b->value : 0.0, bt = b ? b->tangent : 0.0;
+    return iris_make_grad(av * bv, av * bt + at * bv);
+}
+
+IrisGrad* iris_grad_div(IrisGrad* a, IrisGrad* b) {
+    double av = a ? a->value : 0.0, at = a ? a->tangent : 0.0;
+    double bv = b ? b->value : 0.0, bt = b ? b->tangent : 0.0;
+    double denom = bv * bv;
+    if (denom == 0.0) denom = 1e-15;
+    return iris_make_grad(av / bv, (at * bv - av * bt) / denom);
+}
+
+IrisGrad* iris_grad_neg(IrisGrad* a) {
+    double av = a ? a->value : 0.0, at = a ? a->tangent : 0.0;
+    return iris_make_grad(-av, -at);
+}
+
 // ---------------------------------------------------------------------------
 // Sparse tensors (COO format over IrisList of IrisVal)
 // ---------------------------------------------------------------------------
@@ -2717,6 +2874,91 @@ double iris_sparse_dot(IrisSparse* sp, IrisTensor* dense) {
 
 int64_t iris_sparse_nnz(IrisSparse* sp) {
     return (int64_t)sp->len;
+}
+
+IrisSparse* iris_sparse_add(IrisSparse* a, IrisSparse* b) {
+    IrisSparse* sp = xcalloc(1, sizeof(IrisSparse));
+    size_t total_cap = (a ? a->len : 0) + (b ? b->len : 0) + 8;
+    sp->cap = total_cap;
+    sp->indices = xmalloc(sizeof(size_t) * sp->cap);
+    sp->values = xmalloc(sizeof(IrisVal*) * sp->cap);
+    sp->len = 0;
+    size_t i = 0, j = 0;
+    while ((a && i < a->len) || (b && j < b->len)) {
+        if (a && i < a->len && (!b || j >= b->len || a->indices[i] < b->indices[j])) {
+            sp->indices[sp->len] = a->indices[i];
+            sp->values[sp->len] = a->values[i];
+            sp->len++;
+            i++;
+        } else if (b && j < b->len && (!a || i >= a->len || b->indices[j] < a->indices[i])) {
+            sp->indices[sp->len] = b->indices[j];
+            sp->values[sp->len] = b->values[j];
+            sp->len++;
+            j++;
+        } else {
+            double v1 = (a->values[i]->tag == IRIS_TAG_F64) ? a->values[i]->f64 : (double)a->values[i]->i64;
+            double v2 = (b->values[j]->tag == IRIS_TAG_F64) ? b->values[j]->f64 : (double)b->values[j]->i64;
+            double sum = v1 + v2;
+            if (sum != 0.0) {
+                sp->indices[sp->len] = a->indices[i];
+                sp->values[sp->len] = iris_box_f64(sum);
+                sp->len++;
+            }
+            i++; j++;
+        }
+    }
+    return sp;
+}
+
+IrisSparse* iris_sparse_sub(IrisSparse* a, IrisSparse* b) {
+    IrisSparse* sp = xcalloc(1, sizeof(IrisSparse));
+    size_t total_cap = (a ? a->len : 0) + (b ? b->len : 0) + 8;
+    sp->cap = total_cap;
+    sp->indices = xmalloc(sizeof(size_t) * sp->cap);
+    sp->values = xmalloc(sizeof(IrisVal*) * sp->cap);
+    sp->len = 0;
+    size_t i = 0, j = 0;
+    while ((a && i < a->len) || (b && j < b->len)) {
+        if (a && i < a->len && (!b || j >= b->len || a->indices[i] < b->indices[j])) {
+            sp->indices[sp->len] = a->indices[i];
+            sp->values[sp->len] = a->values[i];
+            sp->len++;
+            i++;
+        } else if (b && j < b->len && (!a || i >= a->len || b->indices[j] < a->indices[i])) {
+            sp->indices[sp->len] = b->indices[j];
+            double v2 = (b->values[j]->tag == IRIS_TAG_F64) ? b->values[j]->f64 : (double)b->values[j]->i64;
+            sp->values[sp->len] = iris_box_f64(-v2);
+            sp->len++;
+            j++;
+        } else {
+            double v1 = (a->values[i]->tag == IRIS_TAG_F64) ? a->values[i]->f64 : (double)a->values[i]->i64;
+            double v2 = (b->values[j]->tag == IRIS_TAG_F64) ? b->values[j]->f64 : (double)b->values[j]->i64;
+            double diff = v1 - v2;
+            if (diff != 0.0) {
+                sp->indices[sp->len] = a->indices[i];
+                sp->values[sp->len] = iris_box_f64(diff);
+                sp->len++;
+            }
+            i++; j++;
+        }
+    }
+    return sp;
+}
+
+IrisSparse* iris_sparse_mul_scalar(IrisSparse* a, double s) {
+    if (!a) return NULL;
+    IrisSparse* sp = xcalloc(1, sizeof(IrisSparse));
+    sp->cap = a->cap;
+    sp->indices = xmalloc(sizeof(size_t) * sp->cap);
+    sp->values = xmalloc(sizeof(IrisVal*) * sp->cap);
+    sp->len = 0;
+    for (size_t i = 0; i < a->len; i++) {
+        double v = (a->values[i]->tag == IRIS_TAG_F64) ? a->values[i]->f64 : (double)a->values[i]->i64;
+        sp->indices[sp->len] = a->indices[i];
+        sp->values[sp->len] = iris_box_f64(v * s);
+        sp->len++;
+    }
+    return sp;
 }
 
 // ---------------------------------------------------------------------------
@@ -3566,6 +3808,297 @@ static IrisTensor* tensor_reduce(IrisTensor* t, int32_t axis, int keepdims, int 
 IrisTensor* iris_tensor_reduce_sum(IrisTensor* t, int32_t axis, int keepdims)  { return tensor_reduce(t, axis, keepdims, 0); }
 IrisTensor* iris_tensor_reduce_max(IrisTensor* t, int32_t axis, int keepdims)  { return tensor_reduce(t, axis, keepdims, 1); }
 IrisTensor* iris_tensor_reduce_mean(IrisTensor* t, int32_t axis, int keepdims) { return tensor_reduce(t, axis, keepdims, 2); }
+
+IrisTensor* iris_tensor_reduce_multi(IrisTensor* t, const char* op, int32_t n_axes, const int32_t* axes, int32_t keepdims) {
+    if (!t || t->numel == 0) return NULL;
+    int op_code = 0;
+    if (op) {
+        if (strcmp(op, "max") == 0) op_code = 1;
+        else if (strcmp(op, "mean") == 0) op_code = 2;
+    }
+    if (n_axes == 1) {
+        return tensor_reduce(t, axes[0], keepdims, op_code);
+    }
+    int32_t ndim = t->ndim;
+    int* to_reduce = xcalloc((size_t)ndim, sizeof(int));
+    if (n_axes <= 0) {
+        for (int32_t i = 0; i < ndim; i++) to_reduce[i] = 1;
+    } else {
+        for (int32_t i = 0; i < n_axes; i++) {
+            int32_t ax = axes[i];
+            if (ax < 0) ax += ndim;
+            if (ax >= 0 && ax < ndim) to_reduce[ax] = 1;
+        }
+    }
+
+    IrisTensor* curr = t;
+    int need_free = 0;
+    for (int32_t ax = ndim - 1; ax >= 0; ax--) {
+        if (to_reduce[ax]) {
+            IrisTensor* next = tensor_reduce(curr, ax, 1, op_code);
+            if (need_free) iris_tensor_free(curr);
+            curr = next;
+            need_free = 1;
+        }
+    }
+    free(to_reduce);
+
+    if (!curr) return NULL;
+
+    if (!keepdims) {
+        int32_t non_reduced_count = 0;
+        for (int32_t i = 0; i < ndim; i++) {
+            int is_red = 0;
+            if (n_axes <= 0) is_red = 1;
+            else {
+                for (int32_t k = 0; k < n_axes; k++) {
+                    int32_t ax = axes[k];
+                    if (ax < 0) ax += ndim;
+                    if (ax == i) { is_red = 1; break; }
+                }
+            }
+            if (!is_red) non_reduced_count++;
+        }
+        if (non_reduced_count == 0) {
+            int64_t one_shape[1] = { 1 };
+            IrisTensor* squeezed = iris_tensor_alloc(1, one_shape);
+            squeezed->data[0] = curr->data[0];
+            if (need_free) iris_tensor_free(curr);
+            return squeezed;
+        } else {
+            int64_t* sq_shape = xmalloc((size_t)non_reduced_count * sizeof(int64_t));
+            int32_t idx = 0;
+            for (int32_t i = 0; i < ndim; i++) {
+                int is_red = 0;
+                if (n_axes <= 0) is_red = 1;
+                else {
+                    for (int32_t k = 0; k < n_axes; k++) {
+                        int32_t ax = axes[k];
+                        if (ax < 0) ax += ndim;
+                        if (ax == i) { is_red = 1; break; }
+                    }
+                }
+                if (!is_red) sq_shape[idx++] = curr->shape[i];
+            }
+            IrisTensor* squeezed = iris_tensor_alloc(non_reduced_count, sq_shape);
+            memcpy(squeezed->data, curr->data, (size_t)curr->numel * sizeof(float));
+            free(sq_shape);
+            if (need_free) iris_tensor_free(curr);
+            return squeezed;
+        }
+    }
+
+    return curr;
+}
+
+IrisTensor* iris_tensor_einsum(const char* notation, IrisTensor* a, IrisTensor* b) {
+    if (!notation || !a || !b) return NULL;
+    const char* arrow = strstr(notation, "->");
+    if (!arrow) return NULL;
+
+    const char* comma = strchr(notation, ',');
+    if (!comma || comma > arrow) return NULL;
+
+    size_t lhs_len = (size_t)(comma - notation);
+    char lhs[32] = {0};
+    if (lhs_len >= sizeof(lhs)) lhs_len = sizeof(lhs) - 1;
+    strncpy(lhs, notation, lhs_len);
+
+    size_t rhs_len = (size_t)(arrow - (comma + 1));
+    char rhs[32] = {0};
+    if (rhs_len >= sizeof(rhs)) rhs_len = sizeof(rhs) - 1;
+    strncpy(rhs, comma + 1, rhs_len);
+
+    const char* out_str = arrow + 2;
+    size_t out_len = strlen(out_str);
+
+    int64_t dim_map[256] = {0};
+    for (size_t i = 0; i < lhs_len && (int64_t)i < a->ndim; i++) {
+        unsigned char c = (unsigned char)lhs[i];
+        dim_map[c] = a->shape[i];
+    }
+    for (size_t i = 0; i < rhs_len && (int64_t)i < b->ndim; i++) {
+        unsigned char c = (unsigned char)rhs[i];
+        if (dim_map[c] != 0 && dim_map[c] != b->shape[i]) {
+            return NULL;
+        }
+        dim_map[c] = b->shape[i];
+    }
+
+    int32_t out_ndim = (out_len == 0) ? 1 : (int32_t)out_len;
+    int64_t* out_shape = xmalloc((size_t)out_ndim * sizeof(int64_t));
+    if (out_len == 0) {
+        out_shape[0] = 1;
+    } else {
+        for (size_t i = 0; i < out_len; i++) {
+            unsigned char c = (unsigned char)out_str[i];
+            out_shape[i] = dim_map[c] > 0 ? dim_map[c] : 1;
+        }
+    }
+
+    IrisTensor* out = iris_tensor_zeros(out_ndim, out_shape);
+
+    char contracted[32] = {0};
+    size_t num_contracted = 0;
+    for (size_t i = 0; i < lhs_len; i++) {
+        char c = lhs[i];
+        if (!strchr(out_str, c) && !strchr(contracted, c)) {
+            contracted[num_contracted++] = c;
+        }
+    }
+    for (size_t i = 0; i < rhs_len; i++) {
+        char c = rhs[i];
+        if (!strchr(out_str, c) && !strchr(contracted, c)) {
+            contracted[num_contracted++] = c;
+        }
+    }
+
+    int64_t contracted_numel = 1;
+    int64_t contracted_sizes[32] = {0};
+    int64_t contracted_strides[32] = {0};
+    for (size_t i = 0; i < num_contracted; i++) {
+        unsigned char c = (unsigned char)contracted[i];
+        contracted_sizes[i] = dim_map[c] > 0 ? dim_map[c] : 1;
+        contracted_numel *= contracted_sizes[i];
+    }
+    if (num_contracted > 0) {
+        contracted_strides[num_contracted - 1] = 1;
+        for (int i = (int)num_contracted - 2; i >= 0; i--) {
+            contracted_strides[i] = contracted_strides[i + 1] * contracted_sizes[i + 1];
+        }
+    }
+
+    int64_t* a_strides = xmalloc((size_t)a->ndim * sizeof(int64_t));
+    a_strides[a->ndim - 1] = 1;
+    for (int32_t i = a->ndim - 2; i >= 0; i--) a_strides[i] = a_strides[i + 1] * a->shape[i + 1];
+
+    int64_t* b_strides = xmalloc((size_t)b->ndim * sizeof(int64_t));
+    b_strides[b->ndim - 1] = 1;
+    for (int32_t i = b->ndim - 2; i >= 0; i--) b_strides[i] = b_strides[i + 1] * b->shape[i + 1];
+
+    int64_t* out_strides = xmalloc((size_t)out_ndim * sizeof(int64_t));
+    out_strides[out_ndim - 1] = 1;
+    for (int32_t i = out_ndim - 2; i >= 0; i--) out_strides[i] = out_strides[i + 1] * out_shape[i + 1];
+
+    int64_t char_val[256] = {0};
+    for (int64_t o_flat = 0; o_flat < out->numel; o_flat++) {
+        int64_t rem = o_flat;
+        for (size_t d = 0; d < out_len; d++) {
+            unsigned char c = (unsigned char)out_str[d];
+            char_val[c] = rem / out_strides[d];
+            rem %= out_strides[d];
+        }
+
+        float acc = 0.0f;
+        for (int64_t k_flat = 0; k_flat < contracted_numel; k_flat++) {
+            int64_t krem = k_flat;
+            for (size_t d = 0; d < num_contracted; d++) {
+                unsigned char c = (unsigned char)contracted[d];
+                char_val[c] = krem / contracted_strides[d];
+                krem %= contracted_strides[d];
+            }
+
+            int64_t a_flat = 0;
+            for (size_t d = 0; d < lhs_len && (int64_t)d < a->ndim; d++) {
+                unsigned char c = (unsigned char)lhs[d];
+                a_flat += char_val[c] * a_strides[d];
+            }
+
+            int64_t b_flat = 0;
+            for (size_t d = 0; d < rhs_len && (int64_t)d < b->ndim; d++) {
+                unsigned char c = (unsigned char)rhs[d];
+                b_flat += char_val[c] * b_strides[d];
+            }
+
+            acc += a->data[a_flat] * b->data[b_flat];
+        }
+        out->data[o_flat] = acc;
+    }
+
+    free(a_strides);
+    free(b_strides);
+    free(out_strides);
+    free(out_shape);
+    return out;
+}
+
+IrisTensor* iris_tensor_einsum_single(const char* notation, IrisTensor* a) {
+    if (!notation || !a) return NULL;
+    const char* arrow = strstr(notation, "->");
+    if (!arrow) return NULL;
+
+    size_t lhs_len = (size_t)(arrow - notation);
+    char lhs[32] = {0};
+    if (lhs_len >= sizeof(lhs)) lhs_len = sizeof(lhs) - 1;
+    strncpy(lhs, notation, lhs_len);
+
+    const char* out_str = arrow + 2;
+    size_t out_len = strlen(out_str);
+
+    int64_t dim_map[256] = {0};
+    for (size_t i = 0; i < lhs_len && (int64_t)i < a->ndim; i++) {
+        unsigned char c = (unsigned char)lhs[i];
+        dim_map[c] = a->shape[i];
+    }
+
+    int32_t out_ndim = (out_len == 0) ? 1 : (int32_t)out_len;
+    int64_t* out_shape = xmalloc((size_t)out_ndim * sizeof(int64_t));
+    if (out_len == 0) {
+        out_shape[0] = 1;
+    } else {
+        for (size_t i = 0; i < out_len; i++) {
+            unsigned char c = (unsigned char)out_str[i];
+            out_shape[i] = dim_map[c] > 0 ? dim_map[c] : 1;
+        }
+    }
+    IrisTensor* out = iris_tensor_zeros(out_ndim, out_shape);
+
+    int64_t* a_strides = xmalloc((size_t)a->ndim * sizeof(int64_t));
+    a_strides[a->ndim - 1] = 1;
+    for (int32_t i = a->ndim - 2; i >= 0; i--) a_strides[i] = a_strides[i + 1] * a->shape[i + 1];
+
+    int64_t* out_strides = xmalloc((size_t)out_ndim * sizeof(int64_t));
+    out_strides[out_ndim - 1] = 1;
+    for (int32_t i = out_ndim - 2; i >= 0; i--) out_strides[i] = out_strides[i + 1] * out_shape[i + 1];
+
+    int64_t coords[32] = {0};
+    for (int64_t flat = 0; flat < a->numel; flat++) {
+        int64_t rem = flat;
+        for (int32_t d = 0; d < a->ndim; d++) {
+            coords[d] = rem / a_strides[d];
+            rem %= a_strides[d];
+        }
+        int valid = 1;
+        for (size_t i = 0; i < lhs_len && (int64_t)i < a->ndim; i++) {
+            for (size_t j = i + 1; j < lhs_len && (int64_t)j < a->ndim; j++) {
+                if (lhs[i] == lhs[j] && coords[i] != coords[j]) {
+                    valid = 0; break;
+                }
+            }
+            if (!valid) break;
+        }
+        if (!valid) continue;
+
+        int64_t dst_flat = 0;
+        if (out_len > 0) {
+            for (size_t d = 0; d < out_len; d++) {
+                char oc = out_str[d];
+                for (size_t s = 0; s < lhs_len && (int64_t)s < a->ndim; s++) {
+                    if (lhs[s] == oc) {
+                        dst_flat += coords[s] * out_strides[d];
+                        break;
+                    }
+                }
+            }
+        }
+        out->data[dst_flat] += a->data[flat];
+    }
+
+    free(a_strides);
+    free(out_strides);
+    free(out_shape);
+    return out;
+}
 
 // --- Define-by-run reverse-mode tensor autodiff ----------------------------
 
@@ -5032,7 +5565,21 @@ int64_t iris_http_tls_available(void) {
 #ifdef _WIN32
     return 1;
 #else
-    return 0;
+    static int checked = 0;
+    static int available = 0;
+    if (!checked) {
+        checked = 1;
+        void* h1 = dlopen("libssl.so.3", RTLD_LAZY);
+        if (!h1) h1 = dlopen("libssl.so.1.1", RTLD_LAZY);
+        if (!h1) h1 = dlopen("libssl.dylib", RTLD_LAZY);
+        if (!h1) h1 = dlopen("libcurl.so", RTLD_LAZY);
+        if (!h1) h1 = dlopen("libcurl.dylib", RTLD_LAZY);
+        if (h1) {
+            available = 1;
+            dlclose(h1);
+        }
+    }
+    return available;
 #endif
 }
 #else /* __IRIS_WASM_STUB */
@@ -7232,8 +7779,22 @@ static RcEntry* rc_take_one_locked(void) {
 
 static void rc_free_list_payload(IrisList* list) {
     if (!list) return;
-    for (size_t i = 0; i < list->len; i++) {
-        if (list->data[i]) iris_release(list->data[i]);
+    IrisValChunk* c = list->chunks;
+    while (c) {
+        IrisValChunk* next = c->next;
+        free(c);
+        c = next;
+    }
+    if (!list->chunks) {
+        for (size_t i = 0; i < list->len; i++) {
+            if (list->data[i]) {
+                pthread_mutex_lock(&rc_global_mu);
+                RcEntry* e = rc_find(list->data[i]);
+                pthread_mutex_unlock(&rc_global_mu);
+                if (e) iris_release(list->data[i]);
+                else free(list->data[i]);
+            }
+        }
     }
     free(list->data);
     free(list);

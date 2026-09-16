@@ -9,8 +9,9 @@ find target -type f -name '*.ll' -print -exec cp {} /work/ci-artifacts/ \; || tr
 shopt -s nullglob
 for ll in /work/ci-artifacts/*.ll; do
   echo "Checking $ll"
-  if command -v clang-22 >/dev/null 2>&1; then
-    clang_cmd=clang-22
+  if command -v clang-23 >/dev/null 2>&1; then
+    clang_cmd=clang-23
+  elif command -v clang-22 >/dev/null 2>&1; then
   elif command -v clang-21 >/dev/null 2>&1; then
     clang_cmd=clang-21
   elif command -v clang-20 >/dev/null 2>&1; then

@@ -71,6 +71,7 @@ fn fmt_onnx_type(ty: &IrType) -> String {
         IrType::Tuple(_) => "unknown_type { // tuple }".to_owned(),
         IrType::Str => "unknown_type { // str }".to_owned(),
         IrType::Array { elem, len } => format!("unknown_type {{ // array[{}; {}] }}", elem, len),
+        IrType::Slice { elem, .. } => format!("unknown_type {{ // slice[{}] }}", elem),
         IrType::Option(inner) => format!("unknown_type {{ // option<{}> }}", inner),
         IrType::ResultType(ok, err) => format!("unknown_type {{ // result<{},{}> }}", ok, err),
         IrType::Chan(elem) => format!("unknown_type {{ // chan<{}> }}", elem),

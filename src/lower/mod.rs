@@ -1038,6 +1038,8 @@ struct Lowerer<'m> {
     /// Deferred expressions to emit before each return or at function exit.
     /// Entries are in declaration order; emitted in reverse (LIFO).
     defer_stack: Vec<crate::parser::ast::AstExpr>,
+    /// Active local variables whose types implement Drop: (var_name, value_id, drop_fn_name).
+    drop_stack: Vec<(String, ValueId, String)>,
     /// Try-catch state: the catch block to branch to on `?` unwrap failure.
     try_catch_catch_bb: Option<BlockId>,
     /// Try-catch state: the continuation block after the try/catch.
@@ -1264,9 +1266,62 @@ impl<'m> Lowerer<'m> {
             local_struct_defs: HashMap::new(),
             local_struct_defaults: HashMap::new(),
             defer_stack: Vec::new(),
+            drop_stack: Vec::new(),
             try_catch_catch_bb: None,
             try_catch_cont_bb: None,
             try_catch_param: None,
+        }
+    }
+
+    /// Finds the mangled destructor function name for a type if it implements Drop.
+    fn find_destructor(&self, ty: &IrType) -> Option<String> {
+        if let IrType::Struct { name, .. } = ty {
+            if let Some(drop_fn) = self.module.find_drop_method(name) {
+                return Some(drop_fn);
+            }
+        }
+        if let Some(cands) = self.trait_dispatch.get("drop") {
+            for (dispatch_ty, mangled) in cands.iter() {
+                if dispatch_ty == ty {
+                    return Some(mangled.clone());
+                }
+                if let (IrType::Struct { name: n1, .. }, IrType::Struct { name: n2, .. }) =
+                    (dispatch_ty, ty)
+                {
+                    if n1 == n2 {
+                        return Some(mangled.clone());
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Emits destructor calls for active variables implementing Drop in LIFO order.
+    fn emit_drops(&mut self, ret_values: &[ValueId]) {
+        let drops: Vec<_> = self.drop_stack.clone();
+        for (_var_name, val, drop_fn) in drops.iter().rev() {
+            if ret_values.contains(val) {
+                continue; // Moved into return value, do not destruct
+            }
+            let ret_ty = if let Some(fn_id) = self.module.function_index.get(drop_fn).copied() {
+                self.module
+                    .function(fn_id)
+                    .map(|f| f.return_ty.clone())
+                    .unwrap_or(IrType::Tuple(vec![]))
+            } else {
+                IrType::Tuple(vec![])
+            };
+            let drop_res = self.builder.fresh_value();
+            self.builder.push_instr(
+                IrInstr::Call {
+                    result: Some(drop_res),
+                    callee: drop_fn.clone(),
+                    args: vec![*val],
+                    result_ty: Some(ret_ty.clone()),
+                },
+                Some(ret_ty),
+            );
         }
     }
 
@@ -1802,6 +1857,14 @@ impl<'m> Lowerer<'m> {
                         );
                         (lhs_val, cast, lhs_ty)
                     }
+                    (IrType::Grad(_), IrType::Scalar(_)) => (lhs_val, rhs_val, lhs_ty.clone()),
+                    (IrType::Scalar(_), IrType::Grad(_)) => (lhs_val, rhs_val, rhs_ty.clone()),
+                    (IrType::Sparse(_), IrType::Scalar(_)) if matches!(op, AstBinOp::Mul) => {
+                        (lhs_val, rhs_val, lhs_ty.clone())
+                    }
+                    (IrType::Scalar(_), IrType::Sparse(_)) if matches!(op, AstBinOp::Mul) => {
+                        (lhs_val, rhs_val, rhs_ty.clone())
+                    }
                     // Exactly one operand is still `Infer`: adopt the other's
                     // concrete type.
                     //
@@ -1974,12 +2037,12 @@ impl<'m> Lowerer<'m> {
                 span,
             } => {
                 let (base_val, base_ty) = self.lower_expr(base)?;
-                // Array index: arr[i]
-                if let IrType::Array { elem, .. } = &base_ty {
+                // Array or Slice index: arr[i] or slice[i]
+                if let IrType::Array { elem, .. } | IrType::Slice { elem, .. } = &base_ty {
                     let elem_ty = (**elem).clone();
                     if indices.len() != 1 {
                         return Err(LowerError::Unsupported {
-                            detail: "array index requires exactly 1 index".into(),
+                            detail: "array or slice index requires exactly 1 index".into(),
                             span: *span,
                         });
                     }
@@ -17366,6 +17429,10 @@ impl<'m> Lowerer<'m> {
                     ty = nt;
                 }
 
+                if let Some(drop_fn) = self.find_destructor(&ty) {
+                    self.drop_stack.push((name.name.clone(), val, drop_fn));
+                }
+
                 self.scope.insert(name.name.clone(), (val, ty));
                 Ok(())
             }
@@ -17516,11 +17583,11 @@ impl<'m> Lowerer<'m> {
                         span,
                     } => {
                         let (base_val, base_ty) = self.lower_expr(base)?;
-                        if let IrType::Array { .. } = &base_ty {
-                            // Array store
+                        if matches!(&base_ty, IrType::Array { .. } | IrType::Slice { .. }) {
+                            // Array or slice store
                             if indices.len() != 1 {
                                 return Err(LowerError::Unsupported {
-                                    detail: "array store requires exactly 1 index".into(),
+                                    detail: "array or slice store requires exactly 1 index".into(),
                                     span: *span,
                                 });
                             }
@@ -17648,6 +17715,8 @@ impl<'m> Lowerer<'m> {
                 } else {
                     vec![]
                 };
+                // Emit active destructors (Drop trait) in reverse order (LIFO) before return.
+                self.emit_drops(&ret_values);
                 // Emit deferred expressions in reverse order (LIFO) before return.
                 let defers: Vec<_> = self.defer_stack.clone();
                 for expr in defers.iter().rev() {
@@ -17655,10 +17724,6 @@ impl<'m> Lowerer<'m> {
                 }
                 self.builder
                     .push_instr(IrInstr::Return { values: ret_values }, None);
-                // Create a new unreachable block so any subsequent instructions
-                // (from following statements) don't pollute the terminated block.
-                let unreachable_bb = self.builder.create_block(Some("post_return"));
-                self.builder.set_current_block(unreachable_bb);
                 Ok(())
             }
 
@@ -18576,6 +18641,11 @@ fn lower_function_with_generics_and_subs(
         lowerer
             .scope
             .insert(param.name.name.clone(), (val, ir_param.ty.clone()));
+        if let Some(destructor) = lowerer.find_destructor(&ir_param.ty) {
+            lowerer
+                .drop_stack
+                .push((param.name.name.clone(), val, destructor));
+        }
     }
 
     // Inject global constants into scope.
@@ -18587,15 +18657,17 @@ fn lower_function_with_generics_and_subs(
     let tail_val = lowerer.lower_block(&func.body)?;
 
     if !lowerer.builder.is_current_block_terminated() {
+        let ret_values: Vec<ValueId> = match tail_val {
+            Some((v, _)) => vec![v],
+            None => vec![],
+        };
+        // Emit active destructors (Drop trait) in reverse order (LIFO) before implicit return.
+        lowerer.emit_drops(&ret_values);
         // Emit deferred expressions in reverse order (LIFO) before implicit return.
         let defers: Vec<_> = lowerer.defer_stack.clone();
         for expr in defers.iter().rev() {
             let _ = lowerer.lower_expr(expr);
         }
-        let ret_values: Vec<ValueId> = match tail_val {
-            Some((v, _)) => vec![v],
-            None => vec![],
-        };
         lowerer
             .builder
             .push_instr(IrInstr::Return { values: ret_values }, None);
@@ -18691,8 +18763,24 @@ pub fn lower_type(ty: &AstType) -> IrType {
             methods: Vec::new(),
         },
         AstType::MaskEffectType { .. } => IrType::Infer,
-        AstType::Ref(inner, _) => lower_type(inner),
-        AstType::RefMut(inner, _) => lower_type(inner),
+        AstType::Ref(inner, _) => match inner.as_ref() {
+            AstType::Slice(elem, _) => IrType::Slice {
+                elem: Box::new(lower_type(elem)),
+                is_mut: false,
+            },
+            other => lower_type(other),
+        },
+        AstType::RefMut(inner, _) => match inner.as_ref() {
+            AstType::Slice(elem, _) => IrType::Slice {
+                elem: Box::new(lower_type(elem)),
+                is_mut: true,
+            },
+            other => lower_type(other),
+        },
+        AstType::Slice(elem, _) => IrType::Slice {
+            elem: Box::new(lower_type(elem)),
+            is_mut: false,
+        },
     }
 }
 
@@ -18873,6 +18961,13 @@ pub(crate) fn mangle_ir_type(ty: &IrType) -> String {
         IrType::Array { elem, len } => {
             format!("arr{}_{}", len, mangle_ir_type(elem))
         }
+        IrType::Slice { elem, is_mut } => {
+            format!(
+                "slice_{}_{}",
+                if *is_mut { "mut" } else { "const" },
+                mangle_ir_type(elem)
+            )
+        }
         IrType::Option(inner) => format!("opt_{}", mangle_ir_type(inner)),
         IrType::ResultType(ok, err) => {
             format!("res_{}_{}", mangle_ir_type(ok), mangle_ir_type(err))
@@ -19031,8 +19126,24 @@ pub fn lower_type_with_structs(ty: &AstType, module: &IrModule) -> IrType {
             }
         }
         AstType::MaskEffectType { .. } => IrType::Infer,
-        AstType::Ref(inner, _) => lower_type_with_structs(inner, module),
-        AstType::RefMut(inner, _) => lower_type_with_structs(inner, module),
+        AstType::Ref(inner, _) => match inner.as_ref() {
+            AstType::Slice(elem, _) => IrType::Slice {
+                elem: Box::new(lower_type_with_structs(elem, module)),
+                is_mut: false,
+            },
+            other => lower_type_with_structs(other, module),
+        },
+        AstType::RefMut(inner, _) => match inner.as_ref() {
+            AstType::Slice(elem, _) => IrType::Slice {
+                elem: Box::new(lower_type_with_structs(elem, module)),
+                is_mut: true,
+            },
+            other => lower_type_with_structs(other, module),
+        },
+        AstType::Slice(inner, _) => IrType::Slice {
+            elem: Box::new(lower_type_with_structs(inner, module)),
+            is_mut: false,
+        },
         other => lower_type(other),
     }
 }
@@ -20265,7 +20376,9 @@ pub fn populate_struct_fields(ty: &mut IrType, module: &IrModule) {
                 populate_struct_fields(e, module);
             }
         }
-        IrType::Array { elem, .. } => populate_struct_fields(elem, module),
+        IrType::Array { elem, .. } | IrType::Slice { elem, .. } => {
+            populate_struct_fields(elem, module)
+        }
         IrType::Option(inner) => populate_struct_fields(inner, module),
         IrType::ResultType(ok, err) => {
             populate_struct_fields(ok, module);

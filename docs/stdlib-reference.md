@@ -43,10 +43,50 @@ val e   = is_empty("")               // true
 val pl  = pad_left("42", 5, "0")     // "00042"
 val pr  = pad_right("hi", 5, ".")    // "hi..."
 val rep = str_repeat("ab", 3)        // "ababab"
-val tl  = trim_start("  hello")      // "  hello" (approximation)
+val tl  = trim_start("  hello  ")    // "hello  "
+val te  = trim_end("  hello  ")      // "  hello"
 ```
 
-**Functions:** `words`, `lines`, `str_join`, `is_empty`, `pad_left`, `pad_right`, `str_repeat`, `trim_start`, `trim_end`
+**Functions:** `words`, `lines`, `str_join`, `is_empty`, `pad_left`, `pad_right`, `str_repeat`, `trim_start`, `trim_end`, `count`, `strip_prefix`, `strip_suffix`, `split_once`, `split_n`, `replace_n`, `normalize_whitespace`, `is_blank`
+
+`trim_start`, `trim_end`, and `words` recognize ASCII whitespace (space and
+bytes 9-13). They preserve UTF-8 content; `words` collapses whitespace runs and
+returns an empty list for empty or whitespace-only input. `lines` recognizes LF
+and CRLF, preserves interior empty lines and lone CR characters, and omits the
+empty segment after a final newline. Empty input produces an empty list.
+
+Padding widths count UTF-8 bytes, matching `len`. Padding repeats whole copies
+of the supplied string until the minimum width is reached, so a multi-byte or
+multi-character pad can exceed the requested width. Empty padding and widths
+no larger than the input leave it unchanged.
+
+### Parsing and cleanup
+
+| Function | Return type | Behavior |
+| --- | --- | --- |
+| `strip_prefix(s, prefix)` | `option<str>` | Remove one matching prefix; `none` if absent. |
+| `strip_suffix(s, suffix)` | `option<str>` | Remove one matching suffix; `none` if absent. |
+| `split_once(s, delim)` | `option<(str, str)>` | Split at the first match, excluding the delimiter; `none` if absent. |
+| `split_n(s, delim, max_parts)` | `list<str>` | At most `max_parts` fields; the last holds the unsplit remainder. |
+| `replace_n(s, pattern, replacement, limit)` | `str` | Replace up to `limit` non-overlapping matches from left to right. |
+| `normalize_whitespace(s)` | `str` | Collapse ASCII whitespace runs to one space and trim both ends. |
+| `is_blank(s)` | `bool` | True for empty or entirely ASCII-whitespace input. |
+
+Affixes and delimiters are literal strings, not regular expressions. Empty
+prefixes/suffixes match without changing the input. `split_once(s, "")` returns
+`some(("", s))`. `split_n` returns an empty list for nonpositive limits;
+otherwise an empty delimiter leaves the input as one field. Adjacent and
+trailing delimiters produce empty fields. Empty input is one empty field when
+the limit is positive. `replace_n` leaves the input unchanged for an empty
+pattern or nonpositive limit and never searches the replacement text. These
+helpers preserve UTF-8 content and do not perform Unicode normalization.
+
+```iris
+val pair = split_once("name=iris=compiler", "=") // some(("name", "iris=compiler"))
+val fields = split_n("a,b,c", ",", 2)           // list containing "a", "b,c"
+val text = replace_n("a-a-a", "a", "b", 2)      // "b-b-a"
+val clean = normalize_whitespace("  a\t b  ")  // "a b"
+```
 
 ---
 
@@ -63,7 +103,25 @@ val l = left_align("hi", 6)    // "hi    "
 val r = right_align("hi", 6)   // "    hi"
 ```
 
-**Functions:** `pad_int`, `zero_pad_int`, `left_align`, `right_align`
+**Functions:** `pad_int`, `zero_pad_int`, `left_align`, `right_align`, `sprintf`, `printf`, `format_table`
+
+Zero padding follows the sign: `zero_pad_int(-42, 6)` returns `"-00042"`.
+`sprintf("%06d", split("-42", ","))` follows the same rule.
+
+`format_table(headers, rows, col_widths)` accepts `list<str>`,
+`list<list<str>>`, and `option<list<i64>>`. It calculates column widths from
+all cells; supplied widths are minimum UTF-8 byte counts and never truncate
+content. Missing cells are empty; extra cells create columns. Empty headers
+are omitted. Columns are separated by `" | "`, rows by LF, with no final
+newline and no padding after the final column. Empty input returns `""`.
+
+```iris
+val headers = split("Name,N", ",")
+val rows: list<list<str>> = list()
+list_push(rows, split("Ada,12", ","));
+val table = format_table(headers, rows, none)
+// "Name | N\nAda  | 12"
+```
 
 ---
 
@@ -74,15 +132,20 @@ File system I/O.
 ```iris
 bring std.fs
 
-val text = read_text("data.txt")          // "" on error
-val ok   = write_text("out.txt", "hello") // true on success
+val text = read_text("data.txt")          // result<str, str>
+val ok   = write_text("out.txt", "hello") // result<bool, str>
 val ok2  = append_text("log.txt", "line\n")
 val ex   = path_exists("file.iris")       // bool
-val lns  = read_lines("data.txt")         // list<str>
+val lns  = read_lines("data.txt")         // result<list<str>, str>
 val ok3  = copy_file("src.txt", "dst.txt")
 ```
 
 **Functions:** `read_text`, `write_text`, `append_text`, `path_exists`, `read_lines`, `copy_file`
+
+`read_text` returns `result<str, str>`; `read_lines` returns
+`result<list<str>, str>`. Write, append, and copy return `result<bool, str>`.
+Handle `ok(value)` and `err(message)` explicitly. `path_exists` returns `bool`.
+These operations require `effect fs, io`.
 
 ---
 
@@ -100,7 +163,36 @@ val s = stem("report.pdf")              // "report"
 val j = join_path("/home/user", "docs") // "/home/user/docs"
 ```
 
-**Functions:** `basename`, `dirname`, `extension`, `stem`, `join_path`
+**Functions:** `basename`, `dirname`, `extension`, `stem`, `join_path`, `path_is_absolute`, `path_components`, `normalize_path`, `with_extension`
+
+### Lexical path operations
+
+These helpers use POSIX-style paths on every host: `/` is the only separator,
+and a leading `/` makes a path absolute. Backslashes and drive letters are
+ordinary characters. They perform no filesystem access or symlink resolution.
+
+| Function | Return type | Behavior |
+| --- | --- | --- |
+| `path_is_absolute(p)` | `bool` | Whether the path starts with `/`. |
+| `path_components(p)` | `list<str>` | Nonempty components, retaining `.` and `..`. |
+| `normalize_path(p)` | `str` | Collapse repeated separators, `.` and cancellable `..`. |
+| `with_extension(p, ext)` | `str` | Replace the final filename extension; empty `ext` removes it. |
+
+Normalization preserves leading `..` in relative paths and clamps absolute
+paths at `/`. Empty relative results become `"."`; trailing separators are
+removed except for the root. Normalization is lexical and does not establish
+whether a path stays inside a directory when symlinks are involved.
+
+`with_extension` expects the extension without a leading dot. A filename's
+leading dot is not an extension separator: `.env` becomes `.env.local` when
+given `"local"`. Empty paths, paths ending in `/`, and final `.` or `..`
+components remain unchanged. Parent-directory spelling is preserved.
+
+```iris
+val p = normalize_path("./build/../out//report.txt") // "out/report.txt"
+val q = with_extension(p, "json")                   // "out/report.json"
+val r = normalize_path("../../a/../b")              // "../../b"
+```
 
 ---
 
@@ -262,7 +354,50 @@ val ct = count(nums, 1)          // 1
 val idx = index_of(nums, 2)      // 2
 ```
 
-**Functions:** `sum`, `product`, `min`, `max`, `mean_i64`, `reverse`, `take`, `drop`, `count`, `index_of`, `flatten`, `zip_sum`, `normalize_i64`, `range`
+**Functions:** `sum`, `product`, `min`, `max`, `reverse`, `take`, `drop`, `contains`, `count`, `index_of`, `flatten_i64`, `range`, `map_i64`, `filter_i64`, `fold_i64`, `any_i64`, `all_i64`, `find_i64`, `partition_i64`, `unique_i64`, `chunks_i64`, `windows_i64`
+
+### List pipelines
+
+The following helpers operate on `list<i64>`. Callbacks may be named functions
+or closures, including closures that capture values. Collection-producing
+operations allocate fresh lists and preserve input order. Callbacks receive
+the original values from left to right; they should not structurally modify
+the input list while it is being traversed.
+
+| Function | Return type | Behavior |
+| --- | --- | --- |
+| `map_i64(xs, transform)` | `list<i64>` | Apply `transform: \|i64\| -> i64` once to each element. |
+| `filter_i64(xs, predicate)` | `list<i64>` | Retain elements satisfying `predicate: \|i64\| -> bool`. |
+| `fold_i64(xs, initial, combine)` | `i64` | Left fold with `combine: \|i64, i64\| -> i64`. |
+| `any_i64(xs, predicate)` | `bool` | Stop at the first true predicate result; false for empty input. |
+| `all_i64(xs, predicate)` | `bool` | Stop at the first false predicate result; true for empty input. |
+| `find_i64(xs, predicate)` | `option<i64>` | First matching value, or `none`; stops at the first match. |
+| `partition_i64(xs, predicate)` | `(list<i64>, list<i64>)` | Matching and nonmatching values, testing each exactly once. |
+| `unique_i64(xs)` | `list<i64>` | First occurrence of each distinct value in encounter order. |
+| `chunks_i64(xs, size)` | `list<list<i64>>` | Non-overlapping chunks; include the final short chunk. |
+| `windows_i64(xs, size)` | `list<list<i64>>` | Every full overlapping window with a stride of one. |
+
+An empty fold returns `initial` without invoking its callback. Other
+collection-producing helpers return empty lists for empty input; partition
+returns two empty lists. Nonpositive chunk/window sizes return empty lists.
+Oversized chunks contain the entire input; oversized windows produce no
+windows. Each chunk/window owns a separate list, so modifying one does not
+modify its neighbors or the source.
+
+`unique_i64` uses a linear membership scan per element (O(n²) worst case).
+The other flat pipelines are O(n), excluding callback costs. Window copying
+costs O((n - size + 1) × size) for valid sizes.
+
+```iris
+val xs = range(1, 6)
+val doubled = map_i64(xs, |x: i64| x * 2)
+val selected = filter_i64(doubled, |x: i64| x > 5)
+val total = fold_i64(selected, 0, |acc: i64, x: i64| acc + x) // 24
+val batches = chunks_i64(xs, 2) // lists containing (1,2), (3,4), (5)
+```
+
+For a complete example combining string parsing, paths, and list pipelines,
+see [`examples/06_data/stdlib_pipeline.iris`](../examples/06_data/stdlib_pipeline.iris).
 
 ---
 

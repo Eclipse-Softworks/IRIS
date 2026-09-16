@@ -1,0 +1,25 @@
+// Parse a configuration value, prepare an output path, and batch numeric data.
+// Run: iris run examples/06_data/stdlib_pipeline.iris
+bring std.string
+bring std.path
+bring std.iter
+
+def main() -> i64 {
+    val config = normalize_whitespace("  output=./build/../out/report.tmp  ")
+    val pair = split_once(config, "=")
+    assert(is_some(pair));
+    val (key, value) = unwrap(pair)
+    val output = with_extension(normalize_path(value), "json")
+
+    val samples = range(1, 7)
+    val scale = 2
+    val scaled = map_i64(samples, |x: i64| x * scale)
+    val batches = chunks_i64(scaled, 2)
+    val first_total = fold_i64(list_get(batches, 0), 0, |acc: i64, x: i64| acc + x)
+
+    assert(key == "output");
+    assert(output == "out/report.json");
+    assert(first_total == 6);
+    println("stdlib pipeline: ok");
+    return 0
+}

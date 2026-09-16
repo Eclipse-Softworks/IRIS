@@ -35,7 +35,7 @@ fn contains_infer(ty: &IrType) -> bool {
         IrType::ResultType(ok, err) | IrType::Map(ok, err) => {
             contains_infer(ok) || contains_infer(err)
         }
-        IrType::Array { elem, .. } => contains_infer(elem),
+        IrType::Array { elem, .. } | IrType::Slice { elem, .. } => contains_infer(elem),
         IrType::Tuple(fields) => fields.iter().any(contains_infer),
         IrType::Struct { fields, .. } => fields.iter().any(|(_, t)| contains_infer(t)),
         IrType::Fn { params, ret } => params.iter().any(contains_infer) || contains_infer(ret),
@@ -73,16 +73,23 @@ impl Pass for TypeInferPass {
                             let rhs_ty = func.value_type(*rhs);
                             match (lhs_ty, rhs_ty) {
                                 (Some(l), Some(r)) if l != r => {
-                                    // Allow bool result from comparison of same base types —
-                                    // the lowerer already converts the result ty to Bool.
-                                    // Here we check operands only.
-                                    return Err(PassError::TypeError {
-                                        func: func.name.clone(),
-                                        detail: format!(
-                                            "binary op on mismatched types {} and {}",
-                                            l, r
-                                        ),
-                                    });
+                                    let is_grad_mixed = (matches!(l, IrType::Grad(_))
+                                        && matches!(r, IrType::Scalar(_)))
+                                        || (matches!(l, IrType::Scalar(_))
+                                            && matches!(r, IrType::Grad(_)));
+                                    let is_sparse_mixed = (matches!(l, IrType::Sparse(_))
+                                        && matches!(r, IrType::Scalar(_)))
+                                        || (matches!(l, IrType::Scalar(_))
+                                            && matches!(r, IrType::Sparse(_)));
+                                    if !is_grad_mixed && !is_sparse_mixed {
+                                        return Err(PassError::TypeError {
+                                            func: func.name.clone(),
+                                            detail: format!(
+                                                "binary op on mismatched types {} and {}",
+                                                l, r
+                                            ),
+                                        });
+                                    }
                                 }
                                 _ => {}
                             }
@@ -100,12 +107,13 @@ impl Pass for TypeInferPass {
                                                     | DType::I32
                                                     | DType::I64
                                                     | DType::I8
-                                            )
+                                            ) | IrType::Grad(_)
+                                                | IrType::Tensor { .. }
                                         ) {
                                             return Err(PassError::TypeError {
                                                 func: func.name.clone(),
                                                 detail: format!(
-                                                    "neg operand must be a numeric scalar, got {}",
+                                                    "neg operand must be a numeric scalar, grad, or tensor, got {}",
                                                     ty
                                                 ),
                                             });
@@ -263,11 +271,11 @@ impl Pass for TypeInferPass {
 
                         IrInstr::ArrayLoad { array, .. } => {
                             if let Some(ty) = func.value_type(*array) {
-                                if !matches!(ty, IrType::Array { .. }) {
+                                if !matches!(ty, IrType::Array { .. } | IrType::Slice { .. }) {
                                     return Err(PassError::TypeError {
                                         func: func.name.clone(),
                                         detail: format!(
-                                            "ArrayLoad: operand must be an array, got {}",
+                                            "ArrayLoad: operand must be an array or slice, got {}",
                                             ty
                                         ),
                                     });
@@ -277,11 +285,11 @@ impl Pass for TypeInferPass {
 
                         IrInstr::ArrayStore { array, .. } => {
                             if let Some(ty) = func.value_type(*array) {
-                                if !matches!(ty, IrType::Array { .. }) {
+                                if !matches!(ty, IrType::Array { .. } | IrType::Slice { .. }) {
                                     return Err(PassError::TypeError {
                                         func: func.name.clone(),
                                         detail: format!(
-                                            "ArrayStore: operand must be an array, got {}",
+                                            "ArrayStore: operand must be an array or slice, got {}",
                                             ty
                                         ),
                                     });

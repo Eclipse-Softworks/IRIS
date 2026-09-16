@@ -1,0 +1,87 @@
+// Human Problem: Genomic Cancer Mutation Alignment (Bioinformatics)
+// Performs dynamic programming sequence alignment between a reference oncogene
+// (e.g. BRCA1 / EGFR) and patient tumor biopsy sequences to pinpoint mutations.
+
+def align_sequence(ref_len: i64, read_len: i64, match_score: i64, mismatch_score: i64, gap_penalty: i64) -> i64 {
+    val width = read_len + 1;
+    val height = ref_len + 1;
+    val total_cells = width * height;
+
+    val dp: list<i64> = list();
+    var idx = 0;
+    while idx < total_cells {
+        push(dp, 0);
+        idx = idx + 1;
+    }
+
+    // Initialize gap penalties along borders
+    var r = 0;
+    while r <= ref_len {
+        list_set(dp, r * width + 0, r * gap_penalty);
+        r = r + 1;
+    }
+    var c = 0;
+    while c <= read_len {
+        list_set(dp, 0 * width + c, c * gap_penalty);
+        c = c + 1;
+    }
+
+    // Fill DP alignment matrix
+    var i = 1;
+    while i <= ref_len {
+        var j = 1;
+        while j <= read_len {
+            // Synthetic base comparison: match if (i*3 == j*3) or periodic pattern
+            val is_match = ((i * 7 + j * 3) % 11) == 0;
+            val score_diag = if is_match {
+                list_get(dp, (i - 1) * width + (j - 1)) + match_score
+            } else {
+                list_get(dp, (i - 1) * width + (j - 1)) + mismatch_score
+            };
+
+            val score_up = list_get(dp, (i - 1) * width + j) + gap_penalty;
+            val score_left = list_get(dp, i * width + (j - 1)) + gap_penalty;
+
+            var best = score_diag;
+            if score_up > best {
+                best = score_up;
+            } else { 0 };
+
+            if score_left > best {
+                best = score_left;
+            } else { 0 };
+
+            list_set(dp, i * width + j, best);
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+
+    list_get(dp, ref_len * width + read_len)
+}
+
+def main() -> i64 {
+    println("=================================================================");
+    println(" GENOMICS CRISIS: Cancer Oncogene Sequence Alignment             ");
+    println(" Aligning patient biopsy reads against reference genome          ");
+    println("=================================================================");
+
+    val ref_len = 120;
+    val read_len = 120;
+    val num_patients = 100;
+
+    var patient = 0;
+    var total_alignment_score = 0;
+
+    while patient < num_patients {
+        val score = align_sequence(ref_len, read_len, 2, -1, -2);
+        total_alignment_score = total_alignment_score + score;
+        patient = patient + 1;
+    }
+
+    println(f"Processed {num_patients} patient biopsy alignments (14,641 matrix cells each).");
+    println(f"Average Alignment Score: {total_alignment_score / num_patients}");
+    println("=================================================================");
+
+    0
+}

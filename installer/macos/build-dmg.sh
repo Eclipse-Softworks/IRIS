@@ -72,6 +72,7 @@ fi
 
 cp "$ROOT/LICENSE" "$DMG_DIR/"
 cp "$ROOT/README.md" "$DMG_DIR/"
+cp "$ROOT/LLVM_VERSION" "$DMG_DIR/" 2>/dev/null || true
 
 # VSCode extension
 VSIX="$(find "$ROOT/vscode-iris" -name 'iris-lang-*.vsix' 2>/dev/null | sort -rV | head -1)"

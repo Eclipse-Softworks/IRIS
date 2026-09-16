@@ -41,7 +41,7 @@ fn local_contains_infer(ty: &IrType) -> bool {
         IrType::Scalar(_) | IrType::Str | IrType::Enum { .. } | IrType::Struct { .. } => false,
         IrType::Tensor { .. } => false,
         IrType::Tuple(elems) => elems.iter().any(local_contains_infer),
-        IrType::Array { elem, .. } => local_contains_infer(elem),
+        IrType::Array { elem, .. } | IrType::Slice { elem, .. } => local_contains_infer(elem),
         IrType::Grad(inner) | IrType::Sparse(inner) | IrType::List(inner) => {
             local_contains_infer(inner)
         }
@@ -68,6 +68,10 @@ fn default_infer(ty: &IrType) -> IrType {
         IrType::Array { elem, len } => IrType::Array {
             elem: Box::new(default_infer(elem)),
             len: *len,
+        },
+        IrType::Slice { elem, is_mut } => IrType::Slice {
+            elem: Box::new(default_infer(elem)),
+            is_mut: *is_mut,
         },
         IrType::Grad(inner) => IrType::Grad(Box::new(default_infer(inner))),
         IrType::Sparse(inner) => IrType::Sparse(Box::new(default_infer(inner))),
@@ -887,23 +891,66 @@ fn collect_constraints(
             let sr = get_or_create_slot(uf, slots, *result, Some(res_ty));
             let sl = get_or_create_slot(uf, slots, *lhs, None);
             let srs = get_or_create_slot(uf, slots, *rhs, None);
-            // Unify lhs and rhs (same operand type).
-            try_unify(
-                uf,
-                errors,
-                sl,
-                srs,
-                &format!("BinOp lhs {} rhs {}", lhs, rhs),
-            );
-            // For non-comparison ops, result type = operand type.
-            if !is_cmp {
+            let tl = uf.get_type(sl);
+            let tr = uf.get_type(srs);
+            let is_grad_mixed = (matches!(&tl, Some(IrType::Grad(_)))
+                && matches!(&tr, Some(IrType::Scalar(_))))
+                || (matches!(&tl, Some(IrType::Scalar(_))) && matches!(&tr, Some(IrType::Grad(_))));
+            let is_sparse_mixed = *op == crate::ir::instr::BinOp::Mul
+                && ((matches!(&tl, Some(IrType::Sparse(_)))
+                    && matches!(&tr, Some(IrType::Scalar(_))))
+                    || (matches!(&tl, Some(IrType::Scalar(_)))
+                        && matches!(&tr, Some(IrType::Sparse(_)))));
+
+            if is_grad_mixed {
+                let grad_slot = if matches!(&tl, Some(IrType::Grad(_))) {
+                    sl
+                } else {
+                    srs
+                };
+                if !is_cmp {
+                    try_unify(
+                        uf,
+                        errors,
+                        sr,
+                        grad_slot,
+                        &format!("BinOp result {} grad operand", result),
+                    );
+                }
+            } else if is_sparse_mixed {
+                let sparse_slot = if matches!(&tl, Some(IrType::Sparse(_))) {
+                    sl
+                } else {
+                    srs
+                };
+                if !is_cmp {
+                    try_unify(
+                        uf,
+                        errors,
+                        sr,
+                        sparse_slot,
+                        &format!("BinOp result {} sparse operand", result),
+                    );
+                }
+            } else {
+                // Unify lhs and rhs (same operand type).
                 try_unify(
                     uf,
                     errors,
-                    sr,
                     sl,
-                    &format!("BinOp result {} lhs {}", result, lhs),
+                    srs,
+                    &format!("BinOp lhs {} rhs {}", lhs, rhs),
                 );
+                // For non-comparison ops, result type = operand type.
+                if !is_cmp {
+                    try_unify(
+                        uf,
+                        errors,
+                        sr,
+                        sl,
+                        &format!("BinOp result {} lhs {}", result, lhs),
+                    );
+                }
             }
         }
         IrInstr::UnaryOp {

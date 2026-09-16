@@ -67,7 +67,7 @@ This project follows the [Contributor Covenant Code of Conduct](CODE_OF_CONDUCT.
 ### Prerequisites
 
 - **Rust** 1.75+ (install via [rustup](https://rustup.rs/))
-- **LLVM 18** (for native compilation features)
+- **LLVM 23.1.1** (for native compilation features)
 - **Git**
 - **Node.js 18+** and **npm** (only for VS Code extension development)
 

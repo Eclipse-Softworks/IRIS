@@ -3,7 +3,7 @@
 <p align="center"><img src="logo/iris-logo.png" alt="IRIS" width="160"></p>
 
 IRIS is a compiled, statically typed language for software, learning systems,
-and embedded control. This release remains **1.0.0-rc1**.
+and embedded control. This release is **1.0.0-rc2**.
 
 Write ordinary programs with `def`, `val`, `var`, `record`, `choice`, and
 explicit `return`. Use the same language for tensor differentiation, structured
@@ -70,7 +70,9 @@ python tools/verify_learning.py --iris target/release/iris.exe
 | AIS | Viability bounds, active inference, agent/model lifecycle, health, degradation, and decision policies; application behavior still needs application-specific validation |
 | Networking and LLMs | Bounded typed TCP, HTTP status/headers/timeouts, chat/tools/embeddings; native HTTPS currently uses Windows WinHTTP |
 | Metaprogramming | Typed analysis and checked source edits under the compiler host; standalone native programs must check availability |
-| Evolution | ORC JIT, ABI-checked generation leases/rollback, and seven-gate `iris evolve`; unrestricted activation is an explicit host API with separate authority |
+| Evolution | ORC JIT, ABI-checked generation leases/rollback, seven-gate `iris evolve`, and autonomic MAPE-K microservice daemon with live HTTP dashboard (`iris service-daemon --serve`) |
+| Codegen Targets | LLVM native (x86_64, ARM64, RISC-V), WebAssembly/WASI (`wasm32-wasi`), CPython C-extensions (`--emit python-ext`), CUDA PTX, and ONNX |
+| Vectorization | Native AVX2/AVX-512 SIMD loop auto-vectorization metadata and FMA instructions |
 | Embedded | Allocation-free scalar component bundles for supported Cortex-M/ESP32 profiles and a restricted Uno profile; board integration and device verification are separate steps |
 | Editor | Extension 1.0.5: completion, hover/effects, navigation, diagnostics, formatting, Test Explorer, and trace-based DAP debugging |
 

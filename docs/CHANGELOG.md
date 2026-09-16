@@ -1,17 +1,24 @@
 # Changelog
 
+# Changelog
+
 All notable changes to the IRIS programming language are documented here.
 
 This project follows [Keep a Changelog](https://keepachangelog.com/) conventions.
 
 ---
 
-## [Unreleased]
+## [1.0.0-rc2] — 2026-09-16
 
 ### Added
 
-- Rebuilt progressive examples and seven complete projects with explicit
-  returns, assertions, per-entry execution modes, and native/interpreter
+- Autonomous Evolutionary Lab & MAP-Elites search engine: `iris evolve search` with multi-dimensional behavioral descriptors, quality-diversity archives, genetic mutation operators, and polyglot code generation (IRIS, C, Python).
+- High-Performance Scientific Simulation Suite (`tools/crunch/`): N-Body Gravitational Dynamics (`three_body.iris`), Spiral Galaxy Particle Collision (`galaxy_sim.iris`), 2D Navier-Stokes Aerodynamic Wind Tunnel (`wind_tunnel.iris`), with full CLI telemetry and visualization runner.
+- Native Neural Dialogue Model & Machine Learning Suite (`tools/neural_dialogue/`): Character-level neural dialogue model using `std.ml` and `std.dataset`, autoregressive sampling, streaming inference, and interactive conversational loop.
+- Real-world Biomedical & Epidemiological modeling (`examples/human_problems/`): Monte Carlo epidemic diffusion, antimicrobial peptide biophysics, GPU/SIMD genomic sequence alignment.
+- Python C-ABI bindings and cross-language genome bridge (`crates/iris_ffi`, `bindings/python`).
+- LLVM 23.1.1 release toolchains, version-aware Windows dependency upgrades,
+  versioned LLVM-C discovery, and the `IRIS_LLVM_C_API` override.
   catalog checks. Added real localhost LLM verification and Rust ORC embedding
   examples alongside separately classified SDK/board integrations.
 

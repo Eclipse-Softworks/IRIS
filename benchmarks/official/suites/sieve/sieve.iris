@@ -1,0 +1,33 @@
+// Benchmark: Sieve of Eratosthenes
+def main() -> i64 {
+    val limit = 100000;
+    val sieve: list<i64> = list();
+    var i = 0;
+    while i <= limit {
+        push(sieve, 1);
+        i = i + 1
+    }
+
+    i = 2;
+    while (i * i) <= limit {
+        if list_get(sieve, i) == 1 {
+            var j = i * i;
+            while j <= limit {
+                list_set(sieve, j, 0);
+                j = j + i
+            }
+        } else { 0 };
+        i = i + 1
+    }
+
+    var count = 0;
+    i = 2;
+    while i <= limit {
+        if list_get(sieve, i) == 1 {
+            count = count + 1
+        } else { 0 };
+        i = i + 1
+    }
+    print(count);
+    0
+}

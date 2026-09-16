@@ -929,25 +929,43 @@ fn check_potential_infinite_loops(func: &AstFunction, warnings: &mut Vec<IrWarni
     check_infinite_loops_in_block(&func.body, &func.name.name, warnings);
 }
 
+fn expr_has_call(expr: &AstExpr) -> bool {
+    let mut has_call = false;
+    walk_expr_tree(expr, &mut |e| {
+        if matches!(
+            e,
+            AstExpr::Call { .. }
+                | AstExpr::MethodCall { .. }
+                | AstExpr::Await { .. }
+                | AstExpr::MacroCall { .. }
+        ) {
+            has_call = true;
+        }
+    });
+    has_call
+}
+
 fn check_infinite_loops_in_block(block: &AstBlock, func_name: &str, warnings: &mut Vec<IrWarning>) {
     for stmt in &block.stmts {
         match stmt {
             AstStmt::While {
                 cond, body, span, ..
             } => {
-                let cond_vars = collect_idents_in_expr(cond);
-                if !cond_vars.is_empty() {
-                    let mutated = cond_vars.iter().any(|v| body_assigns_var(body, v));
-                    let exits = body_has_exit(body);
-                    if !mutated && !exits {
-                        warnings.push(IrWarning {
-                            func: func_name.to_string(),
-                            message: format!(
-                                "possible infinite loop: '{}' is never modified in the loop body",
-                                cond_vars.join("', '")
-                            ),
-                            span: Some(*span),
-                        });
+                if !expr_has_call(cond) {
+                    let cond_vars = collect_idents_in_expr(cond);
+                    if !cond_vars.is_empty() {
+                        let mutated = cond_vars.iter().any(|v| body_assigns_var(body, v));
+                        let exits = body_has_exit(body);
+                        if !mutated && !exits {
+                            warnings.push(IrWarning {
+                                func: func_name.to_string(),
+                                message: format!(
+                                    "possible infinite loop: '{}' is never modified in the loop body",
+                                    cond_vars.join("', '")
+                                ),
+                                span: Some(*span),
+                            });
+                        }
                     }
                 }
                 check_infinite_loops_in_block(body, func_name, warnings);

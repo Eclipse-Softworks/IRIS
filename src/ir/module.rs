@@ -168,6 +168,26 @@ impl IrModule {
         &self.trait_impl_methods
     }
 
+    /// Returns the mangled destructor function name for a type if it implements `Drop`.
+    pub fn find_drop_method(&self, type_name: &str) -> Option<String> {
+        if let Some(methods) = self.trait_impl_methods.get("Drop") {
+            for (concrete, method, mangled) in methods {
+                if concrete == type_name && (method == "drop" || method == "destroy") {
+                    return Some(mangled.clone());
+                }
+            }
+        }
+        let direct_name = format!("Drop__{}__drop", type_name);
+        if self.function_index.contains_key(&direct_name) {
+            return Some(direct_name);
+        }
+        let direct_name2 = format!("{}__drop", type_name);
+        if self.function_index.contains_key(&direct_name2) {
+            return Some(direct_name2);
+        }
+        None
+    }
+
     pub fn function(&self, id: FunctionId) -> Option<&IrFunction> {
         self.functions.get(id.0 as usize)
     }

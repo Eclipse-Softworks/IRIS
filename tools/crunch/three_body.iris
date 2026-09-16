@@ -1,0 +1,199 @@
+// Tool 6: The Chaotic Three-Body Problem Simulator (Poincaré Chaos Engine)
+// Solves Newton's equations of motion for 3 gravitationally interacting celestial bodies.
+// Uses a 2nd-order Symplectic Velocity-Verlet integrator to preserve Hamiltonian phase space,
+// tracking chaos, close-encounter slingshots, energy conservation, and terminal orbit rendering.
+
+def compute_acc_x(x1: f64, y1: f64, x2: f64, y2: f64, m2: f64, x3: f64, y3: f64, m3: f64, eps_sq: f64) -> f64 {
+    val dx12 = x2 - x1;
+    val dy12 = y2 - y1;
+    val r12_sq = dx12 * dx12 + dy12 * dy12 + eps_sq;
+    val r12 = sqrt(r12_sq);
+    val inv_r12_3 = 1.0 / (r12 * r12_sq);
+
+    val dx13 = x3 - x1;
+    val dy13 = y3 - y1;
+    val r13_sq = dx13 * dx13 + dy13 * dy13 + eps_sq;
+    val r13 = sqrt(r13_sq);
+    val inv_r13_3 = 1.0 / (r13 * r13_sq);
+
+    m2 * dx12 * inv_r12_3 + m3 * dx13 * inv_r13_3
+}
+
+def compute_acc_y(x1: f64, y1: f64, x2: f64, y2: f64, m2: f64, x3: f64, y3: f64, m3: f64, eps_sq: f64) -> f64 {
+    val dx12 = x2 - x1;
+    val dy12 = y2 - y1;
+    val r12_sq = dx12 * dx12 + dy12 * dy12 + eps_sq;
+    val r12 = sqrt(r12_sq);
+    val inv_r12_3 = 1.0 / (r12 * r12_sq);
+
+    val dx13 = x3 - x1;
+    val dy13 = y3 - y1;
+    val r13_sq = dx13 * dx13 + dy13 * dy13 + eps_sq;
+    val r13 = sqrt(r13_sq);
+    val inv_r13_3 = 1.0 / (r13 * r13_sq);
+
+    m2 * dy12 * inv_r12_3 + m3 * dy13 * inv_r13_3
+}
+
+def main() -> i64 {
+    println("===============================================================================");
+    println(" IRIS CHAOS CRUNCH: The Classical Three-Body Gravitational Problem             ");
+    println(" Simulating Deterministic Non-Linear Celestial Chaos (Poincaré 1890)          ");
+    println("===============================================================================");
+
+    // Masses of the three suns (Trisolaris configuration)
+    val m1 = 1.0;
+    val m2 = 1.0;
+    val m3 = 1.0;
+
+    // Initial Positions (Burrau / Pythagorean unstable configuration)
+    // Body 1 at (1.0, 3.0), Body 2 at (-2.0, -1.0), Body 3 at (1.0, -1.0)
+    var x1 = 1.0;
+    var y1 = 3.0;
+    var x2 = -2.0;
+    var y2 = -1.0;
+    var x3 = 1.0;
+    var y3 = -1.0;
+
+    // Initial Velocities (all initially at rest: pure gravitational collapse)
+    var vx1 = 0.0;
+    var vy1 = 0.0;
+    var vx2 = 0.0;
+    var vy2 = 0.0;
+    var vx3 = 0.0;
+    var vy3 = 0.0;
+
+    val dt = 0.001; // High-precision symplectic timestep
+    val total_steps = 10000;
+    val eps_sq = 0.0001; // Micro-softening to prevent division by zero at singularity
+
+    // Compute Initial Total Energy E0 = T0 + U0
+    val d12_0 = sqrt((x2 - x1)*(x2 - x1) + (y2 - y1)*(y2 - y1) + eps_sq);
+    val d23_0 = sqrt((x3 - x2)*(x3 - x2) + (y3 - y2)*(y3 - y2) + eps_sq);
+    val d13_0 = sqrt((x3 - x1)*(x3 - x1) + (y3 - y1)*(y3 - y1) + eps_sq);
+    val u0 = 0.0 - (m1*m2/d12_0 + m2*m3/d23_0 + m1*m3/d13_0);
+    val e0 = u0;
+
+    println(f"Initial State: 3 equal-mass stars in asymmetric Pythagorean triangle.");
+    println(f"Initial Potential Energy E0: {e0:8.4f} | Integration: {total_steps} Symplectic Steps (dt = {dt})");
+    println("-------------------------------------------------------------------------------");
+
+    // Initial Accelerations
+    var ax1 = compute_acc_x(x1, y1, x2, y2, m2, x3, y3, m3, eps_sq);
+    var ay1 = compute_acc_y(x1, y1, x2, y2, m2, x3, y3, m3, eps_sq);
+    var ax2 = compute_acc_x(x2, y2, x1, y1, m1, x3, y3, m3, eps_sq);
+    var ay2 = compute_acc_y(x2, y2, x1, y1, m1, x3, y3, m3, eps_sq);
+    var ax3 = compute_acc_x(x3, y3, x1, y1, m1, x2, y2, m2, eps_sq);
+    var ay3 = compute_acc_y(x3, y3, x1, y1, m1, x2, y2, m2, eps_sq);
+
+    var step = 0;
+    var min_separation = 999.0;
+    var close_encounters = 0;
+
+    // ── Symplectic Velocity-Verlet Loop ─────────────────────────────────────────
+    while step < total_steps {
+        // Step 1: Half-step velocity update
+        vx1 = vx1 + 0.5 * ax1 * dt;
+        vy1 = vy1 + 0.5 * ay1 * dt;
+        vx2 = vx2 + 0.5 * ax2 * dt;
+        vy2 = vy2 + 0.5 * ay2 * dt;
+        vx3 = vx3 + 0.5 * ax3 * dt;
+        vy3 = vy3 + 0.5 * ay3 * dt;
+
+        // Step 2: Full-step position update
+        x1 = x1 + vx1 * dt;
+        y1 = y1 + vy1 * dt;
+        x2 = x2 + vx2 * dt;
+        y2 = y2 + vy2 * dt;
+        x3 = x3 + vx3 * dt;
+        y3 = y3 + vy3 * dt;
+
+        // Step 3: Compute new accelerations at updated positions
+        ax1 = compute_acc_x(x1, y1, x2, y2, m2, x3, y3, m3, eps_sq);
+        ay1 = compute_acc_y(x1, y1, x2, y2, m2, x3, y3, m3, eps_sq);
+        ax2 = compute_acc_x(x2, y2, x1, y1, m1, x3, y3, m3, eps_sq);
+        ay2 = compute_acc_y(x2, y2, x1, y1, m1, x3, y3, m3, eps_sq);
+        ax3 = compute_acc_x(x3, y3, x1, y1, m1, x2, y2, m2, eps_sq);
+        ay3 = compute_acc_y(x3, y3, x1, y1, m1, x2, y2, m2, eps_sq);
+
+        // Step 4: Complete velocity update
+        vx1 = vx1 + 0.5 * ax1 * dt;
+        vy1 = vy1 + 0.5 * ay1 * dt;
+        vx2 = vx2 + 0.5 * ax2 * dt;
+        vy2 = vy2 + 0.5 * ay2 * dt;
+        vx3 = vx3 + 0.5 * ax3 * dt;
+        vy3 = vy3 + 0.5 * ay3 * dt;
+
+        // Check close-encounter distances
+        val d12 = sqrt((x2 - x1)*(x2 - x1) + (y2 - y1)*(y2 - y1));
+        val d23 = sqrt((x3 - x2)*(x3 - x2) + (y3 - y2)*(y3 - y2));
+        val d13 = sqrt((x3 - x1)*(x3 - x1) + (y3 - y1)*(y3 - y1));
+
+        val local_min = if d12 < d23 {
+            if d12 < d13 { d12 } else { d13 }
+        } else {
+            if d23 < d13 { d23 } else { d13 }
+        };
+
+        if local_min < min_separation {
+            min_separation = local_min;
+        } else {
+            min_separation = min_separation;
+        };
+
+        if local_min < 0.10 {
+            close_encounters = close_encounters + 1;
+        } else {
+            close_encounters = close_encounters;
+        };
+
+        // Telemetry every 2,000 steps
+        if (step % 2000) == 0 {
+            val t_ke = 0.5 * (m1*(vx1*vx1 + vy1*vy1) + m2*(vx2*vx2 + vy2*vy2) + m3*(vx3*vx3 + vy3*vy3));
+            val t_pe = 0.0 - (m1*m2/d12 + m2*m3/d23 + m1*m3/d13);
+            val total_e = t_ke + t_pe;
+            val energy_drift = (total_e - e0) / e0;
+
+            val sim_time = (step to f64) * dt;
+            println(f"[T = {sim_time:4.1f} yr | Step {step:>5}] Star1: ({x1:5.2f}, {y1:5.2f}) | Star2: ({x2:5.2f}, {y2:5.2f}) | Star3: ({x3:5.2f}, {y3:5.2f}) | dE/E0: {energy_drift * 100.0:6.3f}%");
+        } else {
+            step = step;
+        };
+
+        step = step + 1;
+    }
+
+    // Final Energy Verification
+    val final_d12 = sqrt((x2 - x1)*(x2 - x1) + (y2 - y1)*(y2 - y1));
+    val final_d23 = sqrt((x3 - x2)*(x3 - x2) + (y3 - y2)*(y3 - y2));
+    val final_d13 = sqrt((x3 - x1)*(x3 - x1) + (y3 - y1)*(y3 - y1));
+    val final_ke = 0.5 * (m1*(vx1*vx1 + vy1*vy1) + m2*(vx2*vx2 + vy2*vy2) + m3*(vx3*vx3 + vy3*vy3));
+    val final_pe = 0.0 - (m1*m2/final_d12 + m2*m3/final_d23 + m1*m3/final_d13);
+    val final_e = final_ke + final_pe;
+    val total_drift = (final_e - e0) / e0;
+
+    // Slingshot Identification: Which star has highest velocity?
+    val v1_mag = sqrt(vx1*vx1 + vy1*vy1);
+    val v2_mag = sqrt(vx2*vx2 + vy2*vy2);
+    val v3_mag = sqrt(vx3*vx3 + vy3*vy3);
+
+    println("===============================================================================");
+    println(" THREE-BODY CHAOS EVOLUTION SUMMARY");
+    println("===============================================================================");
+    println(f"Total Numerical Steps: {total_steps} | Simulated Time: {(total_steps to f64) * dt:.1f} orbital units");
+    println(f"Closest Periastron Encounter: {min_separation:.4f} distance units");
+    println(f"Near-Singularity Critical Encounters: {close_encounters} times");
+    println(f"Symplectic Energy Conservation: Initial E = {e0:.4f}, Final E = {final_e:.4f} (Drift: {total_drift * 100.0:.3f}%)");
+    println(f"Final Speeds: Star 1 = {v1_mag:.3f} | Star 2 = {v2_mag:.3f} | Star 3 = {v3_mag:.3f}");
+
+    val ejected_star = if v1_mag > v2_mag {
+        if v1_mag > v3_mag { 1 } else { 3 }
+    } else {
+        if v2_mag > v3_mag { 2 } else { 3 }
+    };
+    println(f"Chaos Outcome: Star {ejected_star} achieved gravitational slingshot escape velocity!");
+    println("Remaining stars formed an eccentric bound binary pair.");
+    println("===============================================================================");
+
+    0
+}

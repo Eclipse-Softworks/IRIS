@@ -76,6 +76,15 @@ if (Test-CommandExists "git") {
 # 2. Check LLVM (clang + lld)
 # ---------------------------------------------------------------------------
 Write-Host "`n[2/4] Checking LLVM (clang + lld)..." -ForegroundColor Yellow
+$llvmVersionFile = Join-Path $PSScriptRoot "LLVM_VERSION"
+if (-not (Test-Path $llvmVersionFile)) {
+    $llvmVersionFile = Join-Path (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent) "LLVM_VERSION"
+}
+$requiredLlvmVersion = if (Test-Path $llvmVersionFile) {
+    [version](Get-Content -Raw $llvmVersionFile).Trim()
+} else {
+    [version]"23.1.1"
+}
 $clangPath = $null
 if (Test-CommandExists "clang") {
     $clangPath = (Get-Command clang).Source
@@ -91,20 +100,34 @@ if (Test-CommandExists "clang") {
 }
 
 if ($null -ne $clangPath) {
-    Write-Host "  LLVM/clang is already installed at: $clangPath" -ForegroundColor Green
-    $llvmBinDir = Split-Path $clangPath
-    Add-ToPath $llvmBinDir
-} else {
-    Write-Host "  LLVM not found. Downloading official LLVM installer..." -ForegroundColor Cyan
-    $llvmUrl = "https://github.com/llvm/llvm-project/releases/download/llvmorg-17.0.6/LLVM-17.0.6-win64.exe"
-    $tempExe = Join-Path $env:TEMP "llvm-setup.exe"
+    $versionText = (& $clangPath --version | Select-Object -First 1)
+    if ($versionText -match 'version\s+([0-9]+(?:\.[0-9]+){1,2})') {
+        $installedLlvmVersion = [version]$Matches[1]
+        if ($installedLlvmVersion -ge $requiredLlvmVersion) {
+            Write-Host "  LLVM/clang $installedLlvmVersion is installed at: $clangPath" -ForegroundColor Green
+            $llvmBinDir = Split-Path $clangPath
+            Add-ToPath $llvmBinDir
+        } else {
+            Write-Host "  LLVM/clang $installedLlvmVersion is older than required $requiredLlvmVersion; upgrading." -ForegroundColor Cyan
+            $clangPath = $null
+        }
+    } else {
+        Write-Host "  Could not determine the LLVM version at $clangPath; installing $requiredLlvmVersion." -ForegroundColor Cyan
+        $clangPath = $null
+    }
+}
+
+if ($null -eq $clangPath) {
+    Write-Host "  Downloading official LLVM $requiredLlvmVersion installer..." -ForegroundColor Cyan
+    $llvmArch = if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') { 'woa64' } else { 'win64' }
+    $llvmUrl = "https://github.com/llvm/llvm-project/releases/download/llvmorg-$requiredLlvmVersion/LLVM-$requiredLlvmVersion-$llvmArch.msi"
+    $tempMsi = Join-Path $env:TEMP "llvm-$requiredLlvmVersion-$llvmArch.msi"
     
     try {
-        Download-FileWithProgress $llvmUrl $tempExe
-        Write-Host "  Running LLVM installer silently (destination C:\Program Files\LLVM)..." -ForegroundColor Cyan
-        # Install LLVM silently
-        $proc = Start-Process -FilePath $tempExe -ArgumentList "/S", "/D=C:\Program Files\LLVM" -Wait -PassThru -NoNewWindow
-        Remove-Item $tempExe
+        Download-FileWithProgress $llvmUrl $tempMsi
+        Write-Host "  Running LLVM $requiredLlvmVersion installer silently..." -ForegroundColor Cyan
+        $proc = Start-Process -FilePath "msiexec.exe" -ArgumentList "/i", "`"$tempMsi`"", "/qn", "/norestart" -Wait -PassThru -NoNewWindow
+        Remove-Item $tempMsi
         
         if ($proc.ExitCode -eq 0 -or (Test-Path "C:\Program Files\LLVM\bin\clang.exe")) {
             Write-Host "  LLVM installed successfully." -ForegroundColor Green

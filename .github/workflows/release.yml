@@ -79,49 +79,51 @@ jobs:
         run: |
           # Download a minimal LLVM distribution (clang + lld) for the target.
           # We extract only the binaries needed for `iris build` (native compilation).
-          LLVM_VER="18.1.8"
+          LLVM_VER="$(tr -d '\r\n' < LLVM_VERSION)"
+          LLVM_MAJOR="${LLVM_VER%%.*}"
           LLVM_BASE="https://github.com/llvm/llvm-project/releases/download/llvmorg-${LLVM_VER}"
 
           mkdir -p toolchain-dl
 
           case "${{ matrix.target }}" in
             x86_64-pc-windows-msvc)
-              # Windows: LLVM provides a prebuilt zip/exe.  Use the win64 release.
-              curl -fSL "${LLVM_BASE}/LLVM-${LLVM_VER}-win64.exe" -o toolchain-dl/llvm.exe
-              # Extract with 7z (NSIS self-extractor)
-              7z x toolchain-dl/llvm.exe -otoolchain-dl/llvm -y > /dev/null 2>&1 || true
+              LLVM_ARCHIVE="clang+llvm-${LLVM_VER}-x86_64-pc-windows-msvc.tar.xz"
               ;;
             aarch64-pc-windows-msvc)
-              # Windows ARM64: use the woa64 build
-              curl -fSL "${LLVM_BASE}/LLVM-${LLVM_VER}-woa64.exe" -o toolchain-dl/llvm.exe
-              7z x toolchain-dl/llvm.exe -otoolchain-dl/llvm -y > /dev/null 2>&1 || true
+              LLVM_ARCHIVE="clang+llvm-${LLVM_VER}-aarch64-pc-windows-msvc.tar.xz"
               ;;
             x86_64-unknown-linux-gnu)
-              curl -fSL "${LLVM_BASE}/clang+llvm-${LLVM_VER}-x86_64-linux-gnu-ubuntu-18.04.tar.xz" \
-                -o toolchain-dl/llvm.tar.xz
-              tar xf toolchain-dl/llvm.tar.xz -C toolchain-dl
-              mv toolchain-dl/clang+llvm-* toolchain-dl/llvm
+              LLVM_ARCHIVE="LLVM-${LLVM_VER}-Linux-X64.tar.xz"
               ;;
             aarch64-unknown-linux-gnu)
-              curl -fSL "${LLVM_BASE}/clang+llvm-${LLVM_VER}-aarch64-linux-gnu.tar.xz" \
-                -o toolchain-dl/llvm.tar.xz
-              tar xf toolchain-dl/llvm.tar.xz -C toolchain-dl
-              mv toolchain-dl/clang+llvm-* toolchain-dl/llvm
+              LLVM_ARCHIVE="LLVM-${LLVM_VER}-Linux-ARM64.tar.xz"
               ;;
             x86_64-apple-darwin)
-              # Install LLVM via Homebrew directly.
-              brew install --quiet llvm@18
-              BREW_LLVM="$(brew --prefix llvm@18)"
+              # Upstream no longer publishes Intel macOS archives. Homebrew
+              # builds current LLVM for the Intel runner architecture.
+              brew install --quiet llvm
+              BREW_LLVM="$(brew --prefix llvm)"
               mkdir -p toolchain-dl/llvm/bin toolchain-dl/llvm/lib
               cp -a "${BREW_LLVM}/bin/"* toolchain-dl/llvm/bin/ 2>/dev/null || true
               cp -a "${BREW_LLVM}/lib/"*.dylib toolchain-dl/llvm/lib/ 2>/dev/null || true
               ;;
             aarch64-apple-darwin)
-              curl -fSL "${LLVM_BASE}/clang+llvm-${LLVM_VER}-arm64-apple-macos11.tar.xz" \
-                -o toolchain-dl/llvm.tar.xz
-              tar xf toolchain-dl/llvm.tar.xz -C toolchain-dl
-              mv toolchain-dl/clang+llvm-* toolchain-dl/llvm
+              LLVM_ARCHIVE="LLVM-${LLVM_VER}-macOS-ARM64.tar.xz"
               ;;
+          esac
+
+          if [[ -n "${LLVM_ARCHIVE:-}" ]]; then
+            curl -fSL "${LLVM_BASE}/${LLVM_ARCHIVE}" -o toolchain-dl/llvm.tar.xz
+            tar xf toolchain-dl/llvm.tar.xz -C toolchain-dl
+            LLVM_ROOT="$(find toolchain-dl -mindepth 1 -maxdepth 1 -type d ! -name llvm | head -1)"
+            test -n "${LLVM_ROOT}" && test -x "${LLVM_ROOT}/bin/clang"
+            mv "${LLVM_ROOT}" toolchain-dl/llvm
+          fi
+
+          ACTUAL_LLVM_VERSION="$(toolchain-dl/llvm/bin/clang --version | sed -n 's/.*clang version \([0-9][0-9.]*\).*/\1/p' | head -1)"
+          case "${ACTUAL_LLVM_VERSION}" in
+            ${LLVM_VER}|${LLVM_VER}.*) ;;
+            *) echo "Expected LLVM ${LLVM_VER}, found ${ACTUAL_LLVM_VERSION:-unknown}" >&2; exit 1 ;;
           esac
 
           # Extract only the binaries we need: clang, lld (and their symlinks)
@@ -129,7 +131,7 @@ jobs:
           if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
             cp toolchain-dl/llvm/bin/clang.exe    toolchain/llvm/bin/ 2>/dev/null || true
             cp toolchain-dl/llvm/bin/clang++.exe   toolchain/llvm/bin/ 2>/dev/null || true
-            cp toolchain-dl/llvm/bin/clang-18.exe  toolchain/llvm/bin/ 2>/dev/null || true
+            cp "toolchain-dl/llvm/bin/clang-${LLVM_MAJOR}.exe" toolchain/llvm/bin/ 2>/dev/null || true
             cp toolchain-dl/llvm/bin/lld.exe       toolchain/llvm/bin/ 2>/dev/null || true
             cp toolchain-dl/llvm/bin/ld.lld.exe    toolchain/llvm/bin/ 2>/dev/null || true
             cp toolchain-dl/llvm/bin/lld-link.exe  toolchain/llvm/bin/ 2>/dev/null || true
@@ -139,7 +141,7 @@ jobs:
           else
             cp toolchain-dl/llvm/bin/clang      toolchain/llvm/bin/ 2>/dev/null || true
             cp toolchain-dl/llvm/bin/clang++    toolchain/llvm/bin/ 2>/dev/null || true
-            cp toolchain-dl/llvm/bin/clang-18   toolchain/llvm/bin/ 2>/dev/null || true
+            cp "toolchain-dl/llvm/bin/clang-${LLVM_MAJOR}" toolchain/llvm/bin/ 2>/dev/null || true
             cp toolchain-dl/llvm/bin/lld        toolchain/llvm/bin/ 2>/dev/null || true
             cp toolchain-dl/llvm/bin/ld.lld     toolchain/llvm/bin/ 2>/dev/null || true
             cp toolchain-dl/llvm/bin/llvm-ar    toolchain/llvm/bin/ 2>/dev/null || true
@@ -155,9 +157,9 @@ jobs:
           # Copy LLVM headers/libs needed for linking (MinGW sysroot on Windows)
           if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
             # Clang internal headers
-            if [[ -d "toolchain-dl/llvm/lib/clang/${LLVM_VER}/include" ]]; then
-              mkdir -p toolchain/llvm/lib/clang/${LLVM_VER}
-              cp -r toolchain-dl/llvm/lib/clang/${LLVM_VER}/include toolchain/llvm/lib/clang/${LLVM_VER}/
+            if [[ -d "toolchain-dl/llvm/lib/clang/${LLVM_MAJOR}/include" ]]; then
+              mkdir -p "toolchain/llvm/lib/clang/${LLVM_MAJOR}"
+              cp -r "toolchain-dl/llvm/lib/clang/${LLVM_MAJOR}/include" "toolchain/llvm/lib/clang/${LLVM_MAJOR}/"
             fi
 
             # Bundle MinGW ucrt64 sysroot from runner's MSYS2 installation.
@@ -244,6 +246,7 @@ jobs:
           cp -r stdlib staging-light/ 2>/dev/null || true
           cp -r examples staging-light/ 2>/dev/null || true
           cp LICENSE staging-light/
+          cp LLVM_VERSION staging-light/
 
           # 2. Stage full assets (with bundled toolchain if present)
           mkdir -p staging

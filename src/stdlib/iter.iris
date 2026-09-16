@@ -160,3 +160,186 @@ pub def flatten_i64(xss: list<list<i64>>) -> list<i64> {
     }
     result
 }
+
+/// Transform each value in order into a fresh list.
+pub def map_i64(xs: list<i64>, transform: |i64| -> i64) -> list<i64> {
+    val out: list<i64> = list()
+    var i = 0
+    val n = list_len(xs)
+    while i < n {
+        push(out, transform(list_get(xs, i)));
+        i = i + 1
+    }
+    out
+}
+
+/// Retain matching values in order, without changing the input.
+pub def filter_i64(xs: list<i64>, predicate: |i64| -> bool) -> list<i64> {
+    val out: list<i64> = list()
+    var i = 0
+    val n = list_len(xs)
+    while i < n {
+        val value = list_get(xs, i)
+        if predicate(value) { push(out, value); }
+        i = i + 1
+    }
+    out
+}
+
+/// Left fold. Empty lists return initial without calling combine.
+pub def fold_i64(xs: list<i64>, initial: i64, combine: |i64, i64| -> i64) -> i64 {
+    var acc = initial
+    var i = 0
+    val n = list_len(xs)
+    while i < n {
+        acc = combine(acc, list_get(xs, i))
+        i = i + 1
+    }
+    acc
+}
+
+/// Short-circuit queries. any(empty) is false; all(empty) is true.
+pub def any_i64(xs: list<i64>, predicate: |i64| -> bool) -> bool {
+    var i = 0
+    val n = list_len(xs)
+    while i < n {
+        if predicate(list_get(xs, i)) { return true }
+        i = i + 1
+    }
+    false
+}
+
+pub def all_i64(xs: list<i64>, predicate: |i64| -> bool) -> bool {
+    var i = 0
+    val n = list_len(xs)
+    while i < n {
+        if !predicate(list_get(xs, i)) { return false }
+        i = i + 1
+    }
+    true
+}
+
+/// First matching value, or none. Stops at the first match.
+pub def find_i64(xs: list<i64>, predicate: |i64| -> bool) -> option<i64> {
+    var i = 0
+    val n = list_len(xs)
+    while i < n {
+        val value = list_get(xs, i)
+        if predicate(value) { return some(value) }
+        i = i + 1
+    }
+    none
+}
+
+/// Stable partition into (matching, nonmatching), testing each value once.
+pub def partition_i64(xs: list<i64>, predicate: |i64| -> bool) -> (list<i64>, list<i64>) {
+    val yes: list<i64> = list()
+    val no: list<i64> = list()
+    var i = 0
+    val n = list_len(xs)
+    while i < n {
+        val value = list_get(xs, i)
+        if predicate(value) { push(yes, value); } else { push(no, value); }
+        i = i + 1
+    }
+    (yes, no)
+}
+
+/// First occurrence of each value, preserving order. O(n^2) worst case.
+pub def unique_i64(xs: list<i64>) -> list<i64> {
+    val out: list<i64> = list()
+    var i = 0
+    val n = list_len(xs)
+    while i < n {
+        val value = list_get(xs, i)
+        if list_index_of(out, value) < 0 { push(out, value); }
+        i = i + 1
+    }
+    out
+}
+
+/// Independent chunks, including a final short chunk. size <= 0 returns empty.
+pub def chunks_i64(xs: list<i64>, size: i64) -> list<list<i64>> {
+    val out: list<list<i64>> = list()
+    if size <= 0 { return out }
+    var i = 0
+    val n = list_len(xs)
+    while i < n {
+        val chunk: list<i64> = list()
+        val remaining = n - i
+        val chunk_len = if size < remaining { size } else { remaining }
+        var j = 0
+        while j < chunk_len {
+            push(chunk, list_get(xs, i));
+            i = i + 1
+            j = j + 1
+        }
+        push(out, chunk);
+    }
+    out
+}
+
+/// All full, overlapping windows, copied into independent lists.
+/// Nonpositive sizes or sizes larger than the input return empty.
+pub def windows_i64(xs: list<i64>, size: i64) -> list<list<i64>> {
+    val out: list<list<i64>> = list()
+    val n = list_len(xs)
+    if size <= 0 || size > n { return out }
+    var i = 0
+    while i <= n - size {
+        val window: list<i64> = list()
+        var j = 0
+        while j < size {
+            push(window, list_get(xs, i + j));
+            j = j + 1
+        }
+        push(out, window);
+        i = i + 1
+    }
+    out
+}
+
+/// Sum of elements in a borrowed slice.
+pub def slice_sum(s: &[i64], len: i64) -> i64 {
+    var acc = 0;
+    var i = 0;
+    while i < len {
+        acc = acc + s[i];
+        i = i + 1;
+    }
+    acc
+}
+
+/// Find index of target in a borrowed slice (-1 if absent).
+pub def slice_find(s: &[i64], len: i64, target: i64) -> i64 {
+    var i = 0;
+    while i < len {
+        if s[i] == target { return i }
+        i = i + 1;
+    }
+    -1
+}
+
+/// In-place slice fill operation on a mutable slice view.
+pub def slice_fill(s: &mut [i64], len: i64, value: i64) -> i64 {
+    var i = 0;
+    while i < len {
+        s[i] = value;
+        i = i + 1;
+    }
+    0
+}
+
+/// In-place slice reverse on a mutable slice view.
+pub def slice_reverse(s: &mut [i64], len: i64) -> i64 {
+    var left = 0;
+    var right = len - 1;
+    while left < right {
+        val temp = s[left];
+        s[left] = s[right];
+        s[right] = temp;
+        left = left + 1;
+        right = right - 1;
+    }
+    0
+}

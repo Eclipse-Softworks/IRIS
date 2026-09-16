@@ -1,12 +1,12 @@
 [package]
 name = "iris"
-version = "1.0.0-rc1"
+version = "1.0.0-rc2"
 edition = "2021"
 rust-version = "1.75"
 description = "IRIS: A compiled systems language for Autonomous Intelligent Systems"
 license = "GPL-2.0-or-later"
-repository = "https://github.com/moon9t/iris"
-homepage = "https://github.com/moon9t/iris"
+repository = "https://github.com/Eclipse-Softworks/IRIS"
+homepage = "https://github.com/Eclipse-Softworks/IRIS"
 
 [[bin]]
 name = "iris"
@@ -15,6 +15,13 @@ path = "src/main.rs"
 [lib]
 name = "iris"
 path = "src/lib.rs"
+
+[workspace]
+members = [
+    ".",
+    "crates/iris_ffi",
+    "projects/autonomous_organism",
+]
 
 [dependencies]
 thiserror = "1.0"

@@ -1,0 +1,50 @@
+// Benchmark: In-Place Quicksort (100,000 elements)
+def partition(arr: list<i64>, low: i64, high: i64) -> i64 {
+    val pivot = list_get(arr, high);
+    var i = low - 1;
+    var j = low;
+    while j < high {
+        if list_get(arr, j) <= pivot {
+            i = i + 1;
+            val temp = list_get(arr, i);
+            list_set(arr, i, list_get(arr, j));
+            list_set(arr, j, temp);
+        } else { 0 };
+        j = j + 1;
+    }
+    val temp = list_get(arr, i + 1);
+    list_set(arr, i + 1, list_get(arr, high));
+    list_set(arr, high, temp);
+    i + 1
+}
+
+def quicksort(arr: list<i64>, low: i64, high: i64) -> i64 {
+    if low < high {
+        val pi = partition(arr, low, high);
+        quicksort(arr, low, pi - 1);
+        quicksort(arr, pi + 1, high);
+        0
+    } else {
+        0
+    }
+}
+
+def main() -> i64 {
+    val n = 100000;
+    val arr: list<i64> = list();
+    var seed = 123456789;
+    var i = 0;
+    while i < n {
+        seed = (seed * 1103515245 + 12345) % 2147483648;
+        push(arr, seed);
+        i = i + 1;
+    }
+
+    quicksort(arr, 0, n - 1);
+
+    val first = list_get(arr, 0);
+    val last = list_get(arr, n - 1);
+    print(first);
+    print(last);
+    0
+}

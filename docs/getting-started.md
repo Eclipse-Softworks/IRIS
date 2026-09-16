@@ -17,7 +17,8 @@ On Windows the recommended per-user location is
 changing the user PATH.
 
 Compiler/LSP startup needs the executable and its OS runtime. Native builds also
-need a loadable LLVM-C library, a linker, and target system libraries.
+need a loadable LLVM-C library, a linker, and target system libraries. IRIS
+release bundles and installers use LLVM 23.1.1.
 On Windows install LLVM and a MinGW UCRT64 sysroot. See
 [requirements](REQUIREMENTS.md) for discovery settings and platform dependencies.
 

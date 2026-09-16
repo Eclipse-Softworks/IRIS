@@ -146,6 +146,8 @@ pub enum IrType {
     Str,
     /// A fixed-length array of a single element type.
     Array { elem: Box<IrType>, len: usize },
+    /// A dynamically sized zero-copy slice view: `&[T]` or `&mut [T]`.
+    Slice { elem: Box<IrType>, is_mut: bool },
     /// Option type: `option<T>` — either Some(T) or None.
     Option(Box<IrType>),
     /// Result type: `result<T, E>` — either Ok(T) or Err(E).
@@ -228,6 +230,13 @@ impl std::fmt::Display for IrType {
             }
             IrType::Str => f.write_str("str"),
             IrType::Array { elem, len } => write!(f, "[{}; {}]", elem, len),
+            IrType::Slice { elem, is_mut } => {
+                if *is_mut {
+                    write!(f, "&mut [{}]", elem)
+                } else {
+                    write!(f, "&[{}]", elem)
+                }
+            }
             IrType::Option(inner) => write!(f, "option<{}>", inner),
             IrType::ResultType(ok, err) => write!(f, "result<{},{}>", ok, err),
             IrType::Chan(elem) => write!(f, "chan<{}>", elem),

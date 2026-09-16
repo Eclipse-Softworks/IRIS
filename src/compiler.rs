@@ -424,6 +424,9 @@ fn rewrite_type(ty: &mut AstType, symbols: &HashSet<String>, prefix: &str) {
         AstType::RefMut(inner, _) => {
             rewrite_type(inner, symbols, prefix);
         }
+        AstType::Slice(inner, _) => {
+            rewrite_type(inner, symbols, prefix);
+        }
     }
 }
 

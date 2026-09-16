@@ -17,13 +17,14 @@ pub def pad_int(n: i64, width: i64) -> str {
 /// Pad an integer with leading zeros to at least `width` characters.
 pub def zero_pad_int(n: i64, width: i64) -> str {
     val s = to_str(n)
-    var result = s
-    var current_len = len(result)
-    while current_len < width {
-        result = concat("0", result)
-        current_len = current_len + 1
+    if width <= len(s) { return s }
+    val needed = width - len(s)
+    val zeros = repeat("0", needed)
+    if starts_with(s, "-") {
+        concat(concat("-", zeros), slice(s, 1, len(s)))
+    } else {
+        concat(zeros, s)
     }
-    result
 }
 
 /// Left-align a string in a field of at least `width` characters.
@@ -130,7 +131,11 @@ pub def fmt_apply_spec(spec: str, type_char: str, arg: str) -> str {
             left_align(arg_prec, width)
         } else {
             if zero_fill {
-                concat(repeat("0", pad_needed), arg_prec)
+                if starts_with(arg_prec, "-") || starts_with(arg_prec, "+") {
+                    concat(concat(slice(arg_prec, 0, 1), repeat("0", pad_needed)), slice(arg_prec, 1, len(arg_prec)))
+                } else {
+                    concat(repeat("0", pad_needed), arg_prec)
+                }
             } else {
                 right_align(arg_prec, width)
             }
@@ -185,8 +190,64 @@ pub def printf(fmt: str, args: list<str>) -> str effect io {
 /// Format a table as a string with aligned columns.
 /// `headers`: `list<str>` of column headers.
 /// `rows`: `list<list<str>>` of row data.
-/// `col_widths`: optional `list<i64>` of column widths (auto-computed if not provided).
+/// Widths are UTF-8 byte counts; supplied widths are minimums (never truncate).
+/// Ragged rows are padded with empty cells. Extra cells create extra columns.
+/// Rows use " | " separators and LF, with no final newline. Empty headers are omitted.
 pub def format_table(headers: list<str>, rows: list<list<str>>, col_widths: option<list<i64>>) -> str {
-    // Implementation would go here
-    ""
+    var columns = list_len(headers)
+    var r = 0
+    while r < list_len(rows) {
+        val size = list_len(list_get(rows, r))
+        if size > columns { columns = size }
+        r = r + 1
+    }
+    if columns == 0 { return "" }
+    val widths: list<i64> = list()
+    var c = 0
+    while c < columns {
+        var width = 0
+        if c < list_len(headers) { width = len(list_get(headers, c)) }
+        r = 0
+        while r < list_len(rows) {
+            val row = list_get(rows, r)
+            if c < list_len(row) {
+                val size = len(list_get(row, c))
+                if size > width { width = size }
+            }
+            r = r + 1
+        }
+        if is_some(col_widths) {
+            val supplied = unwrap(col_widths)
+            if c < list_len(supplied) {
+                val requested = list_get(supplied, c)
+                if requested > width { width = requested }
+            }
+        }
+        list_push(widths, width);
+        c = c + 1
+    }
+    val output: list<str> = list()
+    if list_len(headers) > 0 {
+        list_push(output, fmt_table_row(headers, widths));
+    }
+    r = 0
+    while r < list_len(rows) {
+        list_push(output, fmt_table_row(list_get(rows, r), widths));
+        r = r + 1
+    }
+    join(output, "\n")
+}
+// Missing cells are empty; omit padding after the final column.
+def fmt_table_row(row: list<str>, widths: list<i64>) -> str {
+    val cells: list<str> = list()
+    var c = 0
+    while c < list_len(widths) {
+        val cell = if c < list_len(row) { list_get(row, c) } else { "" }
+        val text = if c + 1 < list_len(widths) {
+            left_align(cell, list_get(widths, c))
+        } else { cell }
+        list_push(cells, text);
+        c = c + 1
+    }
+    join(cells, " | ")
 }

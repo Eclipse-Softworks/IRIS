@@ -2012,40 +2012,35 @@ impl<'t> Parser<'t> {
                 Ok(AstType::Named("str".to_string(), span))
             }
             Token::LBracket => {
-                // [T; N] — fixed-length array type
+                // [T; N] — fixed-length array type or [T] — unsized slice type
                 self.advance(); // consume '['
                 let elem = self.parse_type()?;
-                self.expect(&Token::Semi)?;
-                let (len, len_expr) = match self.peek_tok().clone() {
-                    Token::IntLit(n) => {
-                        self.advance();
-                        (n as usize, None)
-                    }
-                    Token::Ident(name) => {
-                        self.advance();
-                        (
-                            0,
-                            Some(Box::new(AstExpr::Ident(Ident {
-                                name,
-                                span: self.current_span(),
-                            }))),
-                        )
-                    }
-                    _ => {
-                        return Err(ParseError::UnexpectedToken {
-                            expected: "integer length or identifier for array type".to_owned(),
-                            found: format!("{}", self.peek_tok()),
-                            span: self.current_span(),
-                        })
-                    }
-                };
-                let end = self.expect(&Token::RBracket)?;
-                Ok(AstType::Array {
-                    elem: Box::new(elem),
-                    len,
-                    len_expr,
-                    span: span.merge(end),
-                })
+                if self.peek_tok() == &Token::Semi {
+                    self.advance(); // consume ';'
+                    let expr = self.parse_expr()?;
+                    let (len, len_expr) = match &expr {
+                        AstExpr::IntLit { value, .. } if *value >= 0 => (*value as usize, None),
+                        AstExpr::Ident(_) => (0, Some(Box::new(expr))),
+                        _ => {
+                            let eval_res = crate::pass::const_eval::ConstEvaluator::new()
+                                .eval_array_len(&expr);
+                            match eval_res {
+                                Ok(n) => (n, Some(Box::new(expr))),
+                                Err(_) => (0, Some(Box::new(expr))),
+                            }
+                        }
+                    };
+                    let end = self.expect(&Token::RBracket)?;
+                    Ok(AstType::Array {
+                        elem: Box::new(elem),
+                        len,
+                        len_expr,
+                        span: span.merge(end),
+                    })
+                } else {
+                    let end = self.expect(&Token::RBracket)?;
+                    Ok(AstType::Slice(Box::new(elem), span.merge(end)))
+                }
             }
             Token::Ident(ref name) if name == "chan" => {
                 let _ = name.clone();
@@ -5343,5 +5338,41 @@ mod tests {
             "expected RecursionLimitExceeded for type, got: {:?}",
             errors
         );
+    }
+
+    #[test]
+    fn test_parse_ctfe_array_len_and_slice() {
+        let m1 = parse_ok("record Buffer { data: [i64; 2 + 3 * 4] }");
+        let field_ty = &m1.structs[0].fields[0].ty;
+        match field_ty {
+            AstType::Array { len, .. } => assert_eq!(*len, 14),
+            _ => panic!("expected AstType::Array, got {:?}", field_ty),
+        }
+
+        let m2 = parse_ok("def process(s: &[f64]) -> i64 { return 0 }");
+        let param_ty = &m2.functions[0].params[0].ty;
+        match param_ty {
+            AstType::Ref(inner, _) => match **inner {
+                AstType::Slice(ref elem, _) => match **elem {
+                    AstType::Scalar(AstScalarKind::F64, _) => {}
+                    ref other => panic!("expected f64 elem, got {:?}", other),
+                },
+                ref other => panic!("expected AstType::Slice, got {:?}", other),
+            },
+            ref other => panic!("expected AstType::Ref, got {:?}", other),
+        }
+
+        let m3 = parse_ok("def mutate(s: &mut [i32]) -> i64 { return 0 }");
+        let param_ty = &m3.functions[0].params[0].ty;
+        match param_ty {
+            AstType::RefMut(inner, _) => match **inner {
+                AstType::Slice(ref elem, _) => match **elem {
+                    AstType::Scalar(AstScalarKind::I32, _) => {}
+                    ref other => panic!("expected i32 elem, got {:?}", other),
+                },
+                ref other => panic!("expected AstType::Slice, got {:?}", other),
+            },
+            ref other => panic!("expected AstType::RefMut, got {:?}", other),
+        }
     }
 }

@@ -365,6 +365,11 @@ impl Writer {
                     self.ty(&m.ret);
                 }
             }
+            IrType::Slice { elem, is_mut } => {
+                self.u8(0x16);
+                self.ty(elem);
+                self.u8(if *is_mut { 1 } else { 0 });
+            }
         }
     }
 
@@ -1763,6 +1768,14 @@ impl<'a> Reader<'a> {
                     });
                 }
                 IrType::TraitObject { name, methods }
+            }
+            0x16 => {
+                let elem = self.ty()?;
+                let is_mut = self.u8()? != 0;
+                IrType::Slice {
+                    elem: Box::new(elem),
+                    is_mut,
+                }
             }
             t => return Err(format!("unknown type tag 0x{:02x}", t)),
         })

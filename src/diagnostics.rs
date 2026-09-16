@@ -216,91 +216,422 @@ pub fn render_error_colored_with_file(source: &str, err: &Error, filename: &str)
     render_error_inner(source, err, Some(filename), true)
 }
 
-fn render_error_inner(source: &str, err: &Error, filename: Option<&str>, colored: bool) -> String {
+// ---------------------------------------------------------------------------
+// Structured Multi-Span Diagnostic Engine (rustc-style)
+// ---------------------------------------------------------------------------
+
+/// Severity level of a diagnostic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DiagnosticLevel {
+    Error,
+    Warning,
+    Note,
+    Help,
+}
+
+impl std::fmt::Display for DiagnosticLevel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DiagnosticLevel::Error => write!(f, "error"),
+            DiagnosticLevel::Warning => write!(f, "warning"),
+            DiagnosticLevel::Note => write!(f, "note"),
+            DiagnosticLevel::Help => write!(f, "help"),
+        }
+    }
+}
+
+/// A source span with optional label within a diagnostic.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct DiagnosticSpan {
+    pub start: u32,
+    pub end: u32,
+    pub label: Option<String>,
+    pub is_primary: bool,
+}
+
+/// A structured multi-span diagnostic with optional notes, helps, and JSON serialization.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Diagnostic {
+    pub code: Option<String>,
+    pub level: DiagnosticLevel,
+    pub message: String,
+    pub spans: Vec<DiagnosticSpan>,
+    pub notes: Vec<String>,
+    pub helps: Vec<String>,
+    pub suggestions: Vec<String>,
+}
+
+impl Diagnostic {
+    pub fn error(message: impl Into<String>) -> Self {
+        Self {
+            code: None,
+            level: DiagnosticLevel::Error,
+            message: message.into(),
+            spans: Vec::new(),
+            notes: Vec::new(),
+            helps: Vec::new(),
+            suggestions: Vec::new(),
+        }
+    }
+
+    pub fn warning(message: impl Into<String>) -> Self {
+        Self {
+            code: None,
+            level: DiagnosticLevel::Warning,
+            message: message.into(),
+            spans: Vec::new(),
+            notes: Vec::new(),
+            helps: Vec::new(),
+            suggestions: Vec::new(),
+        }
+    }
+
+    pub fn with_code(mut self, code: impl Into<String>) -> Self {
+        self.code = Some(code.into());
+        self
+    }
+
+    pub fn with_primary_span(mut self, start: u32, end: u32, label: Option<String>) -> Self {
+        self.spans.push(DiagnosticSpan {
+            start,
+            end,
+            label,
+            is_primary: true,
+        });
+        self
+    }
+
+    pub fn with_secondary_span(mut self, start: u32, end: u32, label: Option<String>) -> Self {
+        self.spans.push(DiagnosticSpan {
+            start,
+            end,
+            label,
+            is_primary: false,
+        });
+        self
+    }
+
+    pub fn with_note(mut self, note: impl Into<String>) -> Self {
+        self.notes.push(note.into());
+        self
+    }
+
+    pub fn with_help(mut self, help: impl Into<String>) -> Self {
+        self.helps.push(help.into());
+        self
+    }
+
+    pub fn with_suggestion(mut self, suggestion: impl Into<String>) -> Self {
+        self.suggestions.push(suggestion.into());
+        self
+    }
+
+    /// Renders this diagnostic to a human-readable text string with source excerpts and underlines.
+    pub fn render(&self, source: &str, filename: Option<&str>, colored: bool) -> String {
+        let mut out = if colored {
+            let (level_color, level_str) = match self.level {
+                DiagnosticLevel::Error => (ansi::BOLD_RED, "error"),
+                DiagnosticLevel::Warning => (ansi::BOLD_GREEN, "warning"),
+                DiagnosticLevel::Note => (ansi::BOLD_BLUE, "note"),
+                DiagnosticLevel::Help => (ansi::BOLD_GREEN, "help"),
+            };
+            if let Some(ref code) = self.code {
+                format!(
+                    "{}{}[{}]{}: {}{}{}\n",
+                    level_color,
+                    level_str,
+                    code,
+                    ansi::RESET,
+                    ansi::BOLD,
+                    self.message,
+                    ansi::RESET,
+                )
+            } else {
+                format!(
+                    "{}{}{}: {}{}{}\n",
+                    level_color,
+                    level_str,
+                    ansi::RESET,
+                    ansi::BOLD,
+                    self.message,
+                    ansi::RESET,
+                )
+            }
+        } else if let Some(ref code) = self.code {
+            format!("{}[{}]: {}\n", self.level, code, self.message)
+        } else {
+            format!("{}: {}\n", self.level, self.message)
+        };
+
+        if !self.spans.is_empty() {
+            // Find primary span or fallback to first span for header location
+            let primary = self
+                .spans
+                .iter()
+                .find(|s| s.is_primary)
+                .unwrap_or(&self.spans[0]);
+            let (primary_line, primary_col) = byte_to_line_col(source, primary.start);
+            let loc = if let Some(f) = filename {
+                format!("{}:{}:{}", f, primary_line, primary_col)
+            } else {
+                format!("{}:{}", primary_line, primary_col)
+            };
+
+            let max_line_num = self
+                .spans
+                .iter()
+                .map(|s| byte_to_line_col(source, s.start).0)
+                .max()
+                .unwrap_or(primary_line);
+            let gutter_width = max_line_num.to_string().len().max(2);
+            let gutter = " ".repeat(gutter_width);
+
+            if colored {
+                out.push_str(&format!(" {}-->{} {}\n", ansi::BOLD_BLUE, ansi::RESET, loc));
+            } else {
+                out.push_str(&format!(" --> {}\n", loc));
+            }
+
+            // Sort spans by byte offset
+            let mut sorted_spans = self.spans.clone();
+            sorted_spans.sort_by_key(|s| s.start);
+
+            for span in &sorted_spans {
+                let (line, col) = byte_to_line_col(source, span.start);
+                let source_line = source.lines().nth((line - 1) as usize).unwrap_or("");
+
+                let span_len = (span.end.saturating_sub(span.start)).max(1) as usize;
+                let max_underline = source_line
+                    .len()
+                    .saturating_sub((col as usize).saturating_sub(1));
+                let underline_len = span_len.min(max_underline).max(1);
+
+                let indent = (col as usize).saturating_sub(1);
+                let ch = if span.is_primary { "^" } else { "-" };
+                let pointer_chars = ch.repeat(underline_len);
+
+                let label_text = if let Some(ref l) = span.label {
+                    format!(" {}", l)
+                } else {
+                    String::new()
+                };
+
+                let line_str = line.to_string();
+                let pad = " ".repeat(gutter_width.saturating_sub(line_str.len()));
+
+                if colored {
+                    out.push_str(&format!("{} {}|{}\n", gutter, ansi::BOLD_BLUE, ansi::RESET));
+                    out.push_str(&format!(
+                        "{}{}{} |{} {}\n",
+                        pad,
+                        ansi::BOLD_BLUE,
+                        line_str,
+                        ansi::RESET,
+                        source_line
+                    ));
+                    let color = if span.is_primary {
+                        ansi::BOLD_RED
+                    } else {
+                        ansi::BOLD_BLUE
+                    };
+                    out.push_str(&format!(
+                        "{} {}|{} {}{}{}{}\n",
+                        gutter,
+                        ansi::BOLD_BLUE,
+                        ansi::RESET,
+                        " ".repeat(indent),
+                        color,
+                        pointer_chars,
+                        label_text,
+                    ));
+                } else {
+                    out.push_str(&format!("{}  |\n", gutter));
+                    out.push_str(&format!("{}{} | {}\n", pad, line_str, source_line));
+                    out.push_str(&format!(
+                        "{}  | {}{}{}\n",
+                        gutter,
+                        " ".repeat(indent),
+                        pointer_chars,
+                        label_text
+                    ));
+                }
+            }
+        }
+
+        // Render notes
+        for note in &self.notes {
+            if colored {
+                out.push_str(&format!(
+                    "   {}= note:{} {}\n",
+                    ansi::BOLD_BLUE,
+                    ansi::RESET,
+                    note
+                ));
+            } else {
+                out.push_str(&format!("   = note: {}\n", note));
+            }
+        }
+
+        // Render helps
+        for help in &self.helps {
+            if colored {
+                out.push_str(&format!(
+                    "   {}= help:{} {}\n",
+                    ansi::BOLD_GREEN,
+                    ansi::RESET,
+                    help
+                ));
+            } else {
+                out.push_str(&format!("   = help: {}\n", help));
+            }
+        }
+
+        // Render suggestions
+        for suggestion in &self.suggestions {
+            if colored {
+                out.push_str(&format!(
+                    "   {}= suggestion:{} {}\n",
+                    ansi::BOLD_GREEN,
+                    ansi::RESET,
+                    suggestion
+                ));
+            } else {
+                out.push_str(&format!("   = suggestion: {}\n", suggestion));
+            }
+        }
+
+        out
+    }
+
+    /// Renders this diagnostic to a rustc-compatible JSON string.
+    pub fn render_json(&self, source: &str, filename: Option<&str>) -> String {
+        #[derive(serde::Serialize)]
+        struct JsonSpan<'a> {
+            file_name: &'a str,
+            byte_start: u32,
+            byte_end: u32,
+            line_start: u32,
+            line_end: u32,
+            column_start: u32,
+            column_end: u32,
+            is_primary: bool,
+            label: Option<&'a str>,
+            text: Vec<JsonLine<'a>>,
+        }
+
+        #[derive(serde::Serialize)]
+        struct JsonLine<'a> {
+            text: &'a str,
+            highlight_start: u32,
+            highlight_end: u32,
+        }
+
+        #[derive(serde::Serialize)]
+        struct JsonChild<'a> {
+            message: &'a str,
+            level: &'a str,
+        }
+
+        #[derive(serde::Serialize)]
+        struct JsonDiagnostic<'a> {
+            message: &'a str,
+            code: Option<&'a str>,
+            level: &'a str,
+            spans: Vec<JsonSpan<'a>>,
+            children: Vec<JsonChild<'a>>,
+            rendered: String,
+        }
+
+        let fname = filename.unwrap_or("<unknown>");
+        let mut json_spans = Vec::new();
+
+        for span in &self.spans {
+            let (l_start, c_start) = byte_to_line_col(source, span.start);
+            let (l_end, c_end) = byte_to_line_col(source, span.end);
+            let line_txt = source.lines().nth((l_start - 1) as usize).unwrap_or("");
+            json_spans.push(JsonSpan {
+                file_name: fname,
+                byte_start: span.start,
+                byte_end: span.end,
+                line_start: l_start,
+                line_end: l_end,
+                column_start: c_start,
+                column_end: c_end,
+                is_primary: span.is_primary,
+                label: span.label.as_deref(),
+                text: vec![JsonLine {
+                    text: line_txt,
+                    highlight_start: c_start,
+                    highlight_end: c_end.max(c_start + 1),
+                }],
+            });
+        }
+
+        let mut children = Vec::new();
+        for note in &self.notes {
+            children.push(JsonChild {
+                message: note,
+                level: "note",
+            });
+        }
+        for help in &self.helps {
+            children.push(JsonChild {
+                message: help,
+                level: "help",
+            });
+        }
+        for sugg in &self.suggestions {
+            children.push(JsonChild {
+                message: sugg,
+                level: "help",
+            });
+        }
+
+        let rendered = self.render(source, filename, false);
+
+        let diag = JsonDiagnostic {
+            message: &self.message,
+            code: self.code.as_deref(),
+            level: match self.level {
+                DiagnosticLevel::Error => "error",
+                DiagnosticLevel::Warning => "warning",
+                DiagnosticLevel::Note => "note",
+                DiagnosticLevel::Help => "help",
+            },
+            spans: json_spans,
+            children,
+            rendered,
+        };
+
+        serde_json::to_string(&diag).unwrap_or_else(|_| "{}".into())
+    }
+}
+
+/// Converts any standard IRIS [`Error`] into a structured [`Diagnostic`].
+pub fn error_to_diagnostic(err: &Error) -> Diagnostic {
     let code = err.diagnostic_code();
-    let mut out = if colored {
-        format!(
-            "{}error[{}]{}: {}{}{}\n",
-            ansi::BOLD_RED,
-            code,
-            ansi::RESET,
-            ansi::BOLD,
-            err,
-            ansi::RESET,
-        )
-    } else {
-        format!("error[{}]: {}\n", code, err)
-    };
+    let mut diag = Diagnostic::error(format!("{}", err)).with_code(code);
 
     if let Some((start_byte, end_byte)) = extract_span(err) {
-        let (line, col) = byte_to_line_col(source, start_byte);
-        let source_line = source.lines().nth((line - 1) as usize).unwrap_or("");
-
-        // Compute underline width: clamp to the current source line
-        let span_len = (end_byte.saturating_sub(start_byte)).max(1) as usize;
-        // Don't underline past the end of the source line
-        let max_underline = source_line
-            .len()
-            .saturating_sub((col as usize).saturating_sub(1));
-        let underline_len = span_len.min(max_underline).max(1);
-
-        let indent = (col as usize).saturating_sub(1);
-        let pointer = format!("{}{}", " ".repeat(indent), "^".repeat(underline_len));
-        let line_num = line.to_string();
-        let gutter = " ".repeat(line_num.len());
-
-        if colored {
-            let loc = if let Some(f) = filename {
-                format!("{}:{}:{}", f, line, col)
-            } else {
-                format!("{}:{}", line, col)
-            };
-            out.push_str(&format!(" {}-->{} {}\n", ansi::BOLD_BLUE, ansi::RESET, loc));
-            out.push_str(&format!("{} {}|{}\n", gutter, ansi::BOLD_BLUE, ansi::RESET));
-            out.push_str(&format!(
-                "{}{} |{} {}\n",
-                ansi::BOLD_BLUE,
-                line_num,
-                ansi::RESET,
-                source_line
-            ));
-            out.push_str(&format!(
-                "{} {}|{} {}{}{}\n",
-                gutter,
-                ansi::BOLD_BLUE,
-                ansi::RESET,
-                ansi::BOLD_RED,
-                pointer,
-                ansi::RESET,
-            ));
-        } else {
-            let loc = if let Some(f) = filename {
-                format!("{}:{}:{}", f, line, col)
-            } else {
-                format!("{}:{}", line, col)
-            };
-            out.push_str(&format!(" --> {}\n", loc));
-            out.push_str(&format!("{}  |\n", gutter));
-            out.push_str(&format!("{} | {}\n", line_num, source_line));
-            out.push_str(&format!("{}  | {}\n", gutter, pointer));
-        }
+        diag.spans.push(DiagnosticSpan {
+            start: start_byte,
+            end: end_byte,
+            label: None,
+            is_primary: true,
+        });
     }
 
-    // Append help note if available
     if let Some(hint) = error_hint(err) {
-        if colored {
-            out.push_str(&format!(
-                "   {}= help:{} {}\n",
-                ansi::BOLD_GREEN,
-                ansi::RESET,
-                hint
-            ));
-        } else {
-            out.push_str(&format!("   = help: {}\n", hint));
-        }
+        diag.helps.push(hint.to_string());
     }
 
-    out
+    diag
+}
+
+fn render_error_inner(source: &str, err: &Error, filename: Option<&str>, colored: bool) -> String {
+    let diag = error_to_diagnostic(err);
+    diag.render(source, filename, colored)
 }
 
 // ---------------------------------------------------------------------------
@@ -635,5 +966,53 @@ mod tests {
     fn hint_none_for_generic_error() {
         let err = Error::Io(std::io::Error::new(std::io::ErrorKind::NotFound, "test"));
         assert!(error_hint(&err).is_none());
+    }
+
+    // -- Multi-span and JSON diagnostic tests ---------------------------------
+
+    #[test]
+    fn multi_span_diagnostic_renders_secondary_underlines_and_labels() {
+        let source = "val mut x = 10\nval r = &x\nx = 20\n";
+        let diag = Diagnostic::error("cannot mutate `x` because it is currently borrowed")
+            .with_code("E0382")
+            .with_secondary_span(23, 25, Some("immutable borrow occurs here".into()))
+            .with_primary_span(26, 27, Some("conflicting mutation occurs here".into()))
+            .with_note("borrows must end before mutation can occur");
+
+        let rendered = diag.render(source, Some("main.iris"), false);
+        assert!(
+            rendered.contains("error[E0382]: cannot mutate `x` because it is currently borrowed")
+        );
+        assert!(rendered.contains("--> main.iris:3:1"));
+        assert!(rendered.contains("-- immutable borrow occurs here"));
+        assert!(rendered.contains("^ conflicting mutation occurs here"));
+        assert!(rendered.contains("= note: borrows must end before mutation can occur"));
+    }
+
+    #[test]
+    fn json_diagnostic_produces_valid_rustc_schema() {
+        let source = "val x = bad\n";
+        let diag = Diagnostic::error("cannot find `bad` in scope")
+            .with_code("E0425")
+            .with_primary_span(8, 11, Some("not found in this scope".into()))
+            .with_help("check spelling or declare `bad` before use");
+
+        let json_str = diag.render_json(source, Some("test.iris"));
+        let parsed: serde_json::Value =
+            serde_json::from_str(&json_str).expect("must be valid JSON");
+
+        assert_eq!(parsed["message"], "cannot find `bad` in scope");
+        assert_eq!(parsed["code"], "E0425");
+        assert_eq!(parsed["level"], "error");
+        assert_eq!(parsed["spans"][0]["file_name"], "test.iris");
+        assert_eq!(parsed["spans"][0]["line_start"], 1);
+        assert_eq!(parsed["spans"][0]["column_start"], 9);
+        assert_eq!(parsed["spans"][0]["is_primary"], true);
+        assert_eq!(parsed["spans"][0]["label"], "not found in this scope");
+        assert_eq!(parsed["children"][0]["level"], "help");
+        assert!(parsed["rendered"]
+            .as_str()
+            .unwrap()
+            .contains("error[E0425]"));
     }
 }

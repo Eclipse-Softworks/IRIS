@@ -85,6 +85,7 @@ fi
 # Documentation
 cp "$ROOT/LICENSE" "$PKG_DIR/usr/share/doc/iris/copyright"
 cp "$ROOT/README.md" "$PKG_DIR/usr/share/doc/iris/"
+cp "$ROOT/LLVM_VERSION" "$PKG_DIR/usr/share/iris/" 2>/dev/null || true
 
 # ── Generate man page ────────────────────────────────────────────────────
 echo "[3/5] Generating man page..."

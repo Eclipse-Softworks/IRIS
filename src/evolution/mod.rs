@@ -8,8 +8,25 @@
 
 pub mod artifact;
 pub mod audit;
+pub mod daemon;
+pub mod ffi;
+pub mod fitness;
+pub mod genome;
 pub mod manifest;
+pub mod map_elites;
+pub mod mutation;
 pub mod unrestricted;
+
+pub use daemon::run_service_daemon;
+pub use fitness::{FitnessConfig, FitnessEvaluator, FitnessScore, WeightedCanaryCase};
+pub use genome::{BinaryOp, GeneNode, GeneType, GenomeState, UnaryOp};
+pub use map_elites::{
+    EliteEntry, MapElitesArchive, MapElitesConfig, MapElitesSearch, NicheCoordinate,
+};
+pub use mutation::{
+    crossover, point_mutate, shrink_mutate, subtree_mutate, tune_constants_gradient,
+    EvolutionConfig, EvolutionSearchResult, EvolutionarySearch, GenerationSummary,
+};
 
 use std::collections::{BTreeMap, HashSet, VecDeque};
 

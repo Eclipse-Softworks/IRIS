@@ -58,6 +58,7 @@ The machine-readable [catalog.json](catalog.json) also includes project modules.
 | [05_concurrency/async.iris](05_concurrency/async.iris) | dual | async: ok |
 | [05_concurrency/task_groups.iris](05_concurrency/task_groups.iris) | dual | task groups: ok |
 | [06_data/json_csv.iris](06_data/json_csv.iris) | dual | json and csv: ok |
+| [06_data/stdlib_pipeline.iris](06_data/stdlib_pipeline.iris) | dual | stdlib pipeline: ok |
 | [07_ml/scalar_autodiff.iris](07_ml/scalar_autodiff.iris) | dual | scalar autodiff: ok |
 | [07_ml/tensor_autodiff.iris](07_ml/tensor_autodiff.iris) | dual | tensor autodiff: ok |
 | [07_ml/neural_layer.iris](07_ml/neural_layer.iris) | dual | neural layer: ok |

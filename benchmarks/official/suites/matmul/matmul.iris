@@ -1,0 +1,44 @@
+// Benchmark: Dense Flat Matrix Multiplication (256x256)
+def main() -> i64 {
+    val n = 256;
+    val size = n * n;
+    val a: list<f64> = list();
+    val b: list<f64> = list();
+    val c: list<f64> = list();
+
+    var i = 0;
+    while i < size {
+        val row = i / n;
+        val col = i % n;
+        val val_a = (((row * col) % 13) to f64) * 0.1;
+        val val_b = (((row + col) % 17) to f64) * 0.1;
+        push(a, val_a);
+        push(b, val_b);
+        push(c, 0.0);
+        i = i + 1;
+    }
+
+    var r = 0;
+    while r < n {
+        var col = 0;
+        while col < n {
+            var sum = 0.0;
+            var k = 0;
+            while k < n {
+                val a_val = list_get(a, r * n + k);
+                val b_val = list_get(b, k * n + col);
+                sum = sum + a_val * b_val;
+                k = k + 1;
+            }
+            list_set(c, r * n + col, sum);
+            col = col + 1;
+        }
+        r = r + 1;
+    }
+
+    val c_first = list_get(c, 0);
+    val c_last = list_get(c, size - 1);
+    print((c_first to i64));
+    print((c_last to i64));
+    0
+}

@@ -37,6 +37,8 @@ pub enum EmitKindCli {
     Binary,
     #[clap(name = "tensorrt")]
     TensorRt,
+    #[clap(name = "python-ext")]
+    PythonExt,
 }
 
 impl From<EmitKindCli> for EmitKind {
@@ -57,8 +59,17 @@ impl From<EmitKindCli> for EmitKind {
             EmitKindCli::Eval => EmitKind::Eval,
             EmitKindCli::Binary => EmitKind::Binary,
             EmitKindCli::TensorRt => EmitKind::TensorRt,
+            EmitKindCli::PythonExt => EmitKind::PythonExt,
         }
     }
+}
+
+/// Output format for diagnostics (rustc-style human text vs. machine-readable json).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Default)]
+pub enum ErrorFormatCli {
+    #[default]
+    Human,
+    Json,
 }
 
 // ---------------------------------------------------------------------------
@@ -79,6 +90,10 @@ pub struct Cli {
     /// Write output to <file> instead of stdout
     #[arg(short = 'o', long = "output")]
     pub output: Option<PathBuf>,
+
+    /// Diagnostic error format (human or json)
+    #[arg(long = "error-format", value_enum, default_value_t = ErrorFormatCli::Human)]
+    pub error_format: ErrorFormatCli,
 
     /// Target preset/triple for LLVM and native builds
     #[arg(long = "target")]
@@ -186,6 +201,95 @@ pub enum Command {
         /// Exact acknowledgement phrase printed in the command help
         #[arg(long = "acknowledge-unsafe")]
         acknowledge_unsafe: String,
+    },
+    /// Search and evolve an optimal policy genome using genetic programming
+    #[command(name = "evolve-search")]
+    EvolveSearch {
+        /// Optional trusted baseline IRIS source to seed population
+        #[arg(long)]
+        baseline: Option<PathBuf>,
+        /// JSON array of `{ "input": i64, "expected": i64 }` canary cases
+        #[arg(long)]
+        cases: PathBuf,
+        /// Number of generations to evolve
+        #[arg(long, default_value_t = 30)]
+        generations: usize,
+        /// Size of population
+        #[arg(long = "pop-size", default_value_t = 50)]
+        pop_size: usize,
+        /// Mutation probability (0.0 to 1.0)
+        #[arg(long = "mutation-rate", default_value_t = 0.3)]
+        mutation_rate: f64,
+        /// Crossover probability (0.0 to 1.0)
+        #[arg(long = "crossover-rate", default_value_t = 0.7)]
+        crossover_rate: f64,
+        /// Tournament selection size
+        #[arg(long = "tournament-size", default_value_t = 4)]
+        tournament_size: usize,
+        /// Elites preserved per generation
+        #[arg(long = "elite-count", default_value_t = 2)]
+        elite_count: usize,
+        /// Maximum AST depth
+        #[arg(long = "max-depth", default_value_t = 6)]
+        max_depth: usize,
+        /// Parsimony pressure weight per AST node
+        #[arg(long = "parsimony-weight", default_value_t = 0.001)]
+        parsimony_weight: f64,
+        /// Optional target loss threshold to stop early
+        #[arg(long = "target-loss")]
+        target_loss: Option<f64>,
+        /// Random number seed for reproducible evolution
+        #[arg(long)]
+        seed: Option<u64>,
+        /// Output path for the evolved candidate IRIS source file
+        #[arg(long = "out-candidate")]
+        out_candidate: Option<PathBuf>,
+        /// Automatically promote the winning candidate through the 7 gates
+        #[arg(long)]
+        promote: bool,
+        /// Trusted constitution text (required if --promote)
+        #[arg(long)]
+        constitution: Option<PathBuf>,
+        /// Expected SHA-256 of constitution (required if --promote)
+        #[arg(long = "constitution-sha256")]
+        constitution_sha256: Option<String>,
+        /// Append-only JSONL decision log (required if --promote)
+        #[arg(long)]
+        audit: Option<PathBuf>,
+        /// Independently protected audit-head checkpoint (required if --promote)
+        #[arg(long = "audit-head")]
+        audit_head: Option<PathBuf>,
+        /// Lowest constitution-approved output
+        #[arg(long = "min-output", default_value_t = i64::MIN)]
+        min_output: i64,
+        /// Highest constitution-approved output
+        #[arg(long = "max-output", default_value_t = i64::MAX)]
+        max_output: i64,
+    },
+    /// Run the production autonomic microservice daemon or living organism simulation
+    #[command(name = "service-daemon")]
+    ServiceDaemon {
+        /// Number of autonomic simulation ticks (default: 60)
+        #[arg(long, default_value_t = 60)]
+        ticks: usize,
+        /// Target P99 SLA threshold in milliseconds
+        #[arg(long = "target-p99", default_value_t = 15.0)]
+        target_p99: f64,
+        /// Maximum allowed error budget ratio
+        #[arg(long = "error-budget", default_value_t = 0.01)]
+        error_budget: f64,
+        /// Run in headless mode without interactive terminal UI
+        #[arg(long)]
+        headless: bool,
+        /// Optional path to export JSON audit ledger
+        #[arg(long)]
+        audit: Option<PathBuf>,
+        /// Enable embedded HTTP live dashboard and Prometheus metrics server
+        #[arg(long)]
+        serve: bool,
+        /// HTTP server port (default: 9090)
+        #[arg(long, default_value_t = 9090)]
+        port: u16,
     },
     /// Inspect source through the compiler-hosted typed metaprogramming API
     Meta {
@@ -308,6 +412,7 @@ pub struct CliArgs {
     pub no_cache: bool,
     pub sandbox: bool,
     pub strict_effects: bool,
+    pub error_format: ErrorFormatCli,
 }
 
 /// Result of `parse_args` — backward-compatible with the old API.
@@ -340,6 +445,28 @@ pub enum ParseArgsResult {
         candidate: PathBuf,
         manifest: PathBuf,
         acknowledge_unsafe: String,
+    },
+    EvolveSearch {
+        baseline: Option<PathBuf>,
+        cases: PathBuf,
+        generations: usize,
+        pop_size: usize,
+        mutation_rate: f64,
+        crossover_rate: f64,
+        tournament_size: usize,
+        elite_count: usize,
+        max_depth: usize,
+        parsimony_weight: f64,
+        target_loss: Option<f64>,
+        seed: Option<u64>,
+        out_candidate: Option<PathBuf>,
+        promote: bool,
+        constitution: Option<PathBuf>,
+        constitution_sha256: Option<String>,
+        audit: Option<PathBuf>,
+        audit_head: Option<PathBuf>,
+        min_output: i64,
+        max_output: i64,
     },
     Meta {
         file: PathBuf,
@@ -380,6 +507,15 @@ pub enum ParseArgsResult {
         file: Option<PathBuf>,
         output: Option<PathBuf>,
     },
+    ServiceDaemon {
+        ticks: usize,
+        target_p99: f64,
+        error_budget: f64,
+        headless: bool,
+        audit: Option<PathBuf>,
+        serve: bool,
+        port: u16,
+    },
 }
 
 /// Parses command-line arguments.
@@ -417,6 +553,7 @@ pub fn parse_args(args: &[String]) -> Result<ParseArgsResult, String> {
                 no_cache: cli.no_cache,
                 sandbox: cli.sandbox,
                 strict_effects: cli.strict_effects,
+                error_format: cli.error_format,
             }))
         }
         Some(Command::Run { file }) => {
@@ -435,6 +572,7 @@ pub fn parse_args(args: &[String]) -> Result<ParseArgsResult, String> {
                 no_cache: cli.no_cache,
                 sandbox: cli.sandbox,
                 strict_effects: cli.strict_effects,
+                error_format: cli.error_format,
             }))
         }
         Some(Command::Embedded {
@@ -478,6 +616,49 @@ pub fn parse_args(args: &[String]) -> Result<ParseArgsResult, String> {
             manifest,
             acknowledge_unsafe,
         }),
+        Some(Command::EvolveSearch {
+            baseline,
+            cases,
+            generations,
+            pop_size,
+            mutation_rate,
+            crossover_rate,
+            tournament_size,
+            elite_count,
+            max_depth,
+            parsimony_weight,
+            target_loss,
+            seed,
+            out_candidate,
+            promote,
+            constitution,
+            constitution_sha256,
+            audit,
+            audit_head,
+            min_output,
+            max_output,
+        }) => Ok(ParseArgsResult::EvolveSearch {
+            baseline,
+            cases,
+            generations,
+            pop_size,
+            mutation_rate,
+            crossover_rate,
+            tournament_size,
+            elite_count,
+            max_depth,
+            parsimony_weight,
+            target_loss,
+            seed,
+            out_candidate,
+            promote,
+            constitution,
+            constitution_sha256,
+            audit,
+            audit_head,
+            min_output,
+            max_output,
+        }),
         Some(Command::Meta { file, emit_ir }) => Ok(ParseArgsResult::Meta { file, emit_ir }),
         Some(Command::Repl) => Ok(ParseArgsResult::Repl),
         Some(Command::Lsp { .. }) => Ok(ParseArgsResult::Lsp),
@@ -500,6 +681,7 @@ pub fn parse_args(args: &[String]) -> Result<ParseArgsResult, String> {
                     no_cache: cli.no_cache,
                     sandbox: cli.sandbox,
                     strict_effects: cli.strict_effects,
+                    error_format: cli.error_format,
                 }))
             } else {
                 Ok(ParseArgsResult::Profile)
@@ -522,6 +704,23 @@ pub fn parse_args(args: &[String]) -> Result<ParseArgsResult, String> {
         Some(Command::Install { url }) => Ok(ParseArgsResult::Install { url }),
         Some(Command::Fmt { file, check }) => Ok(ParseArgsResult::Fmt { file, check }),
         Some(Command::Docs { file, output }) => Ok(ParseArgsResult::Docs { file, output }),
+        Some(Command::ServiceDaemon {
+            ticks,
+            target_p99,
+            error_budget,
+            headless,
+            audit,
+            serve,
+            port,
+        }) => Ok(ParseArgsResult::ServiceDaemon {
+            ticks,
+            target_p99,
+            error_budget,
+            headless,
+            audit,
+            serve,
+            port,
+        }),
         None => {
             // No subcommand — treat as direct compilation request
             let path = cli
@@ -539,6 +738,7 @@ pub fn parse_args(args: &[String]) -> Result<ParseArgsResult, String> {
                 no_cache: cli.no_cache,
                 sandbox: cli.sandbox,
                 strict_effects: cli.strict_effects,
+                error_format: cli.error_format,
             }))
         }
     }
@@ -620,8 +820,8 @@ pub fn help_text() -> &'static str {
        build                 Build native binary (same as --emit binary)\n\
        run                   Build and run the binary\n\
        embedded             Build an allocation-free bare-metal component bundle\n\
-       evolve               Validate and hot-swap a governed `(i64) -> i64` policy\n\
-       test [file.iris]      Discover and run test_ functions (--filter <substr> --no-color)\n\
+        evolve               Validate and hot-swap a governed `(i64) -> i64` policy\n\
+        test [file.iris]      Discover and run test_ functions (--filter <substr> --no-color)\n\
        install [url]         Install dependencies or a package from a Git URL\n\
        fmt [file.iris]       Format source files (--check to verify without modifying)\n\
        repl                  Start an interactive REPL session\n\

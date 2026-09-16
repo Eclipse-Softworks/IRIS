@@ -1,0 +1,93 @@
+// Human Problem: Epidemic Outbreak, ICU Collapse, and Triage Simulation
+// Models the spread of a pathogen across a population of 1,000,000 citizens,
+// tracking hospital ICU saturation and preventable mortality under triage conditions.
+
+def simulate_epidemic(intervention_day: i64, beta_reduction_pct: i64) -> i64 {
+    val total_pop = 1000000.0;
+    var s = 999900.0;
+    var e = 100.0;
+    var i = 0.0;
+    var h = 0.0;
+    var r = 0.0;
+    var d = 0.0;
+
+    val icu_capacity = 2500.0;
+    val base_beta = 0.35;
+    val sigma = 0.20; // 5 days incubation
+    val gamma = 0.10; // 10 days infectious
+    val hosp_rate = 0.05; // 5% need ICU
+    val hosp_recovery = 0.07; // 14 days in ICU
+
+    var peak_icu = 0.0;
+
+    var day = 0;
+    while day < 180 {
+        val current_beta = if day >= intervention_day {
+            val factor = (100 - beta_reduction_pct) to f64;
+            base_beta * (factor / 100.0)
+        } else {
+            base_beta
+        };
+
+        // Euler integration step (dt = 1.0 day)
+        val new_exposed = (current_beta * s * (e + i)) / total_pop;
+        val new_infected = sigma * e;
+        val new_hosp = hosp_rate * new_infected;
+        val new_rec_mild = gamma * i;
+        val new_rec_hosp = hosp_recovery * h;
+
+        // Mortality dynamics: standard 2% ICU mortality, but surges to 12% if ICU is overwhelmed
+        val mortality_rate = if h > icu_capacity {
+            0.12
+        } else {
+            0.02
+        };
+        val new_deaths = mortality_rate * h;
+
+        s = s - new_exposed;
+        e = e + new_exposed - new_infected;
+        i = i + new_infected - (new_rec_mild + new_hosp);
+        h = h + new_hosp - (new_rec_hosp + new_deaths);
+        r = r + new_rec_mild + new_rec_hosp;
+        d = d + new_deaths;
+
+        val new_peak = if h > peak_icu {
+            h
+        } else {
+            peak_icu
+        };
+        peak_icu = new_peak;
+
+        day = day + 1;
+    }
+
+    // Return total lives lost as integer
+    d to i64
+}
+
+def main() -> i64 {
+    println("=================================================================");
+    println(" HUMAN CRISIS SIMULATION: Epidemic ICU Saturation & Triage Model ");
+    println(" Population: 1,000,000 | Baseline ICU Capacity: 2,500 beds        ");
+    println("=================================================================");
+
+    // Scenario A: Uncontrolled Spread (No intervention)
+    val deaths_uncontrolled = simulate_epidemic(999, 0);
+    println(f"[Scenario A: No Intervention] Total Fatalities: {deaths_uncontrolled}");
+
+    // Scenario B: Late Intervention (Day 60, 30% reduction)
+    val deaths_late = simulate_epidemic(60, 30);
+    val saved_late = deaths_uncontrolled - deaths_late;
+    println(f"[Scenario B: Late Action  ] Total Fatalities: {deaths_late} | Lives Saved: {saved_late}");
+
+    // Scenario C: Early Public Health Intervention (Day 25, 45% reduction)
+    val deaths_early = simulate_epidemic(25, 45);
+    val saved_early = deaths_uncontrolled - deaths_early;
+    println(f"[Scenario C: Early Action ] Total Fatalities: {deaths_early} | Lives Saved: {saved_early}");
+
+    println("-----------------------------------------------------------------");
+    println(f" CONCLUSION: Early intervention prevented {saved_early} human deaths.");
+    println("=================================================================");
+
+    0
+}

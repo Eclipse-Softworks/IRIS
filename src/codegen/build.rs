@@ -677,6 +677,13 @@ fn build_binary_impl(
                 shim_cmd.arg("-I").arg(dir.join("include"));
             }
         }
+        if backend_name == "ML kernels"
+            && (resolved_target.contains("x86_64")
+                || (resolved_target.is_empty() && cfg!(target_arch = "x86_64")))
+            && std::env::var("IRIS_NO_AVX2").is_err()
+        {
+            shim_cmd.args(["-mavx2", "-mfma"]);
+        }
 
         let shim_output = shim_cmd.output().map_err(|e| CodegenError::Unsupported {
             backend: "binary".into(),
@@ -730,16 +737,30 @@ fn build_binary_impl(
             Some(&resolved_target),
         )?;
     } else {
+        let opt_flag = match std::env::var("IRIS_OPT_LEVEL").as_deref() {
+            Ok("0") => "-O0",
+            Ok("1") => "-O1",
+            Ok("2") => "-O2",
+            _ => "-O3",
+        };
         let mut ir_cmd = Command::new(&clang);
         ir_cmd.args(&target_args);
         ir_cmd.args([
-            "-O2",
+            opt_flag,
+            "-fvectorize",
+            "-fslp-vectorize",
             "-c",
             path_str(&ll_path)?,
             "-o",
             path_str(&mod_obj)?,
             "-Wno-override-module",
         ]);
+        if (resolved_target.contains("x86_64")
+            || (resolved_target.is_empty() && cfg!(target_arch = "x86_64")))
+            && std::env::var("IRIS_NO_AVX2").is_err()
+        {
+            ir_cmd.args(["-mavx2", "-mfma"]);
+        }
         let ir_status = ir_cmd.status().map_err(|e| CodegenError::Unsupported {
             backend: "binary".into(),
             detail: format!("'{}' not found: {}", clang, e),
@@ -1347,7 +1368,11 @@ pub(crate) fn find_clang() -> String {
             ));
         }
 
-        // 3. Standalone LLVM version directories (LLVM 20, etc.)
+        // 3. Standalone LLVM version directories, newest supported first.
+        candidates.push(r"C:\llvm-23.1.1\bin\clang.exe".into());
+        candidates.push(r"C:\llvm-23\bin\clang.exe".into());
+        candidates.push(r"C:\llvm-22\bin\clang.exe".into());
+        candidates.push(r"C:\llvm-21\bin\clang.exe".into());
         candidates.push(r"C:\llvm-20\bin\clang.exe".into());
         candidates.push(r"C:\llvm-19\bin\clang.exe".into());
         candidates.push(r"C:\llvm-18\bin\clang.exe".into());
@@ -1382,9 +1407,12 @@ pub(crate) fn find_clang() -> String {
     {
         // Linux: package-installed toolchain, then common distribution paths
         candidates.push("/usr/share/iris/toolchain/llvm/bin/clang".into());
-        candidates.push("/usr/bin/clang".into());
+        candidates.push("/usr/lib/llvm-23/bin/clang".into());
+        candidates.push("/usr/lib/llvm-22/bin/clang".into());
+        candidates.push("/usr/lib/llvm-21/bin/clang".into());
         candidates.push("/usr/lib/llvm-18/bin/clang".into());
         candidates.push("/usr/lib/llvm-17/bin/clang".into());
+        candidates.push("/usr/bin/clang".into());
         if let Ok(home) = std::env::var("HOME") {
             candidates.push(format!("{}/.iris/toolchain/llvm/bin/clang", home));
             candidates.push(format!("{}/.iris/llvm/bin/clang", home));
@@ -1466,7 +1494,11 @@ pub(crate) fn find_lld() -> Option<String> {
                 lad, exe_name
             ));
         }
-        // Standalone LLVM version directories (LLVM 20, etc.)
+        // Standalone LLVM version directories, newest supported first.
+        candidates.push(format!(r"C:\llvm-23.1.1\bin\{}", exe_name));
+        candidates.push(format!(r"C:\llvm-23\bin\{}", exe_name));
+        candidates.push(format!(r"C:\llvm-22\bin\{}", exe_name));
+        candidates.push(format!(r"C:\llvm-21\bin\{}", exe_name));
         candidates.push(format!(r"C:\llvm-20\bin\{}", exe_name));
         candidates.push(format!(r"C:\llvm-19\bin\{}", exe_name));
         candidates.push(format!(r"C:\llvm-18\bin\{}", exe_name));
@@ -1487,6 +1519,9 @@ pub(crate) fn find_lld() -> Option<String> {
         ));
         candidates.push(format!("/opt/homebrew/opt/llvm/bin/{}", exe_name));
         candidates.push(format!("/usr/local/opt/llvm/bin/{}", exe_name));
+        candidates.push(format!("/usr/lib/llvm-23/bin/{}", exe_name));
+        candidates.push(format!("/usr/lib/llvm-22/bin/{}", exe_name));
+        candidates.push(format!("/usr/lib/llvm-21/bin/{}", exe_name));
         candidates.push(format!("/usr/bin/{}", exe_name));
         if let Ok(home) = std::env::var("HOME") {
             candidates.push(format!("{}/.iris/toolchain/llvm/bin/{}", home, exe_name));

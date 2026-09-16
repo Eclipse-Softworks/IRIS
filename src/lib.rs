@@ -151,6 +151,8 @@ pub enum EmitKind {
     Binary,
     /// TensorRT backend compiler target.
     TensorRt,
+    /// CPython C-extension module source code with PyMethodDef, argument unboxing, and PyInit entry point.
+    PythonExt,
 }
 
 /// Compiles multiple IRIS source strings together, supporting `bring module_name`,
@@ -502,6 +504,7 @@ fn compile_ast_inner(
     use crate::codegen::onnx_binary::emit_onnx_binary;
     use crate::codegen::pgo::{emit_pgo_instrument, emit_pgo_optimize};
     use crate::codegen::printer::emit_ir_text;
+    use crate::codegen::python_ext::emit_python_ext;
     use crate::codegen::simd::emit_simd;
     use crate::lower::{lower, lower_graph_to_ir, lower_model};
     use crate::pass::infer_shapes;
@@ -615,6 +618,7 @@ fn compile_ast_inner(
         EmitKind::Graph | EmitKind::Onnx | EmitKind::OnnxBinary => unreachable!(),
         EmitKind::Eval => eval_ir_module_internal(&ir_module, max_steps, max_depth),
         EmitKind::TensorRt => Ok(crate::codegen::tensorrt::emit_tensorrt(&ir_module)?),
+        EmitKind::PythonExt => Ok(emit_python_ext(&ir_module)?),
     }
 }
 

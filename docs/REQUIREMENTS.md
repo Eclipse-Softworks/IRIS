@@ -45,7 +45,7 @@ an optional compatibility fallback for targets without a direct linker path.
 
 | Component     | Requirement                                              |
 |---------------|----------------------------------------------------------|
-| **LLVM-C**    | A compatible LLVM shared library with target and ORC APIs   |
+| **LLVM-C**    | LLVM 23.1.1 shared library with target and ORC APIs         |
 | **Linker**    | `lld` (bundled with LLVM) or system linker               |
 | **C library** | Windows: MinGW UCRT64 · Linux: glibc · macOS: system SDK |
 | **RAM**       | 512 MB minimum, 2 GB recommended for large projects      |
@@ -57,8 +57,8 @@ an optional compatibility fallback for targets without a direct linker path.
 ```sh
 sudo apt update
 sudo apt install clang lld
-# Or install a specific version:
-sudo apt install clang-18 lld-18
+# Or install the version used by IRIS release bundles:
+sudo apt install clang-23 lld-23
 ```
 
 **Fedora / RHEL:**
@@ -80,6 +80,7 @@ export PATH="$(brew --prefix llvm)/bin:$PATH"
 
 **Windows:**
 - The **Full installer** (`.exe` / `.msi`) bundles LLVM and MinGW UCRT64 — no extra steps needed.
+- IRIS release bundles and the dependency downloader use LLVM **23.1.1**.
 - For **portable** installs: download LLVM from https://releases.llvm.org/ and install MSYS2 UCRT64:
   ```powershell
   # Install MSYS2 from https://www.msys2.org/
@@ -161,6 +162,7 @@ run merely because a target is declared.
 | Variable                  | Purpose                                              | Default |
 |---------------------------|------------------------------------------------------|---------|
 | `IRIS_CLANG`              | Optional Clang compatibility fallback override       | `clang` |
+| `IRIS_LLVM_C_API`         | Exact LLVM-C shared-library path                      | auto-detected |
 | `IRIS_USE_BLAS`           | Enable BLAS-accelerated tensor ops (`1` to enable)   | off     |
 | `IRIS_NATIVE_ML_BACKENDS` | Link real ONNX/PyTorch/TF backends (`1` to enable)  | off     |
 | `ONNXRUNTIME_DIR`         | Path to ONNX Runtime SDK                             | —       |

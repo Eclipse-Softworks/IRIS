@@ -87,6 +87,59 @@ impl BorrowError {
             BorrowError::MoveAfterMove { second_move, .. } => *second_move,
         }
     }
+
+    /// Converts this borrow error into a rich, rustc-style multi-span Diagnostic.
+    pub fn to_diagnostic(&self, offending: Span) -> crate::diagnostics::Diagnostic {
+        let var = self.var_name();
+        let conflicting = self.conflicting_span();
+        let primary_label = match self {
+            BorrowError::MutBorrowWhileBorrowed { .. } => "mutable borrow occurs here",
+            BorrowError::BorrowWhileMutBorrowed { .. } => "immutable borrow occurs here",
+            BorrowError::MutateWhileBorrowed { .. } => "conflicting mutation occurs here",
+            BorrowError::MoveWhileBorrowed { .. } => "move occurs here",
+            BorrowError::UseAfterMove { .. } => "use of moved value here",
+            BorrowError::BorrowAfterMove { .. } => "borrow occurs here",
+            BorrowError::MoveAfterMove { .. } => "second move occurs here",
+        };
+        let secondary_label = match self {
+            BorrowError::MutBorrowWhileBorrowed { .. } => "immutable borrow occurs here",
+            BorrowError::BorrowWhileMutBorrowed { .. } => "mutable borrow occurs here",
+            BorrowError::MutateWhileBorrowed { .. } => "first borrow occurs here",
+            BorrowError::MoveWhileBorrowed { .. } => "first borrow occurs here",
+            BorrowError::UseAfterMove { .. } => "value moved here",
+            BorrowError::BorrowAfterMove { .. } => "value moved here",
+            BorrowError::MoveAfterMove { .. } => "first move occurs here",
+        };
+
+        let mut spans = Vec::new();
+        if conflicting.start.0 != offending.start.0 {
+            spans.push(crate::diagnostics::DiagnosticSpan {
+                start: conflicting.start.0,
+                end: conflicting.end.0,
+                label: Some(secondary_label.to_string()),
+                is_primary: false,
+            });
+        }
+        spans.push(crate::diagnostics::DiagnosticSpan {
+            start: offending.start.0,
+            end: offending.end.0,
+            label: Some(primary_label.to_string()),
+            is_primary: true,
+        });
+
+        crate::diagnostics::Diagnostic {
+            code: Some("E0382".into()),
+            level: crate::diagnostics::DiagnosticLevel::Error,
+            message: format!("{}", self),
+            spans,
+            notes: vec![format!(
+                "value `{}` cannot be used while borrowed or moved",
+                var
+            )],
+            helps: vec![],
+            suggestions: vec![],
+        }
+    }
 }
 
 impl std::fmt::Display for BorrowError {
@@ -169,6 +222,14 @@ impl BorrowChecker {
 
     pub fn errors(&self) -> &[(BorrowError, Span)] {
         &self.errors
+    }
+
+    /// Converts all collected borrow errors into structured Diagnostics.
+    pub fn diagnostics(&self) -> Vec<crate::diagnostics::Diagnostic> {
+        self.errors
+            .iter()
+            .map(|(err, span)| err.to_diagnostic(*span))
+            .collect()
     }
 
     pub fn has_ref_types(&self) -> bool {
@@ -285,6 +346,7 @@ impl BorrowChecker {
             | AstType::Grad(inner, _)
             | AstType::Sparse(inner, _)
             | AstType::List(inner, _)
+            | AstType::Slice(inner, _)
             | AstType::WeakRef(inner, _) => self.scan_type_for_refs(inner),
             AstType::Result(ok, err, _) => {
                 self.scan_type_for_refs(ok);

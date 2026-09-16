@@ -1,0 +1,228 @@
+// projects/autonomous_service/service.iris
+// Production-Grade Autonomic Microservice Daemon in Native IRIS.
+// Demonstrates MAPE-K closed-loop adaptation, SLO enforcement, and policy switching.
+
+record ServiceTelemetry {
+    total_requests: i64,
+    failed_requests: i64,
+    queue_depth: i64,
+    p99_latency_ms: f64,
+    allostatic_strain: f64,
+    active_generation: i64,
+    hot_swaps: i64
+}
+
+record RegimeContext {
+    name: str,
+    concurrency_multiplier: i64,
+    downstream_delay_ms: f64,
+    cache_thrashing: i64
+}
+
+// Production Policy Set (hot-swappable (i64) -> i64 dispatch slots)
+def policy_nominal(sensory: i64) -> i64 {
+    return 0 // Full Process (200 OK)
+}
+
+def policy_shed_reject(sensory: i64) -> i64 {
+    return 1 // Shed / Reject (429 Too Many Requests)
+}
+
+def policy_cache_fallback(sensory: i64) -> i64 {
+    return 2 // Cache Fallback (203 Stale/Fast)
+}
+
+def policy_rate_throttle(sensory: i64) -> i64 {
+    return 3 // Adaptive Rate Throttle (202 Queued)
+}
+
+// Autonomic MAPE-K Controller Step
+def serve_traffic(
+    telemetry: ServiceTelemetry,
+    regime: RegimeContext,
+    action: i64,
+    tick: i64
+) -> ServiceTelemetry {
+    var lat: f64 = 4.5;
+    var failed: i64 = 0;
+    var q_delta: i64 = 0;
+
+    if regime.concurrency_multiplier > 10 {
+        if action == 1 {
+            // Shed/Reject protects P99 latency and drains queue
+            lat = 1.2;
+            failed = 0;
+            q_delta = 0 - 1;
+        } else {
+            // Unthrottled traffic floods the queue and breaches SLA
+            lat = 48.0;
+            failed = 1;
+            q_delta = 3;
+        }
+    } else {
+        if regime.downstream_delay_ms > 50.0 {
+            if action == 2 {
+                // Serving from cache isolates service from downstream delay
+                lat = 2.8;
+                failed = 0;
+                q_delta = 0;
+            } else {
+                // Full process stalls on slow upstream
+                lat = 185.0;
+                failed = 1;
+                q_delta = 2;
+            }
+        } else {
+            // Nominal operation
+            lat = 4.5;
+            failed = 0;
+            q_delta = 0;
+        }
+    };
+
+    var new_q: i64 = telemetry.queue_depth + q_delta;
+    if new_q < 0 {
+        new_q = 0;
+    };
+
+    // Allostatic strain calculation against 15.0ms P99 SLA
+    var target_p99: f64 = 15.0;
+    var lat_strain: f64 = 0.0;
+    if lat > target_p99 {
+        lat_strain = (lat - target_p99) / target_p99;
+        if lat_strain > 1.0 {
+            lat_strain = 1.0;
+        }
+    };
+
+    var err_strain: f64 = 0.0;
+    if failed > 0 {
+        err_strain = 1.0;
+    };
+
+    var strain: f64 = (lat_strain * 0.6) + (err_strain * 0.4);
+
+    return ServiceTelemetry {
+        total_requests: telemetry.total_requests + 1,
+        failed_requests: telemetry.failed_requests + failed,
+        queue_depth: new_q,
+        p99_latency_ms: lat,
+        allostatic_strain: strain,
+        active_generation: telemetry.active_generation,
+        hot_swaps: telemetry.hot_swaps
+    };
+}
+
+def main() -> i64 {
+    println("================================================================");
+    println("  IRIS NATIVE AUTONOMIC MICROSERVICE DEMONSTRATOR");
+    println("================================================================");
+    println("Service Level Objective: P99 <= 15.0 ms | Error Budget <= 1.0%");
+    println("Closed-loop Controller  : Active (Monitor -> Analyze -> Plan -> Execute)");
+    println("----------------------------------------------------------------\n");
+
+    var telem = ServiceTelemetry {
+        total_requests: 0,
+        failed_requests: 0,
+        queue_depth: 0,
+        p99_latency_ms: 4.5,
+        allostatic_strain: 0.0,
+        active_generation: 1,
+        hot_swaps: 0
+    };
+
+    var active_policy_id: i64 = 0; // 0: Nominal, 1: Shed, 2: Cache, 3: Throttle
+
+    // 24-tick production simulation across regimes
+    for tick in 1..25 {
+        var regime_name = "Nominal";
+        var concurrency: i64 = 1;
+        var downstream_delay: f64 = 2.0;
+
+        if tick > 6 {
+            if tick <= 12 {
+                regime_name = "Flash Crowd Surge";
+                concurrency = 50;
+                downstream_delay = 2.0;
+            } else {
+                if tick <= 18 {
+                    regime_name = "Upstream Brownout";
+                    concurrency = 1;
+                    downstream_delay = 120.0;
+                } else {
+                    regime_name = "Flash Crowd Surge";
+                    concurrency = 50;
+                    downstream_delay = 2.0;
+                }
+            }
+        };
+
+        let regime = RegimeContext {
+            name: regime_name,
+            concurrency_multiplier: concurrency,
+            downstream_delay_ms: downstream_delay,
+            cache_thrashing: 0
+        };
+
+        // 1. Perception: Compute policy decision
+        var action: i64 = 0;
+        if active_policy_id == 0 {
+            action = policy_nominal(tick);
+        } else {
+            if active_policy_id == 1 {
+                action = policy_shed_reject(tick);
+            } else {
+                if active_policy_id == 2 {
+                    action = policy_cache_fallback(tick);
+                } else {
+                    action = policy_rate_throttle(tick);
+                }
+            }
+        };
+
+        // 2. Serve traffic under active policy
+        telem = serve_traffic(telem, regime, action, tick);
+
+        // 3. Autonomic Governance: If allostatic strain exceeds threshold, hot-swap!
+        var swap_event = "   [STEADY-STATE]";
+        if telem.allostatic_strain > 0.35 {
+            var target_policy: i64 = 0;
+            if concurrency > 10 {
+                target_policy = 1; // Shed/Reject
+            } else {
+                if downstream_delay > 50.0 {
+                    target_policy = 2; // Cache Fallback
+                }
+            };
+
+            if target_policy != active_policy_id {
+                active_policy_id = target_policy;
+                telem = ServiceTelemetry {
+                    total_requests: telem.total_requests,
+                    failed_requests: telem.failed_requests,
+                    queue_depth: telem.queue_depth,
+                    p99_latency_ms: telem.p99_latency_ms,
+                    allostatic_strain: telem.allostatic_strain,
+                    active_generation: telem.active_generation + 1,
+                    hot_swaps: telem.hot_swaps + 1
+                };
+                swap_event = "🔄 [AUTONOMIC HOT-SWAP]";
+            }
+        };
+
+        println(f"Tick {tick} | {regime_name} | Gen {telem.active_generation} | Lat {telem.p99_latency_ms}ms | Strain {telem.allostatic_strain} | {swap_event}");
+    };
+
+    println("\n================================================================");
+    println("  SERVICE SIMULATION COMPLETED SUCCESSFULLY");
+    println("================================================================");
+    println(f"Total Requests Served : {telem.total_requests}");
+    println(f"Final Generation      : {telem.active_generation}");
+    println(f"Hot-swaps Performed   : {telem.hot_swaps}");
+    println(f"Final P99 Latency     : {telem.p99_latency_ms} ms");
+    println(f"Final Allostatic Strain: {telem.allostatic_strain}");
+
+    assert(telem.hot_swaps >= 2);
+    assert(telem.active_generation >= 3);
+    return 0;
+}

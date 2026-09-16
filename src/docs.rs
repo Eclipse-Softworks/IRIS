@@ -86,6 +86,7 @@ fn format_type(ty: &crate::parser::ast::AstType) -> String {
         }
         AstType::Ref(inner, _) => format!("&{}", format_type(inner)),
         AstType::RefMut(inner, _) => format!("&mut {}", format_type(inner)),
+        AstType::Slice(inner, _) => format!("[{}]", format_type(inner)),
         AstType::DynTrait { trait_name, .. } => format!("dyn {}", trait_name),
         _ => "...".to_string(),
     }

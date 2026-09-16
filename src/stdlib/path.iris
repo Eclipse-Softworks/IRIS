@@ -66,3 +66,69 @@ pub def stem(p: str) -> str {
     }
     if last_dot < 0 { b } else { slice(b, 0, last_dot) }
 }
+
+// POSIX-style lexical helpers: slash is the only separator. No filesystem I/O.
+pub def path_is_absolute(p: str) -> bool {
+    starts_with(p, "/")
+}
+
+// Nonempty components, retaining '.' and '..' for callers to interpret.
+pub def path_components(p: str) -> list<str> {
+    val out: list<str> = list()
+    val parts = split(p, "/")
+    var i = 0
+    while i < list_len(parts) {
+        val part = list_get(parts, i)
+        if len(part) > 0 { push(out, part); }
+        i = i + 1
+    }
+    out
+}
+
+// Collapse repeated slashes, '.' and cancellable '..' components.
+// Relative leading '..' are retained; absolute paths cannot climb above '/'.
+// Empty relative results become '.'. Does not resolve symlinks.
+pub def normalize_path(p: str) -> str {
+    val rooted = path_is_absolute(p)
+    val parts = path_components(p)
+    val stack: list<str> = list()
+    var i = 0
+    while i < list_len(parts) {
+        val part = list_get(parts, i)
+        if part == ".." {
+            val n = list_len(stack)
+            var cancelled = false
+            if n > 0 {
+                if list_get(stack, n - 1) != ".." {
+                    list_remove(stack, n - 1);
+                    cancelled = true
+                }
+            }
+            if !cancelled && !rooted { push(stack, ".."); }
+        } else {
+            if part != "." { push(stack, part); }
+        }
+        i = i + 1
+    }
+    val joined = join(stack, "/")
+    if rooted { concat("/", joined) } else {
+        if len(joined) == 0 { "." } else { joined }
+    }
+}
+
+// Replace the final filename extension; empty ext removes it.
+// ext is supplied without a leading dot. A leading filename dot is preserved.
+// Empty paths, directory paths, '.' and '..' are returned unchanged.
+pub def with_extension(p: str, ext: str) -> str {
+    val b = basename(p)
+    if len(b) == 0 || b == "." || b == ".." { return p }
+    var dot = -1
+    var i = 1
+    while i < len(b) {
+        if str_index(b, i) == 46 { dot = i }
+        i = i + 1
+    }
+    val end = if dot < 0 { len(p) } else { len(p) - len(b) + dot }
+    val base = slice(p, 0, end)
+    if len(ext) == 0 { base } else { concat(concat(base, "."), ext) }
+}

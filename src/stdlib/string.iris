@@ -1,47 +1,86 @@
 // src/stdlib/string.iris -- IRIS standard string library
 
-// Trim leading whitespace from a string.
-// Uses the built-in trim() which trims both sides, so we re-implement
-// using starts_with checks.
+// Text whitespace is ASCII space, tab, LF, VT, FF, or CR.
+def string_is_space(b: i64) -> bool {
+    b == 32 || (b >= 9 && b <= 13)
+}
+
+// Trim only leading ASCII whitespace, preserving UTF-8 content.
 pub def trim_start(s: str) -> str {
-    trim(s)
+    var i = 0
+    val n = len(s)
+    while i < n {
+        if !string_is_space(str_index(s, i)) { return slice(s, i, n) }
+        i = i + 1
+    }
+    ""
 }
 
-// Trim trailing whitespace from a string.
+// Trim only trailing ASCII whitespace.
 pub def trim_end(s: str) -> str {
-    trim(s)
+    var end = len(s)
+    while end > 0 {
+        if !string_is_space(str_index(s, end - 1)) { return slice(s, 0, end) }
+        end = end - 1
+    }
+    ""
 }
 
-// Pad a string on the left to at least `width` characters using `pad_char`.
+// Pad to at least width UTF-8 bytes using whole copies of pad_char.
+// Empty padding leaves the input unchanged; content is never truncated.
 pub def pad_left(s: str, width: i64, pad_char: str) -> str {
-    var result = s
-    var current_len = len(result)
-    while current_len < width {
-        result = concat(pad_char, result)
-        current_len = current_len + 1
-    }
-    result
+    val step = len(pad_char)
+    if step == 0 || width <= len(s) { return s }
+    val missing = width - len(s)
+    val copies = missing / step + if missing % step == 0 { 0 } else { 1 }
+    concat(repeat(pad_char, copies), s)
 }
 
-// Pad a string on the right to at least `width` characters using `pad_char`.
 pub def pad_right(s: str, width: i64, pad_char: str) -> str {
-    var result = s
-    var current_len = len(result)
-    while current_len < width {
-        result = concat(result, pad_char)
-        current_len = current_len + 1
-    }
-    result
+    val step = len(pad_char)
+    if step == 0 || width <= len(s) { return s }
+    val missing = width - len(s)
+    val copies = missing / step + if missing % step == 0 { 0 } else { 1 }
+    concat(s, repeat(pad_char, copies))
 }
 
-// Split a string into words (split by space).
+// Split on runs of ASCII whitespace, omitting empty words.
 pub def words(s: str) -> list<str> {
-    split(trim(s), " ")
+    val out: list<str> = list()
+    val n = len(s)
+    var start = 0
+    var i = 0
+    while i < n {
+        if string_is_space(str_index(s, i)) {
+            if start < i { list_push(out, slice(s, start, i)); }
+            start = i + 1
+        }
+        i = i + 1
+    }
+    if start < n { list_push(out, slice(s, start, n)); }
+    out
 }
 
-// Split a string into lines (split by newline).
+// Split LF and CRLF lines. Preserve interior empty lines, omit a final
+// empty segment after a terminator, and keep lone CR characters as content.
 pub def lines(s: str) -> list<str> {
-    split(s, "\n")
+    val out: list<str> = list()
+    val n = len(s)
+    var start = 0
+    var i = 0
+    while i < n {
+        if str_index(s, i) == 10 {
+            var end = i
+            if end > start {
+                if str_index(s, end - 1) == 13 { end = end - 1 }
+            }
+            list_push(out, slice(s, start, end));
+            start = i + 1
+        }
+        i = i + 1
+    }
+    if start < n { list_push(out, slice(s, start, n)); }
+    out
 }
 
 // Join a list of strings into one, separated by a delimiter.
@@ -62,4 +101,82 @@ pub def str_repeat(s: str, n: i64) -> str {
 // Count non-overlapping occurrences of substring in a string.
 pub def count(s: str, sub: str) -> i64 {
     str_count(s, sub)
+}
+
+// Remove one matching prefix/suffix. Empty patterns always match.
+pub def strip_prefix(s: str, prefix: str) -> option<str> {
+    if starts_with(s, prefix) { some(slice(s, len(prefix), len(s))) } else { none }
+}
+
+pub def strip_suffix(s: str, suffix: str) -> option<str> {
+    if ends_with(s, suffix) { some(slice(s, 0, len(s) - len(suffix))) } else { none }
+}
+
+// Split at the first delimiter, excluding it. An empty delimiter splits at 0.
+pub def split_once(s: str, delim: str) -> option<(str, str)> {
+    val pos = find(s, delim)
+    if is_some(pos) {
+        val i = unwrap(pos)
+        some((slice(s, 0, i), slice(s, i + len(delim), len(s))))
+    } else { none }
+}
+
+// At most max_parts segments, retaining the unsplit remainder in the last.
+// Nonpositive limits return an empty list. Empty delimiters leave s unsplit.
+pub def split_n(s: str, delim: str, max_parts: i64) -> list<str> {
+    val out: list<str> = list()
+    if max_parts <= 0 { return out }
+    if len(delim) == 0 {
+        list_push(out, s);
+        return out
+    }
+    var start = 0
+    var parts = 1
+    val n = len(s)
+    while parts < max_parts {
+        val pos = find(slice(s, start, n), delim)
+        if !is_some(pos) {
+            list_push(out, slice(s, start, n));
+            return out
+        }
+        val end = start + unwrap(pos)
+        list_push(out, slice(s, start, end));
+        start = end + len(delim)
+        parts = parts + 1
+    }
+    list_push(out, slice(s, start, n));
+    out
+}
+
+// Replace up to limit non-overlapping matches, scanning the original string.
+// An empty pattern or nonpositive limit leaves s unchanged.
+pub def replace_n(s: str, pattern: str, replacement: str, limit: i64) -> str {
+    if len(pattern) == 0 || limit <= 0 { return s }
+    val parts: list<str> = list()
+    var start = 0
+    var replaced = 0
+    val n = len(s)
+    while replaced < limit {
+        val pos = find(slice(s, start, n), pattern)
+        if !is_some(pos) {
+            list_push(parts, slice(s, start, n));
+            return join(parts, "")
+        }
+        val end = start + unwrap(pos)
+        list_push(parts, slice(s, start, end));
+        list_push(parts, replacement);
+        start = end + len(pattern)
+        replaced = replaced + 1
+    }
+    list_push(parts, slice(s, start, n));
+    join(parts, "")
+}
+
+// Collapse ASCII whitespace runs to one space and remove outer whitespace.
+pub def normalize_whitespace(s: str) -> str {
+    join(words(s), " ")
+}
+
+pub def is_blank(s: str) -> bool {
+    len(trim_start(s)) == 0
 }

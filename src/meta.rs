@@ -363,6 +363,7 @@ pub fn ast_type_name(ty: &AstType) -> String {
         AstType::MaskEffectType { effects, .. } => format!("with {}", effects.join(", ")),
         AstType::Ref(inner, _) => format!("&{}", ast_type_name(inner)),
         AstType::RefMut(inner, _) => format!("&mut {}", ast_type_name(inner)),
+        AstType::Slice(inner, _) => format!("[{}]", ast_type_name(inner)),
     }
 }
 

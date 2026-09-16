@@ -80,6 +80,51 @@ Canary cases are a JSON array:
 ]
 ```
 
+### Automated Evolutionary Search (`iris evolve-search`)
+
+IRIS provides a built-in genetic programming engine to search for optimal code genomes autonomously:
+
+```text
+iris evolve-search \
+  --baseline baseline.iris \
+  --cases cases.json \
+  --generations 30 \
+  --pop-size 50 \
+  --mutation-rate 0.3 \
+  --crossover-rate 0.7 \
+  --parsimony-weight 0.001 \
+  --out-candidate candidate_evolved.iris \
+  --promote \
+  --constitution constitution.txt \
+  --constitution-sha256 <lowercase-sha256> \
+  --audit evolution-audit.jsonl \
+  --audit-head /protected/iris/evolution-audit.head.json
+```
+
+Key options:
+- `--generations <N>` & `--pop-size <N>`: Control the evolutionary search horizon.
+- `--mutation-rate <float>` & `--crossover-rate <float>`: Control genetic operator frequencies.
+- `--parsimony-weight <float>`: Applies multi-objective pressure against AST node bloat.
+- `--out-candidate <path>`: Saves the discovered genome as compile-ready IRIS source code.
+- `--promote`: Automatically evaluates the winning candidate through the seven coordinator gates and hot-swaps it.
+
+### Autonomic Microservice Daemon & Live Web Dashboard (`iris service-daemon`)
+
+IRIS includes a closed-loop MAPE-K (Monitor-Analyze-Plan-Execute-Knowledge) autonomic daemon runtime with an embedded zero-dependency HTTP server, Prometheus metrics exporter, and real-time SVG web visualizer:
+
+```text
+iris service-daemon \
+  --ticks 120 \
+  --target-p99 15.0 \
+  --error-budget 0.01 \
+  --serve \
+  --port 9090
+```
+
+- **Live Web Dashboard**: Navigate to `http://localhost:9090/` to visualize real-time P99 latency sparklines, allostatic strain gauges, and hot-swap policy generations.
+- **Prometheus Metrics**: `GET http://localhost:9090/metrics` exports gauges and counters (`iris_requests_total`, `iris_p99_latency_ms`, `iris_allostatic_strain`, `iris_service_generation`, etc.).
+- **JSON Telemetry API**: `GET http://localhost:9090/status` returns structured real-time operational status.
+
 ## Current boundary
 
 - Candidate validation is bounded by interpreter steps and call depth.

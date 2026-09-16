@@ -4,6 +4,8 @@
 
 #[cfg(target_os = "windows")]
 const SETUP_SCRIPT: &str = include_str!("../installer/windows/setup_dependencies.ps1");
+#[cfg(target_os = "windows")]
+const LLVM_VERSION: &str = include_str!("../LLVM_VERSION");
 
 /// Run the smart dependency setup downloader command.
 pub fn run_setup_command() -> Result<(), String> {
@@ -26,11 +28,14 @@ pub fn run_setup_command() -> Result<(), String> {
         println!("Installing local dependencies into ~/.iris/ directory...");
         println!();
 
-        // 1. Create a temporary .ps1 file
+        // 1. Create temporary .ps1 and LLVM_VERSION files
         let temp_dir = std::env::temp_dir();
         let temp_script = temp_dir.join("iris_setup_dependencies.ps1");
         fs::write(&temp_script, SETUP_SCRIPT)
             .map_err(|e| format!("Failed to write temporary setup script: {}", e))?;
+        let temp_version = temp_dir.join("LLVM_VERSION");
+        fs::write(&temp_version, LLVM_VERSION.trim())
+            .map_err(|e| format!("Failed to write temporary LLVM_VERSION: {}", e))?;
 
         // 2. Resolve the target installation directory (~/.iris)
         let home = std::env::var("USERPROFILE")
@@ -58,8 +63,9 @@ pub fn run_setup_command() -> Result<(), String> {
             .wait()
             .map_err(|e| format!("Failed to wait on setup process: {}", e))?;
 
-        // 4. Cleanup the temporary script file
+        // 4. Cleanup temporary files
         let _ = fs::remove_file(&temp_script);
+        let _ = fs::remove_file(&temp_version);
 
         if !status.success() {
             return Err(format!(

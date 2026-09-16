@@ -10,11 +10,11 @@
 #   3. Invokes ISCC (Inno Setup Compiler) to produce the single-EXE installer
 #
 # Bundled dependencies (no GCC -- clang + lld only):
-#   - clang.exe + ld.lld.exe  (LLVM 17)
+#   - clang.exe + ld.lld.exe  (LLVM 23.1.1)
 #   - MinGW ucrt64 sysroot    (C headers + static libs)
 
 param(
-    [string]$Version = "1.0.0-rc1",
+    [string]$Version = "1.0.0-rc2",
     [switch]$SkipBuild
 )
 
@@ -66,7 +66,8 @@ Copy-Item (Join-Path $InstallerDir "README.md") $StageDir -Force
 $Icon = Join-Path $Root "vscode-iris\icon.png"
 if (Test-Path $Icon) { Copy-Item $Icon $StageDir -Force }
 Copy-Item (Join-Path $InstallerDir "windows\setup_dependencies.ps1") $StageDir -Force
-Write-Host "  README.md + icon.png + setup_dependencies.ps1" -ForegroundColor Green
+Copy-Item (Join-Path $Root "LLVM_VERSION") $StageDir -Force
+Write-Host "  README.md + icon.png + setup_dependencies.ps1 + LLVM_VERSION" -ForegroundColor Green
 
 # ---------------------------------------------------------------------------
 # Step 5: Stage VSCode extension

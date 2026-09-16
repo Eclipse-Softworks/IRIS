@@ -1,5 +1,5 @@
 {
-  "version": "1.0.0-rc1",
+  "version": "1.0.0-rc2",
   "entries": [
     {
       "path": "examples/01_basics/hello.iris",
@@ -270,6 +270,11 @@
       "path": "examples/06_data/database.iris",
       "mode": "dual",
       "expected": "database: ok"
+    },
+    {
+      "path": "examples/06_data/stdlib_pipeline.iris",
+      "mode": "dual",
+      "expected": "stdlib pipeline: ok"
     },
     {
       "path": "examples/10_integration/ffi_cells.iris",

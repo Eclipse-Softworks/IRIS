@@ -84,6 +84,17 @@ pub fn emit_simd(module: &IrModule) -> Result<String, CodegenError> {
                 1,
             );
             writeln!(out, "{}", with_attrs)?;
+        } else if (line.trim_start().starts_with("br ")
+            || line.trim_start().starts_with("br label"))
+            && (line.contains("loop")
+                || line.contains("header")
+                || line.contains("while")
+                || line.contains("cond")
+                || line.contains("body")
+                || line.contains("bb"))
+            && !line.contains("!llvm.loop")
+        {
+            writeln!(out, "{}, !llvm.loop !llvm.loop.vec.f64", line)?;
         } else {
             writeln!(out, "{}", line)?;
         }

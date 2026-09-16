@@ -8,7 +8,7 @@
 # ──────────────────────────────────────────────────────────────────────────
 
 param(
-    [string]$Version = "1.0.0-rc1",
+    [string]$Version = "1.0.0-rc2",
     [string]$Arch = "x64",
     [switch]$SkipBuild
 )
@@ -49,10 +49,24 @@ Copy-Item $IrisExe $StageDir -Force
 Write-Host "  iris.exe" -ForegroundColor Green
 
 # Stdlib
-$StdlibSrc = Join-Path $Root "stdlib"
+$StdlibSrc = Join-Path $Root "src\stdlib"
 if (Test-Path $StdlibSrc) {
     Copy-Item $StdlibSrc (Join-Path $StageDir "stdlib") -Recurse -Force
+    Write-Host "  stdlib/ (from src/stdlib)" -ForegroundColor Green
+} elseif (Test-Path (Join-Path $Root "stdlib")) {
+    Copy-Item (Join-Path $Root "stdlib") (Join-Path $StageDir "stdlib") -Recurse -Force
     Write-Host "  stdlib/" -ForegroundColor Green
+}
+
+# Prebuilt runtime objects
+$RuntimeSrc = Join-Path $Root "src\runtime"
+if (Test-Path $RuntimeSrc) {
+    $StageRuntime = Join-Path $StageDir "src\runtime"
+    New-Item -ItemType Directory -Force -Path $StageRuntime | Out-Null
+    if (Test-Path (Join-Path $RuntimeSrc "prebuilt")) {
+        Copy-Item (Join-Path $RuntimeSrc "prebuilt") $StageRuntime -Recurse -Force
+        Write-Host "  src/runtime/prebuilt/" -ForegroundColor Green
+    }
 }
 
 # Examples
@@ -70,9 +84,10 @@ if (Test-Path $ToolchainSrc) {
     Write-Host "  toolchain/ ($tcSize MB)" -ForegroundColor Green
 }
 
-# License + README
+# License + README + LLVM_VERSION
 Copy-Item (Join-Path $Root "LICENSE") $StageDir -Force
 Copy-Item (Join-Path $Root "README.md") $StageDir -Force
+Copy-Item (Join-Path $Root "LLVM_VERSION") $StageDir -Force
 
 # VSCode extension
 $Vsix = Get-ChildItem (Join-Path $Root "vscode-iris\*.vsix") -ErrorAction SilentlyContinue |

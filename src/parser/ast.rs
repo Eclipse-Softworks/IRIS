@@ -132,6 +132,8 @@ pub enum AstType {
     Ref(Box<AstType>, Span),
     /// `&mut T` mutable reference type.
     RefMut(Box<AstType>, Span),
+    /// `[T]` unsized slice type.
+    Slice(Box<AstType>, Span),
 }
 
 impl PartialEq for AstType {
@@ -237,6 +239,7 @@ impl PartialEq for AstType {
             ) => e1 == e2,
             (AstType::Ref(i1, _), AstType::Ref(i2, _)) => i1 == i2,
             (AstType::RefMut(i1, _), AstType::RefMut(i2, _)) => i1 == i2,
+            (AstType::Slice(i1, _), AstType::Slice(i2, _)) => i1 == i2,
             _ => false,
         }
     }
@@ -313,6 +316,7 @@ impl std::hash::Hash for AstType {
             AstType::MaskEffectType { effects, .. } => effects.hash(state),
             AstType::Ref(inner, _) => inner.hash(state),
             AstType::RefMut(inner, _) => inner.hash(state),
+            AstType::Slice(inner, _) => inner.hash(state),
         }
     }
 }
@@ -343,6 +347,7 @@ impl AstType {
             AstType::WeakRef(_, s) => *s,
             AstType::Ref(_, s) => *s,
             AstType::RefMut(_, s) => *s,
+            AstType::Slice(_, s) => *s,
         }
     }
 }

@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "iris-evolution"
+version = "1.0.0rc1"
+description = "Python bindings for the IRIS Autonomous Code Genome Evolution Engine"
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "GPL-2.0-or-later" }
+authors = [{ name = "IRIS Intelligent Systems Group" }]
+keywords = ["evolution", "genetic-programming", "cybernetics", "homeostasis", "hot-swap", "systems-ai"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["iris_evolution*"]

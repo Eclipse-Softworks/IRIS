@@ -8,6 +8,7 @@
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::path::Path;
+use std::path::PathBuf;
 use std::ptr;
 use std::sync::OnceLock;
 
@@ -41,11 +42,15 @@ type LLVMPassBuilderOptionsRef = *mut LLVMOpaquePassBuilderOptions;
 type LLVMErrorRef = *mut LLVMOpaqueError;
 type LLVMBool = i32;
 
+/// LLVM release bundled by IRIS installers and release archives.
+pub const RECOMMENDED_LLVM_VERSION: &str = "23.1.1";
+
 // ---------------------------------------------------------------------------
 // Function pointer types for LLVM C API
 // ---------------------------------------------------------------------------
 
 type FnContextCreate = unsafe extern "C" fn() -> LLVMContextRef;
+type FnGetVersion = unsafe extern "C" fn(*mut u32, *mut u32, *mut u32);
 type FnContextDispose = unsafe extern "C" fn(LLVMContextRef);
 type FnCreateMemoryBufferWithMemoryRangeCopy =
     unsafe extern "C" fn(*const c_char, usize, *const c_char) -> LLVMMemoryBufferRef;
@@ -105,6 +110,7 @@ struct LlvmCApi {
     _lib: Library,
 
     context_create: FnContextCreate,
+    get_version: FnGetVersion,
     context_dispose: FnContextDispose,
     create_memory_buffer_with_memory_range_copy: FnCreateMemoryBufferWithMemoryRangeCopy,
     parse_ir_in_context: FnParseIRInContext,
@@ -137,59 +143,26 @@ impl LlvmCApi {
         #[cfg(not(any(target_os = "windows", target_os = "macos")))]
         let lib_name = "libLLVM.so";
 
-        // Try system PATH / dynamic loader first
-        let lib = match unsafe { Library::new(lib_name) } {
-            Ok(lib) => lib,
-            Err(_) => {
-                #[cfg(target_os = "windows")]
-                {
-                    let candidates = [
-                        r"C:\llvm-20\bin\LLVM-C.dll",
-                        r"C:\llvm-19\bin\LLVM-C.dll",
-                        r"C:\llvm-18\bin\LLVM-C.dll",
-                        r"C:\Program Files\LLVM\bin\LLVM-C.dll",
-                    ];
-                    let mut found = None;
-                    for path in &candidates {
-                        if std::path::Path::new(path).exists() {
-                            match unsafe { Library::new::<&str>(path) } {
-                                Ok(lib) => {
-                                    found = Some(lib);
-                                    break;
-                                }
-                                Err(e) => {
-                                    return Err(CodegenError::Unsupported {
-                                        backend: "llvm_c_api".into(),
-                                        detail: format!("failed to load '{}': {}", path, e),
-                                    });
-                                }
-                            }
-                        }
-                    }
-                    if let Some(lib) = found {
-                        lib
-                    } else {
-                        return Err(CodegenError::Unsupported {
-                            backend: "llvm_c_api".into(),
-                            detail: format!(
-                                "failed to load '{}' via PATH or any known install path. Is LLVM installed?",
-                                lib_name
-                            ),
-                        });
-                    }
+        let candidates = llvm_library_candidates(lib_name);
+        let mut failures = Vec::new();
+        let mut loaded = None;
+        for candidate in &candidates {
+            match unsafe { Library::new(candidate) } {
+                Ok(library) => {
+                    loaded = Some(library);
+                    break;
                 }
-                #[cfg(not(target_os = "windows"))]
-                {
-                    return Err(CodegenError::Unsupported {
-                        backend: "llvm_c_api".into(),
-                        detail: format!(
-                            "failed to load '{}' via standard library paths. Is LLVM installed?",
-                            lib_name
-                        ),
-                    });
-                }
+                Err(error) => failures.push(format!("{}: {error}", candidate.display())),
             }
-        };
+        }
+        let lib = loaded.ok_or_else(|| CodegenError::Unsupported {
+            backend: "llvm_c_api".into(),
+            detail: format!(
+                "failed to load LLVM-C {}. Set IRIS_LLVM_C_API to the shared-library path. Tried: {}",
+                RECOMMENDED_LLVM_VERSION,
+                failures.join("; ")
+            ),
+        })?;
 
         // Helper to load a function symbol
         macro_rules! load {
@@ -211,6 +184,7 @@ impl LlvmCApi {
         Ok(Self {
             // Load all function pointers first (borrow `lib`), THEN move `lib` into `_lib`.
             context_create: load!(lib, FnContextCreate, b"LLVMContextCreate\0"),
+            get_version: load!(lib, FnGetVersion, b"LLVMGetVersion\0"),
             context_dispose: load!(lib, FnContextDispose, b"LLVMContextDispose\0"),
             create_memory_buffer_with_memory_range_copy: load!(
                 lib,
@@ -251,6 +225,14 @@ impl LlvmCApi {
             dispose_error_message: load!(lib, FnDisposeErrorMessage, b"LLVMDisposeErrorMessage\0"),
             _lib: lib,
         })
+    }
+
+    fn version(&self) -> (u32, u32, u32) {
+        let mut major = 0;
+        let mut minor = 0;
+        let mut patch = 0;
+        unsafe { (self.get_version)(&mut major, &mut minor, &mut patch) };
+        (major, minor, patch)
     }
 
     fn initialize_target(&self, triple: &str) -> Result<(), CodegenError> {
@@ -298,6 +280,80 @@ impl LlvmCApi {
     }
 }
 
+/// Candidate order deliberately prefers an explicit override and the bundled
+/// IRIS toolchain over system installations. This prevents an older LLVM on
+/// PATH from silently shadowing the 23.1.1 release bundle.
+pub(crate) fn llvm_library_candidates(default_name: &str) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Some(path) = std::env::var_os("IRIS_LLVM_C_API").filter(|value| !value.is_empty()) {
+        candidates.push(PathBuf::from(path));
+    }
+
+    if let Ok(executable) = std::env::current_exe() {
+        if let Some(directory) = executable.parent() {
+            #[cfg(target_os = "windows")]
+            candidates.push(directory.join("toolchain/llvm/bin/LLVM-C.dll"));
+            #[cfg(target_os = "macos")]
+            candidates.push(directory.join("toolchain/llvm/lib/libLLVM.dylib"));
+            #[cfg(target_os = "linux")]
+            {
+                candidates.push(directory.join("toolchain/llvm/lib/libLLVM.so.23.1"));
+                candidates.push(directory.join("toolchain/llvm/lib/libLLVM.so.23"));
+                candidates.push(directory.join("toolchain/llvm/lib/libLLVM.so"));
+            }
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
+            candidates.push(
+                PathBuf::from(local_app_data).join("Programs/IRIS/toolchain/llvm/bin/LLVM-C.dll"),
+            );
+        }
+        for directory in [
+            r"C:\llvm-23.1.1\bin",
+            r"C:\llvm-23\bin",
+            r"C:\llvm-22\bin",
+            r"C:\llvm-21\bin",
+            r"C:\llvm-20\bin",
+            r"C:\Program Files\LLVM\bin",
+            r"C:\Program Files (x86)\LLVM\bin",
+        ] {
+            candidates.push(PathBuf::from(directory).join("LLVM-C.dll"));
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    for directory in [
+        "/usr/local/share/iris/toolchain/llvm/lib",
+        "/opt/homebrew/opt/llvm/lib",
+        "/usr/local/opt/llvm/lib",
+    ] {
+        candidates.push(PathBuf::from(directory).join("libLLVM.dylib"));
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        for name in [
+            "libLLVM.so.23.1",
+            "libLLVM.so.23",
+            "libLLVM-23.so.1",
+            "libLLVM-23.so",
+        ] {
+            candidates.push(PathBuf::from(name));
+        }
+        for directory in ["/usr/lib/llvm-23/lib", "/usr/local/lib"] {
+            for name in ["libLLVM.so.23.1", "libLLVM.so.23", "libLLVM.so"] {
+                candidates.push(PathBuf::from(directory).join(name));
+            }
+        }
+    }
+
+    candidates.push(PathBuf::from(default_name));
+    candidates
+}
+
 static LLVM_C_API: OnceLock<Result<LlvmCApi, String>> = OnceLock::new();
 
 fn llvm_c_api() -> Result<&'static LlvmCApi, CodegenError> {
@@ -341,7 +397,12 @@ pub fn compile_llvm_ir_to_object_bytes(
     source_text: &str,
     target_triple: Option<&str>,
 ) -> Result<Vec<u8>, CodegenError> {
-    compile_llvm_ir_to_object_bytes_with_pipeline(source_text, target_triple, None)
+    let custom_pipeline = std::env::var("IRIS_PASS_PIPELINE").ok();
+    compile_llvm_ir_to_object_bytes_with_pipeline(
+        source_text,
+        target_triple,
+        custom_pipeline.as_deref(),
+    )
 }
 
 /// Compile LLVM IR after running a new-pass-manager pipeline such as
@@ -433,28 +494,45 @@ fn compile_llvm_ir_to_object_bytes_with_pipeline(
     }
 
     // Create target machine
-    let cpu_name = if triple.starts_with("avr") {
-        "atmega328p"
+    let cpu_name = if let Ok(custom) = std::env::var("IRIS_TARGET_CPU") {
+        custom
+    } else if triple.starts_with("avr") {
+        "atmega328p".to_string()
     } else {
-        "generic"
+        "generic".to_string()
     };
     let cpu = CString::new(cpu_name).unwrap();
-    let features = CString::new("").unwrap();
+    let features = CString::new(std::env::var("IRIS_TARGET_FEATURES").unwrap_or_default()).unwrap();
     // LLVMRelocPIC (2) is required for the ASLR-enabled executables produced by
     // the MinGW linker. LLVMRelocStatic (1) can emit absolute references that
     // happen to work under a debugger (which commonly fixes the image base) but
     // access-violate when Windows relocates the image at normal process start.
+    const LLVM_CODEGEN_LEVEL_NONE: u32 = 0;
+    const LLVM_CODEGEN_LEVEL_LESS: u32 = 1;
     const LLVM_CODEGEN_LEVEL_DEFAULT: u32 = 2;
+    const LLVM_CODEGEN_LEVEL_AGGRESSIVE: u32 = 3;
     const LLVM_RELOC_STATIC: u32 = 1;
     const LLVM_RELOC_PIC: u32 = 2;
     const LLVM_CODE_MODEL_DEFAULT: u32 = 0;
+
+    let codegen_level = match std::env::var("IRIS_OPT_LEVEL")
+        .ok()
+        .and_then(|s| s.parse::<u32>().ok())
+        .unwrap_or(3)
+    {
+        0 => LLVM_CODEGEN_LEVEL_NONE,
+        1 => LLVM_CODEGEN_LEVEL_LESS,
+        2 => LLVM_CODEGEN_LEVEL_DEFAULT,
+        _ => LLVM_CODEGEN_LEVEL_AGGRESSIVE,
+    };
+
     let machine = unsafe {
         (api.create_target_machine)(
             target,
             triple_c.as_ptr(),
             cpu.as_ptr(),
             features.as_ptr(),
-            LLVM_CODEGEN_LEVEL_DEFAULT,
+            codegen_level,
             if triple.starts_with("avr") {
                 LLVM_RELOC_STATIC
             } else {
@@ -567,6 +645,11 @@ pub fn is_llvm_c_api_available() -> bool {
     llvm_c_api().is_ok()
 }
 
+/// Version of the LLVM-C library IRIS actually loaded.
+pub fn loaded_llvm_version() -> Result<(u32, u32, u32), CodegenError> {
+    Ok(llvm_c_api()?.version())
+}
+
 /// Return whether the loaded LLVM distribution contains the backend for a
 /// specific target triple.
 ///
@@ -673,7 +756,41 @@ fn validate_object_bytes(data: &[u8], triple: &str) -> Result<(), CodegenError> 
 
 #[cfg(test)]
 mod tests {
-    use super::{compile_llvm_ir_to_object, is_llvm_c_api_available, validate_object_bytes};
+    use super::{
+        compile_llvm_ir_to_object, is_llvm_c_api_available, llvm_library_candidates,
+        loaded_llvm_version, validate_object_bytes, RECOMMENDED_LLVM_VERSION,
+    };
+
+    #[test]
+    fn recommended_version_and_search_order_track_llvm_23() {
+        assert_eq!(RECOMMENDED_LLVM_VERSION, "23.1.1");
+        let candidates = llvm_library_candidates("LLVM-C.dll");
+        let rendered = candidates
+            .iter()
+            .map(|path| path.to_string_lossy())
+            .collect::<Vec<_>>();
+        let llvm_23 = rendered.iter().position(|path| path.contains("llvm-23"));
+        let default = rendered
+            .iter()
+            .rposition(|path| path.ends_with("LLVM-C.dll"));
+        if let (Some(llvm_23), Some(default)) = (llvm_23, default) {
+            assert!(llvm_23 < default);
+        }
+    }
+
+    #[test]
+    fn loaded_library_reports_its_real_version() {
+        if !is_llvm_c_api_available() {
+            return;
+        }
+        let (major, minor, patch) =
+            loaded_llvm_version().expect("available LLVM must report a version");
+        eprintln!("LOADED LLVM VERSION: {major}.{minor}.{patch}");
+        assert!(
+            major >= 23,
+            "unsupported LLVM version {major}.{minor}.{patch}"
+        );
+    }
 
     #[test]
     fn validates_native_object_container_magic() {

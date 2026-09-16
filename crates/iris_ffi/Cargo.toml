@@ -1,0 +1,13 @@
+[package]
+name = "iris_ffi"
+version = "1.0.0-rc2"
+edition = "2021"
+description = "C-ABI shared library for IRIS Evolution Engine (Python, C, C++, Go interop)"
+license = "GPL-2.0-or-later"
+
+[lib]
+name = "iris_evolution"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+iris = { path = "../../" }

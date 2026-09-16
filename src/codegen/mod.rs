@@ -22,6 +22,7 @@ pub mod onnx;
 pub mod onnx_binary;
 pub mod pgo;
 pub mod printer;
+pub mod python_ext;
 pub mod simd;
 pub mod tensorrt;
 
@@ -42,6 +43,7 @@ pub use onnx::emit_onnx_text;
 pub use onnx_binary::emit_onnx_binary;
 pub use pgo::{emit_pgo_instrument, emit_pgo_optimize};
 pub use printer::emit_ir_text;
+pub use python_ext::emit_python_ext;
 pub use simd::emit_simd;
 pub use tensorrt::emit_tensorrt;
 

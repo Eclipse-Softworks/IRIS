@@ -15,11 +15,11 @@ RUN apt-get update -y \
 
 # Install a newer LLVM/Clang toolchain to match rustc's emitted IR.
 RUN set -eux; \
-    # add apt.llvm.org repo for bullseye and install LLVM 22
+    # add apt.llvm.org repo for bullseye and install LLVM 23
     wget -qO - https://apt.llvm.org/llvm-snapshot.gpg.key | apt-key add -; \
-    echo "deb http://apt.llvm.org/bullseye/ llvm-toolchain-bullseye-22 main" > /etc/apt/sources.list.d/llvm.list; \
+    echo "deb http://apt.llvm.org/bullseye/ llvm-toolchain-bullseye-23 main" > /etc/apt/sources.list.d/llvm.list; \
     apt-get update -y; \
-    apt-get install -y --no-install-recommends clang-22 llvm-22 llvm-22-tools; \
+    apt-get install -y --no-install-recommends clang-23 llvm-23 llvm-23-tools; \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /work
