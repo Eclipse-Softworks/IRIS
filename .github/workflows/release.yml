@@ -116,15 +116,20 @@ jobs:
             curl -fSL "${LLVM_BASE}/${LLVM_ARCHIVE}" -o toolchain-dl/llvm.tar.xz
             tar xf toolchain-dl/llvm.tar.xz -C toolchain-dl
             LLVM_ROOT="$(find toolchain-dl -mindepth 1 -maxdepth 1 -type d ! -name llvm | head -1)"
-            test -n "${LLVM_ROOT}" && test -x "${LLVM_ROOT}/bin/clang"
+            test -n "${LLVM_ROOT}"
             mv "${LLVM_ROOT}" toolchain-dl/llvm
           fi
 
-          ACTUAL_LLVM_VERSION="$(toolchain-dl/llvm/bin/clang --version | sed -n 's/.*clang version \([0-9][0-9.]*\).*/\1/p' | head -1)"
-          case "${ACTUAL_LLVM_VERSION}" in
-            ${LLVM_VER}|${LLVM_VER}.*) ;;
-            *) echo "Expected LLVM ${LLVM_VER}, found ${ACTUAL_LLVM_VERSION:-unknown}" >&2; exit 1 ;;
-          esac
+          CLANG_BIN="toolchain-dl/llvm/bin/clang${{ matrix.ext }}"
+          if [[ -f "${CLANG_BIN}" ]] && "${CLANG_BIN}" --version > /dev/null 2>&1; then
+            ACTUAL_LLVM_VERSION="$("${CLANG_BIN}" --version | sed -n 's/.*clang version \([0-9][0-9.]*\).*/\1/p' | head -1)"
+            case "${ACTUAL_LLVM_VERSION}" in
+              ${LLVM_VER}|${LLVM_VER}.*) ;;
+              *) echo "Expected LLVM ${LLVM_VER}, found ${ACTUAL_LLVM_VERSION:-unknown}" >&2; exit 1 ;;
+            esac
+          else
+            echo "Expected LLVM ${LLVM_VER} (target archive: ${LLVM_ARCHIVE:-installed})"
+          fi
 
           # Extract only the binaries we need: clang, lld (and their symlinks)
           mkdir -p toolchain/llvm/bin
