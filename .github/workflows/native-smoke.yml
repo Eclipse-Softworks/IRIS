@@ -124,7 +124,7 @@ jobs:
           ${{ matrix.timeout_cmd }} 120s ./target/debug/iris run examples/02_functions/closures.iris
           ${{ matrix.timeout_cmd }} 120s ./target/debug/iris run examples/07_ml/neural_layer.iris
           ${{ matrix.timeout_cmd }} 120s ./target/debug/iris run examples/05_concurrency/task_groups.iris
-          ${{ matrix.timeout_cmd }} 120s ./target/debug/iris run projects/model_gateway/main.iris
+          ${{ matrix.timeout_cmd }} 120s ./target/debug/iris run projects/job_pipeline/main.iris
           IRIS_SOAK_DURATION_MS=5000 IRIS_SOAK_REPORT_MS=1000 ${{ matrix.timeout_cmd }} 60s ./target/debug/iris run examples/05_concurrency/runtime_soak.iris
 
       - name: Native example smoke (Windows)
@@ -170,7 +170,7 @@ jobs:
           Invoke-IrisRun -Example 'examples/02_functions/closures.iris'
           Invoke-IrisRun -Example 'examples/07_ml/neural_layer.iris'
           Invoke-IrisRun -Example 'examples/05_concurrency/task_groups.iris'
-          Invoke-IrisRun -Example 'projects/model_gateway/main.iris'
+          Invoke-IrisRun -Example 'projects/job_pipeline/main.iris'
           Invoke-IrisRun -Example 'examples/05_concurrency/runtime_soak.iris' -TimeoutMs 60000 -ExtraEnv @{
             IRIS_SOAK_DURATION_MS = '5000'
             IRIS_SOAK_REPORT_MS = '1000'
