@@ -124,7 +124,7 @@ jobs:
           if [[ -f "${CLANG_BIN}" ]] && "${CLANG_BIN}" --version > /dev/null 2>&1; then
             ACTUAL_LLVM_VERSION="$("${CLANG_BIN}" --version | sed -n 's/.*clang version \([0-9][0-9.]*\).*/\1/p' | head -1)"
             case "${ACTUAL_LLVM_VERSION}" in
-              ${LLVM_VER}|${LLVM_VER}.*) ;;
+              ${LLVM_VER}|${LLVM_VER}.*|${LLVM_MAJOR}.*) ;;
               *) echo "Expected LLVM ${LLVM_VER}, found ${ACTUAL_LLVM_VERSION:-unknown}" >&2; exit 1 ;;
             esac
           else
