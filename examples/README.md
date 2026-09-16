@@ -58,16 +58,16 @@ The machine-readable [catalog.json](catalog.json) also includes project modules.
 | [05_concurrency/async.iris](05_concurrency/async.iris) | dual | async: ok |
 | [05_concurrency/task_groups.iris](05_concurrency/task_groups.iris) | dual | task groups: ok |
 | [06_data/json_csv.iris](06_data/json_csv.iris) | dual | json and csv: ok |
-| [06_data/stdlib_pipeline.iris](06_data/stdlib_pipeline.iris) | dual | stdlib pipeline: ok |
+| [06_data/stdlib_pipeline.iris](06_data/stdlib_pipeline.iris) | host | stdlib pipeline: ok |
 | [07_ml/scalar_autodiff.iris](07_ml/scalar_autodiff.iris) | dual | scalar autodiff: ok |
 | [07_ml/tensor_autodiff.iris](07_ml/tensor_autodiff.iris) | dual | tensor autodiff: ok |
 | [07_ml/neural_layer.iris](07_ml/neural_layer.iris) | dual | neural layer: ok |
-| [08_ais/viability.iris](08_ais/viability.iris) | dual | viability: ok |
+| [08_ais/viability.iris](08_ais/viability.iris) | host | viability: ok |
 | [08_ais/lifecycle.iris](08_ais/lifecycle.iris) | dual | lifecycle: ok |
-| [09_evolution/transactions.iris](09_evolution/transactions.iris) | dual | transactions: ok |
+| [09_evolution/transactions.iris](09_evolution/transactions.iris) | host | transactions: ok |
 | [09_evolution/speculation.iris](09_evolution/speculation.iris) | dual | speculation: ok |
 | [09_evolution/typed_edit.iris](09_evolution/typed_edit.iris) | host | typed edit: ok |
-| [10_integration/llm_protocol.iris](10_integration/llm_protocol.iris) | dual | llm protocol: ok |
+| [10_integration/llm_protocol.iris](10_integration/llm_protocol.iris) | host | llm protocol: ok |
 | [10_integration/checked_network.iris](10_integration/checked_network.iris) | dual | checked network: ok |
 | [10_integration/ros2_geometry.iris](10_integration/ros2_geometry.iris) | dual | ros2 geometry: ok |
 | [embedded/uno_button_led.iris](embedded/uno_button_led.iris) | embedded | See embedded instructions |

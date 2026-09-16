@@ -113,7 +113,7 @@
     },
     {
       "path": "examples/08_ais/viability.iris",
-      "mode": "dual",
+      "mode": "host",
       "expected": "viability: ok"
     },
     {
@@ -123,7 +123,7 @@
     },
     {
       "path": "examples/09_evolution/transactions.iris",
-      "mode": "dual",
+      "mode": "host",
       "expected": "transactions: ok"
     },
     {
@@ -138,7 +138,7 @@
     },
     {
       "path": "examples/10_integration/llm_protocol.iris",
-      "mode": "dual",
+      "mode": "host",
       "expected": "llm protocol: ok"
     },
     {
@@ -183,7 +183,7 @@
     },
     {
       "path": "projects/learning_service/main.iris",
-      "mode": "dual",
+      "mode": "host",
       "expected": "learning service: trained, evaluated, registered; degradation checked"
     },
     {
@@ -193,7 +193,7 @@
     },
     {
       "path": "projects/model_gateway/main.iris",
-      "mode": "dual",
+      "mode": "host",
       "expected": "model gateway: offline protocol, action validation, provider errors checked"
     },
     {
@@ -273,7 +273,7 @@
     },
     {
       "path": "examples/06_data/stdlib_pipeline.iris",
-      "mode": "dual",
+      "mode": "host",
       "expected": "stdlib pipeline: ok"
     },
     {
@@ -295,6 +295,16 @@
       "path": "examples/10_integration/ros2_topics.iris",
       "mode": "manual",
       "expected": "ros2 topics: vector payload verified"
+    },
+    {
+      "path": "projects/autonomous_organism/main.iris",
+      "mode": "module",
+      "expected": ""
+    },
+    {
+      "path": "projects/autonomous_service/service.iris",
+      "mode": "module",
+      "expected": ""
     }
   ]
 }
