@@ -942,7 +942,13 @@ typedef struct IrisTxSnapshot {
     IrisTxKind kind;
     void* target;
     union {
-        IrisList list;
+        struct {
+            IrisVal**     data;
+            size_t        len;
+            size_t        cap;
+            IrisValChunk* chunks;
+            size_t        chunk_count;
+        } list;
         IrisMap map;
         IrisVal* atomic;
     } before;
@@ -970,6 +976,17 @@ static int iris_tx_has_snapshot(IrisTxFrame* frame, IrisTxKind kind, void* targe
     return 0;
 }
 
+static int iris_list_is_chunk_ptr(const IrisList* l, const void* ptr) {
+    if (!l || !ptr) return 0;
+    for (const IrisValChunk* c = l->chunks; c; c = c->next) {
+        if ((const char*)ptr >= (const char*)&c->items[0] &&
+            (const char*)ptr < (const char*)&c->items[1024]) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
 static void iris_tx_free_map_entries(IrisMap* map) {
     if (!map || !map->buckets) return;
     for (size_t i = 0; i < map->n_buckets; i++) {
@@ -991,9 +1008,15 @@ static void iris_tx_free_map_entries(IrisMap* map) {
 static void iris_tx_discard_snapshot(IrisTxSnapshot* snapshot) {
     if (!snapshot) return;
     if (snapshot->kind == IRIS_TX_LIST) {
-        for (size_t i = 0; i < snapshot->before.list.len; i++)
-            if (snapshot->before.list.data[i]) iris_release(snapshot->before.list.data[i]);
+        IrisList* target = (IrisList*)snapshot->target;
+        for (size_t i = 0; i < snapshot->before.list.len; i++) {
+            IrisVal* val = snapshot->before.list.data ? snapshot->before.list.data[i] : NULL;
+            if (val && !iris_list_is_chunk_ptr(target, val))
+                iris_release(val);
+        }
         free(snapshot->before.list.data);
+        snapshot->before.list.data = NULL;
+        snapshot->before.list.len = snapshot->before.list.cap = 0;
     } else if (snapshot->kind == IRIS_TX_MAP) {
         iris_tx_free_map_entries(&snapshot->before.map);
     } else if (snapshot->kind == IRIS_TX_ATOMIC) {
@@ -1006,10 +1029,38 @@ static void iris_tx_restore_snapshot(IrisTxSnapshot* snapshot) {
     if (snapshot->kind == IRIS_TX_LIST) {
         IrisList* target = (IrisList*)snapshot->target;
         coll_lock();
-        for (size_t i = 0; i < target->len; i++)
-            if (target->data[i]) iris_release(target->data[i]);
-        free(target->data);
-        *target = snapshot->before.list;
+        // 1. Release non-chunk elements added during the transaction
+        for (size_t i = snapshot->before.list.len; i < target->len; i++) {
+            IrisVal* val = target->data[i];
+            if (val && !iris_list_is_chunk_ptr(target, val))
+                iris_release(val);
+        }
+        // 2. Restore modified elements in 0..snapshot_len - 1
+        for (size_t i = 0; i < snapshot->before.list.len; i++) {
+            IrisVal* old_val = snapshot->before.list.data ? snapshot->before.list.data[i] : NULL;
+            IrisVal* curr_val = target->data[i];
+            if (curr_val != old_val) {
+                if (curr_val && !iris_list_is_chunk_ptr(target, curr_val))
+                    iris_release(curr_val);
+                target->data[i] = old_val;
+            } else {
+                if (old_val && !iris_list_is_chunk_ptr(target, old_val))
+                    iris_release(old_val);
+            }
+        }
+        // 3. Free any chunks allocated during this transaction
+        IrisValChunk* c = target->chunks;
+        while (c && c != snapshot->before.list.chunks) {
+            IrisValChunk* next = c->next;
+            free(c);
+            c = next;
+        }
+        target->chunks = snapshot->before.list.chunks;
+        if (target->chunks) {
+            target->chunks->count = snapshot->before.list.chunk_count;
+        }
+        target->len = snapshot->before.list.len;
+        free(snapshot->before.list.data);
         snapshot->before.list.data = NULL;
         snapshot->before.list.len = snapshot->before.list.cap = 0;
         coll_unlock();
@@ -1040,10 +1091,18 @@ static void iris_tx_record_list(IrisList* list) {
     coll_lock();
     snapshot->before.list.len = list->len;
     snapshot->before.list.cap = list->cap;
-    snapshot->before.list.data = xmalloc(sizeof(IrisVal*) * list->cap);
-    for (size_t i = 0; i < list->len; i++) {
-        snapshot->before.list.data[i] = list->data[i];
-        if (list->data[i]) iris_retain(list->data[i]);
+    snapshot->before.list.chunks = list->chunks;
+    snapshot->before.list.chunk_count = list->chunks ? list->chunks->count : 0;
+    if (list->len > 0) {
+        snapshot->before.list.data = xmalloc(sizeof(IrisVal*) * list->len);
+        for (size_t i = 0; i < list->len; i++) {
+            IrisVal* val = list->data[i];
+            snapshot->before.list.data[i] = val;
+            if (val && !iris_list_is_chunk_ptr(list, val))
+                iris_retain(val);
+        }
+    } else {
+        snapshot->before.list.data = NULL;
     }
     coll_unlock();
     snapshot->next = iris_tx_top->snapshots;
@@ -1355,7 +1414,8 @@ void iris_list_set(IrisList* l, int64_t idx, IrisVal* val) {
         abort();
     }
     if (val) iris_retain(val);
-    if (l->data[idx]) iris_release(l->data[idx]);
+    if (l->data[idx] && !iris_list_is_chunk_ptr(l, l->data[idx]))
+        iris_release(l->data[idx]);
     l->data[idx] = val;
     coll_unlock();
 }
