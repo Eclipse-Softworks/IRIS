@@ -7852,7 +7852,6 @@ static void rc_free_list_payload(IrisList* list) {
                 RcEntry* e = rc_find(list->data[i]);
                 pthread_mutex_unlock(&rc_global_mu);
                 if (e) iris_release(list->data[i]);
-                else free(list->data[i]);
             }
         }
     }
