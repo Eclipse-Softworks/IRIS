@@ -1,8 +1,8 @@
 {
   "name": "iris-lang",
   "displayName": "IRIS Language",
-  "description": "Complete IRIS RC1 developer experience: language server, formatter, Test Explorer, debugger, safety diagnostics, and REPL",
-  "version": "1.0.5",
+  "description": "Complete IRIS RC2 developer experience: language server, formatter, Test Explorer, debugger, safety diagnostics, and REPL",
+  "version": "1.0.6",
   "publisher": "iris-lang",
   "engines": {
     "vscode": "^1.85.0"

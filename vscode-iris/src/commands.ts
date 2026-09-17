@@ -72,7 +72,8 @@ export function runFileAtPath(
         // --target only affects llvm/binary outputs, so it is a build-only flag.
         const target = cfg.get<string>('target', '').trim();
         const targetArgs = target ? ['--target', target] : [];
-        args = ['build', ...extra, ...targetArgs, filePath, '-o', filePath.replace(/\.iris$/, '')];
+        const outBinary = filePath.replace(/\.iris$/, '') + (process.platform === 'win32' ? '.exe' : '');
+        args = ['-o', outBinary, 'build', ...extra, ...targetArgs, filePath];
     } else {
         args = ['run', ...extra, filePath];
     }

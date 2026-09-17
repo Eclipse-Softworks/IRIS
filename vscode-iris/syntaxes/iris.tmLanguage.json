@@ -103,7 +103,7 @@
         },
         {
           "name": "keyword.control.effect.iris",
-          "match": "\\b(effect|handle|resume|with|yield|mask|pure)\\b"
+          "match": "\\b(effect|handle|resume|with|yield|mask|pure|transaction)\\b"
         },
         {
           "name": "keyword.control.concurrent.iris",
@@ -171,7 +171,7 @@
         },
         {
           "name": "support.type.iris",
-          "match": "\\b(option|result|list|map|tensor|tuple|chan|atomic|grad|sparse|deque|bitset|mutex|task_group|weak_ref|Dual|Cell|Tensor|DiffTensor|MLTensor|LlmClient|LlmMessage|LlmResponse|MetaProgram|MetaEdit)\\b"
+          "match": "\\b(option|result|list|map|set|tensor|tuple|chan|atomic|grad|sparse|deque|bitset|mutex|task_group|weak_ref|Dual|Cell|Tensor|DiffTensor|MLTensor|LlmClient|LlmMessage|LlmResponse|MetaProgram|MetaEdit|ViabilityBound|ViabilityAssessment|AutonomyV2Decision|ExpectedFreeEnergy|ActiveInferenceDecision|AgentRuntime|AgentStep|ROS2Node|LifecycleNode|Transform|StampedTransform|Vector3|Quaternion|Point|QoSProfile)\\b"
         }
       ]
     },
@@ -350,6 +350,21 @@
           "comment": "LLM, typed metaprogramming, and checked networking",
           "name": "support.function.stdlib.iris",
           "match": "\\b(llm_client|llm_message|llm_chat|llm_chat_with_tools|llm_embed|local_onnx_model|local_model_run|meta_available|meta_program|meta_analyze|meta_emit_ir|meta_apply|tcp_connect_checked|tcp_listen_checked|tcp_accept_checked|tcp_write_all_checked|tcp_read_bounded|tcp_shutdown_checked|tcp_close_checked)\\b"
+        },
+        {
+          "comment": "Transactional speculative effects builtins",
+          "name": "support.function.builtin.iris",
+          "match": "\\b(transaction_begin|transaction_commit|transaction_rollback|transaction_depth)\\b"
+        },
+        {
+          "comment": "Set, WeakRef, GC, and Reflection builtins",
+          "name": "support.function.builtin.iris",
+          "match": "\\b(set_new|set_add|set_contains|set_remove|set_len|set_to_list|weak_ref|weak_alive|weak_upgrade|gc_stats_map|gc_collect_call|reflection_available|validate|eval|eval_i64)\\b"
+        },
+        {
+          "comment": "AIS Autonomy v2 and ROS 2 v2 robotics stdlib",
+          "name": "support.function.stdlib.iris",
+          "match": "\\b(autonomy_v2_step|active_inference_select|viability_bound_new|viability_predict|viability_assess|expected_free_energy|agent_runtime_new|agent_record_outcome|agent_production_step|qos_sensor_data|qos_control|lifecycle_new|lifecycle_transition|lifecycle_can_publish|transform_point|transform_inverse|transform_buffer_new|transform_buffer_set|transform_buffer_lookup)\\b"
         }
       ]
     },

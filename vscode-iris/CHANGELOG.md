@@ -1,5 +1,29 @@
 # IRIS Language Extension Changelog
 
+## 1.0.6
+
+### Language & Grammar Updates (IRIS 1.0.0-rc2)
+
+- **Transactional Speculative Effects**: Added syntax highlighting and snippets for
+  `transaction_begin()`, `transaction_commit()`, `transaction_rollback()`,
+  `transaction_depth()`, and `effect transaction`.
+- **Autonomy v2 & ROS 2 v2**: Added type and function highlighting for
+  `ViabilityBound`, `AutonomyV2Decision`, `ExpectedFreeEnergy`, `ActiveInferenceDecision`,
+  `autonomy_v2_step`, `active_inference_select`, `ROS2Node`, `LifecycleNode`, `Transform`,
+  `StampedTransform`, `transform_buffer_set`, and `transform_buffer_lookup`.
+- **Set Collections & Reflection**: Added syntax highlighting for `set_new`, `set_add`,
+  `set_contains`, `set_remove`, `set_to_list`, `reflection_available`, `validate`,
+  `eval`, and `eval_i64`.
+- **Expanded Snippets**: Added completion snippets for transactional frames (`tx`),
+  active inference autonomy (`autonomyv2`), ROS 2 transform buffers (`tfbuffer`),
+  and set operations (`setops`).
+
+### Bug Fixes
+
+- **`IRIS: Build Binary` CLI argument ordering**: Fixed issue where `-o` was appended
+  after `build`, causing the compiler CLI parser to reject it. `-o` is now passed
+  as a global compiler option (`iris -o <output> build <file>`).
+
 ## 1.0.5
 
 ### New Features

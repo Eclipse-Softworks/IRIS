@@ -608,5 +608,60 @@
       "val ${3:next_runtime} = agent_record_outcome(${1:runtime}, ${4:observation}, ${5:reward}, ${6:true})"
     ],
     "description": "Create an AIS runtime and record a production outcome"
+  },
+  "Transactional effect block": {
+    "prefix": "tx",
+    "body": [
+      "transaction_begin();",
+      "try {",
+      "  ${1:// transactional state mutations and staged file operations}",
+      "  transaction_commit();",
+      "} catch {",
+      "  transaction_rollback();",
+      "}"
+    ],
+    "description": "Execute state mutations inside an atomic transactional rollback frame"
+  },
+  "Autonomy v2 step": {
+    "prefix": "autonomyv2",
+    "body": [
+      "bring std.ais",
+      "val ${1:bounds}: list<ViabilityBound> = list()",
+      "push(${1:bounds}, viability_bound_new(\"${2:metric}\", ${3:0.4}, ${4:0.8}, ${5:0.2}, ${6:0.9}, ${7:1.0}, ${8:0}));",
+      "val ${9:decision} = autonomy_v2_step(",
+      "  ${1:bounds}, ${10:values}, ${11:drift}, ${12:1.0},",
+      "  ${13:policy_outcomes}, ${14:preferences}, ${15:ambiguities}, ${16:epistemic}, ${17:99}",
+      ");"
+    ],
+    "description": "Evaluate viability bounds and select policy via expected free energy"
+  },
+  "ROS 2 Transform Buffer": {
+    "prefix": "tfbuffer",
+    "body": [
+      "bring std.ros2",
+      "var ${1:buffer} = transform_buffer_new()",
+      "${1:buffer} = transform_buffer_set(${1:buffer}, StampedTransform {",
+      "  parent_frame: \"${2:map}\",",
+      "  child_frame: \"${3:base_link}\",",
+      "  stamp_ns: ${4:0},",
+      "  transform: Transform {",
+      "    translation: Vector3 { x: ${5:0.0}, y: ${6:0.0}, z: ${7:0.0} },",
+      "    rotation: Quaternion { x: 0.0, y: 0.0, z: 0.0, w: 1.0 }",
+      "  }",
+      "});",
+      "val ${8:lookup} = transform_buffer_lookup(${1:buffer}, \"${2:map}\", \"${3:base_link}\")"
+    ],
+    "description": "Create a transform buffer, store a stamped transform, and perform frame lookup"
+  },
+  "Set operations": {
+    "prefix": "setops",
+    "body": [
+      "var ${1:s} = set_new()",
+      "${1:s} = set_add(${1:s}, ${2:item});",
+      "if set_contains(${1:s}, ${2:item}) {",
+      "  val ${3:items} = set_to_list(${1:s})",
+      "}"
+    ],
+    "description": "Create a set, add items, check membership, and convert to a list"
   }
 }
