@@ -11994,6 +11994,15 @@ static int iris_exec_tick_leaves(int after_idle, int64_t* wait_ms) {
         iris_panic("out of memory running timers");
         return 0;
     }
+    int64_t sleep_cutoff = now;
+    for (int64_t i = 0; i < count; i++) {
+        IrisTask* t = iris_exec_leaves[i];
+        if (!t->done && t->kind == IRIS_TASK_SLEEP && t->deadline_ms <= now) {
+            if (t->deadline_ms + 5 < sleep_cutoff) {
+                sleep_cutoff = t->deadline_ms + 5;
+            }
+        }
+    }
     for (int64_t i = 0; i < count; i++) {
         IrisTask* t = iris_exec_leaves[i];
         if (t->done) {
@@ -12006,12 +12015,12 @@ static int iris_exec_tick_leaves(int after_idle, int64_t* wait_ms) {
         int64_t when = now;
         switch (t->kind) {
         case IRIS_TASK_SLEEP:
-            if (t->deadline_ms <= now) {
+            if (t->deadline_ms <= sleep_cutoff) {
                 value = iris_box_i64(0);
                 finished = 1;
                 when = t->deadline_ms;
             } else {
-                int64_t left = t->deadline_ms - now;
+                int64_t left = t->deadline_ms > now ? t->deadline_ms - now : 0;
                 if (wait < 0 || left < wait) wait = left;
             }
             break;
