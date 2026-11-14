@@ -2099,6 +2099,8 @@ fn emit_function_body(
         if block.id == func.blocks()[0].id {
             if reports_locations(module, func) {
                 writeln!(out, "  store ptr @.iris_src_files, ptr @iris_loc_files")?;
+            }
+            if needs_loc_slot(module, func) {
                 // This thread's position slot, which the stores below write.
                 writeln!(out, "  %__iris_locp = call ptr @iris_loc_slot()")?;
             }
@@ -2328,18 +2330,18 @@ fn emit_function_body(
         // a block's start, and again after any call.
         let mut loc_stored: Option<u32> = None;
         for (instr_idx, instr) in block.instrs.iter().enumerate() {
-            if let Some(src) = module.source.as_deref() {
+            let at = module.source.as_deref().and_then(|src| {
+                func.error_span(block.id.0, instr_idx)
+                    .and_then(|byte| src.locate(byte).map(|loc| (byte, loc)))
+            });
+            let instr_loc = at
+                .map(|(_, (file, line, col))| pack_location(file, line, col))
+                .unwrap_or(0);
+            if module.source.is_some() {
                 if can_fail_or_call(instr) {
-                    let at = func
-                        .error_span(block.id.0, instr_idx)
-                        .and_then(|byte| src.locate(byte).map(|loc| (byte, loc)));
-                    if let Some((byte, (file, line, col))) = at {
+                    if let Some((byte, _)) = at {
                         if loc_stored != Some(byte) {
-                            writeln!(
-                                out,
-                                "  store i64 {}, ptr %__iris_locp",
-                                pack_location(file, line, col)
-                            )?;
+                            writeln!(out, "  store i64 {}, ptr %__iris_locp", instr_loc)?;
                             loc_stored = Some(byte);
                         }
                     }
@@ -2373,6 +2375,7 @@ fn emit_function_body(
             }
             emit_instr_ir(
                 instr,
+                instr_loc,
                 &consts,
                 func,
                 entry_rename,
@@ -3262,6 +3265,7 @@ fn coerce_llvm_store_val(
 #[allow(clippy::too_many_arguments)]
 fn emit_instr_ir(
     instr: &IrInstr,
+    instr_loc: i64,
     consts: &HashMap<ValueId, String>,
     func: &IrFunction,
     entry_rename: Option<(&str, &str)>,
@@ -3744,22 +3748,34 @@ fn emit_instr_ir(
                     // gives (an `sdiv` by zero is undefined behaviour, and a
                     // constant one folded to an arbitrary answer).
                     (BinOp::Add, false) if ty_s == "i64" || ty_s == "i32" => {
-                        format!("call {ty_s} @__iris_chk_add_{ty_s}({ty_s} {lv}, {ty_s} {rv})")
+                        format!(
+                            "call {ty_s} @__iris_chk_add_{ty_s}({ty_s} {lv}, {ty_s} {rv}, i64 {instr_loc})"
+                        )
                     }
                     (BinOp::Sub, false) if ty_s == "i64" || ty_s == "i32" => {
-                        format!("call {ty_s} @__iris_chk_sub_{ty_s}({ty_s} {lv}, {ty_s} {rv})")
+                        format!(
+                            "call {ty_s} @__iris_chk_sub_{ty_s}({ty_s} {lv}, {ty_s} {rv}, i64 {instr_loc})"
+                        )
                     }
                     (BinOp::Mul, false) if ty_s == "i64" || ty_s == "i32" => {
-                        format!("call {ty_s} @__iris_chk_mul_{ty_s}({ty_s} {lv}, {ty_s} {rv})")
+                        format!(
+                            "call {ty_s} @__iris_chk_mul_{ty_s}({ty_s} {lv}, {ty_s} {rv}, i64 {instr_loc})"
+                        )
                     }
                     (BinOp::Div, false) if ty_s == "i64" || ty_s == "i32" => {
-                        format!("call {ty_s} @__iris_chk_sdiv_{ty_s}({ty_s} {lv}, {ty_s} {rv})")
+                        format!(
+                            "call {ty_s} @__iris_chk_sdiv_{ty_s}({ty_s} {lv}, {ty_s} {rv}, i64 {instr_loc})"
+                        )
                     }
                     (BinOp::FloorDiv, false) if ty_s == "i64" || ty_s == "i32" => {
-                        format!("call {ty_s} @__iris_chk_floordiv_{ty_s}({ty_s} {lv}, {ty_s} {rv})")
+                        format!(
+                            "call {ty_s} @__iris_chk_floordiv_{ty_s}({ty_s} {lv}, {ty_s} {rv}, i64 {instr_loc})"
+                        )
                     }
                     (BinOp::Mod, false) if ty_s == "i64" || ty_s == "i32" => {
-                        format!("call {ty_s} @__iris_chk_srem_{ty_s}({ty_s} {lv}, {ty_s} {rv})")
+                        format!(
+                            "call {ty_s} @__iris_chk_srem_{ty_s}({ty_s} {lv}, {ty_s} {rv}, i64 {instr_loc})"
+                        )
                     }
                     (BinOp::Add, false) => format!("add {} {}, {}", ty_s, lv, rv),
                     (BinOp::Sub, false) => format!("sub {} {}, {}", ty_s, lv, rv),
@@ -9324,6 +9340,20 @@ fn reports_locations(module: &IrModule, func: &IrFunction) -> bool {
     };
     func.blocks().iter().any(|block| {
         block.instrs.iter().enumerate().any(|(i, instr)| {
+            (can_fail_or_call(instr) || is_checked_int_binop(instr))
+                && func
+                    .error_span(block.id.0, i)
+                    .is_some_and(|byte| src.locate(byte).is_some())
+        })
+    })
+}
+
+fn needs_loc_slot(module: &IrModule, func: &IrFunction) -> bool {
+    let Some(src) = module.source.as_deref() else {
+        return false;
+    };
+    func.blocks().iter().any(|block| {
+        block.instrs.iter().enumerate().any(|(i, instr)| {
             can_fail_or_call(instr)
                 && func
                     .error_span(block.id.0, i)
@@ -9332,22 +9362,29 @@ fn reports_locations(module: &IrModule, func: &IrFunction) -> bool {
     })
 }
 
-/// `iris_loc`'s layout, which the runtime decodes: file index, line, column.
-pub(crate) fn pack_location(file: usize, line: u32, col: u32) -> i64 {
-    ((file as i64) << 44) | ((line as i64 & 0xFF_FFFF) << 20) | (col as i64 & 0xF_FFFF)
-}
-
-/// Instructions that can stop the program with a runtime error. Of the
-/// binary operations only integer arithmetic can (overflow, division by
-/// zero); a comparison or float operation needs no position.
-fn can_fail_or_call(instr: &IrInstr) -> bool {
+fn is_checked_int_binop(instr: &IrInstr) -> bool {
     matches!(
         instr,
         IrInstr::BinOp {
             op: BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::FloorDiv | BinOp::Mod,
             ty: IrType::Scalar(DType::I64 | DType::I32),
             ..
-        } | IrInstr::ListGet { .. }
+        }
+    )
+}
+
+/// `iris_loc`'s layout, which the runtime decodes: file index, line, column.
+pub(crate) fn pack_location(file: usize, line: u32, col: u32) -> i64 {
+    ((file as i64) << 44) | ((line as i64 & 0xFF_FFFF) << 20) | (col as i64 & 0xF_FFFF)
+}
+
+/// Instructions whose location must be recorded in `iris_loc` before they run
+/// (calls and non-arithmetic traps; checked integer ops pass their location to
+/// `__iris_chk_*` and only store on the cold failure branch).
+fn can_fail_or_call(instr: &IrInstr) -> bool {
+    matches!(
+        instr,
+        IrInstr::ListGet { .. }
             | IrInstr::ListSet { .. }
             | IrInstr::ListPop { .. }
             | IrInstr::ArrayLoad { .. }
@@ -9414,11 +9451,25 @@ fn tensor_index_args(
 /// `phi` naming its predecessor block, and splitting a block in the middle of
 /// an instruction would break those names; LLVM's inliner rewrites them.
 fn emit_checked_helpers(out: &mut String) -> Result<(), CodegenError> {
+    writeln!(
+        out,
+        "define internal void @__iris_set_loc(i64 %loc) alwaysinline {{"
+    )?;
+    writeln!(out, "  %has = icmp sgt i64 %loc, 0")?;
+    writeln!(out, "  br i1 %has, label %set, label %done")?;
+    writeln!(out, "set:")?;
+    writeln!(out, "  %slot = call ptr @iris_loc_slot()")?;
+    writeln!(out, "  store i64 %loc, ptr %slot")?;
+    writeln!(out, "  br label %done")?;
+    writeln!(out, "done:")?;
+    writeln!(out, "  ret void")?;
+    writeln!(out, "}}\n")?;
+
     for (ty, bits) in [("i64", 64), ("i32", 32)] {
         for (name, intrinsic, op) in [("add", "sadd", 0), ("sub", "ssub", 1), ("mul", "smul", 2)] {
             writeln!(
                 out,
-                "define internal {ty} @__iris_chk_{name}_{ty}({ty} %a, {ty} %b) alwaysinline {{"
+                "define internal {ty} @__iris_chk_{name}_{ty}({ty} %a, {ty} %b, i64 %loc) alwaysinline {{"
             )?;
             writeln!(
                 out,
@@ -9427,6 +9478,7 @@ fn emit_checked_helpers(out: &mut String) -> Result<(), CodegenError> {
             writeln!(out, "  %o = extractvalue {{ {ty}, i1 }} %r, 1")?;
             writeln!(out, "  br i1 %o, label %bad, label %ok")?;
             writeln!(out, "bad:")?;
+            writeln!(out, "  call void @__iris_set_loc(i64 %loc)")?;
             if bits == 64 {
                 writeln!(
                     out,
@@ -9454,11 +9506,12 @@ fn emit_checked_helpers(out: &mut String) -> Result<(), CodegenError> {
         for (name, inst, op) in [("sdiv", "sdiv", 3), ("srem", "srem", 4)] {
             writeln!(
                 out,
-                "define internal {ty} @__iris_chk_{name}_{ty}({ty} %a, {ty} %b) alwaysinline {{"
+                "define internal {ty} @__iris_chk_{name}_{ty}({ty} %a, {ty} %b, i64 %loc) alwaysinline {{"
             )?;
             writeln!(out, "  %z = icmp eq {ty} %b, 0")?;
             writeln!(out, "  br i1 %z, label %zero, label %nonzero")?;
             writeln!(out, "zero:")?;
+            writeln!(out, "  call void @__iris_set_loc(i64 %loc)")?;
             writeln!(out, "  call void @iris_div_zero_abort()")?;
             writeln!(out, "  unreachable")?;
             writeln!(out, "nonzero:")?;
@@ -9469,6 +9522,7 @@ fn emit_checked_helpers(out: &mut String) -> Result<(), CodegenError> {
             writeln!(out, "edge:")?;
             if op == 3 {
                 // MIN / -1 does not fit.
+                writeln!(out, "  call void @__iris_set_loc(i64 %loc)")?;
                 if bits == 64 {
                     writeln!(
                         out,
@@ -9497,11 +9551,11 @@ fn emit_checked_helpers(out: &mut String) -> Result<(), CodegenError> {
     for ty in ["i64", "i32"] {
         writeln!(
             out,
-            "define internal {ty} @__iris_chk_floordiv_{ty}({ty} %a, {ty} %b) alwaysinline {{"
+            "define internal {ty} @__iris_chk_floordiv_{ty}({ty} %a, {ty} %b, i64 %loc) alwaysinline {{"
         )?;
         writeln!(
             out,
-            "  %q = call {ty} @__iris_chk_sdiv_{ty}({ty} %a, {ty} %b)"
+            "  %q = call {ty} @__iris_chk_sdiv_{ty}({ty} %a, {ty} %b, i64 %loc)"
         )?;
         writeln!(out, "  %r = srem {ty} %a, %b")?;
         writeln!(out, "  %rnz = icmp ne {ty} %r, 0")?;
