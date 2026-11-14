@@ -3,7 +3,13 @@
 // it once per control period; reference.iris uses the same model to derive
 // the optimal controller.
 
-pub record PlantInput { position: f64, velocity: f64, force: f64, dt: f64 }
+pub record PlantInput {
+    position: f64,
+    velocity: f64,
+    force: f64,
+    dt: f64,
+}
+
 pub record PlantState { position: f64, velocity: f64 }
 
 pub const MASS: f64 = 1.2
@@ -13,5 +19,5 @@ pub const DRAG: f64 = 0.4
 pub def plant(s: PlantInput) -> PlantState {
     val accel = (s.force - DRAG * s.velocity) / MASS
     val velocity = s.velocity + accel * s.dt
-    PlantState { position: s.position + velocity * s.dt, velocity: velocity }
+    return PlantState { position: s.position + velocity * s.dt, velocity: velocity }
 }

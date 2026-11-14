@@ -2,7 +2,19 @@
 // and with overshoot, and never needs more than a few newtons.
 def policy(error: f64, velocity: f64) -> f64 effect pure { 0.5 * error }
 
-def test_policy() -> i64 effect throw { assert(policy(1.0, 0.0) == 0.5); 0 }
+def policy(error: f64, velocity: f64) -> f64 effect pure {
+    return 0.5 * error
+}
+
+def test_policy() -> i64 effect throw {
+    assert(policy(1.0, 0.0) == 0.5);
+    0
+}
+
+def test_policy() -> i64 effect throw {
+    assert(policy(1.0, 0.0) == 0.5);
+    return 0
+}
 
 def test_transaction_rollback() -> i64 effect alloc, transaction {
     val state: list<i64> = list()
@@ -11,4 +23,5 @@ def test_transaction_rollback() -> i64 effect alloc, transaction {
     push(state, 99);
     transaction_rollback();
     if list_len(state) == 1 && list_get(state, 0) == 10 { 0 } else { 1 }
+    return if list_len(state) == 1 && list_get(state, 0) == 10 { 0 } else { 1 }
 }

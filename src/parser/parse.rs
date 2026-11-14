@@ -174,6 +174,123 @@ pub struct Parser<'t> {
     max_errors: usize,
     /// Current recursion depth.
     depth: usize,
+    /// Nesting depth of `(...)` / `[...]` expression groups (reset inside `{ ... }` blocks).
+    expr_group_depth: usize,
+}
+
+fn skip_balanced_tokens(
+    tokens: &[Spanned<Token>],
+    mut idx: usize,
+    open: &Token,
+    close: &Token,
+) -> Option<usize> {
+    if !tokens.get(idx).is_some_and(|s| &s.node == open) {
+        return None;
+    }
+    idx += 1;
+    let mut depth = 1usize;
+    while idx < tokens.len() && depth > 0 {
+        let node = &tokens[idx].node;
+        if node == open {
+            depth += 1;
+        } else if node == close {
+            depth -= 1;
+        }
+        idx += 1;
+    }
+    (depth == 0).then_some(idx)
+}
+
+/// Previous non-doc-comment token immediately before `pos`, if any.
+fn prev_non_doc_tok(tokens: &[Spanned<Token>], pos: usize) -> Option<&Token> {
+    tokens
+        .get(..pos)?
+        .iter()
+        .rev()
+        .map(|s| &s.node)
+        .find(|tok| !matches!(tok, Token::DocComment(_)))
+}
+
+/// Returns true when `pos` sits at `*<lvalue> <assign-op>` on a new line, so `*` begins
+/// a dereference assignment statement rather than multiplying the previous line.
+fn looks_like_deref_assign_at(tokens: &[Spanned<Token>], pos: usize) -> bool {
+    let mut idx = pos;
+    while matches!(tokens.get(idx).map(|s| &s.node), Some(Token::Star)) {
+        idx += 1;
+    }
+    if idx == pos {
+        return false;
+    }
+    match tokens.get(idx).map(|s| &s.node) {
+        Some(Token::Ident(_)) => idx += 1,
+        Some(Token::LParen) => {
+            let Some(next) = skip_balanced_tokens(tokens, idx, &Token::LParen, &Token::RParen)
+            else {
+                return false;
+            };
+            idx = next;
+        }
+        _ => return false,
+    }
+    while let Some(spanned) = tokens.get(idx) {
+        if spanned.newline_before {
+            break;
+        }
+        match &spanned.node {
+            Token::Dot => {
+                idx += 1;
+                if matches!(
+                    tokens.get(idx).map(|s| &s.node),
+                    Some(Token::Ident(_) | Token::IntLit(_))
+                ) {
+                    idx += 1;
+                } else {
+                    return false;
+                }
+            }
+            Token::LBracket => {
+                let Some(next) =
+                    skip_balanced_tokens(tokens, idx, &Token::LBracket, &Token::RBracket)
+                else {
+                    return false;
+                };
+                idx = next;
+            }
+            _ => break,
+        }
+    }
+    tokens.get(idx).is_some_and(|s| {
+        !s.newline_before
+            && matches!(
+                s.node,
+                Token::Eq
+                    | Token::PlusEq
+                    | Token::MinusEq
+                    | Token::StarEq
+                    | Token::SlashEq
+                    | Token::PercentEq
+            )
+    })
+}
+
+/// Returns true when a newline-leading `*` or `-` outside grouping delimiters should end
+/// the current outer expression rather than continue it as a binary operator.
+pub(crate) fn stops_before_line_start_op(
+    tokens: &[Spanned<Token>],
+    pos: usize,
+    expr_group_depth: usize,
+    op: &Token,
+) -> bool {
+    let at_line_start = tokens.get(pos).is_some_and(|t| t.newline_before);
+    if expr_group_depth > 0 || !at_line_start {
+        return false;
+    }
+    if matches!(prev_non_doc_tok(tokens, pos), Some(Token::RBrace))
+        && matches!(op, Token::Star | Token::Minus)
+    {
+        return true;
+    }
+    matches!(op, Token::Star) && looks_like_deref_assign_at(tokens, pos)
 }
 
 impl<'t> Parser<'t> {
@@ -185,12 +302,36 @@ impl<'t> Parser<'t> {
             errors: Vec::new(),
             max_errors: 50,
             depth: 0,
+            expr_group_depth: 0,
         }
     }
 
     /// Whether a line break comes before the current token.
     fn at_line_start(&self) -> bool {
         self.tokens.get(self.pos).is_some_and(|t| t.newline_before)
+    }
+
+    /// Evaluates `f` inside `(...)` or `[...]` expression grouping delimiters.
+    fn with_expr_group<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> R {
+        self.expr_group_depth += 1;
+        let res = f(self);
+        self.expr_group_depth -= 1;
+        res
+    }
+
+    /// Evaluates `f` at statement scope (`expr_group_depth = 0`) for `{ ... }` blocks.
+    fn with_stmt_scope<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> R {
+        let prev = self.expr_group_depth;
+        self.expr_group_depth = 0;
+        let res = f(self);
+        self.expr_group_depth = prev;
+        res
+    }
+
+    /// Returns true when a newline-leading `*` or `-` outside grouping delimiters should end
+    /// the current outer expression rather than continue it as a binary operator.
+    fn stops_before_line_start_op(&self, op: &Token) -> bool {
+        stops_before_line_start_op(self.tokens, self.pos, self.expr_group_depth, op)
     }
 
     /// Look past one or more `@attr(...)` annotations to see whether `extern` follows.
@@ -2660,7 +2801,7 @@ impl<'t> Parser<'t> {
             });
         }
         self.depth += 1;
-        let res = self.parse_block_inner();
+        let res = self.with_stmt_scope(|p| p.parse_block_inner());
         self.depth = self.depth.saturating_sub(1);
         res
     }
@@ -3252,6 +3393,9 @@ impl<'t> Parser<'t> {
     fn parse_add_expr(&mut self) -> Result<AstExpr, ParseError> {
         let mut lhs = self.parse_mul_expr()?;
         loop {
+            if self.stops_before_line_start_op(self.peek_tok()) {
+                break;
+            }
             let op = match self.peek_tok() {
                 Token::Plus => AstBinOp::Add,
                 Token::Minus => AstBinOp::Sub,
@@ -3273,6 +3417,9 @@ impl<'t> Parser<'t> {
     fn parse_mul_expr(&mut self) -> Result<AstExpr, ParseError> {
         let mut lhs = self.parse_cast_expr()?;
         loop {
+            if self.stops_before_line_start_op(self.peek_tok()) {
+                break;
+            }
             let op = match self.peek_tok() {
                 Token::Star => AstBinOp::Mul,
                 Token::Slash => AstBinOp::Div,
@@ -3649,16 +3796,19 @@ impl<'t> Parser<'t> {
         {
             self.advance();
             self.advance();
-            let mut args = Vec::new();
-            while !matches!(self.peek_tok(), Token::RParen | Token::Eof) {
-                args.push(self.parse_expr()?);
-                if matches!(self.peek_tok(), Token::Comma) {
-                    self.advance();
-                } else {
-                    break;
+            let (args, end) = self.with_expr_group(|p| {
+                let mut args = Vec::new();
+                while !matches!(p.peek_tok(), Token::RParen | Token::Eof) {
+                    args.push(p.parse_expr()?);
+                    if matches!(p.peek_tok(), Token::Comma) {
+                        p.advance();
+                    } else {
+                        break;
+                    }
                 }
-            }
-            let end = self.expect(&Token::RParen)?;
+                let end = p.expect(&Token::RParen)?;
+                Ok::<_, ParseError>((args, end))
+            })?;
             Ok(AstExpr::MacroCall {
                 name: ident,
                 args,
@@ -3690,25 +3840,27 @@ impl<'t> Parser<'t> {
     #[inline(never)]
     fn parse_paren_or_tuple_expr(&mut self, span: Span) -> Result<AstExpr, ParseError> {
         self.advance();
-        let first = self.parse_expr()?;
-        if matches!(self.peek_tok(), Token::Comma) {
-            let mut elements = vec![first];
-            while matches!(self.peek_tok(), Token::Comma) {
-                self.advance();
-                if matches!(self.peek_tok(), Token::RParen) {
-                    break;
+        self.with_expr_group(|p| {
+            let first = p.parse_expr()?;
+            if matches!(p.peek_tok(), Token::Comma) {
+                let mut elements = vec![first];
+                while matches!(p.peek_tok(), Token::Comma) {
+                    p.advance();
+                    if matches!(p.peek_tok(), Token::RParen) {
+                        break;
+                    }
+                    elements.push(p.parse_expr()?);
                 }
-                elements.push(self.parse_expr()?);
+                let end = p.expect(&Token::RParen)?;
+                Ok(AstExpr::Tuple {
+                    elements,
+                    span: span.merge(end),
+                })
+            } else {
+                p.expect(&Token::RParen)?;
+                Ok(first)
             }
-            let end = self.expect(&Token::RParen)?;
-            Ok(AstExpr::Tuple {
-                elements,
-                span: span.merge(end),
-            })
-        } else {
-            self.expect(&Token::RParen)?;
-            Ok(first)
-        }
+        })
     }
 
     #[inline(never)]
@@ -3931,21 +4083,26 @@ impl<'t> Parser<'t> {
     fn parse_raise_expr(&mut self, span: Span) -> Result<AstExpr, ParseError> {
         self.advance();
         let effect_name = self.expect_ident()?.name;
-        let mut args = Vec::new();
-        if matches!(self.peek_tok(), Token::LParen) {
+        let args = if matches!(self.peek_tok(), Token::LParen) {
             self.advance();
-            if !matches!(self.peek_tok(), Token::RParen) {
-                args.push(self.parse_expr()?);
-                while matches!(self.peek_tok(), Token::Comma) {
-                    self.advance();
-                    if matches!(self.peek_tok(), Token::RParen) {
-                        break;
+            self.with_expr_group(|p| {
+                let mut args = Vec::new();
+                if !matches!(p.peek_tok(), Token::RParen) {
+                    args.push(p.parse_expr()?);
+                    while matches!(p.peek_tok(), Token::Comma) {
+                        p.advance();
+                        if matches!(p.peek_tok(), Token::RParen) {
+                            break;
+                        }
+                        args.push(p.parse_expr()?);
                     }
-                    args.push(self.parse_expr()?);
                 }
-            }
-            self.expect(&Token::RParen)?;
-        }
+                p.expect(&Token::RParen)?;
+                Ok::<_, ParseError>(args)
+            })?
+        } else {
+            Vec::new()
+        };
         Ok(AstExpr::Raise {
             effect_name,
             args,
@@ -3956,18 +4113,21 @@ impl<'t> Parser<'t> {
     #[inline(never)]
     fn parse_array_lit_expr(&mut self, span: Span) -> Result<AstExpr, ParseError> {
         self.advance();
-        let mut elems = Vec::new();
-        if !matches!(self.peek_tok(), Token::RBracket) {
-            elems.push(self.parse_expr()?);
-            while matches!(self.peek_tok(), Token::Comma) {
-                self.advance();
-                if matches!(self.peek_tok(), Token::RBracket) {
-                    break;
+        let (elems, end) = self.with_expr_group(|p| {
+            let mut elems = Vec::new();
+            if !matches!(p.peek_tok(), Token::RBracket) {
+                elems.push(p.parse_expr()?);
+                while matches!(p.peek_tok(), Token::Comma) {
+                    p.advance();
+                    if matches!(p.peek_tok(), Token::RBracket) {
+                        break;
+                    }
+                    elems.push(p.parse_expr()?);
                 }
-                elems.push(self.parse_expr()?);
             }
-        }
-        let end = self.expect(&Token::RBracket)?;
+            let end = p.expect(&Token::RBracket)?;
+            Ok::<_, ParseError>((elems, end))
+        })?;
         Ok(AstExpr::ArrayLit {
             elems,
             span: span.merge(end),
@@ -4308,18 +4468,21 @@ impl<'t> Parser<'t> {
     fn parse_postfix_index(&mut self, base: AstExpr) -> Result<AstExpr, ParseError> {
         let start = base.span();
         self.advance();
-        let mut indices = Vec::new();
-        if !matches!(self.peek_tok(), Token::RBracket) {
-            indices.push(self.parse_expr()?);
-            while matches!(self.peek_tok(), Token::Comma) {
-                self.advance();
-                if matches!(self.peek_tok(), Token::RBracket) {
-                    break;
+        let (indices, end) = self.with_expr_group(|p| {
+            let mut indices = Vec::new();
+            if !matches!(p.peek_tok(), Token::RBracket) {
+                indices.push(p.parse_expr()?);
+                while matches!(p.peek_tok(), Token::Comma) {
+                    p.advance();
+                    if matches!(p.peek_tok(), Token::RBracket) {
+                        break;
+                    }
+                    indices.push(p.parse_expr()?);
                 }
-                indices.push(self.parse_expr()?);
             }
-        }
-        let end = self.expect(&Token::RBracket)?;
+            let end = p.expect(&Token::RBracket)?;
+            Ok::<_, ParseError>((indices, end))
+        })?;
         Ok(AstExpr::Index {
             base: Box::new(base),
             indices,
@@ -4877,21 +5040,23 @@ impl<'t> Parser<'t> {
     }
 
     fn parse_call_args(&mut self) -> Result<ParsedCallArgs, ParseError> {
-        let mut args = Vec::new();
-        let mut named_args = Vec::new();
-        if matches!(self.peek_tok(), Token::RParen) {
-            return Ok((args, named_args));
-        }
-        // Parse first argument: either named (`name = expr`), splat (`..expr`), or regular expr
-        self.parse_one_call_arg(&mut args, &mut named_args)?;
-        while matches!(self.peek_tok(), Token::Comma) {
-            self.advance();
-            if matches!(self.peek_tok(), Token::RParen) {
-                break;
+        self.with_expr_group(|p| {
+            let mut args = Vec::new();
+            let mut named_args = Vec::new();
+            if matches!(p.peek_tok(), Token::RParen) {
+                return Ok((args, named_args));
             }
-            self.parse_one_call_arg(&mut args, &mut named_args)?;
-        }
-        Ok((args, named_args))
+            // Parse first argument: either named (`name = expr`), splat (`..expr`), or regular expr
+            p.parse_one_call_arg(&mut args, &mut named_args)?;
+            while matches!(p.peek_tok(), Token::Comma) {
+                p.advance();
+                if matches!(p.peek_tok(), Token::RParen) {
+                    break;
+                }
+                p.parse_one_call_arg(&mut args, &mut named_args)?;
+            }
+            Ok((args, named_args))
+        })
     }
 
     fn parse_one_call_arg(
@@ -5658,6 +5823,58 @@ mod tests {
                 ref other => panic!("expected AstType::Slice, got {:?}", other),
             },
             ref other => panic!("expected AstType::RefMut, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn line_start_deref_assign_and_negation_after_brace_do_not_merge_across_newline() {
+        let m1 = parse_ok(
+            "def main() -> i64 {\n    val x: i64 = 41\n    val c = 1 + 1\n    val y = if c == 2 { &mut x } else { &mut x }\n    *y = 7\n    0\n}",
+        );
+        let stmts1 = &m1.functions[0].body.stmts;
+        assert_eq!(stmts1.len(), 4);
+        assert!(matches!(
+            &stmts1[3],
+            AstStmt::Assign { target, .. } if matches!(target.as_ref(), AstExpr::Deref { .. })
+        ));
+
+        let m2 = parse_ok(
+            "def main() -> i64 {\n    val x: i64 = 41\n    val y = &mut x\n    *y = 7\n    0\n}",
+        );
+        let stmts2 = &m2.functions[0].body.stmts;
+        assert_eq!(stmts2.len(), 3);
+        assert!(matches!(
+            &stmts2[2],
+            AstStmt::Assign { target, .. } if matches!(target.as_ref(), AstExpr::Deref { .. })
+        ));
+
+        let m3 =
+            parse_ok("def f(c: bool) -> i64 {\n    val a = if c { 10 } else { 20 }\n    -1\n}");
+        assert_eq!(m3.functions[0].body.stmts.len(), 1);
+        assert!(matches!(
+            m3.functions[0].body.tail.as_deref(),
+            Some(AstExpr::UnaryOp {
+                op: AstUnaryOp::Neg,
+                ..
+            })
+        ));
+
+        // Explicit grouping parens and unambiguous multiline multiplication keep multiplying,
+        // while a block inside parens resets statement scope internally and restores outer group depth.
+        let m4 = parse_ok(
+            "def mul(c: bool, alpha: i64, beta: i64) -> i64 {\n    val p = (\n        if c { 1 } else { 2 }\n        * 3\n    )\n    val q = alpha\n        * beta\n    val r = (\n        {\n            if c { 1 } else { 2 }\n            -1\n        }\n        * 3\n    )\n    p + q + r\n}",
+        );
+        for stmt in &m4.functions[0].body.stmts {
+            match stmt {
+                AstStmt::Let { init, .. } => assert!(matches!(
+                    init.as_ref(),
+                    AstExpr::BinOp {
+                        op: AstBinOp::Mul,
+                        ..
+                    }
+                )),
+                other => panic!("expected AstStmt::Let, got {:?}", other),
+            }
         }
     }
 }

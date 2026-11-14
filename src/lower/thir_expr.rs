@@ -12,7 +12,9 @@ use crate::ir::value::ValueId;
 use crate::parser::ast::{AstBinOp, AstType};
 use crate::parser::lexer::Span;
 
-use super::rebound::{collect_rebound_vars_in_thir_block, find_rebound_vars_thir};
+use super::rebound::{
+    collect_rebound_vars_in_thir_block, find_rebound_vars_thir, unwrap_mut_borrow_target_thir,
+};
 use super::{
     assignable, binop_mismatch_thir, get_qualified_enum_name_thir, hints, is_inferred_return,
     no_such_field, not_indexable, resolve_qualifier, thir_block_migratable, thir_expr_migratable,
@@ -20,11 +22,21 @@ use super::{
 };
 
 impl<'m> Lowerer<'m> {
-    /// Try to lower a THIR expression structurally. Returns `None` when the
-    /// form is not migrated yet (caller falls back to the AST), and `Some`
-    /// with the result or a real error otherwise. Recursion goes through
-    /// `lower_expr`, which re-checks THIR for each child.
+    /// Try to lower a THIR expression structurally, auto-dereferencing `MutRef(T)`
+    /// to `T`. Returns `None` when the form is not migrated yet (caller falls
+    /// back to the AST), and `Some` with the result or a real error otherwise.
     pub(super) fn try_lower_thir_expr(
+        &mut self,
+        e: &crate::thir::ThirExpr,
+    ) -> Option<Result<(ValueId, IrType), LowerError>> {
+        let (val, ty) = match self.try_lower_thir_expr_keep_ref(e)? {
+            Ok(r) => r,
+            Err(err) => return Some(Err(err)),
+        };
+        Some(Ok(self.auto_deref_if_mut_ref(val, ty, e.span)))
+    }
+
+    pub(super) fn try_lower_thir_expr_keep_ref(
         &mut self,
         e: &crate::thir::ThirExpr,
     ) -> Option<Result<(ValueId, IrType), LowerError>> {
@@ -122,9 +134,7 @@ impl<'m> Lowerer<'m> {
                     }
                 }
                 let r = self
-                    .scope
-                    .get(&resolved_name)
-                    .cloned()
+                    .load_scope_var(&resolved_name)
                     .ok_or_else(|| self.unknown_name_thir(name, e.span, None));
                 if r.is_ok() {
                     self.record_read_place(name, e.span);
@@ -642,7 +652,7 @@ impl<'m> Lowerer<'m> {
                 if !thir_block_migratable(b) {
                     return None;
                 }
-                Some(self.lower_thir_block(b))
+                Some(self.lower_thir_block_with_keep_ref(b, true))
             }
             crate::thir::ThirExprKind::If {
                 cond,
@@ -661,28 +671,90 @@ impl<'m> Lowerer<'m> {
                     }
                 }
                 let rebound = find_rebound_vars_thir(then_block, else_block.as_ref())?;
-                Some(self.lower_thir_if_expr(
+                Some(self.lower_thir_if_expr_with_keep_ref(
                     cond,
                     then_block,
                     else_block.as_ref(),
                     rebound,
                     e.span,
+                    true,
                 ))
             }
-            crate::thir::ThirExprKind::Ref(inner) => match self.resolve_thir_place(inner) {
-                Some(Ok((val, ty, slot_proj))) => Some(Ok(
-                    self.emit_borrow_marker(val, ty, false, slot_proj, e.span)
-                )),
-                Some(Err(err)) => Some(Err(err)),
-                None => None,
-            },
-            crate::thir::ThirExprKind::RefMut(inner) => match self.resolve_thir_place(inner) {
-                Some(Ok((val, ty, slot_proj))) => {
-                    Some(Ok(self.emit_borrow_marker(val, ty, true, slot_proj, e.span)))
+            crate::thir::ThirExprKind::Ref(inner) => {
+                if let Some(name) = unwrap_mut_borrow_target_thir(inner) {
+                    let resolved = self.resolve_unqualified_name(name);
+                    if self.cell_vars.contains_key(&resolved) {
+                        let (_, _, slot_proj) = match self.resolve_thir_place(inner)? {
+                            Ok(r) => r,
+                            Err(err) => return Some(Err(err)),
+                        };
+                        let (loaded, elem_ty) = self
+                            .load_scope_var(&resolved)
+                            .expect("checked in cell_vars");
+                        return Some(Ok(
+                            self.emit_borrow_marker(loaded, elem_ty, false, slot_proj, e.span)
+                        ));
+                    }
                 }
-                Some(Err(err)) => Some(Err(err)),
-                None => None,
-            },
+                match self.resolve_thir_place(inner) {
+                    Some(Ok((val, ty, slot_proj))) => Some(Ok(
+                        self.emit_borrow_marker(val, ty, false, slot_proj, e.span)
+                    )),
+                    Some(Err(err)) => Some(Err(err)),
+                    None => None,
+                }
+            }
+            crate::thir::ThirExprKind::RefMut(inner) => {
+                if let Some(name) = unwrap_mut_borrow_target_thir(inner) {
+                    let resolved = self.resolve_unqualified_name(name);
+                    if let Some((cell_val, elem_ty)) = self.cell_vars.get(&resolved).cloned() {
+                        let (_, _, slot_proj) = match self.resolve_thir_place(inner)? {
+                            Ok(r) => r,
+                            Err(err) => return Some(Err(err)),
+                        };
+                        let mut_ref_ty = IrType::MutRef(Box::new(elem_ty));
+                        return Some(Ok(
+                            self.emit_borrow_marker(cell_val, mut_ref_ty, true, slot_proj, e.span)
+                        ));
+                    }
+                }
+                if let crate::thir::ThirExprKind::Deref(ptr_inner) = &inner.kind {
+                    match self.try_lower_thir_expr_keep_ref(ptr_inner) {
+                        Some(Ok((inner_val, inner_ty)))
+                            if matches!(inner_ty, IrType::MutRef(_)) =>
+                        {
+                            return Some(Ok(
+                                self.emit_borrow_marker(inner_val, inner_ty, true, None, e.span)
+                            ));
+                        }
+                        Some(Err(err)) => return Some(Err(err)),
+                        _ => {}
+                    }
+                }
+                match self.resolve_thir_place(inner) {
+                    Some(Ok((val, ty, slot_proj))) => {
+                        if matches!(ty, IrType::Slice { .. } | IrType::MutRef(_)) {
+                            Some(Ok(self.emit_borrow_marker(val, ty, true, slot_proj, e.span)))
+                        } else {
+                            let cell = self.builder.fresh_value();
+                            let mut_ref_ty = IrType::MutRef(Box::new(ty.clone()));
+                            self.builder.push_instr(
+                                IrInstr::CellNew {
+                                    result: cell,
+                                    init: val,
+                                    elem_ty: ty,
+                                },
+                                Some(mut_ref_ty.clone()),
+                            );
+                            Some(Ok(self.emit_borrow_marker(
+                                cell, mut_ref_ty, true, slot_proj, e.span,
+                            )))
+                        }
+                    }
+                    Some(Err(err)) => Some(Err(err)),
+                    None => None,
+                }
+            }
             crate::thir::ThirExprKind::Move(inner) => match self.resolve_thir_place(inner) {
                 Some(Ok((val, ty, slot_proj))) => Some(Ok(self.emit_move_marker(
                     val,
@@ -693,9 +765,17 @@ impl<'m> Lowerer<'m> {
                 Some(Err(err)) => Some(Err(err)),
                 None => None,
             },
-            crate::thir::ThirExprKind::Deref(e)
-            | crate::thir::ThirExprKind::Unsafe(e)
-            | crate::thir::ThirExprKind::Splat(e) => self.try_lower_thir_expr(e),
+            crate::thir::ThirExprKind::Deref(inner) => {
+                match self.try_lower_thir_expr_keep_ref(inner) {
+                    Some(Ok((val, ty))) => {
+                        Some(Ok(self.auto_deref_if_mut_ref(val, ty, inner.span)))
+                    }
+                    other => other,
+                }
+            }
+            crate::thir::ThirExprKind::Unsafe(inner) | crate::thir::ThirExprKind::Splat(inner) => {
+                self.try_lower_thir_expr_keep_ref(inner)
+            }
             crate::thir::ThirExprKind::Array(elems) => {
                 if elems.is_empty() {
                     return Some(Err(LowerError::rich(
@@ -1101,7 +1181,7 @@ impl<'m> Lowerer<'m> {
                 self.try_catch_cont_bb = Some(cont_bb);
                 self.try_catch_param = Some(catch_param.clone());
 
-                let (body_val, body_ty) = match self.try_lower_thir_expr(body) {
+                let (mut body_val, mut body_ty) = match self.try_lower_thir_expr_keep_ref(body) {
                     Some(Ok(r)) => r,
                     Some(Err(err)) => return Some(Err(err)),
                     None => {
@@ -1115,15 +1195,8 @@ impl<'m> Lowerer<'m> {
                         )))
                     }
                 };
-                if !self.builder.is_current_block_terminated() {
-                    self.builder.push_instr(
-                        IrInstr::Br {
-                            target: cont_bb,
-                            args: vec![body_val],
-                        },
-                        None,
-                    );
-                }
+                let body_end_bb = self.builder.current_block();
+                let body_terminated = self.builder.is_current_block_terminated();
 
                 self.builder.set_current_block(catch_bb);
                 let catch_ty = self.try_catch_err_ty.take().unwrap_or(IrType::Str);
@@ -1132,21 +1205,59 @@ impl<'m> Lowerer<'m> {
                         .add_block_param(catch_bb, Some(catch_param), catch_ty.clone());
                 self.scope
                     .insert(catch_param.clone(), (catch_param_val, catch_ty));
-                let (catch_val, _catch_ty) = match self.try_lower_thir_expr(catch_body) {
-                    Some(Ok(r)) => r,
-                    Some(Err(err)) => return Some(Err(err)),
-                    None => {
-                        return Some(Err(LowerError::rich(
-                            "E0902",
-                            crate::diagnostics::Diagnostic::error(
-                                "internal compiler error: unmigratable THIR trycatch catch"
-                                    .to_string(),
-                            )
-                            .with_code("E0902"),
-                        )))
+                let (mut catch_val, mut catch_val_ty) =
+                    match self.try_lower_thir_expr_keep_ref(catch_body) {
+                        Some(Ok(r)) => r,
+                        Some(Err(err)) => return Some(Err(err)),
+                        None => {
+                            return Some(Err(LowerError::rich(
+                                "E0902",
+                                crate::diagnostics::Diagnostic::error(
+                                    "internal compiler error: unmigratable THIR trycatch catch"
+                                        .to_string(),
+                                )
+                                .with_code("E0902"),
+                            )))
+                        }
+                    };
+                let catch_end_bb = self.builder.current_block();
+                let catch_terminated = self.builder.is_current_block_terminated();
+
+                let result_ty = Self::unify_branch_ref_types(
+                    !body_terminated,
+                    &body_ty,
+                    !catch_terminated,
+                    &catch_val_ty,
+                )
+                .unwrap_or_else(|| body_ty.clone());
+                let any_shared_borrow = Self::expr_is_shared_borrow_thir(body)
+                    || Self::expr_is_shared_borrow_thir(catch_body);
+                if !any_shared_borrow {
+                    if !body_terminated {
+                        self.builder.set_current_block(body_end_bb);
+                        (body_val, body_ty) =
+                            self.coerce_branch_mut_ref(body_val, body_ty, &result_ty, e.span);
                     }
-                };
-                if !self.builder.is_current_block_terminated() {
+                    if !catch_terminated {
+                        self.builder.set_current_block(catch_end_bb);
+                        (catch_val, catch_val_ty) =
+                            self.coerce_branch_mut_ref(catch_val, catch_val_ty, &result_ty, e.span);
+                    }
+                }
+                let _ = (body_ty, catch_val_ty);
+
+                if !body_terminated {
+                    self.builder.set_current_block(body_end_bb);
+                    self.builder.push_instr(
+                        IrInstr::Br {
+                            target: cont_bb,
+                            args: vec![body_val],
+                        },
+                        None,
+                    );
+                }
+                if !catch_terminated {
+                    self.builder.set_current_block(catch_end_bb);
                     self.builder.push_instr(
                         IrInstr::Br {
                             target: cont_bb,
@@ -1159,14 +1270,14 @@ impl<'m> Lowerer<'m> {
                 self.builder.set_current_block(cont_bb);
                 let result =
                     self.builder
-                        .add_block_param(cont_bb, Some("try_result"), body_ty.clone());
+                        .add_block_param(cont_bb, Some("try_result"), result_ty.clone());
 
                 self.try_catch_catch_bb = prev_catch;
                 self.try_catch_cont_bb = prev_cont;
                 self.try_catch_param = prev_param;
                 self.try_catch_err_ty = prev_err_ty;
 
-                Some(Ok((result, body_ty)))
+                Some(Ok((result, result_ty)))
             }
             crate::thir::ThirExprKind::NullCoal { expr, default } => {
                 let (val, val_ty) = match self.try_lower_thir_expr(expr) {
@@ -1315,7 +1426,7 @@ impl<'m> Lowerer<'m> {
             } => Some(self.lower_thir_method_call(receiver, method, args, e.span)),
             crate::thir::ThirExprKind::When {
                 scrutinee, arms, ..
-            } => Some(self.lower_thir_when_expr(scrutinee, arms, e.span)),
+            } => Some(self.lower_thir_when_expr_with_keep_ref(scrutinee, arms, e.span, true)),
             crate::thir::ThirExprKind::Call {
                 callee,
                 args,
@@ -1415,6 +1526,22 @@ impl<'m> Lowerer<'m> {
         }
     }
 
+    pub(super) fn lower_thir_expr_keep_ref_req(
+        &mut self,
+        e: &crate::thir::ThirExpr,
+    ) -> Result<(ValueId, IrType), LowerError> {
+        match self.try_lower_thir_expr_keep_ref(e) {
+            Some(r) => r,
+            None => Err(LowerError::rich(
+                "E0902",
+                crate::diagnostics::Diagnostic::error(
+                    "internal compiler error: unmigratable THIR expression".to_string(),
+                )
+                .with_code("E0902"),
+            )),
+        }
+    }
+
     pub(super) fn emit_defers(&mut self) {
         let thir_defers: Vec<_> = self.thir_defer_stack.clone();
         for expr in thir_defers.iter().rev() {
@@ -1426,9 +1553,10 @@ impl<'m> Lowerer<'m> {
         }
     }
 
-    pub(super) fn lower_thir_block_opt(
+    pub(super) fn lower_thir_block_opt_with_keep_ref(
         &mut self,
         b: &crate::thir::ThirBlock,
+        keep_ref: bool,
     ) -> Result<Option<(ValueId, IrType)>, LowerError> {
         for stmt in &b.stmts {
             if self.builder.is_current_block_terminated() {
@@ -1453,7 +1581,12 @@ impl<'m> Lowerer<'m> {
             if self.builder.is_current_block_terminated() {
                 return Ok(None);
             }
-            match self.try_lower_thir_expr(tail) {
+            let lowered = if keep_ref {
+                self.try_lower_thir_expr_keep_ref(tail)
+            } else {
+                self.try_lower_thir_expr(tail)
+            };
+            match lowered {
                 Some(Ok(r)) => return Ok(Some(r)),
                 Some(Err(e)) => return Err(e),
                 None => {
@@ -1474,7 +1607,15 @@ impl<'m> Lowerer<'m> {
         &mut self,
         b: &crate::thir::ThirBlock,
     ) -> Result<(ValueId, IrType), LowerError> {
-        if let Some(v) = self.lower_thir_block_opt(b)? {
+        self.lower_thir_block_with_keep_ref(b, false)
+    }
+
+    pub(super) fn lower_thir_block_with_keep_ref(
+        &mut self,
+        b: &crate::thir::ThirBlock,
+        keep_ref: bool,
+    ) -> Result<(ValueId, IrType), LowerError> {
+        if let Some(v) = self.lower_thir_block_opt_with_keep_ref(b, keep_ref)? {
             Ok(v)
         } else if let Some((param_id, param_ty)) = self.builder.current_block_first_param() {
             Ok((param_id, param_ty))
@@ -1761,30 +1902,36 @@ impl<'m> Lowerer<'m> {
         self.builder.set_span_byte(s.span.start.0);
         match &s.kind {
             crate::thir::ThirStmtKind::Let { name, ty, init, is_var } => {
+                let mut ann_ty: Option<IrType> = None;
                 if let Some(ast_ty) = ty {
                     let ann = match self.resolve_ty(ast_ty) {
                         Ok(a) => a,
                         Err(e) => return Some(Err(e)),
                     };
+                    ann_ty = Some(ann.clone());
                     self.binding_ty = Some(ann.clone());
                     self.expected_expr_ty = Some(ann);
                 }
-                let (mut val, mut tyval) = match self.try_lower_thir_expr(init) {
+                let keep_ref =
+                    ty.is_none() || ann_ty.as_ref().is_some_and(|a| matches!(a, IrType::MutRef(_)));
+                let lowered = if keep_ref {
+                    self.try_lower_thir_expr_keep_ref(init)
+                } else {
+                    self.try_lower_thir_expr(init)
+                };
+                let (mut val, mut tyval) = match lowered {
                     Some(Ok(r)) => r,
                     Some(Err(e)) => return Some(Err(e)),
                     None => return None,
                 };
                 self.binding_ty = None;
                 self.expected_expr_ty = None;
-                if let Some(ast_ty) = ty {
-                    let ann = match self.resolve_ty(ast_ty) {
-                        Ok(a) => a,
-                        Err(e) => return Some(Err(e)),
-                    };
-                    let (nv, nt) = match self.coerce_to_trait_object(val, tyval.clone(), &ann, ast_ty.span()) {
-                        Ok(r) => r,
-                        Err(e) => return Some(Err(e)),
-                    };
+                if let (Some(ast_ty), Some(ann)) = (ty, ann_ty.as_ref()) {
+                    let (nv, nt) =
+                        match self.coerce_to_trait_object(val, tyval.clone(), ann, ast_ty.span()) {
+                            Ok(r) => r,
+                            Err(e) => return Some(Err(e)),
+                        };
                     val = nv;
                     tyval = nt;
                 }
@@ -1810,7 +1957,16 @@ impl<'m> Lowerer<'m> {
                     if self.expected_expr_ty.is_none() {
                         self.expected_expr_ty = self.current_return_ty.clone();
                     }
-                    let (val, ty) = match self.try_lower_thir_expr(expr) {
+                    let keep_ref = self
+                        .current_return_ty
+                        .as_ref()
+                        .is_some_and(|t| matches!(t, IrType::MutRef(_)));
+                    let lowered = if keep_ref {
+                        self.try_lower_thir_expr_keep_ref(expr)
+                    } else {
+                        self.try_lower_thir_expr(expr)
+                    };
+                    let (val, ty) = match lowered {
                         Some(Ok(r)) => r,
                         Some(Err(e)) => return Some(Err(e)),
                         None => return None,
@@ -1837,7 +1993,8 @@ impl<'m> Lowerer<'m> {
             crate::thir::ThirStmtKind::Assign { target, op, value } => {
                 match &target.kind {
                     crate::thir::ThirExprKind::Value { name, .. } => {
-                        if !self.scope.contains_key(name) {
+                        let resolved = self.resolve_unqualified_name(name);
+                        if !self.scope.contains_key(name) && !self.scope.contains_key(&resolved) {
                             if let Some((_, state_ty)) = self.module.state_slot(name) {
                                 let state_ty = state_ty.clone();
                                 let (value_val, value_ty) = if let Some(bin_op) = op {
@@ -1869,8 +2026,53 @@ impl<'m> Lowerer<'m> {
                                 return Some(Ok(()));
                             }
                         }
+                        if let Some((cell, elem_ty)) = self.cell_vars.get(&resolved).cloned() {
+                            let new_val = if let Some(bin_op) = op {
+                                let (lhs_val, lhs_ty) = self
+                                    .load_scope_var(&resolved)
+                                    .expect("checked in cell_vars");
+                                let (rhs_val, _) = match self.try_lower_thir_expr(value) {
+                                    Some(Ok(r)) => r,
+                                    Some(Err(e)) => return Some(Err(e)),
+                                    None => return None,
+                                };
+                                self.compound(*bin_op, lhs_val, &lhs_ty, rhs_val)
+                            } else {
+                                let prev_binding_ty = self.binding_ty.replace(elem_ty.clone());
+                                let lowered =
+                                    self.lower_thir_expr_for_expected_ty(value, Some(&elem_ty));
+                                self.binding_ty = prev_binding_ty;
+                                let (val, val_ty) = match lowered {
+                                    Ok(r) => r,
+                                    Err(e) => return Some(Err(e)),
+                                };
+                                if !assignable(&val_ty, &elem_ty) {
+                                    return Some(Err(LowerError::TypeMismatch {
+                                        expected: elem_ty.to_string(),
+                                        found: val_ty.to_string(),
+                                        span: s.span,
+                                    }));
+                                }
+                                val
+                            };
+                            self.builder.name_value(new_val, name);
+                            self.record_assign_place(name, None, new_val, target.span);
+                            self.builder.push_instr(
+                                IrInstr::CellStore {
+                                    cell,
+                                    value: new_val,
+                                },
+                                None,
+                            );
+                            return Some(Ok(()));
+                        }
                         let new_val = if let Some(bin_op) = op {
-                            let (lhs_val, lhs_ty) = match self.scope.get(name).cloned() {
+                            let (lhs_val, lhs_ty) = match self
+                                .scope
+                                .get(name)
+                                .cloned()
+                                .or_else(|| self.scope.get(&resolved).cloned())
+                            {
                                 Some(r) => r,
                                 None => {
                                     return Some(Err(LowerError::rich(
@@ -1890,16 +2092,23 @@ impl<'m> Lowerer<'m> {
                             };
                             (self.compound(*bin_op, lhs_val, &lhs_ty, rhs_val), lhs_ty)
                         } else {
-                            match self.try_lower_thir_expr(value) {
-                                Some(Ok(r)) => r,
-                                Some(Err(e)) => return Some(Err(e)),
-                                None => return None,
+                            let expected_ty = self
+                                .scope
+                                .get(name)
+                                .or_else(|| self.scope.get(&resolved))
+                                .map(|(_, ty)| ty.clone());
+                            match self.lower_thir_expr_for_expected_ty(value, expected_ty.as_ref()) {
+                                Ok(r) => r,
+                                Err(e) => return Some(Err(e)),
                             }
                         };
                         self.builder.name_value(new_val.0, name);
                         self.record_assign_place(name, None, new_val.0, target.span);
                         self.scope.insert(name.clone(), (new_val.0, new_val.1));
                         Some(Ok(()))
+                    }
+                    crate::thir::ThirExprKind::Deref(ptr_expr) => {
+                        Some(self.lower_thir_deref_assign(ptr_expr, *op, value, s.span))
                     }
                     crate::thir::ThirExprKind::Index { base, indices } => {
                         let (base_val, base_ty) = match self.try_lower_thir_expr(base) {
@@ -1984,104 +2193,20 @@ impl<'m> Lowerer<'m> {
                         Some(Ok(()))
                     }
                     crate::thir::ThirExprKind::Field { base, field, .. } => {
-                        let value_val = if let Some(bin_op) = op {
-                            let (lhs_val, lhs_ty) = match self.try_lower_thir_expr(target) {
-                                Some(Ok(r)) => r,
-                                Some(Err(e)) => return Some(Err(e)),
-                                None => return None,
-                            };
-                            let (rhs_val, _) = match self.try_lower_thir_expr(value) {
-                                Some(Ok(r)) => r,
-                                Some(Err(e)) => return Some(Err(e)),
-                                None => return None,
-                            };
-                            self.compound(*bin_op, lhs_val, &lhs_ty, rhs_val)
-                        } else {
-                            match self.try_lower_thir_expr(value) {
-                                Some(Ok((v, _))) => v,
-                                Some(Err(e)) => return Some(Err(e)),
-                                None => return None,
-                            }
+                        let value_val = match self.try_lower_thir_assign_rhs(*op, target, value) {
+                            Some(Ok(v)) => v,
+                            Some(Err(e)) => return Some(Err(e)),
+                            None => return None,
                         };
                         Some(self.lower_thir_field_assignment(base, field, value_val, target.span))
                     }
                     crate::thir::ThirExprKind::TupleIndex { base, index } => {
-                        if let crate::thir::ThirExprKind::Value { name: base_name, .. } = &base.kind {
-                            let (base_val, base_ty) = match self.try_lower_thir_expr(base) {
-                                Some(Ok(r)) => r,
-                                Some(Err(e)) => return Some(Err(e)),
-                                None => return None,
-                            };
-                            let elem_types = match &base_ty {
-                                IrType::Tuple(elems) => elems.clone(),
-                                _ => {
-                                    return Some(Err(LowerError::rich(
-                                        "E0124",
-                                        crate::diagnostics::Diagnostic::error(format!(
-                                            "`.N` takes an element of a tuple, but this is `{}`",
-                                            hints::type_name(&base_ty)
-                                        ))
-                                        .with_primary_span(target.span.start.0, target.span.end.0, None),
-                                    )));
-                                }
-                            };
-                            if *index >= elem_types.len() {
-                                return Some(Err(LowerError::rich(
-                                    "E0125",
-                                    crate::diagnostics::Diagnostic::error(format!(
-                                        "tuple index {} is out of range: the tuple has {} elements",
-                                        index,
-                                        elem_types.len()
-                                    ))
-                                    .with_primary_span(target.span.start.0, target.span.end.0, None),
-                                )));
-                            }
-                            let (value_val, _) = match self.try_lower_thir_expr(value) {
-                                Some(Ok(r)) => r,
-                                Some(Err(e)) => return Some(Err(e)),
-                                None => return None,
-                            };
-                            let mut new_elements = Vec::with_capacity(elem_types.len());
-                            for (i, elem_ty) in elem_types.iter().enumerate() {
-                                if i == *index {
-                                    new_elements.push(value_val);
-                                } else {
-                                    let f_ty = elem_ty.clone();
-                                    let f_val = self.builder.fresh_value();
-                                    self.builder.push_instr(
-                                        IrInstr::GetElement {
-                                            result: f_val,
-                                            base: base_val,
-                                            index: i,
-                                            result_ty: f_ty.clone(),
-                                        },
-                                        Some(f_ty),
-                                    );
-                                    new_elements.push(f_val);
-                                }
-                            }
-                            let result_ty = base_ty.clone();
-                            let result = self.builder.fresh_value();
-                            self.builder.push_instr(
-                                IrInstr::MakeTuple {
-                                    result,
-                                    elements: new_elements,
-                                    result_ty: result_ty.clone(),
-                                },
-                                Some(result_ty.clone()),
-                            );
-                            self.record_assign_place(base_name, Some(*index), result, target.span);
-                            self.scope.insert(base_name.clone(), (result, result_ty));
-                            Some(Ok(()))
-                        } else {
-                            Some(Err(LowerError::rich(
-                                "E0128",
-                                crate::diagnostics::Diagnostic::error(
-                                    "cannot assign to this tuple element: the tuple must be a variable".to_string(),
-                                )
-                                .with_primary_span(target.span.start.0, target.span.end.0, None),
-                            )))
-                        }
+                        let value_val = match self.try_lower_thir_assign_rhs(*op, target, value) {
+                            Some(Ok(v)) => v,
+                            Some(Err(e)) => return Some(Err(e)),
+                            None => return None,
+                        };
+                        Some(self.lower_thir_tuple_assignment(base, *index, value_val, target.span))
                     }
                     _ => Some(Err(LowerError::rich(
                         "E0128",
@@ -2158,6 +2283,82 @@ impl<'m> Lowerer<'m> {
         }
     }
 
+    pub(super) fn lower_thir_deref_assign(
+        &mut self,
+        ptr_expr: &crate::thir::ThirExpr,
+        op: Option<BinOp>,
+        value: &crate::thir::ThirExpr,
+        span: Span,
+    ) -> Result<(), LowerError> {
+        let (ptr_val, ptr_ty) = self.lower_thir_expr_keep_ref_req(ptr_expr)?;
+        let IrType::MutRef(inner_box) = ptr_ty else {
+            return Err(Self::deref_assign_error(&ptr_ty, span));
+        };
+        let elem_ty = *inner_box;
+        let new_val = if let Some(bin_op) = op {
+            let cur_val = self.builder.fresh_value();
+            self.builder.push_instr(
+                IrInstr::CellLoad {
+                    result: cur_val,
+                    cell: ptr_val,
+                    result_ty: elem_ty.clone(),
+                },
+                Some(elem_ty.clone()),
+            );
+            self.builder.note_value_span(cur_val, span.start.0);
+            let (rhs_val, _) = self.lower_thir_expr_req(value)?;
+            self.compound(bin_op, cur_val, &elem_ty, rhs_val)
+        } else {
+            let prev_binding_ty = self.binding_ty.replace(elem_ty.clone());
+            let lowered = self.lower_thir_expr_for_expected_ty(value, Some(&elem_ty));
+            self.binding_ty = prev_binding_ty;
+            let (val, val_ty) = lowered?;
+            if !assignable(&val_ty, &elem_ty) {
+                return Err(LowerError::TypeMismatch {
+                    expected: elem_ty.to_string(),
+                    found: val_ty.to_string(),
+                    span,
+                });
+            }
+            val
+        };
+        self.builder.push_instr(
+            IrInstr::CellStore {
+                cell: ptr_val,
+                value: new_val,
+            },
+            None,
+        );
+        Ok(())
+    }
+
+    pub(super) fn try_lower_thir_assign_rhs(
+        &mut self,
+        op: Option<crate::ir::instr::BinOp>,
+        target: &crate::thir::ThirExpr,
+        value: &crate::thir::ThirExpr,
+    ) -> Option<Result<ValueId, LowerError>> {
+        if let Some(bin_op) = op {
+            let (lhs_val, lhs_ty) = match self.try_lower_thir_expr(target) {
+                Some(Ok(r)) => r,
+                Some(Err(e)) => return Some(Err(e)),
+                None => return None,
+            };
+            let (rhs_val, _) = match self.try_lower_thir_expr(value) {
+                Some(Ok(r)) => r,
+                Some(Err(e)) => return Some(Err(e)),
+                None => return None,
+            };
+            Some(Ok(self.compound(bin_op, lhs_val, &lhs_ty, rhs_val)))
+        } else {
+            match self.try_lower_thir_expr(value) {
+                Some(Ok((v, _))) => Some(Ok(v)),
+                Some(Err(e)) => Some(Err(e)),
+                None => None,
+            }
+        }
+    }
+
     pub(super) fn lower_thir_field_assignment(
         &mut self,
         base: &crate::thir::ThirExpr,
@@ -2223,6 +2424,98 @@ impl<'m> Lowerer<'m> {
             Some(result_ty.clone()),
         );
 
+        self.store_aggregate_to_thir_base(
+            base,
+            field_index,
+            result,
+            result_ty,
+            span,
+            "cannot assign to this field: it must belong to a variable",
+        )
+    }
+
+    pub(super) fn lower_thir_tuple_assignment(
+        &mut self,
+        base: &crate::thir::ThirExpr,
+        index: usize,
+        value_val: ValueId,
+        span: Span,
+    ) -> Result<(), LowerError> {
+        let (base_val, base_ty) = self.lower_thir_expr_req(base)?;
+        let elem_types = match &base_ty {
+            IrType::Tuple(elems) => elems.clone(),
+            _ => {
+                return Err(LowerError::rich(
+                    "E0124",
+                    crate::diagnostics::Diagnostic::error(format!(
+                        "`.N` takes an element of a tuple, but this is `{}`",
+                        hints::type_name(&base_ty)
+                    ))
+                    .with_primary_span(span.start.0, span.end.0, None),
+                ));
+            }
+        };
+        if index >= elem_types.len() {
+            return Err(LowerError::rich(
+                "E0125",
+                crate::diagnostics::Diagnostic::error(format!(
+                    "tuple index {} is out of range: the tuple has {} elements",
+                    index,
+                    elem_types.len()
+                ))
+                .with_primary_span(span.start.0, span.end.0, None),
+            ));
+        }
+
+        let mut new_elements = Vec::with_capacity(elem_types.len());
+        for (i, elem_ty) in elem_types.iter().enumerate() {
+            if i == index {
+                new_elements.push(value_val);
+            } else {
+                let f_ty = elem_ty.clone();
+                let f_val = self.builder.fresh_value();
+                self.builder.push_instr(
+                    IrInstr::GetElement {
+                        result: f_val,
+                        base: base_val,
+                        index: i,
+                        result_ty: f_ty.clone(),
+                    },
+                    Some(f_ty),
+                );
+                new_elements.push(f_val);
+            }
+        }
+        let result_ty = base_ty.clone();
+        let result = self.builder.fresh_value();
+        self.builder.push_instr(
+            IrInstr::MakeTuple {
+                result,
+                elements: new_elements,
+                result_ty: result_ty.clone(),
+            },
+            Some(result_ty.clone()),
+        );
+
+        self.store_aggregate_to_thir_base(
+            base,
+            index,
+            result,
+            result_ty,
+            span,
+            "cannot assign to this tuple element: the tuple must be a variable",
+        )
+    }
+
+    fn store_aggregate_to_thir_base(
+        &mut self,
+        base: &crate::thir::ThirExpr,
+        place_idx: usize,
+        result: ValueId,
+        result_ty: IrType,
+        span: Span,
+        not_var_msg: &str,
+    ) -> Result<(), LowerError> {
         match &base.kind {
             crate::thir::ThirExprKind::Value { name, .. }
                 if !self.scope.contains_key(name) && self.module.state_slot(name).is_some() =>
@@ -2231,8 +2524,43 @@ impl<'m> Lowerer<'m> {
                 Ok(())
             }
             crate::thir::ThirExprKind::Value { name, .. } => {
-                self.record_assign_place(name, Some(field_index), result, span);
+                let resolved = self.resolve_unqualified_name(name);
+                if let Some((cell, _)) = self.cell_vars.get(&resolved).cloned() {
+                    self.builder.push_instr(
+                        IrInstr::CellStore {
+                            cell,
+                            value: result,
+                        },
+                        None,
+                    );
+                    return Ok(());
+                }
+                if let Some((cell, IrType::MutRef(_))) = self.load_scope_var(&resolved) {
+                    self.builder.push_instr(
+                        IrInstr::CellStore {
+                            cell,
+                            value: result,
+                        },
+                        None,
+                    );
+                    return Ok(());
+                }
+                self.record_assign_place(name, Some(place_idx), result, span);
                 self.scope.insert(name.clone(), (result, result_ty));
+                Ok(())
+            }
+            crate::thir::ThirExprKind::Deref(ptr_expr) => {
+                let (ptr_val, ptr_ty) = self.lower_thir_expr_keep_ref_req(ptr_expr)?;
+                if !matches!(ptr_ty, IrType::MutRef(_)) {
+                    return Err(Self::deref_assign_error(&ptr_ty, span));
+                }
+                self.builder.push_instr(
+                    IrInstr::CellStore {
+                        cell: ptr_val,
+                        value: result,
+                    },
+                    None,
+                );
                 Ok(())
             }
             crate::thir::ThirExprKind::Field {
@@ -2240,13 +2568,17 @@ impl<'m> Lowerer<'m> {
                 field: parent_field,
                 ..
             } => self.lower_thir_field_assignment(parent_base, parent_field, result, base.span),
-            _ => Err(LowerError::rich(
-                "E0128",
-                crate::diagnostics::Diagnostic::error(
-                    "cannot assign to this field: it must belong to a variable".to_string(),
-                )
-                .with_primary_span(span.start.0, span.end.0, None),
-            )),
+            crate::thir::ThirExprKind::TupleIndex {
+                base: parent_base,
+                index: parent_index,
+            } => self.lower_thir_tuple_assignment(parent_base, *parent_index, result, base.span),
+            _ => {
+                Err(LowerError::rich(
+                    "E0128",
+                    crate::diagnostics::Diagnostic::error(not_var_msg.to_string())
+                        .with_primary_span(span.start.0, span.end.0, None),
+                ))
+            }
         }
     }
 
@@ -2282,6 +2614,7 @@ impl<'m> Lowerer<'m> {
         _span: Span,
     ) -> Result<(), LowerError> {
         let outer_scope = self.scope.clone();
+        let outer_cells = self.cell_vars.clone();
         let mut rebound_names: Vec<String> = Vec::new();
         for arm in arms {
             let _ = collect_rebound_vars_in_thir_block(&arm.body, &mut rebound_names, false);
@@ -2289,7 +2622,8 @@ impl<'m> Lowerer<'m> {
         if let Some(d) = default {
             let _ = collect_rebound_vars_in_thir_block(d, &mut rebound_names, false);
         }
-        rebound_names.retain(|name| outer_scope.contains_key(name));
+        rebound_names
+            .retain(|name| outer_scope.contains_key(name) && !outer_cells.contains_key(name));
 
         let loop_bb = self.builder.create_block(Some("select_loop"));
         let merge_bb = self.builder.create_block(Some("select_merge"));
@@ -2375,6 +2709,7 @@ impl<'m> Lowerer<'m> {
 
             self.builder.set_current_block(arm_body_bb);
             self.scope = outer_scope.clone();
+            self.cell_vars = outer_cells.clone();
             let (channel, channel_ty) = &channels[i];
             let elem_ty = match self.chan_elem_types.get(channel) {
                 Some(ty) => ty.clone(),
@@ -2424,6 +2759,7 @@ impl<'m> Lowerer<'m> {
 
         self.builder.set_current_block(next_check_bb);
         self.scope = outer_scope.clone();
+        self.cell_vars = outer_cells.clone();
         if let Some(default_block) = default {
             self.lower_thir_block_stmts(default_block)?;
             if !self.builder.is_current_block_terminated() {
@@ -2473,6 +2809,7 @@ impl<'m> Lowerer<'m> {
         }
 
         self.scope = outer_scope;
+        self.cell_vars = outer_cells;
         for (name, param, ty) in rebound_params {
             self.scope.insert(name, (param, ty));
         }
@@ -2620,12 +2957,19 @@ impl<'m> Lowerer<'m> {
         self.lambda_counter.set(counter + 1);
         let fn_name = format!("__spawn_{}", counter);
 
-        let mut captures: Vec<(String, ValueId, IrType)> = self
-            .scope
-            .iter()
-            .map(|(name, (vid, ty))| (name.clone(), *vid, ty.clone()))
-            .collect();
-        captures.sort_by(|a, b| a.0.cmp(&b.0));
+        let mut capture_names: Vec<String> = self.scope.keys().cloned().collect();
+        capture_names.sort();
+        let mut captures: Vec<(String, ValueId, IrType)> = Vec::new();
+        let mut capture_scope_ids: Vec<(ValueId, ValueId)> = Vec::new();
+        for name in &capture_names {
+            let Some(orig_vid) = self.scope.get(name).map(|(v, _)| *v) else {
+                continue;
+            };
+            if let Some((loaded_vid, ty)) = self.load_scope_var(name) {
+                captures.push((name.clone(), loaded_vid, ty));
+                capture_scope_ids.push((orig_vid, loaded_vid));
+            }
+        }
 
         let lifted_params: Vec<crate::ir::function::Param> = captures
             .iter()
@@ -2641,14 +2985,18 @@ impl<'m> Lowerer<'m> {
         let entry = spawn_lowerer.builder.create_block(Some("entry"));
         spawn_lowerer.builder.set_current_block(entry);
         let mut capture_val_map: Vec<(ValueId, ValueId)> = Vec::new();
-        for (name, outer_val, ty) in &captures {
+        for ((name, outer_val, ty), (orig_vid, _)) in captures.iter().zip(capture_scope_ids.iter())
+        {
             let inner_val = spawn_lowerer
                 .builder
                 .add_block_param(entry, Some(name), ty.clone());
             spawn_lowerer
                 .scope
                 .insert(name.clone(), (inner_val, ty.clone()));
-            capture_val_map.push((*outer_val, inner_val));
+            capture_val_map.push((*orig_vid, inner_val));
+            if *outer_val != *orig_vid {
+                capture_val_map.push((*outer_val, inner_val));
+            }
         }
         for (outer_val, inner_val) in &capture_val_map {
             if let Some(elem_ty) = self.chan_elem_types.get(outer_val) {
@@ -2779,17 +3127,28 @@ impl<'m> Lowerer<'m> {
         let param_names: std::collections::HashSet<String> =
             ast_params.iter().map(|p| p.name.name.clone()).collect();
 
-        let mut captures: Vec<(String, ValueId, IrType)> = self
+        let mut captures: Vec<(String, ValueId, IrType, Option<IrType>)> = self
             .scope
             .iter()
             .filter(|(name, _)| !param_names.contains(*name) && thir_expr_uses_name(body, name))
-            .map(|(name, (vid, ty))| (name.clone(), *vid, ty.clone()))
+            .map(|(name, (vid, ty))| {
+                if let Some((cell_vid, elem_ty)) = self.cell_vars.get(name) {
+                    (
+                        name.clone(),
+                        *cell_vid,
+                        IrType::MutRef(Box::new(elem_ty.clone())),
+                        Some(elem_ty.clone()),
+                    )
+                } else {
+                    (name.clone(), *vid, ty.clone(), None)
+                }
+            })
             .collect();
         captures.sort_by(|a, b| a.0.cmp(&b.0));
 
         let mut lifted_params: Vec<Param> = captures
             .iter()
-            .map(|(name, _, ty)| Param {
+            .map(|(name, _, ty, _)| Param {
                 name: name.clone(),
                 ty: ty.clone(),
             })
@@ -2804,22 +3163,32 @@ impl<'m> Lowerer<'m> {
         let temp_builder =
             IrFunctionBuilder::new_return_decided_by_body(&fn_name, lifted_params.clone());
         let mut lambda_lowerer = self.new_sub_lowerer(temp_builder);
+        lambda_lowerer.mut_borrowed_vars = super::find_mut_borrowed_vars_thir_expr(body);
 
         let entry = lambda_lowerer.builder.create_block(Some("entry"));
         lambda_lowerer.builder.set_current_block(entry);
 
-        for (name, _, ty) in &captures {
+        for (name, _, ty, cell_elem_ty) in &captures {
             let val = lambda_lowerer
                 .builder
                 .add_block_param(entry, Some(name), ty.clone());
-            lambda_lowerer.scope.insert(name.clone(), (val, ty.clone()));
+            if let Some(elem_ty) = cell_elem_ty {
+                lambda_lowerer
+                    .cell_vars
+                    .insert(name.clone(), (val, elem_ty.clone()));
+                lambda_lowerer
+                    .scope
+                    .insert(name.clone(), (val, elem_ty.clone()));
+            } else {
+                lambda_lowerer.scope.insert(name.clone(), (val, ty.clone()));
+            }
         }
         for p in &ast_params {
             let ty = self.resolve_ty(&p.ty)?;
             let val = lambda_lowerer
                 .builder
                 .add_block_param(entry, Some(&p.name.name), ty.clone());
-            lambda_lowerer.scope.insert(p.name.name.clone(), (val, ty));
+            lambda_lowerer.bind_scope_var(p.name.name.clone(), val, ty);
         }
 
         let (ret_val, ret_ty) = match lambda_lowerer.try_lower_thir_expr(body) {
@@ -2847,7 +3216,7 @@ impl<'m> Lowerer<'m> {
         ir_func.capture_count = captures.len();
         self.lifted_fns.borrow_mut().push(ir_func);
 
-        let capture_vals: Vec<ValueId> = captures.iter().map(|(_, v, _)| *v).collect();
+        let capture_vals: Vec<ValueId> = captures.iter().map(|(_, v, _, _)| *v).collect();
         let closure_ty = IrType::Fn {
             params: lifted_params.iter().map(|p| p.ty.clone()).collect(),
             ret: Box::new(ret_ty),
@@ -2866,13 +3235,14 @@ impl<'m> Lowerer<'m> {
         Ok((result, closure_ty))
     }
 
-    pub(super) fn lower_thir_if_expr(
+    pub(super) fn lower_thir_if_expr_with_keep_ref(
         &mut self,
         cond: &crate::thir::ThirExpr,
         then_blk: &crate::thir::ThirBlock,
         else_blk: Option<&crate::thir::ThirBlock>,
         rebound_names: Vec<String>,
         span: Span,
+        keep_ref: bool,
     ) -> Result<(ValueId, IrType), LowerError> {
         let (cond_val, _) = match self.try_lower_thir_expr(cond) {
             Some(Ok(r)) => r,
@@ -2890,8 +3260,10 @@ impl<'m> Lowerer<'m> {
         let expected_ty = self.expected_expr_ty.take();
         let outer_scope = self.scope.clone();
         let outer_slots = self.scope_slots.clone();
+        let outer_cells = self.cell_vars.clone();
         let mut rebound_names = rebound_names;
-        rebound_names.retain(|name| outer_scope.contains_key(name));
+        rebound_names
+            .retain(|name| outer_scope.contains_key(name) && !outer_cells.contains_key(name));
 
         if let Some(else_blk) = else_blk {
             let unit_ty = IrType::Scalar(DType::I64);
@@ -2920,19 +3292,78 @@ impl<'m> Lowerer<'m> {
                 None,
             );
 
-            let mut then_br_block: Option<BlockId> = None;
-            let mut else_br_block: Option<BlockId> = None;
-
             self.builder.set_current_block(then_bb);
             self.scope = outer_scope.clone();
             self.scope_slots = outer_slots.clone();
-            let mut then_result = self.lower_thir_block_opt(then_blk)?;
-            if let (Some(ref expected), Some((tv, ref tt))) = (&expected_ty, &then_result) {
-                let (cv, ct) = self.coerce_to_trait_object(*tv, tt.clone(), expected, span)?;
+            self.cell_vars = outer_cells.clone();
+            let mut then_result = self.lower_thir_block_opt_with_keep_ref(then_blk, keep_ref)?;
+            if let (Some(ref expected), Some((tv, tt))) = (&expected_ty, then_result.clone()) {
+                let (tv, tt) = self.coerce_branch_mut_ref(tv, tt, expected, span);
+                let (cv, ct) = self.coerce_to_trait_object(tv, tt, expected, span)?;
                 then_result = Some((cv, ct));
             }
             let then_scope = self.scope.clone();
-            if !self.builder.is_current_block_terminated() {
+            let then_end_bb = self.builder.current_block();
+            let then_terminated = self.builder.is_current_block_terminated();
+            self.scope = outer_scope.clone();
+            self.scope_slots = outer_slots.clone();
+            self.cell_vars = outer_cells.clone();
+
+            self.builder.set_current_block(else_bb);
+            self.scope = outer_scope.clone();
+            self.scope_slots = outer_slots.clone();
+            self.cell_vars = outer_cells.clone();
+            let mut else_result = self.lower_thir_block_opt_with_keep_ref(else_blk, keep_ref)?;
+            if let (Some(ref expected), Some((ev, et))) = (&expected_ty, else_result.clone()) {
+                let (ev, et) = self.coerce_branch_mut_ref(ev, et, expected, span);
+                let (cv, ct) = self.coerce_to_trait_object(ev, et, expected, span)?;
+                else_result = Some((cv, ct));
+            }
+            let else_scope = self.scope.clone();
+            let else_end_bb = self.builder.current_block();
+            let else_terminated = self.builder.is_current_block_terminated();
+            self.scope = outer_scope.clone();
+            self.scope_slots = outer_slots.clone();
+            self.cell_vars = outer_cells.clone();
+
+            let then_eff_ty = then_result
+                .as_ref()
+                .map(|(_, ty)| ty.clone())
+                .unwrap_or_else(|| unit_ty.clone());
+            let else_eff_ty = else_result
+                .as_ref()
+                .map(|(_, ty)| ty.clone())
+                .unwrap_or_else(|| unit_ty.clone());
+            let result_ty = Self::unify_branch_ref_types(
+                !then_terminated,
+                &then_eff_ty,
+                !else_terminated,
+                &else_eff_ty,
+            )
+            .unwrap_or_else(|| unit_ty.clone());
+
+            let any_shared_borrow = Self::block_tail_is_shared_borrow_thir(then_blk)
+                || Self::block_tail_is_shared_borrow_thir(else_blk);
+            if !any_shared_borrow {
+                if !then_terminated {
+                    if let Some((tv, tt)) = then_result.take() {
+                        self.builder.set_current_block(then_end_bb);
+                        then_result = Some(self.coerce_branch_mut_ref(tv, tt, &result_ty, span));
+                    }
+                }
+                if !else_terminated {
+                    if let Some((ev, et)) = else_result.take() {
+                        self.builder.set_current_block(else_end_bb);
+                        else_result = Some(self.coerce_branch_mut_ref(ev, et, &result_ty, span));
+                    }
+                }
+            }
+
+            let mut then_br_block: Option<BlockId> = None;
+            let mut else_br_block: Option<BlockId> = None;
+
+            if !then_terminated {
+                self.builder.set_current_block(then_end_bb);
                 let mut then_args = vec![then_result
                     .as_ref()
                     .map(|(then_val, _)| *then_val)
@@ -2945,7 +3376,7 @@ impl<'m> Lowerer<'m> {
                         .expect("rebound variable missing from then-scope");
                     then_args.push(rebound_val);
                 }
-                then_br_block = Some(self.builder.current_block());
+                then_br_block = Some(then_end_bb);
                 self.builder.push_instr(
                     IrInstr::Br {
                         target: merge_bb,
@@ -2954,19 +3385,9 @@ impl<'m> Lowerer<'m> {
                     None,
                 );
             }
-            self.scope = outer_scope.clone();
-            self.scope_slots = outer_slots.clone();
 
-            self.builder.set_current_block(else_bb);
-            self.scope = outer_scope.clone();
-            self.scope_slots = outer_slots.clone();
-            let mut else_result = self.lower_thir_block_opt(else_blk)?;
-            if let (Some(ref expected), Some((ev, ref et))) = (&expected_ty, &else_result) {
-                let (cv, ct) = self.coerce_to_trait_object(*ev, et.clone(), expected, span)?;
-                else_result = Some((cv, ct));
-            }
-            let else_scope = self.scope.clone();
-            if !self.builder.is_current_block_terminated() {
+            if !else_terminated {
+                self.builder.set_current_block(else_end_bb);
                 let mut else_args = vec![else_result
                     .as_ref()
                     .map(|(else_val, _)| *else_val)
@@ -2979,7 +3400,7 @@ impl<'m> Lowerer<'m> {
                         .expect("rebound variable missing from else-scope");
                     else_args.push(rebound_val);
                 }
-                else_br_block = Some(self.builder.current_block());
+                else_br_block = Some(else_end_bb);
                 self.builder.push_instr(
                     IrInstr::Br {
                         target: merge_bb,
@@ -2988,14 +3409,6 @@ impl<'m> Lowerer<'m> {
                     None,
                 );
             }
-            self.scope = outer_scope.clone();
-            self.scope_slots = outer_slots.clone();
-
-            let result_ty = match (&then_result, &else_result) {
-                (Some((_, ty)), _) => ty.clone(),
-                (_, Some((_, ty))) => ty.clone(),
-                (None, None) => unit_ty,
-            };
 
             let result =
                 self.builder
@@ -3031,6 +3444,7 @@ impl<'m> Lowerer<'m> {
             }
 
             self.builder.set_current_block(merge_bb);
+            self.cell_vars = outer_cells;
             for (name, param, ty) in rebound_params {
                 if let Some(&slot) = self.scope_slots.get(&name) {
                     self.builder.map_value_slot_if_unset(param, slot);
@@ -3073,6 +3487,7 @@ impl<'m> Lowerer<'m> {
             self.builder.set_current_block(then_bb);
             self.scope = outer_scope.clone();
             self.scope_slots = outer_slots.clone();
+            self.cell_vars = outer_cells.clone();
             let _then_result = self.lower_thir_block(then_blk)?;
             let then_scope = self.scope.clone();
             if !self.builder.is_current_block_terminated() {
@@ -3095,6 +3510,7 @@ impl<'m> Lowerer<'m> {
             }
             self.scope = outer_scope.clone();
             self.scope_slots = outer_slots.clone();
+            self.cell_vars = outer_cells;
 
             let merge_param =
                 self.builder

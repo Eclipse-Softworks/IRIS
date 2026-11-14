@@ -249,8 +249,13 @@ impl<'m> Lowerer<'m> {
         if let Some(generic_fn) = self.generic_fns.get(&callee_name).cloned() {
             let mut arg_vals = Vec::with_capacity(args.len());
             let mut arg_tys = Vec::with_capacity(args.len());
-            for arg in args {
-                let (v, ty) = self.lower_thir_expr_req(arg)?;
+            for (i, arg) in args.iter().enumerate() {
+                let expected = generic_fn
+                    .params
+                    .get(i)
+                    .filter(|p| matches!(p.ty, crate::parser::ast::AstType::RefMut(_, _)))
+                    .map(|_| IrType::MutRef(Box::new(IrType::Infer)));
+                let (v, ty) = self.lower_thir_expr_for_expected_ty(arg, expected.as_ref())?;
                 arg_vals.push(v);
                 arg_tys.push(ty);
             }
@@ -355,9 +360,14 @@ impl<'m> Lowerer<'m> {
                 {
                     let mangled = mangled.clone();
                     let ret_ty = self.sig_of(&mangled, span)?;
+                    let param_tys = self.fn_param_types.get(&mangled).cloned();
                     let mut arg_vals = vec![first_val];
-                    for arg in &args[1..] {
-                        let (v, _) = self.lower_thir_expr_req(arg)?;
+                    for (i, arg) in args[1..].iter().enumerate() {
+                        let expected = param_tys
+                            .as_ref()
+                            .and_then(|pts| pts.get(i + 1))
+                            .filter(|t| matches!(t, IrType::MutRef(_)));
+                        let (v, _) = self.lower_thir_expr_for_expected_ty(arg, expected)?;
                         arg_vals.push(v);
                     }
                     let result = self.builder.fresh_value();
@@ -564,17 +574,16 @@ impl<'m> Lowerer<'m> {
                         arg_vals.push(elem_val);
                     }
                 } else {
-                    let (v, vty) = self.lower_thir_expr_req(arg)?;
                     let slot = arg_vals.len();
-                    if let Some(param_ty) = callee_param_tys.as_ref().and_then(|ts| ts.get(slot)) {
+                    let expected_param = callee_param_tys.as_ref().and_then(|ts| ts.get(slot));
+                    let (v, vty) = self.lower_thir_expr_for_expected_ty(arg, expected_param)?;
+                    if let Some(param_ty) = expected_param {
                         if hints::incompatible(&vty, param_ty) {
                             return Err(self
                                 .argument_type_error_span(callee, slot, arg.span, &vty, param_ty));
                         }
                     }
-                    let expected = callee_param_tys
-                        .as_ref()
-                        .and_then(|ts| ts.get(slot))
+                    let expected = expected_param
                         .filter(|t| matches!(t, IrType::TraitObject { .. }))
                         .cloned();
                     let v = match expected {
@@ -585,8 +594,15 @@ impl<'m> Lowerer<'m> {
                 }
             }
             if let Some(ref defs) = defaults {
-                for default_expr in defs.iter().skip(arg_vals.len()).flatten() {
-                    let (v, _) = self.lower_expr(default_expr)?;
+                let start_idx = arg_vals.len();
+                for (offset, default_expr) in defs.iter().skip(start_idx).enumerate() {
+                    let Some(default_expr) = default_expr else {
+                        continue;
+                    };
+                    let expected = callee_param_tys
+                        .as_ref()
+                        .and_then(|ts| ts.get(start_idx + offset));
+                    let (v, _) = self.lower_expr_for_expected_ty(default_expr, expected)?;
                     arg_vals.push(v);
                 }
             }
@@ -638,11 +654,13 @@ impl<'m> Lowerer<'m> {
         }
 
         // 8. Closure call from local scope
-        if let Some((closure_val, closure_ty)) = self.scope.get(&callee_name).cloned() {
-            if let IrType::Fn { ret, .. } = &closure_ty {
+        if let Some((closure_val, closure_ty)) = self.load_scope_var(&callee_name) {
+            if let IrType::Fn { params, ret } = &closure_ty {
+                let offset = params.len().saturating_sub(args.len());
                 let mut arg_vals = Vec::with_capacity(args.len());
-                for a in args {
-                    let (v, _) = self.lower_thir_expr_req(a)?;
+                for (i, a) in args.iter().enumerate() {
+                    let expected = params.get(offset + i);
+                    let (v, _) = self.lower_thir_expr_for_expected_ty(a, expected)?;
                     arg_vals.push(v);
                 }
                 let result = self.builder.fresh_value();
@@ -1749,10 +1767,12 @@ impl<'m> Lowerer<'m> {
                 };
                 if let Some((_, fname)) = chosen {
                     let fname = fname.clone();
+                    let param_tys = self.fn_param_types.get(&fname).cloned();
                     let mut arg_vals = Vec::with_capacity(args.len() + 1);
                     arg_vals.push(base_val);
-                    for arg in args {
-                        let (v, _) = self.lower_thir_expr_req(arg)?;
+                    for (i, arg) in args.iter().enumerate() {
+                        let expected = param_tys.as_ref().and_then(|t| t.get(i + 1));
+                        let (v, _) = self.lower_thir_expr_for_expected_ty(arg, expected)?;
                         arg_vals.push(v);
                     }
                     let ret_ty = self.sig_of(&fname, span)?;
@@ -1774,10 +1794,19 @@ impl<'m> Lowerer<'m> {
         let type_name = match &base_ty {
             IrType::Struct { name, .. } => name.clone(),
             IrType::TypeParam(tp_name) => {
+                let param_tys = self
+                    .trait_dispatch
+                    .get(method)
+                    .and_then(|cands| cands.first())
+                    .and_then(|(_, fname)| self.fn_param_types.get(fname).cloned());
                 let mut arg_vals = Vec::with_capacity(args.len() + 1);
                 arg_vals.push(base_val);
-                for arg in args {
-                    let (v, _) = self.lower_thir_expr_req(arg)?;
+                for (i, arg) in args.iter().enumerate() {
+                    let expected = param_tys
+                        .as_ref()
+                        .and_then(|pts| pts.get(i + 1))
+                        .filter(|t| matches!(t, IrType::MutRef(_)));
+                    let (v, _) = self.lower_thir_expr_for_expected_ty(arg, expected)?;
                     arg_vals.push(v);
                 }
                 let ret_ty = self
@@ -1807,7 +1836,10 @@ impl<'m> Lowerer<'m> {
         if !self.fn_sigs.contains_key(&struct_mangled) {
             if let Some(fields) = self.module.struct_def(&type_name) {
                 if let Some((_, field_ty)) = fields.iter().find(|(name, _)| name == method) {
-                    if let IrType::Fn { params: _, ret } = field_ty {
+                    if let IrType::Fn { params, ret } = field_ty {
+                        let params = params.clone();
+                        let ret = ret.clone();
+                        let offset = params.len().saturating_sub(args.len());
                         let field_val = self.builder.fresh_value();
                         self.builder.push_instr(
                             IrInstr::GetField {
@@ -1819,11 +1851,12 @@ impl<'m> Lowerer<'m> {
                             Some(field_ty.clone()),
                         );
                         let mut arg_vals = Vec::with_capacity(args.len());
-                        for arg in args {
-                            let (v, _) = self.lower_thir_expr_req(arg)?;
+                        for (i, arg) in args.iter().enumerate() {
+                            let expected = params.get(offset + i);
+                            let (v, _) = self.lower_thir_expr_for_expected_ty(arg, expected)?;
                             arg_vals.push(v);
                         }
-                        let ret_ty = *ret.clone();
+                        let ret_ty = *ret;
                         let result = self.builder.fresh_value();
                         self.builder.push_instr(
                             IrInstr::CallClosure {
@@ -1867,9 +1900,14 @@ impl<'m> Lowerer<'m> {
 
         let ret_ty = self.sig_of(&mangled, span)?;
 
+        let param_tys = self.fn_param_types.get(&mangled).cloned();
         let mut arg_vals = vec![base_val];
-        for arg in args {
-            let (v, _) = self.lower_thir_expr_req(arg)?;
+        for (i, arg) in args.iter().enumerate() {
+            let expected = param_tys
+                .as_ref()
+                .and_then(|pts| pts.get(i + 1))
+                .filter(|t| matches!(t, IrType::MutRef(_)));
+            let (v, _) = self.lower_thir_expr_for_expected_ty(arg, expected)?;
             arg_vals.push(v);
         }
 
@@ -2870,11 +2908,13 @@ impl<'m> Lowerer<'m> {
         }
 
         // Check if the callee is a closure variable in scope.
-        if let Some((closure_val, IrType::Fn { ret, .. })) = self.scope.get(&callee_name).cloned() {
+        if let Some((closure_val, IrType::Fn { params, ret })) = self.load_scope_var(&callee_name) {
             let ret_ty = *ret;
+            let offset = params.len().saturating_sub(args.len());
             let mut arg_vals = Vec::with_capacity(args.len());
-            for arg in args {
-                let (v, _) = self.lower_expr(arg)?;
+            for (i, arg) in args.iter().enumerate() {
+                let expected = params.get(offset + i);
+                let (v, _) = self.lower_expr_for_expected_ty(arg, expected)?;
                 arg_vals.push(v);
             }
             let result = self.builder.fresh_value();
@@ -5627,8 +5667,13 @@ impl<'m> Lowerer<'m> {
             // Lower each argument and collect concrete types.
             let mut arg_vals = Vec::with_capacity(args.len());
             let mut arg_tys = Vec::with_capacity(args.len());
-            for arg in args {
-                let (v, ty) = self.lower_expr(arg)?;
+            for (i, arg) in args.iter().enumerate() {
+                let expected = generic_fn
+                    .params
+                    .get(i)
+                    .filter(|p| matches!(p.ty, crate::parser::ast::AstType::RefMut(_, _)))
+                    .map(|_| IrType::MutRef(Box::new(IrType::Infer)));
+                let (v, ty) = self.lower_expr_for_expected_ty(arg, expected.as_ref())?;
                 arg_vals.push(v);
                 arg_tys.push(ty);
             }
@@ -5749,9 +5794,11 @@ impl<'m> Lowerer<'m> {
                 {
                     let mangled = mangled.clone();
                     let ret_ty = self.sig_of(&mangled, span)?;
+                    let param_tys = self.fn_param_types.get(&mangled).cloned();
                     let mut arg_vals = vec![first_val];
-                    for arg in &args[1..] {
-                        let (v, _) = self.lower_expr(arg)?;
+                    for (i, arg) in args[1..].iter().enumerate() {
+                        let expected = param_tys.as_ref().and_then(|t| t.get(i + 1));
+                        let (v, _) = self.lower_expr_for_expected_ty(arg, expected)?;
                         arg_vals.push(v);
                     }
                     let result = self.builder.fresh_value();
@@ -5912,9 +5959,10 @@ impl<'m> Lowerer<'m> {
                     arg_vals.push(elem_val);
                 }
             } else {
-                let (v, vty) = self.lower_expr(arg)?;
                 let slot = arg_vals.len();
-                if let Some(param_ty) = callee_param_tys.as_ref().and_then(|ts| ts.get(slot)) {
+                let expected_param = callee_param_tys.as_ref().and_then(|ts| ts.get(slot));
+                let (v, vty) = self.lower_expr_for_expected_ty(arg, expected_param)?;
+                if let Some(param_ty) = expected_param {
                     if hints::incompatible(&vty, param_ty) {
                         return Err(self.argument_type_error(
                             &callee.name,
@@ -5925,9 +5973,7 @@ impl<'m> Lowerer<'m> {
                         ));
                     }
                 }
-                let expected = callee_param_tys
-                    .as_ref()
-                    .and_then(|ts| ts.get(slot))
+                let expected = expected_param
                     .filter(|t| matches!(t, IrType::TraitObject { .. }))
                     .cloned();
                 let v = match expected {
@@ -5938,8 +5984,15 @@ impl<'m> Lowerer<'m> {
             }
         }
         if let Some(ref defs) = defaults {
-            for default_expr in defs.iter().skip(arg_vals.len()).flatten() {
-                let (v, _) = self.lower_expr(default_expr)?;
+            let start_idx = arg_vals.len();
+            for (offset, default_expr) in defs.iter().skip(start_idx).enumerate() {
+                let Some(default_expr) = default_expr else {
+                    continue;
+                };
+                let expected = callee_param_tys
+                    .as_ref()
+                    .and_then(|ts| ts.get(start_idx + offset));
+                let (v, _) = self.lower_expr_for_expected_ty(default_expr, expected)?;
                 arg_vals.push(v);
             }
         }

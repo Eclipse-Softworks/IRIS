@@ -741,7 +741,7 @@ pub fn cmd_init() -> Result<(), String> {
         fs::write(
             &main_path,
             format!(
-                "// {} — entry point\n\ndef main() -> i64 {{\n    print(\"Hello from {}!\");\n    0\n}}\n",
+                "// {} — entry point\n\ndef main() -> i64 {{\n    print(\"Hello from {}!\");\n    return 0\n}}\n",
                 dir_name, dir_name
             ),
         )

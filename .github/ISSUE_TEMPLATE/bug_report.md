@@ -16,7 +16,7 @@ A clear and concise description of the bug.
 ```iris
 def main() -> i64 {
     // minimal reproduction code
-    0
+    return 0
 }
 ```
 2. Run: `iris run example.iris`

@@ -161,6 +161,9 @@ const OP_MOVE: u8 = 0x80;
 const OP_ENTER_SCOPE: u8 = 0x81;
 const OP_EXIT_SCOPE: u8 = 0x82;
 const OP_DROP: u8 = 0x83;
+const OP_CELL_NEW: u8 = 0x84;
+const OP_CELL_LOAD: u8 = 0x85;
+const OP_CELL_STORE: u8 = 0x86;
 
 const MAGIC: &[u8; 4] = b"IRIS";
 const VERSION: u8 = 1;
@@ -382,6 +385,10 @@ impl Writer {
             IrType::ConstInt(n) => {
                 self.u8(0x18);
                 self.u64(*n as u64);
+            }
+            IrType::MutRef(inner) => {
+                self.u8(0x19);
+                self.ty(inner);
             }
             IrType::TypeParam(_) | IrType::HktApp { .. } => self.u8(0x00),
         }
@@ -803,6 +810,31 @@ impl Writer {
                 self.vid(*value);
                 self.str(drop_fn);
                 self.ty(ty);
+            }
+            IrInstr::CellNew {
+                result,
+                init,
+                elem_ty,
+            } => {
+                self.u8(OP_CELL_NEW);
+                self.vid(*result);
+                self.vid(*init);
+                self.ty(elem_ty);
+            }
+            IrInstr::CellLoad {
+                result,
+                cell,
+                result_ty,
+            } => {
+                self.u8(OP_CELL_LOAD);
+                self.vid(*result);
+                self.vid(*cell);
+                self.ty(result_ty);
+            }
+            IrInstr::CellStore { cell, value } => {
+                self.u8(OP_CELL_STORE);
+                self.vid(*cell);
+                self.vid(*value);
             }
             IrInstr::MakeSome {
                 result,
@@ -1825,6 +1857,7 @@ impl<'a> Reader<'a> {
                 }
             }
             0x18 => IrType::ConstInt(self.u64()? as i64),
+            0x19 => IrType::MutRef(Box::new(self.ty()?)),
             t => return Err(format!("unknown type tag 0x{:02x}", t)),
         })
     }
@@ -2211,6 +2244,31 @@ impl<'a> Reader<'a> {
                 let drop_fn = self.str()?;
                 let ty = self.ty()?;
                 IrInstr::Drop { value, drop_fn, ty }
+            }
+            OP_CELL_NEW => {
+                let result = self.vid()?;
+                let init = self.vid()?;
+                let elem_ty = self.ty()?;
+                IrInstr::CellNew {
+                    result,
+                    init,
+                    elem_ty,
+                }
+            }
+            OP_CELL_LOAD => {
+                let result = self.vid()?;
+                let cell = self.vid()?;
+                let result_ty = self.ty()?;
+                IrInstr::CellLoad {
+                    result,
+                    cell,
+                    result_ty,
+                }
+            }
+            OP_CELL_STORE => {
+                let cell = self.vid()?;
+                let value = self.vid()?;
+                IrInstr::CellStore { cell, value }
             }
             OP_MAKE_SOME => {
                 let result = self.vid()?;

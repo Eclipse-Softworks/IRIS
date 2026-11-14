@@ -215,8 +215,8 @@ with this book. If not, see \url{https://www.gnu.org/licenses/}.
   \item
     \hyperref[31-defining-functions]{3.1 Defining Functions}
   \item
-    \hyperref[32-tail-expressions-no-return-needed]{3.2 Tail Expressions
-    (No \texttt{return} Needed)}
+    \hyperref[32-explicit-return-statements]{3.2 Explicit \texttt{return}
+    Statements}
   \item
     \hyperref[33-early-return]{3.3 Early Return}
   \item
@@ -991,7 +991,7 @@ Create a file named \texttt{hello.iris}:
 \begin{Highlighting}[]
 \KeywordTok{def}\NormalTok{ main() }\OperatorTok{{-}\textgreater{}} \DataTypeTok{i64}\NormalTok{ \{}
     \FunctionTok{print}\NormalTok{(}\StringTok{"Hello, World!"}\NormalTok{);}
-    \DecValTok{0}
+    \ControlFlowTok{return} \DecValTok{0}
 \NormalTok{\}}
 \end{Highlighting}
 \end{Shaded}
@@ -1253,7 +1253,7 @@ mutable one:
     \KeywordTok{val}\NormalTok{ x }\OperatorTok{=} \DecValTok{10}         \CommentTok{// immutable — cannot reassign}
     \KeywordTok{var}\NormalTok{ y }\OperatorTok{=} \DecValTok{20}         \CommentTok{// mutable — can be reassigned}
 \NormalTok{    y }\OperatorTok{=}\NormalTok{ y }\OperatorTok{+} \DecValTok{5}          \CommentTok{// ok: y is now 25}
-\NormalTok{    x }\OperatorTok{+}\NormalTok{ y              }\CommentTok{// returns 35}
+\NormalTok{    }\ControlFlowTok{return}\NormalTok{ x }\OperatorTok{+}\NormalTok{ y              }\CommentTok{// returns 35}
 \NormalTok{\}}
 \end{Highlighting}
 \end{Shaded}
@@ -1265,7 +1265,7 @@ If you try to reassign a \texttt{val}, you get a compile error:
 \KeywordTok{def}\NormalTok{ bad() }\OperatorTok{{-}\textgreater{}} \DataTypeTok{i64}\NormalTok{ \{}
     \KeywordTok{val}\NormalTok{ x }\OperatorTok{=} \DecValTok{10}
 \NormalTok{    x }\OperatorTok{=} \DecValTok{20}   \CommentTok{// ERROR: cannot assign to immutable binding \textquotesingle{}x\textquotesingle{}}
-\NormalTok{    x}
+\NormalTok{    }\ControlFlowTok{return}\NormalTok{ x}
 \NormalTok{\}}
 \end{Highlighting}
 \end{Shaded}
@@ -1280,7 +1280,7 @@ explicitly:
 \KeywordTok{def}\NormalTok{ inferred() }\OperatorTok{{-}\textgreater{}} \DataTypeTok{i64}\NormalTok{ \{}
     \KeywordTok{val}\NormalTok{ a }\OperatorTok{=} \DecValTok{10}        \CommentTok{// inferred as i64}
     \KeywordTok{val}\NormalTok{ b }\OperatorTok{=} \DecValTok{20}        \CommentTok{// inferred as i64}
-\NormalTok{    a }\OperatorTok{+}\NormalTok{ b             }\CommentTok{// returns i64}
+\NormalTok{    }\ControlFlowTok{return}\NormalTok{ a }\OperatorTok{+}\NormalTok{ b             }\CommentTok{// returns i64}
 \NormalTok{\}}
 \end{Highlighting}
 \end{Shaded}
@@ -1291,7 +1291,7 @@ You can add a type annotation after the binding name with \texttt{:}:
 \begin{Highlighting}[]
 \KeywordTok{def}\NormalTok{ annotated() }\OperatorTok{{-}\textgreater{}} \DataTypeTok{f32}\NormalTok{ \{}
     \KeywordTok{val}\NormalTok{ pi: }\DataTypeTok{f32} \OperatorTok{=} \FloatTok{3.14159}
-\NormalTok{    pi}
+\NormalTok{    }\ControlFlowTok{return}\NormalTok{ pi}
 \NormalTok{\}}
 \end{Highlighting}
 \end{Shaded}
@@ -1310,7 +1310,7 @@ To convert between types, use the \texttt{to} keyword:
     \KeywordTok{val}\NormalTok{ f: }\DataTypeTok{f64} \OperatorTok{=} \FloatTok{3.14}
     \KeywordTok{val}\NormalTok{ small: }\DataTypeTok{f32} \OperatorTok{=}\NormalTok{ f }\KeywordTok{to} \DataTypeTok{f32}     \CommentTok{// f32 {-}\textgreater{} f64}
     \KeywordTok{val}\NormalTok{ also: }\DataTypeTok{f64} \OperatorTok{=}\NormalTok{ n }\KeywordTok{to} \DataTypeTok{f64}    \CommentTok{// i64 {-}\textgreater{} f64}
-\NormalTok{    also }\OperatorTok{+}\NormalTok{ big}
+\NormalTok{    }\ControlFlowTok{return}\NormalTok{ also }\OperatorTok{+}\NormalTok{ big}
 \NormalTok{\}}
 \end{Highlighting}
 \end{Shaded}
@@ -1322,7 +1322,7 @@ Common cast patterns:
 \KeywordTok{def}\NormalTok{ cast\_examples() }\OperatorTok{{-}\textgreater{}} \DataTypeTok{i64}\NormalTok{ \{}
     \KeywordTok{val}\NormalTok{ x: }\DataTypeTok{f64} \OperatorTok{=} \FloatTok{9.7} \KeywordTok{to} \DataTypeTok{f64}
     \KeywordTok{val}\NormalTok{ rounded: }\DataTypeTok{i64} \OperatorTok{=} \FunctionTok{floor}\NormalTok{(x) }\KeywordTok{to} \DataTypeTok{i64}     \CommentTok{// 9}
-\NormalTok{    rounded}
+\NormalTok{    }\ControlFlowTok{return}\NormalTok{ rounded}
 \NormalTok{\}}
 \end{Highlighting}
 \end{Shaded}
@@ -1340,7 +1340,7 @@ always typed explicitly:
 
 \KeywordTok{def}\NormalTok{ show\_constants() }\OperatorTok{{-}\textgreater{}} \DataTypeTok{i64}\NormalTok{ \{}
     \FunctionTok{print}\NormalTok{(APP\_NAME);}
-\NormalTok{    MAX\_SIZE}
+\NormalTok{    }\ControlFlowTok{return}\NormalTok{ MAX\_SIZE}
 \NormalTok{\}}
 \end{Highlighting}
 \end{Shaded}
@@ -1359,7 +1359,7 @@ Use \texttt{type} to create an alias for an existing type:
 \KeywordTok{type}\NormalTok{ Name }\OperatorTok{=} \DataTypeTok{str}
 
 \KeywordTok{def}\NormalTok{ greet(name: Name) }\OperatorTok{{-}\textgreater{}} \DataTypeTok{str}\NormalTok{ \{}
-    \FunctionTok{concat}\NormalTok{(}\StringTok{"Hello, "}\NormalTok{, name)}
+    \ControlFlowTok{return} \FunctionTok{concat}\NormalTok{(}\StringTok{"Hello, "}\NormalTok{, name)}
 \NormalTok{\}}
 \end{Highlighting}
 \end{Shaded}
@@ -1447,7 +1447,7 @@ The \texttt{def} keyword introduces a function:
 \begin{Shaded}
 \begin{Highlighting}[]
 \KeywordTok{def}\NormalTok{ add(a: }\DataTypeTok{i64}\NormalTok{, b: }\DataTypeTok{i64}\NormalTok{) }\OperatorTok{{-}\textgreater{}} \DataTypeTok{i64}\NormalTok{ \{}
-\NormalTok{    a }\OperatorTok{+}\NormalTok{ b}
+\NormalTok{    }\ControlFlowTok{return}\NormalTok{ a }\OperatorTok{+}\NormalTok{ b}
 \NormalTok{\}}
 \end{Highlighting}
 \end{Shaded}
@@ -1456,45 +1456,34 @@ Every parameter has a name and a type separated by \texttt{:}. The
 return type follows \texttt{-\textgreater{}}. The function body is
 enclosed in \texttt{\{\ \}}.
 
-\subsection{\texorpdfstring{3.2 Tail Expressions (No \texttt{return}
-Needed)}{3.2 Tail Expressions (No return Needed)}}\label{tail-expressions-no-return-needed}
+\subsection{\texorpdfstring{3.2 Explicit \texttt{return}
+Statements}{3.2 Explicit return Statements}}\label{32-explicit-return-statements}
 
-The last expression in a function body is implicitly returned. This is
-the \emph{tail expression}:
-
-\begin{Shaded}
-\begin{Highlighting}[]
-\KeywordTok{def}\NormalTok{ multiply(a: }\DataTypeTok{i64}\NormalTok{, b: }\DataTypeTok{i64}\NormalTok{) }\OperatorTok{{-}\textgreater{}} \DataTypeTok{i64}\NormalTok{ \{}
-    \KeywordTok{val}\NormalTok{ product }\OperatorTok{=}\NormalTok{ a }\OperatorTok{*}\NormalTok{ b}
-\NormalTok{    product          }\CommentTok{// tail expression — this is the return value}
-\NormalTok{\}}
-\end{Highlighting}
-\end{Shaded}
-
-Most of the time, you do not need an explicit \texttt{return}. Note that
-\texttt{val\ product\ =\ a\ *\ b} has no semicolon? That's wrong ---
-it's a statement, not a tail expression. Let's be precise:
+Non-\texttt{unit} functions use \texttt{return} to send a value back to
+the caller:
 
 \begin{Shaded}
 \begin{Highlighting}[]
 \KeywordTok{def}\NormalTok{ multiply(a: }\DataTypeTok{i64}\NormalTok{, b: }\DataTypeTok{i64}\NormalTok{) }\OperatorTok{{-}\textgreater{}} \DataTypeTok{i64}\NormalTok{ \{}
-    \KeywordTok{val}\NormalTok{ product }\OperatorTok{=}\NormalTok{ a }\OperatorTok{*}\NormalTok{ b;   }\CommentTok{// statement — needs semicolon}
-\NormalTok{    product                }\CommentTok{// tail expression — no semicolon}
+    \KeywordTok{val}\NormalTok{ product }\OperatorTok{=}\NormalTok{ a }\OperatorTok{*}\NormalTok{ b;}
+    \ControlFlowTok{return}\NormalTok{ product}
 \NormalTok{\}}
 \end{Highlighting}
 \end{Shaded}
 
-Actually, \texttt{val} bindings do need a semicolon. Let me show the
-complete picture:
+Statements inside a function body end with \texttt{;}, while block
+expressions such as \texttt{if}/\texttt{else} and \texttt{when} produce
+a value from their final expression without \texttt{;}:
 
 \begin{itemize}
 \tightlist
 \item
-  \textbf{Statements} (non-tail): need \texttt{;} at the end ---
+  \textbf{Statements}: end with \texttt{;} ---
   \texttt{val\ x\ =\ 5;}, \texttt{print("hi");}, \texttt{f();}
 \item
-  \textbf{Tail expression} (last line): no \texttt{;} --- this is the
-  return value
+  \textbf{Return statement}: \texttt{return\ expr} exits the function
+  with a value (followed by \texttt{;} if another statement follows in an
+  enclosing block)
 \end{itemize}
 
 \begin{Shaded}
@@ -1503,31 +1492,31 @@ complete picture:
     \KeywordTok{val}\NormalTok{ a }\OperatorTok{=} \DecValTok{10}\NormalTok{;          }\CommentTok{// statement: val binding}
     \KeywordTok{val}\NormalTok{ b }\OperatorTok{=} \DecValTok{20}\NormalTok{;          }\CommentTok{// statement: val binding}
     \FunctionTok{print}\NormalTok{(}\StringTok{"computing"}\NormalTok{);  }\CommentTok{// statement: side effect call}
-\NormalTok{    a }\OperatorTok{+}\NormalTok{ b                }\CommentTok{// tail expression: no semicolon, this is returned}
+    \ControlFlowTok{return}\NormalTok{ a }\OperatorTok{+}\NormalTok{ b         }\CommentTok{// explicit return of expression value}
 \NormalTok{\}}
 \end{Highlighting}
 \end{Shaded}
 
 \subsection{3.3 Early Return}\label{early-return}
 
-Sometimes you want to return early from a function. Use \texttt{return}:
+Use \texttt{return} inside conditional branches whenever a function
+should exit early:
 
 \begin{Shaded}
 \begin{Highlighting}[]
 \KeywordTok{def}\NormalTok{ safe\_divide(a: }\DataTypeTok{i64}\NormalTok{, b: }\DataTypeTok{i64}\NormalTok{) }\OperatorTok{{-}\textgreater{}} \DataTypeTok{i64}\NormalTok{ \{}
     \ControlFlowTok{if}\NormalTok{ b }\OperatorTok{==} \DecValTok{0}\NormalTok{ \{}
         \ControlFlowTok{return} \DecValTok{0}\NormalTok{;}
-\NormalTok{    \} }\ControlFlowTok{else}\NormalTok{ \{}
-\NormalTok{        a }\OperatorTok{/}\NormalTok{ b}
-\NormalTok{    \}}
+\NormalTok{    \};}
+    \ControlFlowTok{return}\NormalTok{ a }\OperatorTok{/}\NormalTok{ b}
 \NormalTok{\}}
 \end{Highlighting}
 \end{Shaded}
 
 \begin{quote}
-\textbf{Note:} \texttt{return} exits the function immediately. It must
-be inside a statement context (followed by \texttt{;} if not at the end
-of a block).
+\textbf{Note:} \texttt{return} exits the function immediately. Use
+\texttt{;} after an early \texttt{if\ \{\ return\ ...;\ \}} statement
+when more statements follow.
 \end{quote}
 
 \subsection{3.4 Recursive Functions}\label{recursive-functions}
@@ -1537,7 +1526,7 @@ Recursion works naturally in IRIS. Here's factorial:
 \begin{Shaded}
 \begin{Highlighting}[]
 \KeywordTok{def}\NormalTok{ factorial(n: }\DataTypeTok{i64}\NormalTok{) }\OperatorTok{{-}\textgreater{}} \DataTypeTok{i64}\NormalTok{ \{}
-    \ControlFlowTok{if}\NormalTok{ n }\OperatorTok{\textless{}=} \DecValTok{1}\NormalTok{ \{}
+    \ControlFlowTok{return} \ControlFlowTok{if}\NormalTok{ n }\OperatorTok{\textless{}=} \DecValTok{1}\NormalTok{ \{}
         \DecValTok{1}
 \NormalTok{    \} }\ControlFlowTok{else}\NormalTok{ \{}
 \NormalTok{        n }\OperatorTok{*}\NormalTok{ factorial(n }\OperatorTok{{-}} \DecValTok{1}\NormalTok{)}
@@ -1546,7 +1535,7 @@ Recursion works naturally in IRIS. Here's factorial:
 
 \KeywordTok{def}\NormalTok{ main() }\OperatorTok{{-}\textgreater{}} \DataTypeTok{i64}\NormalTok{ \{}
     \FunctionTok{print}\NormalTok{(factorial(}\DecValTok{10}\NormalTok{));}
-    \DecValTok{0}
+    \ControlFlowTok{return} \DecValTok{0}
 \NormalTok{\}}
 \end{Highlighting}
 \end{Shaded}
@@ -1556,7 +1545,7 @@ And Fibonacci:
 \begin{Shaded}
 \begin{Highlighting}[]
 \KeywordTok{def}\NormalTok{ fib(n: }\DataTypeTok{i64}\NormalTok{) }\OperatorTok{{-}\textgreater{}} \DataTypeTok{i64}\NormalTok{ \{}
-    \ControlFlowTok{if}\NormalTok{ n }\OperatorTok{\textless{}=} \DecValTok{1}\NormalTok{ \{}
+    \ControlFlowTok{return} \ControlFlowTok{if}\NormalTok{ n }\OperatorTok{\textless{}=} \DecValTok{1}\NormalTok{ \{}
 \NormalTok{        n}
 \NormalTok{    \} }\ControlFlowTok{else}\NormalTok{ \{}
 \NormalTok{        fib(n }\OperatorTok{{-}} \DecValTok{1}\NormalTok{) }\OperatorTok{+}\NormalTok{ fib(n }\OperatorTok{{-}} \DecValTok{2}\NormalTok{)}
@@ -1565,7 +1554,7 @@ And Fibonacci:
 
 \KeywordTok{def}\NormalTok{ main() }\OperatorTok{{-}\textgreater{}} \DataTypeTok{i64}\NormalTok{ \{}
     \FunctionTok{print}\NormalTok{(fib(}\DecValTok{20}\NormalTok{));}
-    \DecValTok{0}
+    \ControlFlowTok{return} \DecValTok{0}
 \NormalTok{\}}
 \end{Highlighting}
 \end{Shaded}
@@ -1580,7 +1569,7 @@ Here is an iterative Fibonacci that avoids stack overflow:
 \begin{Shaded}
 \begin{Highlighting}[]
 \KeywordTok{def}\NormalTok{ fib\_iter(n: }\DataTypeTok{i64}\NormalTok{) }\OperatorTok{{-}\textgreater{}} \DataTypeTok{i64}\NormalTok{ \{}
-    \ControlFlowTok{if}\NormalTok{ n }\OperatorTok{\textless{}=} \DecValTok{1}\NormalTok{ \{}
+    \ControlFlowTok{return} \ControlFlowTok{if}\NormalTok{ n }\OperatorTok{\textless{}=} \DecValTok{1}\NormalTok{ \{}
 \NormalTok{        n}
 \NormalTok{    \} }\ControlFlowTok{else}\NormalTok{ \{}
         \KeywordTok{var}\NormalTok{ a }\OperatorTok{=} \DecValTok{0}\NormalTok{;}
@@ -1607,12 +1596,12 @@ to make a function accessible from other modules:
 \begin{Highlighting}[]
 \CommentTok{// In mylib.iris}
 \KeywordTok{pub} \KeywordTok{def}\NormalTok{ greet(name: }\DataTypeTok{str}\NormalTok{) }\OperatorTok{{-}\textgreater{}} \DataTypeTok{str}\NormalTok{ \{}
-    \FunctionTok{concat}\NormalTok{(}\StringTok{"Hello, "}\NormalTok{, name)}
+    \ControlFlowTok{return} \FunctionTok{concat}\NormalTok{(}\StringTok{"Hello, "}\NormalTok{, name)}
 \NormalTok{\}}
 
 \CommentTok{// Private helper — not exported}
 \KeywordTok{def}\NormalTok{ helper() }\OperatorTok{{-}\textgreater{}} \DataTypeTok{i64}\NormalTok{ \{}
-    \DecValTok{42}
+    \ControlFlowTok{return} \DecValTok{42}
 \NormalTok{\}}
 \end{Highlighting}
 \end{Shaded}
@@ -1627,13 +1616,13 @@ Functions can have default parameter values:
 \begin{Shaded}
 \begin{Highlighting}[]
 \KeywordTok{def}\NormalTok{ repeat\_char(c: }\DataTypeTok{str}\NormalTok{, n: }\DataTypeTok{i64} \OperatorTok{=} \DecValTok{3}\NormalTok{) }\OperatorTok{{-}\textgreater{}} \DataTypeTok{str}\NormalTok{ \{}
-    \FunctionTok{repeat}\NormalTok{(c, n)}
+    \ControlFlowTok{return} \FunctionTok{repeat}\NormalTok{(c, n)}
 \NormalTok{\}}
 
 \KeywordTok{def}\NormalTok{ main() }\OperatorTok{{-}\textgreater{}} \DataTypeTok{i64}\NormalTok{ \{}
     \FunctionTok{print}\NormalTok{(repeat\_char(}\StringTok{"{-}"}\NormalTok{));      }\CommentTok{// uses default n=3: "{-}{-}{-}"}
     \FunctionTok{print}\NormalTok{(repeat\_char(}\StringTok{"*"}\NormalTok{, }\DecValTok{5}\NormalTok{));   }\CommentTok{// overrides: "*****"}
-    \DecValTok{0}
+    \ControlFlowTok{return} \DecValTok{0}
 \NormalTok{\}}
 \end{Highlighting}
 \end{Shaded}
@@ -1648,17 +1637,17 @@ takes two \texttt{i64} arguments and returns an \texttt{i64}:
 \begin{Shaded}
 \begin{Highlighting}[]
 \KeywordTok{def}\NormalTok{ apply(f: (}\DataTypeTok{i64}\NormalTok{) }\OperatorTok{{-}\textgreater{}} \DataTypeTok{i64}\NormalTok{, x: }\DataTypeTok{i64}\NormalTok{) }\OperatorTok{{-}\textgreater{}} \DataTypeTok{i64}\NormalTok{ \{}
-\NormalTok{    f(x)}
+\NormalTok{    }\ControlFlowTok{return}\NormalTok{ f(x)}
 \NormalTok{\}}
 
 \KeywordTok{def}\NormalTok{ double(x: }\DataTypeTok{i64}\NormalTok{) }\OperatorTok{{-}\textgreater{}} \DataTypeTok{i64}\NormalTok{ \{}
-\NormalTok{    x }\OperatorTok{*} \DecValTok{2}
+\NormalTok{    }\ControlFlowTok{return}\NormalTok{ x }\OperatorTok{*} \DecValTok{2}
 \NormalTok{\}}
 
 \KeywordTok{def}\NormalTok{ main() }\OperatorTok{{-}\textgreater{}} \DataTypeTok{i64}\NormalTok{ \{}
     \KeywordTok{val} \DataTypeTok{result} \OperatorTok{=}\NormalTok{ apply(double, }\DecValTok{21}\NormalTok{);}
     \FunctionTok{print}\NormalTok{(}\DataTypeTok{result}\NormalTok{);   }\CommentTok{// prints 42}
-    \DecValTok{0}
+    \ControlFlowTok{return} \DecValTok{0}
 \NormalTok{\}}
 \end{Highlighting}
 \end{Shaded}
@@ -1715,7 +1704,7 @@ The \texttt{if} expression in IRIS \textbf{always} requires an
 \begin{Shaded}
 \begin{Highlighting}[]
 \KeywordTok{def}\NormalTok{ abs\_val(x: }\DataTypeTok{i64}\NormalTok{) }\OperatorTok{{-}\textgreater{}} \DataTypeTok{i64}\NormalTok{ \{}
-    \ControlFlowTok{if}\NormalTok{ x }\OperatorTok{\textless{}} \DecValTok{0}\NormalTok{ \{ }\DecValTok{0} \OperatorTok{{-}}\NormalTok{ x \} }\ControlFlowTok{else}\NormalTok{ \{ x \}}
+    \ControlFlowTok{return} \ControlFlowTok{if}\NormalTok{ x }\OperatorTok{\textless{}} \DecValTok{0}\NormalTok{ \{ }\DecValTok{0} \OperatorTok{{-}}\NormalTok{ x \} }\ControlFlowTok{else}\NormalTok{ \{ x \}}
 \NormalTok{\}}
 \end{Highlighting}
 \end{Shaded}
@@ -1726,7 +1715,7 @@ must produce the same type:
 \begin{Shaded}
 \begin{Highlighting}[]
 \KeywordTok{def}\NormalTok{ classify(n: }\DataTypeTok{i64}\NormalTok{) }\OperatorTok{{-}\textgreater{}} \DataTypeTok{str}\NormalTok{ \{}
-    \ControlFlowTok{if}\NormalTok{ n }\OperatorTok{\textgreater{}} \DecValTok{0}\NormalTok{ \{}
+    \ControlFlowTok{return} \ControlFlowTok{if}\NormalTok{ n }\OperatorTok{\textgreater{}} \DecValTok{0}\NormalTok{ \{}
         \StringTok{"positive"}
 \NormalTok{    \} }\ControlFlowTok{else}\NormalTok{ \{}
         \ControlFlowTok{if}\NormalTok{ n }\OperatorTok{\textless{}} \DecValTok{0}\NormalTok{ \{}
@@ -1745,7 +1734,7 @@ You can use \texttt{if} inline in expressions:
 \begin{Highlighting}[]
 \KeywordTok{def}\NormalTok{ max\_of(a: }\DataTypeTok{i64}\NormalTok{, b: }\DataTypeTok{i64}\NormalTok{) }\OperatorTok{{-}\textgreater{}} \DataTypeTok{i64}\NormalTok{ \{}
     \KeywordTok{val}\NormalTok{ bigger }\OperatorTok{=} \ControlFlowTok{if}\NormalTok{ a }\OperatorTok{\textgreater{}}\NormalTok{ b \{ a \} }\ControlFlowTok{else}\NormalTok{ \{ b \};}
-\NormalTok{    bigger}
+\NormalTok{    }\ControlFlowTok{return}\NormalTok{ bigger}
 \NormalTok{\}}
 \end{Highlighting}
 \end{Shaded}
@@ -1770,7 +1759,7 @@ Loops}{4.2 while Loops}}\label{while-loops}
         \FunctionTok{print}\NormalTok{(n);}
 \NormalTok{        n }\OperatorTok{=}\NormalTok{ n }\OperatorTok{{-}} \DecValTok{1}
 \NormalTok{    \}}
-    \DecValTok{0}
+    \ControlFlowTok{return} \DecValTok{0}
 \NormalTok{\}}
 \end{Highlighting}
 \end{Shaded}
@@ -1786,7 +1775,7 @@ Compute the sum of 1..100:
 \NormalTok{        total }\OperatorTok{=}\NormalTok{ total }\OperatorTok{+}\NormalTok{ i;}
 \NormalTok{        i }\OperatorTok{=}\NormalTok{ i }\OperatorTok{+} \DecValTok{1}
 \NormalTok{    \}}
-\NormalTok{    total}
+\NormalTok{    }\ControlFlowTok{return}\NormalTok{ total}
 \NormalTok{\}}
 \end{Highlighting}
 \end{Shaded}
@@ -1803,7 +1792,7 @@ range \texttt{{[}start,\ end)}:
     \ControlFlowTok{for}\NormalTok{ i }\ControlFlowTok{in} \DecValTok{0}\OperatorTok{..}\DecValTok{5}\NormalTok{ \{}
         \FunctionTok{print}\NormalTok{(i)}
 \NormalTok{    \}}
-    \DecValTok{0}
+    \ControlFlowTok{return} \DecValTok{0}
 \NormalTok{\}}
 \CommentTok{// prints: 0 1 2 3 4}
 \end{Highlighting}
@@ -1818,7 +1807,7 @@ For loops are clean and idiomatic when you need a counter:
     \ControlFlowTok{for}\NormalTok{ i }\ControlFlowTok{in} \DecValTok{1}\OperatorTok{..}\NormalTok{n }\OperatorTok{+} \DecValTok{1}\NormalTok{ \{}
 \NormalTok{        total }\OperatorTok{=}\NormalTok{ total }\OperatorTok{+}\NormalTok{ i}
 \NormalTok{    \}}
-\NormalTok{    total}
+\NormalTok{    }\ControlFlowTok{return}\NormalTok{ total}
 \NormalTok{\}}
 \end{Highlighting}
 \end{Shaded}
@@ -1847,7 +1836,7 @@ The \texttt{loop} construct runs forever until you explicitly
 \NormalTok{            n }\OperatorTok{=}\NormalTok{ n }\OperatorTok{+} \DecValTok{1}
 \NormalTok{        \}}
 \NormalTok{    \}}
-    \DataTypeTok{result}
+    \ControlFlowTok{return} \DataTypeTok{result}
 \NormalTok{\}}
 \end{Highlighting}
 \end{Shaded}
@@ -1870,7 +1859,7 @@ skips the rest of the current iteration:
 \NormalTok{            printed }\OperatorTok{=}\NormalTok{ printed }\OperatorTok{+} \DecValTok{1}
 \NormalTok{        \}}
 \NormalTok{    \}}
-\NormalTok{    printed}
+\NormalTok{    }\ControlFlowTok{return}\NormalTok{ printed}
 \NormalTok{\}}
 \end{Highlighting}
 \end{Shaded}
@@ -1888,7 +1877,7 @@ Loops can be nested freely:
             \FunctionTok{print}\NormalTok{(product)}
 \NormalTok{        \}}
 \NormalTok{    \}}
-    \DecValTok{0}
+    \ControlFlowTok{return} \DecValTok{0}
 \NormalTok{\}}
 \end{Highlighting}
 \end{Shaded}
@@ -1910,11 +1899,11 @@ IRIS supports short-circuit logical operators:
 \begin{Shaded}
 \begin{Highlighting}[]
 \KeywordTok{def}\NormalTok{ check(x: }\DataTypeTok{i64}\NormalTok{, y: }\DataTypeTok{i64}\NormalTok{) }\OperatorTok{{-}\textgreater{}} \DataTypeTok{bool}\NormalTok{ \{}
-\NormalTok{    x }\OperatorTok{\textgreater{}} \DecValTok{0} \OperatorTok{\&\&}\NormalTok{ y }\OperatorTok{\textgreater{}} \DecValTok{0}
+\NormalTok{    }\ControlFlowTok{return}\NormalTok{ x }\OperatorTok{\textgreater{}} \DecValTok{0} \OperatorTok{\&\&}\NormalTok{ y }\OperatorTok{\textgreater{}} \DecValTok{0}
 \NormalTok{\}}
 
 \KeywordTok{def}\NormalTok{ either\_positive(x: }\DataTypeTok{i64}\NormalTok{, y: }\DataTypeTok{i64}\NormalTok{) }\OperatorTok{{-}\textgreater{}} \DataTypeTok{bool}\NormalTok{ \{}
-\NormalTok{    x }\OperatorTok{\textgreater{}} \DecValTok{0} \OperatorTok{||}\NormalTok{ y }\OperatorTok{\textgreater{}} \DecValTok{0}
+\NormalTok{    }\ControlFlowTok{return}\NormalTok{ x }\OperatorTok{\textgreater{}} \DecValTok{0} \OperatorTok{||}\NormalTok{ y }\OperatorTok{\textgreater{}} \DecValTok{0}
 \NormalTok{\}}
 \end{Highlighting}
 \end{Shaded}
@@ -1934,7 +1923,7 @@ arrays:
     \ControlFlowTok{for}\NormalTok{ x }\ControlFlowTok{in}\NormalTok{ items \{}
         \FunctionTok{print}\NormalTok{(}\FunctionTok{to\_str}\NormalTok{(x))}
 \NormalTok{    \}}
-    \DecValTok{0}
+    \ControlFlowTok{return} \DecValTok{0}
 \NormalTok{\}}
 \end{Highlighting}
 \end{Shaded}
@@ -1946,14 +1935,14 @@ You can bind multiple values at once by destructuring tuples:
 \begin{Shaded}
 \begin{Highlighting}[]
 \KeywordTok{def}\NormalTok{ get\_coords() }\OperatorTok{{-}\textgreater{}}\NormalTok{ (}\DataTypeTok{i64}\NormalTok{, }\DataTypeTok{i64}\NormalTok{) \{}
-\NormalTok{    (}\DecValTok{100}\NormalTok{, }\DecValTok{200}\NormalTok{)}
+\NormalTok{    }\ControlFlowTok{return}\NormalTok{ (}\DecValTok{100}\NormalTok{, }\DecValTok{200}\NormalTok{)}
 \NormalTok{\}}
 
 \KeywordTok{def}\NormalTok{ main() }\OperatorTok{{-}\textgreater{}} \DataTypeTok{i64}\NormalTok{ \{}
     \KeywordTok{val}\NormalTok{ (x, y) }\OperatorTok{=}\NormalTok{ get\_coords();}
     \FunctionTok{print}\NormalTok{(}\FunctionTok{concat}\NormalTok{(}\StringTok{"X: "}\NormalTok{, }\FunctionTok{to\_str}\NormalTok{(x)));}
     \FunctionTok{print}\NormalTok{(}\FunctionTok{concat}\NormalTok{(}\StringTok{"Y: "}\NormalTok{, }\FunctionTok{to\_str}\NormalTok{(y)));}
-    \DecValTok{0}
+    \ControlFlowTok{return} \DecValTok{0}
 \NormalTok{\}}
 \end{Highlighting}
 \end{Shaded}
@@ -1968,15 +1957,15 @@ In addition to \texttt{\&\&}, \texttt{\textbar{}\textbar{}}, and
 \begin{Shaded}
 \begin{Highlighting}[]
 \KeywordTok{def}\NormalTok{ eligible(age: }\DataTypeTok{i64}\NormalTok{, registered: }\DataTypeTok{bool}\NormalTok{) }\OperatorTok{{-}\textgreater{}} \DataTypeTok{bool}\NormalTok{ \{}
-\NormalTok{    age }\OperatorTok{\textgreater{}=} \DecValTok{18} \KeywordTok{and}\NormalTok{ registered}
+\NormalTok{    }\ControlFlowTok{return}\NormalTok{ age }\OperatorTok{\textgreater{}=} \DecValTok{18} \KeywordTok{and}\NormalTok{ registered}
 \NormalTok{\}}
 
 \KeywordTok{def}\NormalTok{ can\_enter(has\_ticket: }\DataTypeTok{bool}\NormalTok{, is\_vip: }\DataTypeTok{bool}\NormalTok{) }\OperatorTok{{-}\textgreater{}} \DataTypeTok{bool}\NormalTok{ \{}
-\NormalTok{    has\_ticket }\KeywordTok{or}\NormalTok{ is\_vip}
+\NormalTok{    }\ControlFlowTok{return}\NormalTok{ has\_ticket }\KeywordTok{or}\NormalTok{ is\_vip}
 \NormalTok{\}}
 
 \KeywordTok{def}\NormalTok{ is\_minor(age: }\DataTypeTok{i64}\NormalTok{) }\OperatorTok{{-}\textgreater{}} \DataTypeTok{bool}\NormalTok{ \{}
-    \KeywordTok{not}\NormalTok{ (age }\OperatorTok{\textgreater{}=} \DecValTok{18}\NormalTok{)}
+    \ControlFlowTok{return} \KeywordTok{not}\NormalTok{ (age }\OperatorTok{\textgreater{}=} \DecValTok{18}\NormalTok{)}
 \NormalTok{\}}
 \end{Highlighting}
 \end{Shaded}
@@ -1996,7 +1985,7 @@ arrays:
     \ControlFlowTok{for}\NormalTok{ x }\ControlFlowTok{in}\NormalTok{ items \{}
         \FunctionTok{print}\NormalTok{(}\FunctionTok{to\_str}\NormalTok{(x))}
 \NormalTok{    \}}
-    \DecValTok{0}
+    \ControlFlowTok{return} \DecValTok{0}
 \NormalTok{\}}
 \end{Highlighting}
 \end{Shaded}
@@ -2008,14 +1997,14 @@ You can bind multiple values at once by destructuring tuples:
 \begin{Shaded}
 \begin{Highlighting}[]
 \KeywordTok{def}\NormalTok{ get\_coords() }\OperatorTok{{-}\textgreater{}}\NormalTok{ (}\DataTypeTok{i64}\NormalTok{, }\DataTypeTok{i64}\NormalTok{) \{}
-\NormalTok{    (}\DecValTok{100}\NormalTok{, }\DecValTok{200}\NormalTok{)}
+\NormalTok{    }\ControlFlowTok{return}\NormalTok{ (}\DecValTok{100}\NormalTok{, }\DecValTok{200}\NormalTok{)}
 \NormalTok{\}}
 
 \KeywordTok{def}\NormalTok{ main() }\OperatorTok{{-}\textgreater{}} \DataTypeTok{i64}\NormalTok{ \{}
     \KeywordTok{val}\NormalTok{ (x, y) }\OperatorTok{=}\NormalTok{ get\_coords();}
     \FunctionTok{print}\NormalTok{(}\FunctionTok{concat}\NormalTok{(}\StringTok{"X: "}\NormalTok{, }\FunctionTok{to\_str}\NormalTok{(x)));}
     \FunctionTok{print}\NormalTok{(}\FunctionTok{concat}\NormalTok{(}\StringTok{"Y: "}\NormalTok{, }\FunctionTok{to\_str}\NormalTok{(y)));}
-    \DecValTok{0}
+    \ControlFlowTok{return} \DecValTok{0}
 \NormalTok{\}}
 \end{Highlighting}
 \end{Shaded}
@@ -2030,15 +2019,15 @@ In addition to \texttt{\&\&}, \texttt{\textbar{}\textbar{}}, and
 \begin{Shaded}
 \begin{Highlighting}[]
 \KeywordTok{def}\NormalTok{ eligible(age: }\DataTypeTok{i64}\NormalTok{, registered: }\DataTypeTok{bool}\NormalTok{) }\OperatorTok{{-}\textgreater{}} \DataTypeTok{bool}\NormalTok{ \{}
-\NormalTok{    age }\OperatorTok{\textgreater{}=} \DecValTok{18} \KeywordTok{and}\NormalTok{ registered}
+\NormalTok{    }\ControlFlowTok{return}\NormalTok{ age }\OperatorTok{\textgreater{}=} \DecValTok{18} \KeywordTok{and}\NormalTok{ registered}
 \NormalTok{\}}
 
 \KeywordTok{def}\NormalTok{ can\_enter(has\_ticket: }\DataTypeTok{bool}\NormalTok{, is\_vip: }\DataTypeTok{bool}\NormalTok{) }\OperatorTok{{-}\textgreater{}} \DataTypeTok{bool}\NormalTok{ \{}
-\NormalTok{    has\_ticket }\KeywordTok{or}\NormalTok{ is\_vip}
+\NormalTok{    }\ControlFlowTok{return}\NormalTok{ has\_ticket }\KeywordTok{or}\NormalTok{ is\_vip}
 \NormalTok{\}}
 
 \KeywordTok{def}\NormalTok{ is\_minor(age: }\DataTypeTok{i64}\NormalTok{) }\OperatorTok{{-}\textgreater{}} \DataTypeTok{bool}\NormalTok{ \{}
-    \KeywordTok{not}\NormalTok{ (age }\OperatorTok{\textgreater{}=} \DecValTok{18}\NormalTok{)}
+    \ControlFlowTok{return} \KeywordTok{not}\NormalTok{ (age }\OperatorTok{\textgreater{}=} \DecValTok{18}\NormalTok{)}
 \NormalTok{\}}
 \end{Highlighting}
 \end{Shaded}
@@ -2097,18 +2086,18 @@ Rust:
 \NormalTok{\}}
 
 \KeywordTok{def}\NormalTok{ make\_point(x: }\DataTypeTok{f64}\NormalTok{, y: }\DataTypeTok{f64}\NormalTok{) }\OperatorTok{{-}\textgreater{}}\NormalTok{ Point \{}
-\NormalTok{    Point \{ x: x, y: y \}}
+\NormalTok{    }\ControlFlowTok{return}\NormalTok{ Point \{ x: x, y: y \}}
 \NormalTok{\}}
 
 \KeywordTok{def}\NormalTok{ distance(p: Point) }\OperatorTok{{-}\textgreater{}} \DataTypeTok{f64}\NormalTok{ \{}
-    \FunctionTok{sqrt}\NormalTok{((p}\OperatorTok{.}\NormalTok{x }\OperatorTok{*}\NormalTok{ p}\OperatorTok{.}\NormalTok{x) }\OperatorTok{+}\NormalTok{ (p}\OperatorTok{.}\NormalTok{y }\OperatorTok{*}\NormalTok{ p}\OperatorTok{.}\NormalTok{y)) }\KeywordTok{to} \DataTypeTok{f64}
+    \ControlFlowTok{return} \FunctionTok{sqrt}\NormalTok{((p}\OperatorTok{.}\NormalTok{x }\OperatorTok{*}\NormalTok{ p}\OperatorTok{.}\NormalTok{x) }\OperatorTok{+}\NormalTok{ (p}\OperatorTok{.}\NormalTok{y }\OperatorTok{*}\NormalTok{ p}\OperatorTok{.}\NormalTok{y)) }\KeywordTok{to} \DataTypeTok{f64}
 \NormalTok{\}}
 
 \KeywordTok{def}\NormalTok{ main() }\OperatorTok{{-}\textgreater{}} \DataTypeTok{i64}\NormalTok{ \{}
     \KeywordTok{val}\NormalTok{ p }\OperatorTok{=}\NormalTok{ Point \{ x: }\FloatTok{3.0} \KeywordTok{to} \DataTypeTok{f64}\NormalTok{, y: }\FloatTok{4.0} \KeywordTok{to} \DataTypeTok{f64}\NormalTok{ \};}
     \KeywordTok{val}\NormalTok{ d }\OperatorTok{=}\NormalTok{ distance(p);}
     \FunctionTok{print}\NormalTok{(d);   }\CommentTok{// 5.0}
-    \DecValTok{0}
+    \ControlFlowTok{return} \DecValTok{0}
 \NormalTok{\}}
 \end{Highlighting}
 \end{Shaded}
@@ -2130,7 +2119,7 @@ Records can contain any types, including other records:
 \NormalTok{\}}
 
 \KeywordTok{def}\NormalTok{ make\_red\_pixel(x: }\DataTypeTok{i64}\NormalTok{, y: }\DataTypeTok{i64}\NormalTok{) }\OperatorTok{{-}\textgreater{}}\NormalTok{ Pixel \{}
-\NormalTok{    Pixel \{}
+\NormalTok{    }\ControlFlowTok{return}\NormalTok{ Pixel \{}
 \NormalTok{        x: x,}
 \NormalTok{        y: y,}
 \NormalTok{        color: Color \{ r: }\FloatTok{1.0}\NormalTok{, g: }\FloatTok{0.0}\NormalTok{, b: }\FloatTok{0.0}\NormalTok{ \}}
@@ -2155,7 +2144,7 @@ declare them:
 \NormalTok{\}}
 
 \KeywordTok{def}\NormalTok{ opposite(d: Direction) }\OperatorTok{{-}\textgreater{}}\NormalTok{ Direction \{}
-    \ControlFlowTok{when}\NormalTok{ d \{}
+    \ControlFlowTok{return} \ControlFlowTok{when}\NormalTok{ d \{}
 \NormalTok{        Direction}\OperatorTok{.}\NormalTok{North }\OperatorTok{=\textgreater{}}\NormalTok{ Direction}\OperatorTok{.}\NormalTok{South,}
 \NormalTok{        Direction}\OperatorTok{.}\NormalTok{South }\OperatorTok{=\textgreater{}}\NormalTok{ Direction}\OperatorTok{.}\NormalTok{North,}
 \NormalTok{        Direction}\OperatorTok{.}\NormalTok{East  }\OperatorTok{=\textgreater{}}\NormalTok{ Direction}\OperatorTok{.}\NormalTok{West,}
@@ -2179,7 +2168,7 @@ The \texttt{when} expression matches a value against its variants:
 \NormalTok{\}}
 
 \KeywordTok{def}\NormalTok{ sides(s: Shape) }\OperatorTok{{-}\textgreater{}} \DataTypeTok{i64}\NormalTok{ \{}
-    \ControlFlowTok{when}\NormalTok{ s \{}
+    \ControlFlowTok{return} \ControlFlowTok{when}\NormalTok{ s \{}
 \NormalTok{        Shape}\OperatorTok{.}\NormalTok{Circle   }\OperatorTok{=\textgreater{}} \DecValTok{0}\NormalTok{,}
 \NormalTok{        Shape}\OperatorTok{.}\NormalTok{Square   }\OperatorTok{=\textgreater{}} \DecValTok{4}\NormalTok{,}
 \NormalTok{        Shape}\OperatorTok{.}\NormalTok{Triangle }\OperatorTok{=\textgreater{}} \DecValTok{3}
@@ -2187,7 +2176,7 @@ The \texttt{when} expression matches a value against its variants:
 \NormalTok{\}}
 
 \KeywordTok{def}\NormalTok{ describe(s: Shape) }\OperatorTok{{-}\textgreater{}} \DataTypeTok{str}\NormalTok{ \{}
-    \ControlFlowTok{when}\NormalTok{ s \{}
+    \ControlFlowTok{return} \ControlFlowTok{when}\NormalTok{ s \{}
 \NormalTok{        Shape}\OperatorTok{.}\NormalTok{Circle   }\OperatorTok{=\textgreater{}} \StringTok{"A round shape with no sides"}\NormalTok{,}
 \NormalTok{        Shape}\OperatorTok{.}\NormalTok{Square   }\OperatorTok{=\textgreater{}} \StringTok{"A four{-}sided shape"}\NormalTok{,}
 \NormalTok{        Shape}\OperatorTok{.}\NormalTok{Triangle }\OperatorTok{=\textgreater{}} \StringTok{"A three{-}sided shape"}
@@ -2204,7 +2193,7 @@ types. Access elements with \texttt{.0}, \texttt{.1}, \texttt{.2}, etc.:
 \begin{Shaded}
 \begin{Highlighting}[]
 \KeywordTok{def}\NormalTok{ make\_pair(a: }\DataTypeTok{i64}\NormalTok{, b: }\DataTypeTok{str}\NormalTok{) }\OperatorTok{{-}\textgreater{}}\NormalTok{ (}\DataTypeTok{i64}\NormalTok{, }\DataTypeTok{str}\NormalTok{) \{}
-\NormalTok{    (a, b)}
+\NormalTok{    }\ControlFlowTok{return}\NormalTok{ (a, b)}
 \NormalTok{\}}
 
 \KeywordTok{def}\NormalTok{ main() }\OperatorTok{{-}\textgreater{}} \DataTypeTok{i64}\NormalTok{ \{}
@@ -2213,7 +2202,7 @@ types. Access elements with \texttt{.0}, \texttt{.1}, \texttt{.2}, etc.:
     \KeywordTok{val}\NormalTok{ text }\OperatorTok{=}\NormalTok{ pair}\OperatorTok{.}\DecValTok{1}\NormalTok{;  }\CommentTok{// "hello"}
     \FunctionTok{print}\NormalTok{(num);}
     \FunctionTok{print}\NormalTok{(text);}
-    \DecValTok{0}
+    \ControlFlowTok{return} \DecValTok{0}
 \NormalTok{\}}
 \end{Highlighting}
 \end{Shaded}
@@ -2225,14 +2214,14 @@ Tuples are great for returning multiple values from a function:
 \KeywordTok{def}\NormalTok{ min\_max(a: }\DataTypeTok{i64}\NormalTok{, b: }\DataTypeTok{i64}\NormalTok{, c: }\DataTypeTok{i64}\NormalTok{) }\OperatorTok{{-}\textgreater{}}\NormalTok{ (}\DataTypeTok{i64}\NormalTok{, }\DataTypeTok{i64}\NormalTok{) \{}
     \KeywordTok{val}\NormalTok{ lo }\OperatorTok{=} \ControlFlowTok{if}\NormalTok{ a }\OperatorTok{\textless{}}\NormalTok{ b \{ }\ControlFlowTok{if}\NormalTok{ a }\OperatorTok{\textless{}}\NormalTok{ c \{ a \} }\ControlFlowTok{else}\NormalTok{ \{ c \} \} }\ControlFlowTok{else}\NormalTok{ \{ }\ControlFlowTok{if}\NormalTok{ b }\OperatorTok{\textless{}}\NormalTok{ c \{ b \} }\ControlFlowTok{else}\NormalTok{ \{ c \} \};}
     \KeywordTok{val}\NormalTok{ hi }\OperatorTok{=} \ControlFlowTok{if}\NormalTok{ a }\OperatorTok{\textgreater{}}\NormalTok{ b \{ }\ControlFlowTok{if}\NormalTok{ a }\OperatorTok{\textgreater{}}\NormalTok{ c \{ a \} }\ControlFlowTok{else}\NormalTok{ \{ c \} \} }\ControlFlowTok{else}\NormalTok{ \{ }\ControlFlowTok{if}\NormalTok{ b }\OperatorTok{\textgreater{}}\NormalTok{ c \{ b \} }\ControlFlowTok{else}\NormalTok{ \{ c \} \};}
-\NormalTok{    (lo, hi)}
+\NormalTok{    }\ControlFlowTok{return}\NormalTok{ (lo, hi)}
 \NormalTok{\}}
 
 \KeywordTok{def}\NormalTok{ main() }\OperatorTok{{-}\textgreater{}} \DataTypeTok{i64}\NormalTok{ \{}
     \KeywordTok{val} \DataTypeTok{result} \OperatorTok{=}\NormalTok{ min\_max(}\DecValTok{7}\NormalTok{, }\DecValTok{2}\NormalTok{, }\DecValTok{9}\NormalTok{);}
     \FunctionTok{print}\NormalTok{(}\DataTypeTok{result}\OperatorTok{.}\DecValTok{0}\NormalTok{);   }\CommentTok{// 2}
     \FunctionTok{print}\NormalTok{(}\DataTypeTok{result}\OperatorTok{.}\DecValTok{1}\NormalTok{);   }\CommentTok{// 9}
-    \DecValTok{0}
+    \ControlFlowTok{return} \DecValTok{0}
 \NormalTok{\}}
 \end{Highlighting}
 \end{Shaded}
@@ -2250,7 +2239,7 @@ an array of \texttt{N} elements of type \texttt{T}:
     \ControlFlowTok{for}\NormalTok{ i }\ControlFlowTok{in} \DecValTok{0}\OperatorTok{..}\DecValTok{5}\NormalTok{ \{}
 \NormalTok{        total }\OperatorTok{=}\NormalTok{ total }\OperatorTok{+}\NormalTok{ nums[i]}
 \NormalTok{    \}}
-\NormalTok{    total}
+\NormalTok{    }\ControlFlowTok{return}\NormalTok{ total}
 \NormalTok{\}}
 \end{Highlighting}
 \end{Shaded}
@@ -2264,7 +2253,7 @@ Arrays support element assignment (they are mutable by default):
     \ControlFlowTok{for}\NormalTok{ i }\ControlFlowTok{in} \DecValTok{0}\OperatorTok{..}\DecValTok{4}\NormalTok{ \{}
 \NormalTok{        arr[i] }\OperatorTok{=}\NormalTok{ i }\OperatorTok{*} \DecValTok{2}
 \NormalTok{    \}}
-\NormalTok{    arr[}\DecValTok{3}\NormalTok{]   }\CommentTok{// returns 6}
+\NormalTok{    }\ControlFlowTok{return}\NormalTok{ arr[}\DecValTok{3}\NormalTok{]   }\CommentTok{// returns 6}
 \NormalTok{\}}
 \end{Highlighting}
 \end{Shaded}
@@ -2284,7 +2273,7 @@ Lists are resizable arrays. \texttt{list()} creates an empty
     \FunctionTok{push}\NormalTok{(nums, }\DecValTok{30}\NormalTok{);}
     \FunctionTok{print}\NormalTok{(}\FunctionTok{list\_len}\NormalTok{(nums));       }\CommentTok{// 3}
     \FunctionTok{print}\NormalTok{(}\FunctionTok{list\_get}\NormalTok{(nums, }\DecValTok{1}\NormalTok{));    }\CommentTok{// 20}
-    \FunctionTok{list\_len}\NormalTok{(nums)}
+    \ControlFlowTok{return} \FunctionTok{list\_len}\NormalTok{(nums)}
 \NormalTok{\}}
 \end{Highlighting}
 \end{Shaded}
@@ -2312,7 +2301,7 @@ List operations:
     \CommentTok{// Pop from end}
     \KeywordTok{val}\NormalTok{ last }\OperatorTok{=} \FunctionTok{list\_pop}\NormalTok{(items);    }\CommentTok{// returns last element}
 
-\NormalTok{    n}
+\NormalTok{    }\ControlFlowTok{return}\NormalTok{ n}
 \NormalTok{\}}
 \end{Highlighting}
 \end{Shaded}
@@ -2327,7 +2316,7 @@ For lists of strings, specify the type explicitly:
     \FunctionTok{push}\NormalTok{(names, }\StringTok{"Bob"}\NormalTok{);}
     \FunctionTok{push}\NormalTok{(names, }\StringTok{"Charlie"}\NormalTok{);}
     \FunctionTok{print}\NormalTok{(}\FunctionTok{list\_get}\NormalTok{(names, }\DecValTok{0}\NormalTok{));   }\CommentTok{// Alice}
-    \FunctionTok{list\_len}\NormalTok{(names)}
+    \ControlFlowTok{return} \FunctionTok{list\_len}\NormalTok{(names)}
 \NormalTok{\}}
 \end{Highlighting}
 \end{Shaded}
@@ -2347,7 +2336,7 @@ Maps store key-value pairs. The
     \FunctionTok{map\_set}\NormalTok{(counts, }\StringTok{"cherry"}\NormalTok{, }\DecValTok{2}\NormalTok{);}
 
     \KeywordTok{val}\NormalTok{ found }\OperatorTok{=} \FunctionTok{map\_get}\NormalTok{(counts, }\StringTok{"banana"}\NormalTok{);}
-    \ControlFlowTok{if} \FunctionTok{is\_some}\NormalTok{(found) \{}
+    \ControlFlowTok{return} \ControlFlowTok{if} \FunctionTok{is\_some}\NormalTok{(found) \{}
         \FunctionTok{print}\NormalTok{(unwrap(found))   }\CommentTok{// prints 7}
 \NormalTok{    \} }\ControlFlowTok{else}\NormalTok{ \{}
         \FunctionTok{print}\NormalTok{(}\DecValTok{0}\NormalTok{)}
@@ -2393,7 +2382,7 @@ Options represent a value that may or may not be present.
 \begin{Shaded}
 \begin{Highlighting}[]
 \KeywordTok{def}\NormalTok{ safe\_head(lst: }\DataTypeTok{list}\OperatorTok{\textless{}}\DataTypeTok{i64}\OperatorTok{\textgreater{}}\NormalTok{) }\OperatorTok{{-}\textgreater{}} \DataTypeTok{option}\OperatorTok{\textless{}}\DataTypeTok{i64}\OperatorTok{\textgreater{}}\NormalTok{ \{}
-    \ControlFlowTok{if} \FunctionTok{list\_len}\NormalTok{(lst) }\OperatorTok{==} \DecValTok{0}\NormalTok{ \{}
+    \ControlFlowTok{return} \ControlFlowTok{if} \FunctionTok{list\_len}\NormalTok{(lst) }\OperatorTok{==} \DecValTok{0}\NormalTok{ \{}
         \ConstantTok{none}
 \NormalTok{    \} }\ControlFlowTok{else}\NormalTok{ \{}
         \FunctionTok{some}\NormalTok{(}\FunctionTok{list\_get}\NormalTok{(lst, }\DecValTok{0}\NormalTok{))}
@@ -2404,7 +2393,7 @@ Options represent a value that may or may not be present.
     \KeywordTok{val}\NormalTok{ lst }\OperatorTok{=} \DataTypeTok{list}\NormalTok{();}
     \FunctionTok{push}\NormalTok{(lst, }\DecValTok{42}\NormalTok{);}
     \KeywordTok{val}\NormalTok{ head }\OperatorTok{=}\NormalTok{ safe\_head(lst);}
-    \ControlFlowTok{if} \FunctionTok{is\_some}\NormalTok{(head) \{}
+    \ControlFlowTok{return} \ControlFlowTok{if} \FunctionTok{is\_some}\NormalTok{(head) \{}
         \FunctionTok{print}\NormalTok{(unwrap(head))   }\CommentTok{// prints 42}
 \NormalTok{    \} }\ControlFlowTok{else}\NormalTok{ \{}
         \FunctionTok{print}\NormalTok{(}\OperatorTok{{-}}\DecValTok{1}\NormalTok{)}
@@ -2448,7 +2437,7 @@ Results represent either success or failure.
 \begin{Highlighting}[]
 \KeywordTok{def}\NormalTok{ parse\_age(s: }\DataTypeTok{str}\NormalTok{) }\OperatorTok{{-}\textgreater{}} \DataTypeTok{result}\OperatorTok{\textless{}}\DataTypeTok{i64}\NormalTok{, }\DataTypeTok{str}\OperatorTok{\textgreater{}}\NormalTok{ \{}
     \KeywordTok{val}\NormalTok{ parsed }\OperatorTok{=} \FunctionTok{parse\_i64}\NormalTok{(s);}
-    \ControlFlowTok{if} \FunctionTok{is\_some}\NormalTok{(parsed) \{}
+    \ControlFlowTok{return} \ControlFlowTok{if} \FunctionTok{is\_some}\NormalTok{(parsed) \{}
         \KeywordTok{val}\NormalTok{ age }\OperatorTok{=}\NormalTok{ unwrap(parsed);}
         \ControlFlowTok{if}\NormalTok{ age }\OperatorTok{\textless{}} \DecValTok{0} \OperatorTok{||}\NormalTok{ age }\OperatorTok{\textgreater{}} \DecValTok{150}\NormalTok{ \{}
             \FunctionTok{err}\NormalTok{(}\StringTok{"age out of range"}\NormalTok{)}
@@ -2462,7 +2451,7 @@ Results represent either success or failure.
 
 \KeywordTok{def}\NormalTok{ main() }\OperatorTok{{-}\textgreater{}} \DataTypeTok{i64}\NormalTok{ \{}
     \KeywordTok{val}\NormalTok{ r }\OperatorTok{=}\NormalTok{ parse\_age(}\StringTok{"25"}\NormalTok{);}
-    \ControlFlowTok{if} \FunctionTok{is\_ok}\NormalTok{(r) \{}
+    \ControlFlowTok{return} \ControlFlowTok{if} \FunctionTok{is\_ok}\NormalTok{(r) \{}
         \FunctionTok{print}\NormalTok{(unwrap(r))   }\CommentTok{// 25}
 \NormalTok{    \} }\ControlFlowTok{else}\NormalTok{ \{}
         \FunctionTok{print}\NormalTok{(}\StringTok{"error"}\NormalTok{)}
@@ -2486,7 +2475,7 @@ ends:
     
     \FunctionTok{print}\NormalTok{(}\FunctionTok{to\_str}\NormalTok{(}\FunctionTok{deque\_pop\_front}\NormalTok{(dq))); }\CommentTok{// 10}
     \FunctionTok{print}\NormalTok{(}\FunctionTok{to\_str}\NormalTok{(}\FunctionTok{deque\_pop\_back}\NormalTok{(dq)));  }\CommentTok{// 30}
-    \DecValTok{0}
+    \ControlFlowTok{return} \DecValTok{0}
 \NormalTok{\}}
 \end{Highlighting}
 \end{Shaded}
@@ -2505,7 +2494,7 @@ BitSets provide compact, high-performance bit-array collections:
     \FunctionTok{print}\NormalTok{(}\FunctionTok{to\_str}\NormalTok{(}\FunctionTok{bitset\_get}\NormalTok{(bs, }\DecValTok{5}\NormalTok{)));   }\CommentTok{// true}
     \FunctionTok{print}\NormalTok{(}\FunctionTok{to\_str}\NormalTok{(}\FunctionTok{bitset\_get}\NormalTok{(bs, }\DecValTok{7}\NormalTok{)));   }\CommentTok{// false}
     \FunctionTok{print}\NormalTok{(}\FunctionTok{to\_str}\NormalTok{(}\FunctionTok{bitset\_count}\NormalTok{(bs)));    }\CommentTok{// 2}
-    \DecValTok{0}
+    \ControlFlowTok{return} \DecValTok{0}
 \NormalTok{\}}
 \end{Highlighting}
 \end{Shaded}
@@ -2524,7 +2513,7 @@ Mutexes provide thread-safe mutual exclusion for shared state:
         \CommentTok{// Locks are managed safely by built{-}ins}
         \DecValTok{0}
 \NormalTok{    \};}
-    \DecValTok{0}
+    \ControlFlowTok{return} \DecValTok{0}
 \NormalTok{\}}
 \end{Highlighting}
 \end{Shaded}
@@ -2544,7 +2533,7 @@ ends:
     
     \FunctionTok{print}\NormalTok{(}\FunctionTok{to\_str}\NormalTok{(}\FunctionTok{deque\_pop\_front}\NormalTok{(dq))); }\CommentTok{// 10}
     \FunctionTok{print}\NormalTok{(}\FunctionTok{to\_str}\NormalTok{(}\FunctionTok{deque\_pop\_back}\NormalTok{(dq)));  }\CommentTok{// 30}
-    \DecValTok{0}
+    \ControlFlowTok{return} \DecValTok{0}
 \NormalTok{\}}
 \end{Highlighting}
 \end{Shaded}
@@ -2563,7 +2552,7 @@ BitSets provide compact, high-performance bit-array collections:
     \FunctionTok{print}\NormalTok{(}\FunctionTok{to\_str}\NormalTok{(}\FunctionTok{bitset\_get}\NormalTok{(bs, }\DecValTok{5}\NormalTok{)));   }\CommentTok{// true}
     \FunctionTok{print}\NormalTok{(}\FunctionTok{to\_str}\NormalTok{(}\FunctionTok{bitset\_get}\NormalTok{(bs, }\DecValTok{7}\NormalTok{)));   }\CommentTok{// false}
     \FunctionTok{print}\NormalTok{(}\FunctionTok{to\_str}\NormalTok{(}\FunctionTok{bitset\_count}\NormalTok{(bs)));    }\CommentTok{// 2}
-    \DecValTok{0}
+    \ControlFlowTok{return} \DecValTok{0}
 \NormalTok{\}}
 \end{Highlighting}
 \end{Shaded}
@@ -2582,7 +2571,7 @@ Mutexes provide thread-safe mutual exclusion for shared state:
         \CommentTok{// Locks are managed safely by built{-}ins}
         \DecValTok{0}
 \NormalTok{    \};}
-    \DecValTok{0}
+    \ControlFlowTok{return} \DecValTok{0}
 \NormalTok{\}}
 \end{Highlighting}
 \end{Shaded}
@@ -2675,7 +2664,7 @@ type:
 
 \KeywordTok{impl}\NormalTok{ Printable }\ControlFlowTok{for}\NormalTok{ Point \{}
     \KeywordTok{def}\NormalTok{ to\_string(self: Point) }\OperatorTok{{-}\textgreater{}} \DataTypeTok{str}\NormalTok{ \{}
-        \FunctionTok{format}\NormalTok{(}\StringTok{"(\{\}, \{\})"}\NormalTok{, self}\OperatorTok{.}\NormalTok{x, self}\OperatorTok{.}\NormalTok{y)}
+        \ControlFlowTok{return} \FunctionTok{format}\NormalTok{(}\StringTok{"(\{\}, \{\})"}\NormalTok{, self}\OperatorTok{.}\NormalTok{x, self}\OperatorTok{.}\NormalTok{y)}
 \NormalTok{    \}}
 \NormalTok{\}}
 \end{Highlighting}
@@ -2689,7 +2678,7 @@ that type:
 \KeywordTok{def}\NormalTok{ main() }\OperatorTok{{-}\textgreater{}} \DataTypeTok{i64}\NormalTok{ \{}
     \KeywordTok{val}\NormalTok{ p }\OperatorTok{=}\NormalTok{ Point \{ x: }\FloatTok{3.5}\NormalTok{, y: }\OperatorTok{{-}}\FloatTok{2.0}\NormalTok{ \};}
     \FunctionTok{print}\NormalTok{(p}\OperatorTok{.}\NormalTok{to\_string());}
-    \DecValTok{0}
+    \ControlFlowTok{return} \DecValTok{0}
 \NormalTok{\}}
 \end{Highlighting}
 \end{Shaded}
@@ -2702,11 +2691,11 @@ Generic functions declare type parameters inside square brackets
 \begin{Shaded}
 \begin{Highlighting}[]
 \KeywordTok{def}\NormalTok{ identity[T](x: T) }\OperatorTok{{-}\textgreater{}}\NormalTok{ T \{}
-\NormalTok{    x}
+\NormalTok{    }\ControlFlowTok{return}\NormalTok{ x}
 \NormalTok{\}}
 
 \KeywordTok{def}\NormalTok{ my\_max[T](a: T, b: T) }\OperatorTok{{-}\textgreater{}}\NormalTok{ T \{}
-    \ControlFlowTok{if}\NormalTok{ a }\OperatorTok{\textgreater{}=}\NormalTok{ b \{ a \} }\ControlFlowTok{else}\NormalTok{ \{ b \}}
+    \ControlFlowTok{return} \ControlFlowTok{if}\NormalTok{ a }\OperatorTok{\textgreater{}=}\NormalTok{ b \{ a \} }\ControlFlowTok{else}\NormalTok{ \{ b \}}
 \NormalTok{\}}
 \end{Highlighting}
 \end{Shaded}
@@ -2724,7 +2713,7 @@ enforcing that types must implement specific traits:
 \begin{Highlighting}[]
 \KeywordTok{def}\NormalTok{ print\_item[T }\KeywordTok{where}\NormalTok{ T: Printable](x: T) }\OperatorTok{{-}\textgreater{}} \DataTypeTok{i64}\NormalTok{ \{}
     \FunctionTok{print}\NormalTok{(x}\OperatorTok{.}\NormalTok{to\_string());}
-    \DecValTok{0}
+    \ControlFlowTok{return} \DecValTok{0}
 \NormalTok{\}}
 \end{Highlighting}
 \end{Shaded}
@@ -2788,7 +2777,7 @@ type:
 
 \KeywordTok{impl}\NormalTok{ Printable }\ControlFlowTok{for}\NormalTok{ Point \{}
     \KeywordTok{def}\NormalTok{ to\_string(self: Point) }\OperatorTok{{-}\textgreater{}} \DataTypeTok{str}\NormalTok{ \{}
-        \FunctionTok{format}\NormalTok{(}\StringTok{"(\{\}, \{\})"}\NormalTok{, self}\OperatorTok{.}\NormalTok{x, self}\OperatorTok{.}\NormalTok{y)}
+        \ControlFlowTok{return} \FunctionTok{format}\NormalTok{(}\StringTok{"(\{\}, \{\})"}\NormalTok{, self}\OperatorTok{.}\NormalTok{x, self}\OperatorTok{.}\NormalTok{y)}
 \NormalTok{    \}}
 \NormalTok{\}}
 \end{Highlighting}
@@ -2802,7 +2791,7 @@ that type:
 \KeywordTok{def}\NormalTok{ main() }\OperatorTok{{-}\textgreater{}} \DataTypeTok{i64}\NormalTok{ \{}
     \KeywordTok{val}\NormalTok{ p }\OperatorTok{=}\NormalTok{ Point \{ x: }\FloatTok{3.5}\NormalTok{, y: }\OperatorTok{{-}}\FloatTok{2.0}\NormalTok{ \};}
     \FunctionTok{print}\NormalTok{(p}\OperatorTok{.}\NormalTok{to\_string());}
-    \DecValTok{0}
+    \ControlFlowTok{return} \DecValTok{0}
 \NormalTok{\}}
 \end{Highlighting}
 \end{Shaded}
@@ -2815,11 +2804,11 @@ Generic functions declare type parameters inside square brackets
 \begin{Shaded}
 \begin{Highlighting}[]
 \KeywordTok{def}\NormalTok{ identity[T](x: T) }\OperatorTok{{-}\textgreater{}}\NormalTok{ T \{}
-\NormalTok{    x}
+\NormalTok{    }\ControlFlowTok{return}\NormalTok{ x}
 \NormalTok{\}}
 
 \KeywordTok{def}\NormalTok{ my\_max[T](a: T, b: T) }\OperatorTok{{-}\textgreater{}}\NormalTok{ T \{}
-    \ControlFlowTok{if}\NormalTok{ a }\OperatorTok{\textgreater{}=}\NormalTok{ b \{ a \} }\ControlFlowTok{else}\NormalTok{ \{ b \}}
+    \ControlFlowTok{return} \ControlFlowTok{if}\NormalTok{ a }\OperatorTok{\textgreater{}=}\NormalTok{ b \{ a \} }\ControlFlowTok{else}\NormalTok{ \{ b \}}
 \NormalTok{\}}
 \end{Highlighting}
 \end{Shaded}
@@ -2837,7 +2826,7 @@ enforcing that types must implement specific traits:
 \begin{Highlighting}[]
 \KeywordTok{def}\NormalTok{ print\_item[T }\KeywordTok{where}\NormalTok{ T: Printable](x: T) }\OperatorTok{{-}\textgreater{}} \DataTypeTok{i64}\NormalTok{ \{}
     \FunctionTok{print}\NormalTok{(x}\OperatorTok{.}\NormalTok{to\_string());}
-    \DecValTok{0}
+    \ControlFlowTok{return} \DecValTok{0}
 \NormalTok{\}}
 \end{Highlighting}
 \end{Shaded}
@@ -2876,7 +2865,7 @@ surrounding scope. The syntax is
     \KeywordTok{val}\NormalTok{ add\_ten }\OperatorTok{=} \OperatorTok{|}\NormalTok{x: }\DataTypeTok{i64}\OperatorTok{|}\NormalTok{ x }\OperatorTok{+} \DecValTok{10}\NormalTok{;}
     \FunctionTok{print}\NormalTok{(double(}\DecValTok{21}\NormalTok{));    }\CommentTok{// 42}
     \FunctionTok{print}\NormalTok{(add\_ten(}\DecValTok{32}\NormalTok{));   }\CommentTok{// 42}
-    \DecValTok{0}
+    \ControlFlowTok{return} \DecValTok{0}
 \NormalTok{\}}
 \end{Highlighting}
 \end{Shaded}
@@ -2900,7 +2889,7 @@ For closures with multiple statements, use a block:
     \FunctionTok{print}\NormalTok{(clamp\_to\_100(}\DecValTok{150}\NormalTok{));   }\CommentTok{// 100}
     \FunctionTok{print}\NormalTok{(clamp\_to\_100(}\DecValTok{50}\NormalTok{));    }\CommentTok{// 50}
     \FunctionTok{print}\NormalTok{(clamp\_to\_100(}\OperatorTok{{-}}\DecValTok{5}\NormalTok{));    }\CommentTok{// 0}
-    \DecValTok{0}
+    \ControlFlowTok{return} \DecValTok{0}
 \NormalTok{\}}
 \end{Highlighting}
 \end{Shaded}
@@ -2914,13 +2903,13 @@ Closures can be passed to functions using function type notation
 \begin{Shaded}
 \begin{Highlighting}[]
 \KeywordTok{def}\NormalTok{ apply\_twice(f: (}\DataTypeTok{i64}\NormalTok{) }\OperatorTok{{-}\textgreater{}} \DataTypeTok{i64}\NormalTok{, x: }\DataTypeTok{i64}\NormalTok{) }\OperatorTok{{-}\textgreater{}} \DataTypeTok{i64}\NormalTok{ \{}
-\NormalTok{    f(f(x))}
+\NormalTok{    }\ControlFlowTok{return}\NormalTok{ f(f(x))}
 \NormalTok{\}}
 
 \KeywordTok{def}\NormalTok{ main() }\OperatorTok{{-}\textgreater{}} \DataTypeTok{i64}\NormalTok{ \{}
     \KeywordTok{val}\NormalTok{ triple }\OperatorTok{=} \OperatorTok{|}\NormalTok{x: }\DataTypeTok{i64}\OperatorTok{|}\NormalTok{ x }\OperatorTok{*} \DecValTok{3}\NormalTok{;}
     \FunctionTok{print}\NormalTok{(apply\_twice(triple, }\DecValTok{2}\NormalTok{));   }\CommentTok{// 3*(3*2) = 18}
-    \DecValTok{0}
+    \ControlFlowTok{return} \DecValTok{0}
 \NormalTok{\}}
 \end{Highlighting}
 \end{Shaded}
@@ -2938,7 +2927,7 @@ every element:
     \ControlFlowTok{for}\NormalTok{ i }\ControlFlowTok{in} \DecValTok{0}\OperatorTok{..}\NormalTok{n \{}
         \FunctionTok{push}\NormalTok{(}\DataTypeTok{result}\NormalTok{, f(}\FunctionTok{list\_get}\NormalTok{(lst, i)))}
 \NormalTok{    \}}
-    \DataTypeTok{result}
+    \ControlFlowTok{return} \DataTypeTok{result}
 \NormalTok{\}}
 
 \KeywordTok{def}\NormalTok{ main() }\OperatorTok{{-}\textgreater{}} \DataTypeTok{i64}\NormalTok{ \{}
@@ -2953,7 +2942,7 @@ every element:
     \ControlFlowTok{for}\NormalTok{ i }\ControlFlowTok{in} \DecValTok{0}\OperatorTok{..}\FunctionTok{list\_len}\NormalTok{(doubled) \{}
         \FunctionTok{print}\NormalTok{(}\FunctionTok{list\_get}\NormalTok{(doubled, i))}
 \NormalTok{    \}}
-    \DecValTok{0}
+    \ControlFlowTok{return} \DecValTok{0}
 \NormalTok{\}}
 \CommentTok{// prints: 2 4 6 8 10}
 \end{Highlighting}
@@ -2974,7 +2963,7 @@ every element:
             \DecValTok{0}
 \NormalTok{        \}}
 \NormalTok{    \}}
-    \DataTypeTok{result}
+    \ControlFlowTok{return} \DataTypeTok{result}
 \NormalTok{\}}
 
 \KeywordTok{def}\NormalTok{ main() }\OperatorTok{{-}\textgreater{}} \DataTypeTok{i64}\NormalTok{ \{}
@@ -2990,7 +2979,7 @@ every element:
     \ControlFlowTok{for}\NormalTok{ i }\ControlFlowTok{in} \DecValTok{0}\OperatorTok{..}\FunctionTok{list\_len}\NormalTok{(evens) \{}
         \FunctionTok{print}\NormalTok{(}\FunctionTok{list\_get}\NormalTok{(evens, i))}
 \NormalTok{    \}}
-    \DecValTok{0}
+    \ControlFlowTok{return} \DecValTok{0}
 \NormalTok{\}}
 \CommentTok{// prints: 2 4 6}
 \end{Highlighting}
@@ -3007,7 +2996,7 @@ Fold}\label{implementing-reduce-fold}
     \ControlFlowTok{for}\NormalTok{ i }\ControlFlowTok{in} \DecValTok{0}\OperatorTok{..}\NormalTok{n \{}
 \NormalTok{        acc }\OperatorTok{=}\NormalTok{ f(acc, }\FunctionTok{list\_get}\NormalTok{(lst, i))}
 \NormalTok{    \}}
-\NormalTok{    acc}
+\NormalTok{    }\ControlFlowTok{return}\NormalTok{ acc}
 \NormalTok{\}}
 
 \KeywordTok{def}\NormalTok{ main() }\OperatorTok{{-}\textgreater{}} \DataTypeTok{i64}\NormalTok{ \{}
@@ -3022,7 +3011,7 @@ Fold}\label{implementing-reduce-fold}
     \KeywordTok{val}\NormalTok{ product }\OperatorTok{=} \FunctionTok{list\_reduce}\NormalTok{(nums, }\DecValTok{1}\NormalTok{, }\OperatorTok{|}\NormalTok{acc: }\DataTypeTok{i64}\NormalTok{, x: }\DataTypeTok{i64}\OperatorTok{|}\NormalTok{ acc }\OperatorTok{*}\NormalTok{ x);}
     \FunctionTok{print}\NormalTok{(total);    }\CommentTok{// 15}
     \FunctionTok{print}\NormalTok{(product);  }\CommentTok{// 120}
-    \DecValTok{0}
+    \ControlFlowTok{return} \DecValTok{0}
 \NormalTok{\}}
 \end{Highlighting}
 \end{Shaded}
@@ -3035,7 +3024,7 @@ point of closure creation:
 \begin{Shaded}
 \begin{Highlighting}[]
 \KeywordTok{def}\NormalTok{ make\_adder(n: }\DataTypeTok{i64}\NormalTok{) }\OperatorTok{{-}\textgreater{}}\NormalTok{ (}\DataTypeTok{i64}\NormalTok{) }\OperatorTok{{-}\textgreater{}} \DataTypeTok{i64}\NormalTok{ \{}
-    \OperatorTok{|}\NormalTok{x: }\DataTypeTok{i64}\OperatorTok{|}\NormalTok{ x }\OperatorTok{+}\NormalTok{ n}
+    \ControlFlowTok{return} \OperatorTok{|}\NormalTok{x: }\DataTypeTok{i64}\OperatorTok{|}\NormalTok{ x }\OperatorTok{+}\NormalTok{ n}
 \NormalTok{\}}
 
 \KeywordTok{def}\NormalTok{ main() }\OperatorTok{{-}\textgreater{}} \DataTypeTok{i64}\NormalTok{ \{}
@@ -3043,7 +3032,7 @@ point of closure creation:
     \KeywordTok{val}\NormalTok{ add10 }\OperatorTok{=}\NormalTok{ make\_adder(}\DecValTok{10}\NormalTok{);}
     \FunctionTok{print}\NormalTok{(add5(}\DecValTok{3}\NormalTok{));    }\CommentTok{// 8}
     \FunctionTok{print}\NormalTok{(add10(}\DecValTok{3}\NormalTok{));   }\CommentTok{// 13}
-    \DecValTok{0}
+    \ControlFlowTok{return} \DecValTok{0}
 \NormalTok{\}}
 \end{Highlighting}
 \end{Shaded}
@@ -3070,7 +3059,7 @@ IRIS features fast, compiled regular expressions built-in:
     \CommentTok{// Replace regex match}
     \KeywordTok{val}\NormalTok{ masked }\OperatorTok{=} \FunctionTok{regex\_replace}\NormalTok{(text, pattern, }\StringTok{"[redacted]"}\NormalTok{);}
     \FunctionTok{print}\NormalTok{(masked);}
-    \DecValTok{0}
+    \ControlFlowTok{return} \DecValTok{0}
 \NormalTok{\}}
 \end{Highlighting}
 \end{Shaded}
@@ -3087,7 +3076,7 @@ The datetime built-ins provide high-precision system time operations:
     
     \KeywordTok{val}\NormalTok{ formatted }\OperatorTok{=} \FunctionTok{datetime\_format}\NormalTok{(now, }\StringTok{"\%Y{-}\%m{-}\%d \%H:\%M:\%S"}\NormalTok{);}
     \FunctionTok{print}\NormalTok{(}\FunctionTok{concat}\NormalTok{(}\StringTok{"Formatted: "}\NormalTok{, formatted));}
-    \DecValTok{0}
+    \ControlFlowTok{return} \DecValTok{0}
 \NormalTok{\}}
 \end{Highlighting}
 \end{Shaded}
@@ -3105,7 +3094,7 @@ You can write integer literals in hexadecimal notation using the
     \KeywordTok{val}\NormalTok{ blue }\OperatorTok{=} \BaseNTok{0x0000FF}\NormalTok{;}
     
     \FunctionTok{print}\NormalTok{(}\FunctionTok{concat}\NormalTok{(}\StringTok{"Red: "}\NormalTok{, }\FunctionTok{to\_str}\NormalTok{(red))); }\CommentTok{// 16711680}
-    \DecValTok{0}
+    \ControlFlowTok{return} \DecValTok{0}
 \NormalTok{\}}
 \end{Highlighting}
 \end{Shaded}
@@ -3161,7 +3150,7 @@ Escape & Meaning \\
     \FunctionTok{print}\NormalTok{(}\StringTok{"Line one\textbackslash{}nLine two"}\NormalTok{);}
     \FunctionTok{print}\NormalTok{(}\StringTok{"Tab\textbackslash{}there"}\NormalTok{);}
     \FunctionTok{print}\NormalTok{(}\StringTok{"She said \textbackslash{}"}\NormalTok{hello\textbackslash{}}\StringTok{""}\NormalTok{);}
-    \DecValTok{0}
+    \ControlFlowTok{return} \DecValTok{0}
 \NormalTok{\}}
 \end{Highlighting}
 \end{Shaded}
@@ -3175,13 +3164,13 @@ F-strings let you embed expressions directly in strings using
 \begin{Shaded}
 \begin{Highlighting}[]
 \KeywordTok{def}\NormalTok{ greet(name: }\DataTypeTok{str}\NormalTok{, age: }\DataTypeTok{i64}\NormalTok{) }\OperatorTok{{-}\textgreater{}} \DataTypeTok{str}\NormalTok{ \{}
-    \StringTok{f"Hello, }\ControlFlowTok{\{}\NormalTok{name}\ControlFlowTok{\}}\StringTok{! You are }\ControlFlowTok{\{}\NormalTok{age}\ControlFlowTok{\}}\StringTok{ years old."}
+    \ControlFlowTok{return} \StringTok{f"Hello, }\ControlFlowTok{\{}\NormalTok{name}\ControlFlowTok{\}}\StringTok{! You are }\ControlFlowTok{\{}\NormalTok{age}\ControlFlowTok{\}}\StringTok{ years old."}
 \NormalTok{\}}
 
 \KeywordTok{def}\NormalTok{ main() }\OperatorTok{{-}\textgreater{}} \DataTypeTok{i64}\NormalTok{ \{}
     \KeywordTok{val}\NormalTok{ msg }\OperatorTok{=}\NormalTok{ greet(}\StringTok{"Alice"}\NormalTok{, }\DecValTok{30}\NormalTok{);}
     \FunctionTok{print}\NormalTok{(msg);   }\CommentTok{// Hello, Alice! You are 30 years old.}
-    \DecValTok{0}
+    \ControlFlowTok{return} \DecValTok{0}
 \NormalTok{\}}
 \end{Highlighting}
 \end{Shaded}
@@ -3264,7 +3253,7 @@ Building a string incrementally by concatenation:
         \DataTypeTok{result} \OperatorTok{=} \FunctionTok{concat}\NormalTok{(}\DataTypeTok{result}\NormalTok{, }\FunctionTok{concat}\NormalTok{(}\StringTok{"Hello, "}\NormalTok{, }\FunctionTok{concat}\NormalTok{(name, }\StringTok{"! "}\NormalTok{)));}
 \NormalTok{        i }\OperatorTok{=}\NormalTok{ i }\OperatorTok{+} \DecValTok{1}
 \NormalTok{    \}}
-    \DataTypeTok{result}
+    \ControlFlowTok{return} \DataTypeTok{result}
 \NormalTok{\}}
 \end{Highlighting}
 \end{Shaded}
@@ -3287,13 +3276,13 @@ Using \texttt{join} with \texttt{split}:
             \FunctionTok{push}\NormalTok{(out, }\FunctionTok{concat}\NormalTok{(first, rest))}
 \NormalTok{        \}}
 \NormalTok{    \}}
-    \FunctionTok{join}\NormalTok{(out, }\StringTok{" "}\NormalTok{)}
+    \ControlFlowTok{return} \FunctionTok{join}\NormalTok{(out, }\StringTok{" "}\NormalTok{)}
 \NormalTok{\}}
 
 \KeywordTok{def}\NormalTok{ main() }\OperatorTok{{-}\textgreater{}} \DataTypeTok{i64}\NormalTok{ \{}
     \FunctionTok{print}\NormalTok{(capitalize\_words(}\StringTok{"hello world from iris"}\NormalTok{));}
     \CommentTok{// Hello World From Iris}
-    \DecValTok{0}
+    \ControlFlowTok{return} \DecValTok{0}
 \NormalTok{\}}
 \end{Highlighting}
 \end{Shaded}
@@ -3315,11 +3304,11 @@ Split a CSV line and process fields:
         \KeywordTok{val}\NormalTok{ i\_str }\OperatorTok{=} \FunctionTok{to\_str}\NormalTok{(i);}
         \FunctionTok{print}\NormalTok{(}\FunctionTok{concat}\NormalTok{(}\StringTok{"  ["}\NormalTok{, }\FunctionTok{concat}\NormalTok{(i\_str, }\FunctionTok{concat}\NormalTok{(}\StringTok{"] = "}\NormalTok{, field))))}
 \NormalTok{    \}}
-\NormalTok{    n}
+\NormalTok{    }\ControlFlowTok{return}\NormalTok{ n}
 \NormalTok{\}}
 
 \KeywordTok{def}\NormalTok{ main() }\OperatorTok{{-}\textgreater{}} \DataTypeTok{i64}\NormalTok{ \{}
-\NormalTok{    parse\_csv\_line(}\StringTok{"Alice, 30, Engineer, London"}\NormalTok{)}
+\NormalTok{    }\ControlFlowTok{return}\NormalTok{ parse\_csv\_line(}\StringTok{"Alice, 30, Engineer, London"}\NormalTok{)}
 \NormalTok{\}}
 \end{Highlighting}
 \end{Shaded}
@@ -3329,7 +3318,7 @@ Build a delimited string from a list:
 \begin{Shaded}
 \begin{Highlighting}[]
 \KeywordTok{def}\NormalTok{ list\_to\_csv(items: }\DataTypeTok{list}\OperatorTok{\textless{}}\DataTypeTok{str}\OperatorTok{\textgreater{}}\NormalTok{) }\OperatorTok{{-}\textgreater{}} \DataTypeTok{str}\NormalTok{ \{}
-    \FunctionTok{join}\NormalTok{(items, }\StringTok{","}\NormalTok{)}
+    \ControlFlowTok{return} \FunctionTok{join}\NormalTok{(items, }\StringTok{","}\NormalTok{)}
 \NormalTok{\}}
 
 \KeywordTok{def}\NormalTok{ main() }\OperatorTok{{-}\textgreater{}} \DataTypeTok{i64}\NormalTok{ \{}
@@ -3338,7 +3327,7 @@ Build a delimited string from a list:
     \FunctionTok{push}\NormalTok{(parts, }\StringTok{"age"}\NormalTok{);}
     \FunctionTok{push}\NormalTok{(parts, }\StringTok{"city"}\NormalTok{);}
     \FunctionTok{print}\NormalTok{(list\_to\_csv(parts));   }\CommentTok{// name,age,city}
-    \DecValTok{0}
+    \ControlFlowTok{return} \DecValTok{0}
 \NormalTok{\}}
 \end{Highlighting}
 \end{Shaded}
@@ -3349,7 +3338,7 @@ Build a delimited string from a list:
 \begin{Highlighting}[]
 \KeywordTok{def}\NormalTok{ find\_and\_extract(text: }\DataTypeTok{str}\NormalTok{, marker: }\DataTypeTok{str}\NormalTok{) }\OperatorTok{{-}\textgreater{}} \DataTypeTok{str}\NormalTok{ \{}
     \KeywordTok{val}\NormalTok{ pos }\OperatorTok{=} \FunctionTok{find}\NormalTok{(text, marker);}
-    \ControlFlowTok{if} \FunctionTok{is\_some}\NormalTok{(pos) \{}
+    \ControlFlowTok{return} \ControlFlowTok{if} \FunctionTok{is\_some}\NormalTok{(pos) \{}
         \KeywordTok{val}\NormalTok{ idx }\OperatorTok{=}\NormalTok{ unwrap(pos);}
         \KeywordTok{val}\NormalTok{ after }\OperatorTok{=} \FunctionTok{slice}\NormalTok{(text, idx }\OperatorTok{+} \FunctionTok{len}\NormalTok{(marker), }\FunctionTok{len}\NormalTok{(text));}
 \NormalTok{        after}
@@ -3361,7 +3350,7 @@ Build a delimited string from a list:
 \KeywordTok{def}\NormalTok{ main() }\OperatorTok{{-}\textgreater{}} \DataTypeTok{i64}\NormalTok{ \{}
     \KeywordTok{val} \DataTypeTok{result} \OperatorTok{=}\NormalTok{ find\_and\_extract(}\StringTok{"key=value"}\NormalTok{, }\StringTok{"="}\NormalTok{);}
     \FunctionTok{print}\NormalTok{(}\DataTypeTok{result}\NormalTok{);   }\CommentTok{// value}
-    \DecValTok{0}
+    \ControlFlowTok{return} \DecValTok{0}
 \NormalTok{\}}
 \end{Highlighting}
 \end{Shaded}
@@ -3385,7 +3374,7 @@ IRIS features fast, compiled regular expressions built-in:
     \CommentTok{// Replace regex match}
     \KeywordTok{val}\NormalTok{ masked }\OperatorTok{=} \FunctionTok{regex\_replace}\NormalTok{(text, pattern, }\StringTok{"[redacted]"}\NormalTok{);}
     \FunctionTok{print}\NormalTok{(masked);}
-    \DecValTok{0}
+    \ControlFlowTok{return} \DecValTok{0}
 \NormalTok{\}}
 \end{Highlighting}
 \end{Shaded}
@@ -3402,7 +3391,7 @@ The datetime built-ins provide high-precision system time operations:
     
     \KeywordTok{val}\NormalTok{ formatted }\OperatorTok{=} \FunctionTok{datetime\_format}\NormalTok{(now, }\StringTok{"\%Y{-}\%m{-}\%d \%H:\%M:\%S"}\NormalTok{);}
     \FunctionTok{print}\NormalTok{(}\FunctionTok{concat}\NormalTok{(}\StringTok{"Formatted: "}\NormalTok{, formatted));}
-    \DecValTok{0}
+    \ControlFlowTok{return} \DecValTok{0}
 \NormalTok{\}}
 \end{Highlighting}
 \end{Shaded}
@@ -3420,7 +3409,7 @@ You can write integer literals in hexadecimal notation using the
     \KeywordTok{val}\NormalTok{ blue }\OperatorTok{=} \BaseNTok{0x0000FF}\NormalTok{;}
     
     \FunctionTok{print}\NormalTok{(}\FunctionTok{concat}\NormalTok{(}\StringTok{"Red: "}\NormalTok{, }\FunctionTok{to\_str}\NormalTok{(red))); }\CommentTok{// 16711680}
-    \DecValTok{0}
+    \ControlFlowTok{return} \DecValTok{0}
 \NormalTok{\}}
 \end{Highlighting}
 \end{Shaded}
@@ -3496,7 +3485,7 @@ Results}\label{creating-and-checking-results}
 \begin{Shaded}
 \begin{Highlighting}[]
 \KeywordTok{def}\NormalTok{ divide(a: }\DataTypeTok{f64}\NormalTok{, b: }\DataTypeTok{f64}\NormalTok{) }\OperatorTok{{-}\textgreater{}} \DataTypeTok{result}\OperatorTok{\textless{}}\DataTypeTok{f64}\NormalTok{, }\DataTypeTok{str}\OperatorTok{\textgreater{}}\NormalTok{ \{}
-    \ControlFlowTok{if}\NormalTok{ b }\OperatorTok{==} \FloatTok{0.0}\NormalTok{ \{}
+    \ControlFlowTok{return} \ControlFlowTok{if}\NormalTok{ b }\OperatorTok{==} \FloatTok{0.0}\NormalTok{ \{}
         \FunctionTok{err}\NormalTok{(}\StringTok{"division by zero"}\NormalTok{)}
 \NormalTok{    \} }\ControlFlowTok{else}\NormalTok{ \{}
         \FunctionTok{ok}\NormalTok{(a }\OperatorTok{/}\NormalTok{ b)}
@@ -3513,7 +3502,7 @@ Results}\label{creating-and-checking-results}
         \FunctionTok{print}\NormalTok{(}\StringTok{"error"}\NormalTok{)}
 \NormalTok{    \};}
 
-    \ControlFlowTok{if} \FunctionTok{is\_ok}\NormalTok{(r2) \{}
+    \ControlFlowTok{return} \ControlFlowTok{if} \FunctionTok{is\_ok}\NormalTok{(r2) \{}
         \FunctionTok{print}\NormalTok{(unwrap(r2))}
 \NormalTok{    \} }\ControlFlowTok{else}\NormalTok{ \{}
         \FunctionTok{print}\NormalTok{(}\StringTok{"error: division by zero"}\NormalTok{)}
@@ -3535,7 +3524,7 @@ immediately; if it is \texttt{ok(v)}, continue with \texttt{v}.
 \begin{Highlighting}[]
 \KeywordTok{def}\NormalTok{ read\_positive(s: }\DataTypeTok{str}\NormalTok{) }\OperatorTok{{-}\textgreater{}} \DataTypeTok{result}\OperatorTok{\textless{}}\DataTypeTok{i64}\NormalTok{, }\DataTypeTok{str}\OperatorTok{\textgreater{}}\NormalTok{ \{}
     \KeywordTok{val}\NormalTok{ parsed }\OperatorTok{=} \FunctionTok{parse\_i64}\NormalTok{(s);}
-    \ControlFlowTok{if} \FunctionTok{is\_some}\NormalTok{(parsed) \{}
+    \ControlFlowTok{return} \ControlFlowTok{if} \FunctionTok{is\_some}\NormalTok{(parsed) \{}
         \KeywordTok{val}\NormalTok{ n }\OperatorTok{=}\NormalTok{ unwrap(parsed);}
         \ControlFlowTok{if}\NormalTok{ n }\OperatorTok{\textgreater{}} \DecValTok{0}\NormalTok{ \{}
             \FunctionTok{ok}\NormalTok{(n)}
@@ -3550,12 +3539,12 @@ immediately; if it is \texttt{ok(v)}, continue with \texttt{v}.
 \KeywordTok{def}\NormalTok{ compute(a\_str: }\DataTypeTok{str}\NormalTok{, b\_str: }\DataTypeTok{str}\NormalTok{) }\OperatorTok{{-}\textgreater{}} \DataTypeTok{result}\OperatorTok{\textless{}}\DataTypeTok{i64}\NormalTok{, }\DataTypeTok{str}\OperatorTok{\textgreater{}}\NormalTok{ \{}
     \KeywordTok{val}\NormalTok{ a }\OperatorTok{=}\NormalTok{ read\_positive(a\_str)}\OperatorTok{?}\NormalTok{;}
     \KeywordTok{val}\NormalTok{ b }\OperatorTok{=}\NormalTok{ read\_positive(b\_str)}\OperatorTok{?}\NormalTok{;}
-    \FunctionTok{ok}\NormalTok{(a }\OperatorTok{+}\NormalTok{ b)}
+    \ControlFlowTok{return} \FunctionTok{ok}\NormalTok{(a }\OperatorTok{+}\NormalTok{ b)}
 \NormalTok{\}}
 
 \KeywordTok{def}\NormalTok{ main() }\OperatorTok{{-}\textgreater{}} \DataTypeTok{i64}\NormalTok{ \{}
     \KeywordTok{val}\NormalTok{ r }\OperatorTok{=}\NormalTok{ compute(}\StringTok{"10"}\NormalTok{, }\StringTok{"20"}\NormalTok{);}
-    \ControlFlowTok{if} \FunctionTok{is\_ok}\NormalTok{(r) \{}
+    \ControlFlowTok{return} \ControlFlowTok{if} \FunctionTok{is\_ok}\NormalTok{(r) \{}
         \FunctionTok{print}\NormalTok{(unwrap(r))   }\CommentTok{// 30}
 \NormalTok{    \} }\ControlFlowTok{else}\NormalTok{ \{}
         \FunctionTok{print}\NormalTok{(}\StringTok{"error"}\NormalTok{)}
@@ -3574,7 +3563,7 @@ expressively:
 \begin{Highlighting}[]
 \KeywordTok{def}\NormalTok{ process\_file(path: }\DataTypeTok{str}\NormalTok{) }\OperatorTok{{-}\textgreater{}} \DataTypeTok{str}\NormalTok{ \{}
     \KeywordTok{val}\NormalTok{ r }\OperatorTok{=}\NormalTok{ file\_read\_all(path);}
-    \ControlFlowTok{when}\NormalTok{ r \{}
+    \ControlFlowTok{return} \ControlFlowTok{when}\NormalTok{ r \{}
         \FunctionTok{ok}\NormalTok{(content) }\OperatorTok{=\textgreater{}} \FunctionTok{concat}\NormalTok{(}\StringTok{"File contents: "}\NormalTok{, content),}
         \FunctionTok{err}\NormalTok{(msg)    }\OperatorTok{=\textgreater{}} \FunctionTok{concat}\NormalTok{(}\StringTok{"Failed to read file: "}\NormalTok{, msg)}
 \NormalTok{    \}}
@@ -3590,7 +3579,7 @@ Results can be chained when each step depends on the previous success:
 \begin{Highlighting}[]
 \KeywordTok{def}\NormalTok{ parse\_and\_double(s: }\DataTypeTok{str}\NormalTok{) }\OperatorTok{{-}\textgreater{}} \DataTypeTok{result}\OperatorTok{\textless{}}\DataTypeTok{i64}\NormalTok{, }\DataTypeTok{str}\OperatorTok{\textgreater{}}\NormalTok{ \{}
     \KeywordTok{val}\NormalTok{ parsed }\OperatorTok{=} \FunctionTok{parse\_i64}\NormalTok{(s);}
-    \ControlFlowTok{if} \FunctionTok{is\_some}\NormalTok{(parsed) \{}
+    \ControlFlowTok{return} \ControlFlowTok{if} \FunctionTok{is\_some}\NormalTok{(parsed) \{}
         \FunctionTok{ok}\NormalTok{(unwrap(parsed) }\OperatorTok{*} \DecValTok{2}\NormalTok{)}
 \NormalTok{    \} }\ControlFlowTok{else}\NormalTok{ \{}
         \FunctionTok{err}\NormalTok{(}\FunctionTok{concat}\NormalTok{(}\StringTok{"cannot parse: "}\NormalTok{, s))}
@@ -3600,7 +3589,7 @@ Results can be chained when each step depends on the previous success:
 \KeywordTok{def}\NormalTok{ parse\_two\_and\_add(a: }\DataTypeTok{str}\NormalTok{, b: }\DataTypeTok{str}\NormalTok{) }\OperatorTok{{-}\textgreater{}} \DataTypeTok{result}\OperatorTok{\textless{}}\DataTypeTok{i64}\NormalTok{, }\DataTypeTok{str}\OperatorTok{\textgreater{}}\NormalTok{ \{}
     \KeywordTok{val}\NormalTok{ x }\OperatorTok{=}\NormalTok{ parse\_and\_double(a)}\OperatorTok{?}\NormalTok{;}
     \KeywordTok{val}\NormalTok{ y }\OperatorTok{=}\NormalTok{ parse\_and\_double(b)}\OperatorTok{?}\NormalTok{;}
-    \FunctionTok{ok}\NormalTok{(x }\OperatorTok{+}\NormalTok{ y)}
+    \ControlFlowTok{return} \FunctionTok{ok}\NormalTok{(x }\OperatorTok{+}\NormalTok{ y)}
 \NormalTok{\}}
 
 \KeywordTok{def}\NormalTok{ main() }\OperatorTok{{-}\textgreater{}} \DataTypeTok{i64}\NormalTok{ \{}
@@ -3610,7 +3599,7 @@ Results can be chained when each step depends on the previous success:
     \ControlFlowTok{if} \FunctionTok{is\_ok}\NormalTok{(good) \{ }\FunctionTok{print}\NormalTok{(unwrap(good)) \} }\ControlFlowTok{else}\NormalTok{ \{ }\FunctionTok{print}\NormalTok{(}\StringTok{"failed"}\NormalTok{) \};}
     \CommentTok{// 16}
 
-    \ControlFlowTok{if} \FunctionTok{is\_ok}\NormalTok{(bad) \{ }\FunctionTok{print}\NormalTok{(unwrap(bad)) \} }\ControlFlowTok{else}\NormalTok{ \{ }\FunctionTok{print}\NormalTok{(}\StringTok{"failed"}\NormalTok{) \}}
+    \ControlFlowTok{return} \ControlFlowTok{if} \FunctionTok{is\_ok}\NormalTok{(bad) \{ }\FunctionTok{print}\NormalTok{(unwrap(bad)) \} }\ControlFlowTok{else}\NormalTok{ \{ }\FunctionTok{print}\NormalTok{(}\StringTok{"failed"}\NormalTok{) \}}
     \CommentTok{// failed}
 \NormalTok{\}}
 \end{Highlighting}
@@ -3626,7 +3615,7 @@ convert \texttt{option\textless{}T\textgreater{}} into
 \begin{Shaded}
 \begin{Highlighting}[]
 \KeywordTok{def}\NormalTok{ option\_to\_result(opt: }\DataTypeTok{option}\OperatorTok{\textless{}}\DataTypeTok{i64}\OperatorTok{\textgreater{}}\NormalTok{, msg: }\DataTypeTok{str}\NormalTok{) }\OperatorTok{{-}\textgreater{}} \DataTypeTok{result}\OperatorTok{\textless{}}\DataTypeTok{i64}\NormalTok{, }\DataTypeTok{str}\OperatorTok{\textgreater{}}\NormalTok{ \{}
-    \ControlFlowTok{if} \FunctionTok{is\_some}\NormalTok{(opt) \{}
+    \ControlFlowTok{return} \ControlFlowTok{if} \FunctionTok{is\_some}\NormalTok{(opt) \{}
         \FunctionTok{ok}\NormalTok{(unwrap(opt))}
 \NormalTok{    \} }\ControlFlowTok{else}\NormalTok{ \{}
         \FunctionTok{err}\NormalTok{(msg)}
@@ -3634,7 +3623,7 @@ convert \texttt{option\textless{}T\textgreater{}} into
 \NormalTok{\}}
 
 \KeywordTok{def}\NormalTok{ safe\_parse(s: }\DataTypeTok{str}\NormalTok{) }\OperatorTok{{-}\textgreater{}} \DataTypeTok{result}\OperatorTok{\textless{}}\DataTypeTok{i64}\NormalTok{, }\DataTypeTok{str}\OperatorTok{\textgreater{}}\NormalTok{ \{}
-\NormalTok{    option\_to\_result(}\FunctionTok{parse\_i64}\NormalTok{(s), }\FunctionTok{concat}\NormalTok{(}\StringTok{"not a number: "}\NormalTok{, s))}
+\NormalTok{    }\ControlFlowTok{return}\NormalTok{ option\_to\_result(}\FunctionTok{parse\_i64}\NormalTok{(s), }\FunctionTok{concat}\NormalTok{(}\StringTok{"not a number: "}\NormalTok{, s))}
 \NormalTok{\}}
 \end{Highlighting}
 \end{Shaded}
@@ -3648,7 +3637,7 @@ message:
 \begin{Shaded}
 \begin{Highlighting}[]
 \KeywordTok{def}\NormalTok{ must\_be\_positive(n: }\DataTypeTok{i64}\NormalTok{) }\OperatorTok{{-}\textgreater{}} \DataTypeTok{i64}\NormalTok{ \{}
-    \ControlFlowTok{if}\NormalTok{ n }\OperatorTok{\textless{}=} \DecValTok{0}\NormalTok{ \{}
+    \ControlFlowTok{return} \ControlFlowTok{if}\NormalTok{ n }\OperatorTok{\textless{}=} \DecValTok{0}\NormalTok{ \{}
         \FunctionTok{panic}\NormalTok{(}\StringTok{f"expected positive, got }\ControlFlowTok{\{}\NormalTok{n}\ControlFlowTok{\}}\StringTok{"}\NormalTok{)}
 \NormalTok{    \} }\ControlFlowTok{else}\NormalTok{ \{}
 \NormalTok{        n}
@@ -3663,7 +3652,7 @@ Use \texttt{assert} for debugging invariants:
 \begin{Highlighting}[]
 \KeywordTok{def}\NormalTok{ safe\_sqrt(x: }\DataTypeTok{f64}\NormalTok{) }\OperatorTok{{-}\textgreater{}} \DataTypeTok{f64}\NormalTok{ \{}
     \FunctionTok{assert}\NormalTok{(x }\OperatorTok{\textgreater{}=} \FloatTok{0.0} \KeywordTok{to} \DataTypeTok{f64}\NormalTok{);}
-    \FunctionTok{sqrt}\NormalTok{(x)}
+    \ControlFlowTok{return} \FunctionTok{sqrt}\NormalTok{(x)}
 \NormalTok{\}}
 \end{Highlighting}
 \end{Shaded}
@@ -3680,7 +3669,7 @@ lightweight, cooperative multitasking:
 \begin{Highlighting}[]
 \KeywordTok{async} \KeywordTok{def}\NormalTok{ slow\_op() }\OperatorTok{{-}\textgreater{}} \DataTypeTok{i64}\NormalTok{ \{}
     \CommentTok{// asynchronous operation}
-    \DecValTok{42}
+    \ControlFlowTok{return} \DecValTok{42}
 \NormalTok{\}}
 
 \KeywordTok{def}\NormalTok{ main() }\OperatorTok{{-}\textgreater{}} \DataTypeTok{i64}\NormalTok{ \{}
@@ -3690,7 +3679,7 @@ lightweight, cooperative multitasking:
     \CommentTok{// Await pauses execution until the future is ready}
     \KeywordTok{val} \DataTypeTok{result} \OperatorTok{=} \KeywordTok{await}\NormalTok{ future;}
     \FunctionTok{print}\NormalTok{(}\FunctionTok{to\_str}\NormalTok{(}\DataTypeTok{result}\NormalTok{));}
-    \DecValTok{0}
+    \ControlFlowTok{return} \DecValTok{0}
 \NormalTok{\}}
 \end{Highlighting}
 \end{Shaded}
@@ -3730,7 +3719,7 @@ channel is a typed queue: one task sends values, another receives them.
     \FunctionTok{send}\NormalTok{(ch, }\DecValTok{42}\NormalTok{);}
     \KeywordTok{val}\NormalTok{ value }\OperatorTok{=} \FunctionTok{recv}\NormalTok{(ch);}
     \FunctionTok{print}\NormalTok{(value);             }\CommentTok{// 42}
-    \DecValTok{0}
+    \ControlFlowTok{return} \DecValTok{0}
 \NormalTok{\}}
 \end{Highlighting}
 \end{Shaded}
@@ -3761,7 +3750,7 @@ The \texttt{spawn} block runs its body as a concurrent task:
         \KeywordTok{val}\NormalTok{ v }\OperatorTok{=} \FunctionTok{recv}\NormalTok{(ch);}
         \FunctionTok{print}\NormalTok{(v)}
 \NormalTok{    \}}
-    \DecValTok{0}
+    \ControlFlowTok{return} \DecValTok{0}
 \NormalTok{\}}
 \CommentTok{// prints: 0 1 2 3 4}
 \end{Highlighting}
@@ -3775,7 +3764,7 @@ The \texttt{spawn} block runs its body as a concurrent task:
 \begin{Highlighting}[]
 \KeywordTok{def}\NormalTok{ heavy\_work(i: }\DataTypeTok{i64}\NormalTok{) }\OperatorTok{{-}\textgreater{}} \DataTypeTok{i64}\NormalTok{ \{}
     \CommentTok{// simulate work}
-\NormalTok{    i }\OperatorTok{*}\NormalTok{ i}
+\NormalTok{    }\ControlFlowTok{return}\NormalTok{ i }\OperatorTok{*}\NormalTok{ i}
 \NormalTok{\}}
 
 \KeywordTok{def}\NormalTok{ main() }\OperatorTok{{-}\textgreater{}} \DataTypeTok{i64}\NormalTok{ \{}
@@ -3786,7 +3775,7 @@ The \texttt{spawn} block runs its body as a concurrent task:
     \ControlFlowTok{for}\NormalTok{ i }\ControlFlowTok{in} \DecValTok{0}\OperatorTok{..}\DecValTok{10}\NormalTok{ \{}
         \FunctionTok{print}\NormalTok{(results[i])}
 \NormalTok{    \}}
-    \DecValTok{0}
+    \ControlFlowTok{return} \DecValTok{0}
 \NormalTok{\}}
 \end{Highlighting}
 \end{Shaded}
@@ -3814,7 +3803,7 @@ races:
 
     \KeywordTok{val}\NormalTok{ total }\OperatorTok{=} \FunctionTok{atomic\_load}\NormalTok{(counter);}
     \FunctionTok{print}\NormalTok{(total);}
-    \DecValTok{0}
+    \ControlFlowTok{return} \DecValTok{0}
 \NormalTok{\}}
 \end{Highlighting}
 \end{Shaded}
@@ -3864,7 +3853,7 @@ consumes it:
 \NormalTok{        \}}
 \NormalTok{    \}}
     \FunctionTok{print}\NormalTok{(total);   }\CommentTok{// sum of squares: 0+1+4+9+...+81 = 285}
-    \DecValTok{0}
+    \ControlFlowTok{return} \DecValTok{0}
 \NormalTok{\}}
 \end{Highlighting}
 \end{Shaded}
@@ -3883,7 +3872,7 @@ For timing and delays:
     \KeywordTok{val}\NormalTok{ t1 }\OperatorTok{=}\NormalTok{ time\_now\_ms();}
     \KeywordTok{val}\NormalTok{ elapsed }\OperatorTok{=}\NormalTok{ t1 }\OperatorTok{{-}}\NormalTok{ t0;}
     \FunctionTok{print}\NormalTok{(}\StringTok{f"elapsed: }\ControlFlowTok{\{}\NormalTok{elapsed}\ControlFlowTok{\}}\StringTok{ ms"}\NormalTok{);}
-    \DecValTok{0}
+    \ControlFlowTok{return} \DecValTok{0}
 \NormalTok{\}}
 \end{Highlighting}
 \end{Shaded}
@@ -3900,7 +3889,7 @@ lightweight, cooperative multitasking:
 \begin{Highlighting}[]
 \KeywordTok{async} \KeywordTok{def}\NormalTok{ slow\_op() }\OperatorTok{{-}\textgreater{}} \DataTypeTok{i64}\NormalTok{ \{}
     \CommentTok{// asynchronous operation}
-    \DecValTok{42}
+    \ControlFlowTok{return} \DecValTok{42}
 \NormalTok{\}}
 
 \KeywordTok{def}\NormalTok{ main() }\OperatorTok{{-}\textgreater{}} \DataTypeTok{i64}\NormalTok{ \{}
@@ -3910,7 +3899,7 @@ lightweight, cooperative multitasking:
     \CommentTok{// Await pauses execution until the future is ready}
     \KeywordTok{val} \DataTypeTok{result} \OperatorTok{=} \KeywordTok{await}\NormalTok{ future;}
     \FunctionTok{print}\NormalTok{(}\FunctionTok{to\_str}\NormalTok{(}\DataTypeTok{result}\NormalTok{));}
-    \DecValTok{0}
+    \ControlFlowTok{return} \DecValTok{0}
 \NormalTok{\}}
 \end{Highlighting}
 \end{Shaded}
@@ -3937,7 +3926,7 @@ reverse-mode AD (backpropagation) using a taped execution graph:
     \CommentTok{// 4. Retrieve gradients}
     \FunctionTok{print}\NormalTok{(}\FunctionTok{concat}\NormalTok{(}\StringTok{"dz/dx: "}\NormalTok{, }\FunctionTok{to\_str}\NormalTok{(grad\_of(x)))); }\CommentTok{// 2*x + y = 7}
     \FunctionTok{print}\NormalTok{(}\FunctionTok{concat}\NormalTok{(}\StringTok{"dz/dy: "}\NormalTok{, }\FunctionTok{to\_str}\NormalTok{(grad\_of(y)))); }\CommentTok{// x = 2}
-    \DecValTok{0}
+    \ControlFlowTok{return} \DecValTok{0}
 \NormalTok{\}}
 \end{Highlighting}
 \end{Shaded}
@@ -3979,7 +3968,7 @@ given point:
     \CommentTok{// Derivative of f(x) = x at x=3.0 is 1.0}
     \KeywordTok{val}\NormalTok{ g }\OperatorTok{=}\NormalTok{ grad\_of(}\OperatorTok{|}\NormalTok{x: }\DataTypeTok{f32}\OperatorTok{|}\NormalTok{ x, }\FloatTok{3.0}\NormalTok{);}
     \FunctionTok{print}\NormalTok{(g);   }\CommentTok{// 1.0}
-    \DecValTok{0}
+    \ControlFlowTok{return} \DecValTok{0}
 \NormalTok{\}}
 \end{Highlighting}
 \end{Shaded}
@@ -3999,7 +3988,7 @@ operations:
 \KeywordTok{def}\NormalTok{ main() }\OperatorTok{{-}\textgreater{}} \DataTypeTok{i64}\NormalTok{ \{}
     \KeywordTok{val}\NormalTok{ deriv }\OperatorTok{=}\NormalTok{ grad\_of(}\OperatorTok{|}\NormalTok{x: }\DataTypeTok{f32}\OperatorTok{|}\NormalTok{ x }\OperatorTok{*}\NormalTok{ x, }\FloatTok{3.0}\NormalTok{);}
     \FunctionTok{print}\NormalTok{(deriv);    }\CommentTok{// 6.0 (derivative of x\^{}2 at x=3 is 2*3=6)}
-    \DecValTok{0}
+    \ControlFlowTok{return} \DecValTok{0}
 \NormalTok{\}}
 \end{Highlighting}
 \end{Shaded}
@@ -4013,13 +4002,13 @@ For a function \texttt{f(x)\ =\ x\^{}3\ +\ 2*x\ +\ 1}, the derivative is
     \CommentTok{// f(x) = x\^{}3 + 2x + 1}
     \CommentTok{// f\textquotesingle{}(x) = 3x\^{}2 + 2}
     \KeywordTok{val}\NormalTok{ x\_sq }\OperatorTok{=}\NormalTok{ x\_val }\OperatorTok{*}\NormalTok{ x\_val;}
-\NormalTok{    (}\FloatTok{3.0} \KeywordTok{to} \DataTypeTok{f64}\NormalTok{) }\OperatorTok{*}\NormalTok{ x\_sq }\OperatorTok{+}\NormalTok{ (}\FloatTok{2.0} \KeywordTok{to} \DataTypeTok{f64}\NormalTok{)}
+\NormalTok{    }\ControlFlowTok{return}\NormalTok{ (}\FloatTok{3.0} \KeywordTok{to} \DataTypeTok{f64}\NormalTok{) }\OperatorTok{*}\NormalTok{ x\_sq }\OperatorTok{+}\NormalTok{ (}\FloatTok{2.0} \KeywordTok{to} \DataTypeTok{f64}\NormalTok{)}
 \NormalTok{\}}
 
 \KeywordTok{def}\NormalTok{ main() }\OperatorTok{{-}\textgreater{}} \DataTypeTok{i64}\NormalTok{ \{}
     \CommentTok{// At x = 2: f\textquotesingle{}(2) = 3*4 + 2 = 14}
     \FunctionTok{print}\NormalTok{(poly\_deriv(}\FloatTok{2.0} \KeywordTok{to} \DataTypeTok{f64}\NormalTok{));   }\CommentTok{// 14.0}
-    \DecValTok{0}
+    \ControlFlowTok{return} \DecValTok{0}
 \NormalTok{\}}
 \end{Highlighting}
 \end{Shaded}
@@ -4034,12 +4023,12 @@ minimize \texttt{f(x)\ =\ (x\ -\ 3)\^{}2}, which has minimum at
 \begin{Highlighting}[]
 \KeywordTok{def}\NormalTok{ f(x: }\DataTypeTok{f64}\NormalTok{) }\OperatorTok{{-}\textgreater{}} \DataTypeTok{f64}\NormalTok{ \{}
     \KeywordTok{val}\NormalTok{ diff }\OperatorTok{=}\NormalTok{ x }\OperatorTok{{-}}\NormalTok{ (}\FloatTok{3.0} \KeywordTok{to} \DataTypeTok{f64}\NormalTok{);}
-\NormalTok{    diff }\OperatorTok{*}\NormalTok{ diff}
+\NormalTok{    }\ControlFlowTok{return}\NormalTok{ diff }\OperatorTok{*}\NormalTok{ diff}
 \NormalTok{\}}
 
 \KeywordTok{def}\NormalTok{ f\_prime(x: }\DataTypeTok{f64}\NormalTok{) }\OperatorTok{{-}\textgreater{}} \DataTypeTok{f64}\NormalTok{ \{}
     \CommentTok{// Derivative of (x{-}3)\^{}2 = 2*(x{-}3)}
-\NormalTok{    (}\FloatTok{2.0} \KeywordTok{to} \DataTypeTok{f64}\NormalTok{) }\OperatorTok{*}\NormalTok{ (x }\OperatorTok{{-}}\NormalTok{ (}\FloatTok{3.0} \KeywordTok{to} \DataTypeTok{f64}\NormalTok{))}
+\NormalTok{    }\ControlFlowTok{return}\NormalTok{ (}\FloatTok{2.0} \KeywordTok{to} \DataTypeTok{f64}\NormalTok{) }\OperatorTok{*}\NormalTok{ (x }\OperatorTok{{-}}\NormalTok{ (}\FloatTok{3.0} \KeywordTok{to} \DataTypeTok{f64}\NormalTok{))}
 \NormalTok{\}}
 
 \KeywordTok{def}\NormalTok{ gradient\_descent(start: }\DataTypeTok{f64}\NormalTok{, lr: }\DataTypeTok{f64}\NormalTok{, steps: }\DataTypeTok{i64}\NormalTok{) }\OperatorTok{{-}\textgreater{}} \DataTypeTok{f64}\NormalTok{ \{}
@@ -4048,13 +4037,13 @@ minimize \texttt{f(x)\ =\ (x\ -\ 3)\^{}2}, which has minimum at
         \KeywordTok{val}\NormalTok{ grad\_val }\OperatorTok{=}\NormalTok{ f\_prime(x);}
 \NormalTok{        x }\OperatorTok{=}\NormalTok{ x }\OperatorTok{{-}}\NormalTok{ lr }\OperatorTok{*}\NormalTok{ grad\_val}
 \NormalTok{    \}}
-\NormalTok{    x}
+\NormalTok{    }\ControlFlowTok{return}\NormalTok{ x}
 \NormalTok{\}}
 
 \KeywordTok{def}\NormalTok{ main() }\OperatorTok{{-}\textgreater{}} \DataTypeTok{i64}\NormalTok{ \{}
     \KeywordTok{val} \DataTypeTok{result} \OperatorTok{=}\NormalTok{ gradient\_descent(}\FloatTok{10.0} \KeywordTok{to} \DataTypeTok{f64}\NormalTok{, }\FloatTok{0.1} \KeywordTok{to} \DataTypeTok{f64}\NormalTok{, }\DecValTok{50}\NormalTok{);}
     \FunctionTok{print}\NormalTok{(}\DataTypeTok{result}\NormalTok{);   }\CommentTok{// approximately 3.0}
-    \DecValTok{0}
+    \ControlFlowTok{return} \DecValTok{0}
 \NormalTok{\}}
 \end{Highlighting}
 \end{Shaded}
@@ -4068,23 +4057,23 @@ A more realistic example --- linear regression with gradient descent:
 \begin{Highlighting}[]
 \CommentTok{// Linear regression: minimize (y {-} (w*x + b))\^{}2 over w and b}
 \KeywordTok{def}\NormalTok{ predict(w: }\DataTypeTok{f64}\NormalTok{, b: }\DataTypeTok{f64}\NormalTok{, x: }\DataTypeTok{f64}\NormalTok{) }\OperatorTok{{-}\textgreater{}} \DataTypeTok{f64}\NormalTok{ \{}
-\NormalTok{    w }\OperatorTok{*}\NormalTok{ x }\OperatorTok{+}\NormalTok{ b}
+\NormalTok{    }\ControlFlowTok{return}\NormalTok{ w }\OperatorTok{*}\NormalTok{ x }\OperatorTok{+}\NormalTok{ b}
 \NormalTok{\}}
 
 \KeywordTok{def}\NormalTok{ loss(w: }\DataTypeTok{f64}\NormalTok{, b: }\DataTypeTok{f64}\NormalTok{, x: }\DataTypeTok{f64}\NormalTok{, y: }\DataTypeTok{f64}\NormalTok{) }\OperatorTok{{-}\textgreater{}} \DataTypeTok{f64}\NormalTok{ \{}
     \KeywordTok{val}\NormalTok{ diff }\OperatorTok{=}\NormalTok{ y }\OperatorTok{{-}}\NormalTok{ predict(w, b, x);}
-\NormalTok{    diff }\OperatorTok{*}\NormalTok{ diff}
+\NormalTok{    }\ControlFlowTok{return}\NormalTok{ diff }\OperatorTok{*}\NormalTok{ diff}
 \NormalTok{\}}
 
 \CommentTok{// Compute gradients numerically (finite differences)}
 \KeywordTok{def}\NormalTok{ grad\_w(w: }\DataTypeTok{f64}\NormalTok{, b: }\DataTypeTok{f64}\NormalTok{, x: }\DataTypeTok{f64}\NormalTok{, y: }\DataTypeTok{f64}\NormalTok{) }\OperatorTok{{-}\textgreater{}} \DataTypeTok{f64}\NormalTok{ \{}
     \KeywordTok{val}\NormalTok{ h }\OperatorTok{=} \FloatTok{0.0001} \KeywordTok{to} \DataTypeTok{f64}\NormalTok{;}
-\NormalTok{    (loss(w }\OperatorTok{+}\NormalTok{ h, b, x, y) }\OperatorTok{{-}}\NormalTok{ loss(w }\OperatorTok{{-}}\NormalTok{ h, b, x, y)) }\OperatorTok{/}\NormalTok{ ((}\FloatTok{2.0} \KeywordTok{to} \DataTypeTok{f64}\NormalTok{) }\OperatorTok{*}\NormalTok{ h)}
+\NormalTok{    }\ControlFlowTok{return}\NormalTok{ (loss(w }\OperatorTok{+}\NormalTok{ h, b, x, y) }\OperatorTok{{-}}\NormalTok{ loss(w }\OperatorTok{{-}}\NormalTok{ h, b, x, y)) }\OperatorTok{/}\NormalTok{ ((}\FloatTok{2.0} \KeywordTok{to} \DataTypeTok{f64}\NormalTok{) }\OperatorTok{*}\NormalTok{ h)}
 \NormalTok{\}}
 
 \KeywordTok{def}\NormalTok{ grad\_b(w: }\DataTypeTok{f64}\NormalTok{, b: }\DataTypeTok{f64}\NormalTok{, x: }\DataTypeTok{f64}\NormalTok{, y: }\DataTypeTok{f64}\NormalTok{) }\OperatorTok{{-}\textgreater{}} \DataTypeTok{f64}\NormalTok{ \{}
     \KeywordTok{val}\NormalTok{ h }\OperatorTok{=} \FloatTok{0.0001} \KeywordTok{to} \DataTypeTok{f64}\NormalTok{;}
-\NormalTok{    (loss(w, b }\OperatorTok{+}\NormalTok{ h, x, y) }\OperatorTok{{-}}\NormalTok{ loss(w, b }\OperatorTok{{-}}\NormalTok{ h, x, y)) }\OperatorTok{/}\NormalTok{ ((}\FloatTok{2.0} \KeywordTok{to} \DataTypeTok{f64}\NormalTok{) }\OperatorTok{*}\NormalTok{ h)}
+\NormalTok{    }\ControlFlowTok{return}\NormalTok{ (loss(w, b }\OperatorTok{+}\NormalTok{ h, x, y) }\OperatorTok{{-}}\NormalTok{ loss(w, b }\OperatorTok{{-}}\NormalTok{ h, x, y)) }\OperatorTok{/}\NormalTok{ ((}\FloatTok{2.0} \KeywordTok{to} \DataTypeTok{f64}\NormalTok{) }\OperatorTok{*}\NormalTok{ h)}
 \NormalTok{\}}
 
 \KeywordTok{def}\NormalTok{ train(epochs: }\DataTypeTok{i64}\NormalTok{) }\OperatorTok{{-}\textgreater{}} \DataTypeTok{i64}\NormalTok{ \{}
@@ -4109,11 +4098,11 @@ A more realistic example --- linear regression with gradient descent:
 
     \FunctionTok{print}\NormalTok{(}\StringTok{f"w = }\ControlFlowTok{\{}\NormalTok{w}\ControlFlowTok{\}}\StringTok{, b = }\ControlFlowTok{\{}\NormalTok{b}\ControlFlowTok{\}}\StringTok{"}\NormalTok{);}
     \CommentTok{// Should converge to w ≈ 2.0, b ≈ 1.0}
-    \DecValTok{0}
+    \ControlFlowTok{return} \DecValTok{0}
 \NormalTok{\}}
 
 \KeywordTok{def}\NormalTok{ main() }\OperatorTok{{-}\textgreater{}} \DataTypeTok{i64}\NormalTok{ \{}
-\NormalTok{    train(}\DecValTok{200}\NormalTok{)}
+\NormalTok{    }\ControlFlowTok{return}\NormalTok{ train(}\DecValTok{200}\NormalTok{)}
 \NormalTok{\}}
 \end{Highlighting}
 \end{Shaded}
@@ -4140,7 +4129,7 @@ reverse-mode AD (backpropagation) using a taped execution graph:
     \CommentTok{// 4. Retrieve gradients}
     \FunctionTok{print}\NormalTok{(}\FunctionTok{concat}\NormalTok{(}\StringTok{"dz/dx: "}\NormalTok{, }\FunctionTok{to\_str}\NormalTok{(grad\_of(x)))); }\CommentTok{// 2*x + y = 7}
     \FunctionTok{print}\NormalTok{(}\FunctionTok{concat}\NormalTok{(}\StringTok{"dz/dy: "}\NormalTok{, }\FunctionTok{to\_str}\NormalTok{(grad\_of(y)))); }\CommentTok{// x = 2}
-    \DecValTok{0}
+    \ControlFlowTok{return} \DecValTok{0}
 \NormalTok{\}}
 \end{Highlighting}
 \end{Shaded}
@@ -4216,7 +4205,7 @@ tensor with \texttt{M} rows and \texttt{K} columns:
 \CommentTok{// A 3x3 identity{-}like matrix (type signature demonstration)}
 \KeywordTok{def}\NormalTok{ make\_identity(t: }\DataTypeTok{tensor}\OperatorTok{\textless{}}\DataTypeTok{f32}\NormalTok{, [}\DecValTok{3}\NormalTok{, }\DecValTok{3}\NormalTok{]}\OperatorTok{\textgreater{}}\NormalTok{) }\OperatorTok{{-}\textgreater{}} \DataTypeTok{tensor}\OperatorTok{\textless{}}\DataTypeTok{f32}\NormalTok{, [}\DecValTok{3}\NormalTok{, }\DecValTok{3}\NormalTok{]}\OperatorTok{\textgreater{}}\NormalTok{ \{}
     \CommentTok{// Tensor operations use einsum notation}
-    \FunctionTok{einsum}\NormalTok{(}\StringTok{"ij{-}\textgreater{}ij"}\NormalTok{, t)}
+    \ControlFlowTok{return} \FunctionTok{einsum}\NormalTok{(}\StringTok{"ij{-}\textgreater{}ij"}\NormalTok{, t)}
 \NormalTok{\}}
 \end{Highlighting}
 \end{Shaded}
@@ -4243,12 +4232,12 @@ operation:
 \begin{Highlighting}[]
 \CommentTok{// Matrix multiplication: C[m,n] = sum\_k A[m,k] * B[k,n]}
 \KeywordTok{def}\NormalTok{ matmul(a: }\DataTypeTok{tensor}\OperatorTok{\textless{}}\DataTypeTok{f32}\NormalTok{, [M, K]}\OperatorTok{\textgreater{}}\NormalTok{, b: }\DataTypeTok{tensor}\OperatorTok{\textless{}}\DataTypeTok{f32}\NormalTok{, [K, N]}\OperatorTok{\textgreater{}}\NormalTok{) }\OperatorTok{{-}\textgreater{}} \DataTypeTok{tensor}\OperatorTok{\textless{}}\DataTypeTok{f32}\NormalTok{, [M, N]}\OperatorTok{\textgreater{}}\NormalTok{ \{}
-    \FunctionTok{einsum}\NormalTok{(}\StringTok{"mk,kn{-}\textgreater{}mn"}\NormalTok{, a, b)}
+    \ControlFlowTok{return} \FunctionTok{einsum}\NormalTok{(}\StringTok{"mk,kn{-}\textgreater{}mn"}\NormalTok{, a, b)}
 \NormalTok{\}}
 
 \CommentTok{// Dot product: scalar = sum\_i a[i] * b[i]}
 \KeywordTok{def}\NormalTok{ dot(a: }\DataTypeTok{tensor}\OperatorTok{\textless{}}\DataTypeTok{f32}\NormalTok{, [N]}\OperatorTok{\textgreater{}}\NormalTok{, b: }\DataTypeTok{tensor}\OperatorTok{\textless{}}\DataTypeTok{f32}\NormalTok{, [N]}\OperatorTok{\textgreater{}}\NormalTok{) }\OperatorTok{{-}\textgreater{}} \DataTypeTok{tensor}\OperatorTok{\textless{}}\DataTypeTok{f32}\NormalTok{, []}\OperatorTok{\textgreater{}}\NormalTok{ \{}
-    \FunctionTok{einsum}\NormalTok{(}\StringTok{"i,i{-}\textgreater{}"}\NormalTok{, a, b)}
+    \ControlFlowTok{return} \FunctionTok{einsum}\NormalTok{(}\StringTok{"i,i{-}\textgreater{}"}\NormalTok{, a, b)}
 \NormalTok{\}}
 
 \CommentTok{// Batch matrix multiply: C[b,m,n] = sum\_k A[b,m,k] * B[b,k,n]}
@@ -4256,7 +4245,7 @@ operation:
 \NormalTok{    a: }\DataTypeTok{tensor}\OperatorTok{\textless{}}\DataTypeTok{f32}\NormalTok{, [B, M, K]}\OperatorTok{\textgreater{}}\NormalTok{,}
 \NormalTok{    b: }\DataTypeTok{tensor}\OperatorTok{\textless{}}\DataTypeTok{f32}\NormalTok{, [B, K, N]}\OperatorTok{\textgreater{}}
 \NormalTok{) }\OperatorTok{{-}\textgreater{}} \DataTypeTok{tensor}\OperatorTok{\textless{}}\DataTypeTok{f32}\NormalTok{, [B, M, N]}\OperatorTok{\textgreater{}}\NormalTok{ \{}
-    \FunctionTok{einsum}\NormalTok{(}\StringTok{"bmk,bkn{-}\textgreater{}bmn"}\NormalTok{, a, b)}
+    \ControlFlowTok{return} \FunctionTok{einsum}\NormalTok{(}\StringTok{"bmk,bkn{-}\textgreater{}bmn"}\NormalTok{, a, b)}
 \NormalTok{\}}
 \end{Highlighting}
 \end{Shaded}
@@ -4295,7 +4284,7 @@ A linear (dense) layer computes
 \NormalTok{    lyr: LinearLayer,}
 \NormalTok{    x: }\DataTypeTok{tensor}\OperatorTok{\textless{}}\DataTypeTok{f32}\NormalTok{, [IN]}\OperatorTok{\textgreater{}}
 \NormalTok{) }\OperatorTok{{-}\textgreater{}} \DataTypeTok{tensor}\OperatorTok{\textless{}}\DataTypeTok{f32}\NormalTok{, [OUT]}\OperatorTok{\textgreater{}}\NormalTok{ \{}
-    \FunctionTok{einsum}\NormalTok{(}\StringTok{"oi,i{-}\textgreater{}o"}\NormalTok{, lyr}\OperatorTok{.}\NormalTok{weights, x)}
+    \ControlFlowTok{return} \FunctionTok{einsum}\NormalTok{(}\StringTok{"oi,i{-}\textgreater{}o"}\NormalTok{, lyr}\OperatorTok{.}\NormalTok{weights, x)}
     \CommentTok{// Note: bias addition would be a separate step}
 \NormalTok{\}}
 \end{Highlighting}
@@ -4310,17 +4299,17 @@ operations:
 \begin{Highlighting}[]
 \CommentTok{// ReLU: f(x) = max(0, x)}
 \KeywordTok{def}\NormalTok{ relu(x: }\DataTypeTok{tensor}\OperatorTok{\textless{}}\DataTypeTok{f32}\NormalTok{, [N]}\OperatorTok{\textgreater{}}\NormalTok{) }\OperatorTok{{-}\textgreater{}} \DataTypeTok{tensor}\OperatorTok{\textless{}}\DataTypeTok{f32}\NormalTok{, [N]}\OperatorTok{\textgreater{}}\NormalTok{ \{}
-    \FunctionTok{einsum}\NormalTok{(}\StringTok{"i{-}\textgreater{}i"}\NormalTok{, x)}
+    \ControlFlowTok{return} \FunctionTok{einsum}\NormalTok{(}\StringTok{"i{-}\textgreater{}i"}\NormalTok{, x)}
 \NormalTok{\}}
 
 \CommentTok{// Sigmoid: f(x) = 1 / (1 + exp({-}x))}
 \KeywordTok{def}\NormalTok{ sigmoid(x: }\DataTypeTok{tensor}\OperatorTok{\textless{}}\DataTypeTok{f32}\NormalTok{, [N]}\OperatorTok{\textgreater{}}\NormalTok{) }\OperatorTok{{-}\textgreater{}} \DataTypeTok{tensor}\OperatorTok{\textless{}}\DataTypeTok{f32}\NormalTok{, [N]}\OperatorTok{\textgreater{}}\NormalTok{ \{}
-    \FunctionTok{einsum}\NormalTok{(}\StringTok{"i{-}\textgreater{}i"}\NormalTok{, x)}
+    \ControlFlowTok{return} \FunctionTok{einsum}\NormalTok{(}\StringTok{"i{-}\textgreater{}i"}\NormalTok{, x)}
 \NormalTok{\}}
 
 \CommentTok{// Tanh activation}
 \KeywordTok{def}\NormalTok{ tanh\_act(x: }\DataTypeTok{tensor}\OperatorTok{\textless{}}\DataTypeTok{f32}\NormalTok{, [N]}\OperatorTok{\textgreater{}}\NormalTok{) }\OperatorTok{{-}\textgreater{}} \DataTypeTok{tensor}\OperatorTok{\textless{}}\DataTypeTok{f32}\NormalTok{, [N]}\OperatorTok{\textgreater{}}\NormalTok{ \{}
-    \FunctionTok{einsum}\NormalTok{(}\StringTok{"i{-}\textgreater{}i"}\NormalTok{, x)}
+    \ControlFlowTok{return} \FunctionTok{einsum}\NormalTok{(}\StringTok{"i{-}\textgreater{}i"}\NormalTok{, x)}
 \NormalTok{\}}
 \end{Highlighting}
 \end{Shaded}
@@ -4351,7 +4340,7 @@ Putting it together with a minimal training loop structure:
     \KeywordTok{val}\NormalTok{ h }\OperatorTok{=} \FunctionTok{einsum}\NormalTok{(}\StringTok{"hi,i{-}\textgreater{}h"}\NormalTok{, mdl}\OperatorTok{.}\NormalTok{w1, x);}
     \KeywordTok{val}\NormalTok{ h\_act }\OperatorTok{=} \FunctionTok{einsum}\NormalTok{(}\StringTok{"i{-}\textgreater{}i"}\NormalTok{, h);}
     \CommentTok{// Output layer}
-    \FunctionTok{einsum}\NormalTok{(}\StringTok{"oh,h{-}\textgreater{}o"}\NormalTok{, mdl}\OperatorTok{.}\NormalTok{w2, h\_act)}
+    \ControlFlowTok{return} \FunctionTok{einsum}\NormalTok{(}\StringTok{"oh,h{-}\textgreater{}o"}\NormalTok{, mdl}\OperatorTok{.}\NormalTok{w2, h\_act)}
 \NormalTok{\}}
 \end{Highlighting}
 \end{Shaded}
@@ -4373,7 +4362,7 @@ For data with many zero values, IRIS supports sparse representations:
 \KeywordTok{def}\NormalTok{ process\_sparse(data: }\DataTypeTok{tensor}\OperatorTok{\textless{}}\DataTypeTok{f32}\NormalTok{, [N]}\OperatorTok{\textgreater{}}\NormalTok{) }\OperatorTok{{-}\textgreater{}} \DataTypeTok{i64}\NormalTok{ \{}
     \KeywordTok{val} \DataTypeTok{sparse} \OperatorTok{=} \FunctionTok{sparsify}\NormalTok{(data);      }\CommentTok{// convert to sparse}
     \KeywordTok{val}\NormalTok{ dense }\OperatorTok{=} \FunctionTok{densify}\NormalTok{(}\DataTypeTok{sparse}\NormalTok{);      }\CommentTok{// convert back to dense}
-    \DecValTok{0}
+    \ControlFlowTok{return} \DecValTok{0}
 \NormalTok{\}}
 \end{Highlighting}
 \end{Shaded}
@@ -4568,7 +4557,7 @@ IRIS can call C functions using \texttt{extern\ def} declarations:
 \KeywordTok{def}\NormalTok{ main() }\OperatorTok{{-}\textgreater{}} \DataTypeTok{i64}\NormalTok{ \{}
     \KeywordTok{val}\NormalTok{ msg }\OperatorTok{=} \StringTok{"Hello from C!"}\NormalTok{;}
 \NormalTok{    puts(msg);}
-    \DecValTok{0}
+    \ControlFlowTok{return} \DecValTok{0}
 \NormalTok{\}}
 \end{Highlighting}
 \end{Shaded}
@@ -4587,7 +4576,7 @@ A more complete FFI example --- calling a C math function:
 \KeywordTok{def}\NormalTok{ compute\_power() }\OperatorTok{{-}\textgreater{}} \DataTypeTok{i64}\NormalTok{ \{}
     \KeywordTok{val} \DataTypeTok{result} \OperatorTok{=}\NormalTok{ pow\_c(}\FloatTok{2.0} \KeywordTok{to} \DataTypeTok{f64}\NormalTok{, }\FloatTok{10.0} \KeywordTok{to} \DataTypeTok{f64}\NormalTok{);}
     \FunctionTok{print}\NormalTok{(}\DataTypeTok{result}\NormalTok{);   }\CommentTok{// 1024.0}
-    \DecValTok{0}
+    \ControlFlowTok{return} \DecValTok{0}
 \NormalTok{\}}
 \end{Highlighting}
 \end{Shaded}
@@ -4629,7 +4618,7 @@ arrays are allocated on the stack and have no overhead.
     \ControlFlowTok{for}\NormalTok{ i }\ControlFlowTok{in} \DecValTok{0}\OperatorTok{..}\DecValTok{8}\NormalTok{ \{}
 \NormalTok{        total }\OperatorTok{=}\NormalTok{ total }\OperatorTok{+}\NormalTok{ data[i]}
 \NormalTok{    \}}
-\NormalTok{    total}
+\NormalTok{    }\ControlFlowTok{return}\NormalTok{ total}
 \NormalTok{\}}
 \end{Highlighting}
 \end{Shaded}
@@ -4652,7 +4641,7 @@ how long sections of code take:
     \KeywordTok{val}\NormalTok{ t1 }\OperatorTok{=}\NormalTok{ time\_now\_ms();}
     \KeywordTok{val}\NormalTok{ elapsed }\OperatorTok{=}\NormalTok{ t1 }\OperatorTok{{-}}\NormalTok{ t0;}
     \FunctionTok{print}\NormalTok{(}\StringTok{f"elapsed: }\ControlFlowTok{\{}\NormalTok{elapsed}\ControlFlowTok{\}}\StringTok{ms"}\NormalTok{);}
-    \DecValTok{0}
+    \ControlFlowTok{return} \DecValTok{0}
 \NormalTok{\}}
 \end{Highlighting}
 \end{Shaded}
@@ -4707,7 +4696,7 @@ Functions}{15.1 std.math --- Extended Math Functions}}\label{std.math-extended-m
     \FunctionTok{print}\NormalTok{(is\_even(}\DecValTok{7}\NormalTok{));            }\CommentTok{// false}
     \FunctionTok{print}\NormalTok{(is\_odd(}\DecValTok{7}\NormalTok{));             }\CommentTok{// true}
     \FunctionTok{print}\NormalTok{(clamp\_i64(}\DecValTok{150}\NormalTok{, }\DecValTok{0}\NormalTok{, }\DecValTok{100}\NormalTok{)); }\CommentTok{// 100}
-    \DecValTok{0}
+    \ControlFlowTok{return} \DecValTok{0}
 \NormalTok{\}}
 \end{Highlighting}
 \end{Shaded}
@@ -4749,7 +4738,7 @@ Utilities}{15.2 std.string --- String Utilities}}\label{std.string-string-utilit
 
     \KeywordTok{val}\NormalTok{ joined }\OperatorTok{=}\NormalTok{ str\_join(ws, }\StringTok{"{-}"}\NormalTok{);}
     \FunctionTok{print}\NormalTok{(joined);    }\CommentTok{// "hello{-}world{-}foo"}
-    \DecValTok{0}
+    \ControlFlowTok{return} \DecValTok{0}
 \NormalTok{\}}
 \end{Highlighting}
 \end{Shaded}
@@ -4801,7 +4790,7 @@ The \texttt{fmt} module provides printf-style string formatting:
 
     \KeywordTok{val}\NormalTok{ z }\OperatorTok{=}\NormalTok{ zero\_pad\_int(}\DecValTok{42}\NormalTok{, }\DecValTok{6}\NormalTok{);}
     \FunctionTok{print}\NormalTok{(z);   }\CommentTok{// "000042"}
-    \DecValTok{0}
+    \ControlFlowTok{return} \DecValTok{0}
 \NormalTok{\}}
 \end{Highlighting}
 \end{Shaded}
@@ -4858,7 +4847,7 @@ System}{15.4 std.fs --- File System}}\label{std.fs-file-system}
     \CommentTok{// Read lines}
     \KeywordTok{val}\NormalTok{ lns }\OperatorTok{=}\NormalTok{ read\_lines(}\StringTok{"output.txt"}\NormalTok{);}
     \FunctionTok{print}\NormalTok{(}\FunctionTok{list\_len}\NormalTok{(lns));}
-    \DecValTok{0}
+    \ControlFlowTok{return} \DecValTok{0}
 \NormalTok{\}}
 \end{Highlighting}
 \end{Shaded}
@@ -4893,7 +4882,7 @@ JSON}{15.5 std.json --- JSON}}\label{std.json-json}
 \NormalTok{    json\_set(obj, }\StringTok{"version"}\NormalTok{, }\StringTok{"1.0.0{-}rc1"}\NormalTok{);}
     \KeywordTok{val}\NormalTok{ s }\OperatorTok{=}\NormalTok{ json\_emit(obj);}
     \FunctionTok{print}\NormalTok{(s);   }\CommentTok{// \{"name": "IRIS", "version": "1.0.0{-}rc1"\}}
-    \DecValTok{0}
+    \ControlFlowTok{return} \DecValTok{0}
 \NormalTok{\}}
 \end{Highlighting}
 \end{Shaded}
@@ -4911,7 +4900,7 @@ CSV}{15.6 std.csv --- CSV}}\label{std.csv-csv}
 
     \KeywordTok{val}\NormalTok{ out }\OperatorTok{=}\NormalTok{ csv\_emit\_row(row);}
     \FunctionTok{print}\NormalTok{(out);   }\CommentTok{// Alice,30,Engineer}
-    \DecValTok{0}
+    \ControlFlowTok{return} \DecValTok{0}
 \NormalTok{\}}
 \end{Highlighting}
 \end{Shaded}
@@ -4930,7 +4919,7 @@ Hashing}{15.7 std.crypto --- Cryptography \& Hashing}}\label{std.crypto-cryptogr
     \FunctionTok{print}\NormalTok{(id);                   }\CommentTok{// random UUID v4}
     \KeywordTok{val}\NormalTok{ enc }\OperatorTok{=} \FunctionTok{hex\_encode}\NormalTok{(}\StringTok{"hi"}\NormalTok{);}
     \KeywordTok{val}\NormalTok{ dec }\OperatorTok{=} \FunctionTok{hex\_decode}\NormalTok{(enc);}
-    \DecValTok{0}
+    \ControlFlowTok{return} \DecValTok{0}
 \NormalTok{\}}
 \end{Highlighting}
 \end{Shaded}
@@ -4956,7 +4945,7 @@ Rust)}{15.8 std.ffi --- Foreign Function Interface (C, Python, Rust)}}\label{std
     \CommentTok{// Rust cdylib FFI}
     \KeywordTok{val}\NormalTok{ rlib }\OperatorTok{=} \FunctionTok{rust\_lib\_open}\NormalTok{(}\StringTok{"mylib.dll"}\NormalTok{);}
     \KeywordTok{val}\NormalTok{ n }\OperatorTok{=} \FunctionTok{rust\_call\_i64}\NormalTok{(rlib, }\StringTok{"compute"}\NormalTok{, }\DecValTok{42}\NormalTok{);}
-    \DecValTok{0}
+    \ControlFlowTok{return} \DecValTok{0}
 \NormalTok{\}}
 \end{Highlighting}
 \end{Shaded}
@@ -4973,7 +4962,7 @@ System}{15.9 std.os --- Operating System}}\label{std.os-operating-system}
     \FunctionTok{print}\NormalTok{(home);}
     \KeywordTok{val}\NormalTok{ p }\OperatorTok{=} \FunctionTok{pid}\NormalTok{();}
     \FunctionTok{print}\NormalTok{(}\FunctionTok{to\_str}\NormalTok{(p));}
-    \DecValTok{0}
+    \ControlFlowTok{return} \DecValTok{0}
 \NormalTok{\}}
 \end{Highlighting}
 \end{Shaded}
@@ -4989,7 +4978,7 @@ Testing}{15.10 std.testing --- Testing}}\label{std.testing-testing}
 \NormalTok{    assert\_eq(}\DecValTok{2} \OperatorTok{+} \DecValTok{2}\NormalTok{, }\DecValTok{4}\NormalTok{, }\StringTok{"basic addition"}\NormalTok{);}
 \NormalTok{    assert\_ne(}\DecValTok{2} \OperatorTok{+} \DecValTok{2}\NormalTok{, }\DecValTok{5}\NormalTok{, }\StringTok{"should not be 5"}\NormalTok{);}
 \NormalTok{    assert\_true(}\ConstantTok{true}\NormalTok{, }\StringTok{"truthy"}\NormalTok{);}
-    \DecValTok{0}
+    \ControlFlowTok{return} \DecValTok{0}
 \NormalTok{\}}
 \end{Highlighting}
 \end{Shaded}
@@ -5005,7 +4994,7 @@ Logging}{15.11 std.log --- Logging}}\label{std.log-logging}
 \NormalTok{    log\_info(}\StringTok{"Application started"}\NormalTok{);}
 \NormalTok{    log\_warn(}\StringTok{"Low memory"}\NormalTok{);}
 \NormalTok{    log\_error(}\StringTok{"Failed to connect"}\NormalTok{);}
-    \DecValTok{0}
+    \ControlFlowTok{return} \DecValTok{0}
 \NormalTok{\}}
 \end{Highlighting}
 \end{Shaded}
@@ -5064,7 +5053,7 @@ generate vector graphics:
 \NormalTok{    svg}\OperatorTok{.}\NormalTok{circle(canvas, }\DecValTok{400}\NormalTok{, }\DecValTok{300}\NormalTok{, }\DecValTok{150}\NormalTok{, }\StringTok{"fill: blue; opacity: 0.5"}\NormalTok{);}
 \NormalTok{    svg}\OperatorTok{.}\NormalTok{text(canvas, }\DecValTok{400}\NormalTok{, }\DecValTok{80}\NormalTok{, }\StringTok{"IRIS Standard Visualization"}\NormalTok{, }\StringTok{"font{-}size: 24px; text{-}anchor: middle"}\NormalTok{);}
 \NormalTok{    svg}\OperatorTok{.}\NormalTok{save(canvas, }\StringTok{"chart.svg"}\NormalTok{);}
-    \DecValTok{0}
+    \ControlFlowTok{return} \DecValTok{0}
 \NormalTok{\}}
 \end{Highlighting}
 \end{Shaded}
@@ -5083,7 +5072,7 @@ in your terminal output:
     
     \CommentTok{// Plots a clean Unicode line chart}
 \NormalTok{    termplot}\OperatorTok{.}\NormalTok{line(data, }\StringTok{"Performance Profile"}\NormalTok{);}
-    \DecValTok{0}
+    \ControlFlowTok{return} \DecValTok{0}
 \NormalTok{\}}
 \end{Highlighting}
 \end{Shaded}
@@ -5398,7 +5387,7 @@ and \texttt{var} bindings that omit explicit types:
 \KeywordTok{def}\NormalTok{ example() }\OperatorTok{{-}\textgreater{}} \DataTypeTok{i64}\NormalTok{ \{}
     \KeywordTok{val}\NormalTok{ x }\OperatorTok{=} \DecValTok{42}\NormalTok{;          }\CommentTok{// inlay hint: \textasciigrave{}: i64\textasciigrave{}}
     \KeywordTok{var}\NormalTok{ name }\OperatorTok{=} \StringTok{"IRIS"}\NormalTok{;   }\CommentTok{// inlay hint: \textasciigrave{}: str\textasciigrave{}}
-    \DecValTok{0}
+    \ControlFlowTok{return} \DecValTok{0}
 \NormalTok{\}}
 \end{Highlighting}
 \end{Shaded}
@@ -5863,11 +5852,11 @@ The \texttt{bring} statement imports another IRIS file. All
 \begin{Highlighting}[]
 \CommentTok{// src/utils.iris}
 \KeywordTok{pub} \KeywordTok{def} \FunctionTok{clamp}\NormalTok{(x: }\DataTypeTok{i64}\NormalTok{, lo: }\DataTypeTok{i64}\NormalTok{, hi: }\DataTypeTok{i64}\NormalTok{) }\OperatorTok{{-}\textgreater{}} \DataTypeTok{i64}\NormalTok{ \{}
-    \ControlFlowTok{if}\NormalTok{ x }\OperatorTok{\textless{}}\NormalTok{ lo \{ lo \} }\ControlFlowTok{else}\NormalTok{ \{ }\ControlFlowTok{if}\NormalTok{ x }\OperatorTok{\textgreater{}}\NormalTok{ hi \{ hi \} }\ControlFlowTok{else}\NormalTok{ \{ x \} \}}
+    \ControlFlowTok{return} \ControlFlowTok{if}\NormalTok{ x }\OperatorTok{\textless{}}\NormalTok{ lo \{ lo \} }\ControlFlowTok{else}\NormalTok{ \{ }\ControlFlowTok{if}\NormalTok{ x }\OperatorTok{\textgreater{}}\NormalTok{ hi \{ hi \} }\ControlFlowTok{else}\NormalTok{ \{ x \} \}}
 \NormalTok{\}}
 
 \KeywordTok{pub} \KeywordTok{def}\NormalTok{ square(x: }\DataTypeTok{i64}\NormalTok{) }\OperatorTok{{-}\textgreater{}} \DataTypeTok{i64}\NormalTok{ \{}
-\NormalTok{    x }\OperatorTok{*}\NormalTok{ x}
+\NormalTok{    }\ControlFlowTok{return}\NormalTok{ x }\OperatorTok{*}\NormalTok{ x}
 \NormalTok{\}}
 \end{Highlighting}
 \end{Shaded}
@@ -5880,7 +5869,7 @@ The \texttt{bring} statement imports another IRIS file. All
 \KeywordTok{def}\NormalTok{ main() }\OperatorTok{{-}\textgreater{}} \DataTypeTok{i64}\NormalTok{ \{}
     \FunctionTok{print}\NormalTok{(}\FunctionTok{clamp}\NormalTok{(}\DecValTok{150}\NormalTok{, }\DecValTok{0}\NormalTok{, }\DecValTok{100}\NormalTok{));   }\CommentTok{// 100}
     \FunctionTok{print}\NormalTok{(square(}\DecValTok{7}\NormalTok{));            }\CommentTok{// 49}
-    \DecValTok{0}
+    \ControlFlowTok{return} \DecValTok{0}
 \NormalTok{\}}
 \end{Highlighting}
 \end{Shaded}
@@ -5927,7 +5916,7 @@ A number-guessing game as a complete command-line program:
             \FunctionTok{print}\NormalTok{(}\StringTok{"Please enter a valid number:"}\NormalTok{)}
 \NormalTok{        \}}
 \NormalTok{    \}}
-    \DecValTok{0}
+    \ControlFlowTok{return} \DecValTok{0}
 \NormalTok{\}}
 \end{Highlighting}
 \end{Shaded}
@@ -5944,17 +5933,17 @@ A more practical command-line tool --- counting words in a file:
 
 \KeywordTok{def}\NormalTok{ count\_words\_in\_text(text: }\DataTypeTok{str}\NormalTok{) }\OperatorTok{{-}\textgreater{}} \DataTypeTok{i64}\NormalTok{ \{}
     \KeywordTok{val}\NormalTok{ ws }\OperatorTok{=}\NormalTok{ words(text);}
-    \FunctionTok{list\_len}\NormalTok{(ws)}
+    \ControlFlowTok{return} \FunctionTok{list\_len}\NormalTok{(ws)}
 \NormalTok{\}}
 
 \KeywordTok{def}\NormalTok{ count\_lines\_in\_text(text: }\DataTypeTok{str}\NormalTok{) }\OperatorTok{{-}\textgreater{}} \DataTypeTok{i64}\NormalTok{ \{}
     \KeywordTok{val}\NormalTok{ ls }\OperatorTok{=}\NormalTok{ lines(text);}
-    \FunctionTok{list\_len}\NormalTok{(ls)}
+    \ControlFlowTok{return} \FunctionTok{list\_len}\NormalTok{(ls)}
 \NormalTok{\}}
 
 \KeywordTok{def}\NormalTok{ main() }\OperatorTok{{-}\textgreater{}} \DataTypeTok{i64}\NormalTok{ \{}
     \KeywordTok{val}\NormalTok{ args }\OperatorTok{=}\NormalTok{ process\_args();}
-    \ControlFlowTok{if} \FunctionTok{list\_len}\NormalTok{(args) }\OperatorTok{\textless{}} \DecValTok{2}\NormalTok{ \{}
+    \ControlFlowTok{return} \ControlFlowTok{if} \FunctionTok{list\_len}\NormalTok{(args) }\OperatorTok{\textless{}} \DecValTok{2}\NormalTok{ \{}
         \FunctionTok{print}\NormalTok{(}\StringTok{"Usage: wc \textless{}filename\textgreater{}"}\NormalTok{);}
         \DecValTok{1}
 \NormalTok{    \} }\ControlFlowTok{else}\NormalTok{ \{}
@@ -6001,7 +5990,7 @@ IRIS has built-in TCP networking:
 \NormalTok{        \}}
 \NormalTok{    \}}
     \FunctionTok{tcp\_close}\NormalTok{(conn);}
-    \DecValTok{0}
+    \ControlFlowTok{return} \DecValTok{0}
 \NormalTok{\}}
 
 \KeywordTok{def}\NormalTok{ main() }\OperatorTok{{-}\textgreater{}} \DataTypeTok{i64}\NormalTok{ \{}
@@ -6014,7 +6003,7 @@ IRIS has built-in TCP networking:
     \FunctionTok{print}\NormalTok{(}\StringTok{"Connection accepted"}\NormalTok{);}
 \NormalTok{    handle\_connection(conn);}
     \FunctionTok{tcp\_close}\NormalTok{(listener);}
-    \DecValTok{0}
+    \ControlFlowTok{return} \DecValTok{0}
 \NormalTok{\}}
 \end{Highlighting}
 \end{Shaded}
@@ -6042,15 +6031,15 @@ Use \texttt{time\_now\_ms()} to build simple profiling wrappers:
     \KeywordTok{val}\NormalTok{ time\_iterative }\OperatorTok{=}\NormalTok{ t3 }\OperatorTok{{-}}\NormalTok{ t2;}
     \FunctionTok{print}\NormalTok{(}\StringTok{f"Recursive: }\ControlFlowTok{\{}\NormalTok{r1}\ControlFlowTok{\}}\StringTok{ in }\ControlFlowTok{\{}\NormalTok{time\_recursive}\ControlFlowTok{\}}\StringTok{ms"}\NormalTok{);}
     \FunctionTok{print}\NormalTok{(}\StringTok{f"Iterative: }\ControlFlowTok{\{}\NormalTok{r2}\ControlFlowTok{\}}\StringTok{ in }\ControlFlowTok{\{}\NormalTok{time\_iterative}\ControlFlowTok{\}}\StringTok{ms"}\NormalTok{);}
-    \DecValTok{0}
+    \ControlFlowTok{return} \DecValTok{0}
 \NormalTok{\}}
 
 \KeywordTok{def}\NormalTok{ fib\_recursive(n: }\DataTypeTok{i64}\NormalTok{) }\OperatorTok{{-}\textgreater{}} \DataTypeTok{i64}\NormalTok{ \{}
-    \ControlFlowTok{if}\NormalTok{ n }\OperatorTok{\textless{}=} \DecValTok{1}\NormalTok{ \{ n \} }\ControlFlowTok{else}\NormalTok{ \{ fib\_recursive(n}\OperatorTok{{-}}\DecValTok{1}\NormalTok{) }\OperatorTok{+}\NormalTok{ fib\_recursive(n}\OperatorTok{{-}}\DecValTok{2}\NormalTok{) \}}
+    \ControlFlowTok{return} \ControlFlowTok{if}\NormalTok{ n }\OperatorTok{\textless{}=} \DecValTok{1}\NormalTok{ \{ n \} }\ControlFlowTok{else}\NormalTok{ \{ fib\_recursive(n}\OperatorTok{{-}}\DecValTok{1}\NormalTok{) }\OperatorTok{+}\NormalTok{ fib\_recursive(n}\OperatorTok{{-}}\DecValTok{2}\NormalTok{) \}}
 \NormalTok{\}}
 
 \KeywordTok{def}\NormalTok{ fib\_iter(n: }\DataTypeTok{i64}\NormalTok{) }\OperatorTok{{-}\textgreater{}} \DataTypeTok{i64}\NormalTok{ \{}
-    \ControlFlowTok{if}\NormalTok{ n }\OperatorTok{\textless{}=} \DecValTok{1}\NormalTok{ \{}
+    \ControlFlowTok{return} \ControlFlowTok{if}\NormalTok{ n }\OperatorTok{\textless{}=} \DecValTok{1}\NormalTok{ \{}
 \NormalTok{        n}
 \NormalTok{    \} }\ControlFlowTok{else}\NormalTok{ \{}
         \KeywordTok{var}\NormalTok{ a }\OperatorTok{=} \DecValTok{0}\NormalTok{;}
@@ -6081,11 +6070,11 @@ A simple in-memory key-value store served over TCP:
     \KeywordTok{val}\NormalTok{ cmd }\OperatorTok{=} \ControlFlowTok{if}\NormalTok{ n }\OperatorTok{\textgreater{}} \DecValTok{0}\NormalTok{ \{ }\FunctionTok{list\_get}\NormalTok{(parts, }\DecValTok{0}\NormalTok{) \} }\ControlFlowTok{else}\NormalTok{ \{ }\StringTok{""}\NormalTok{ \};}
     \KeywordTok{val}\NormalTok{ key }\OperatorTok{=} \ControlFlowTok{if}\NormalTok{ n }\OperatorTok{\textgreater{}} \DecValTok{1}\NormalTok{ \{ }\FunctionTok{list\_get}\NormalTok{(parts, }\DecValTok{1}\NormalTok{) \} }\ControlFlowTok{else}\NormalTok{ \{ }\StringTok{""}\NormalTok{ \};}
     \KeywordTok{val}\NormalTok{ val\_ }\OperatorTok{=} \ControlFlowTok{if}\NormalTok{ n }\OperatorTok{\textgreater{}} \DecValTok{2}\NormalTok{ \{ }\FunctionTok{list\_get}\NormalTok{(parts, }\DecValTok{2}\NormalTok{) \} }\ControlFlowTok{else}\NormalTok{ \{ }\StringTok{""}\NormalTok{ \};}
-\NormalTok{    (cmd, key, val\_)}
+\NormalTok{    }\ControlFlowTok{return}\NormalTok{ (cmd, key, val\_)}
 \NormalTok{\}}
 
 \KeywordTok{def}\NormalTok{ handle\_cmd(store: }\DataTypeTok{map}\OperatorTok{\textless{}}\DataTypeTok{str}\NormalTok{, }\DataTypeTok{str}\OperatorTok{\textgreater{}}\NormalTok{, conn: }\DataTypeTok{i64}\NormalTok{, cmd: }\DataTypeTok{str}\NormalTok{, key: }\DataTypeTok{str}\NormalTok{, value: }\DataTypeTok{str}\NormalTok{) }\OperatorTok{{-}\textgreater{}} \DataTypeTok{bool}\NormalTok{ \{}
-    \ControlFlowTok{when}\NormalTok{ cmd \{}
+    \ControlFlowTok{return} \ControlFlowTok{when}\NormalTok{ cmd \{}
         \StringTok{"SET"} \OperatorTok{=\textgreater{}}\NormalTok{ \{}
             \FunctionTok{map\_set}\NormalTok{(store, key, value);}
             \FunctionTok{tcp\_write}\NormalTok{(conn, }\StringTok{"OK\textbackslash{}n"}\NormalTok{);}
@@ -6137,7 +6126,7 @@ A simple in-memory key-value store served over TCP:
 \NormalTok{    \}}
     \FunctionTok{tcp\_close}\NormalTok{(conn);}
     \FunctionTok{tcp\_close}\NormalTok{(listener);}
-    \DecValTok{0}
+    \ControlFlowTok{return} \DecValTok{0}
 \NormalTok{\}}
 \end{Highlighting}
 \end{Shaded}
@@ -6304,7 +6293,7 @@ Table}\label{creating-a-database-and-table}
     \KeywordTok{val}\NormalTok{ db }\OperatorTok{=}\NormalTok{ db\_open(}\StringTok{"app.db"}\NormalTok{);}
 \NormalTok{    db\_exec(db, }\StringTok{"CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, age INTEGER)"}\NormalTok{);}
     \FunctionTok{print}\NormalTok{(}\StringTok{"Table created"}\NormalTok{);}
-\NormalTok{    db\_close(db)}
+\NormalTok{    }\ControlFlowTok{return}\NormalTok{ db\_close(db)}
 \NormalTok{\}}
 \end{Highlighting}
 \end{Shaded}
@@ -6324,7 +6313,7 @@ subsequent database call.
 \NormalTok{    db\_exec(db, }\StringTok{"INSERT INTO users (name, age) VALUES (\textquotesingle{}Bob\textquotesingle{}, 25)"}\NormalTok{);}
 \NormalTok{    db\_exec(db, }\StringTok{"INSERT INTO users (name, age) VALUES (\textquotesingle{}Carol\textquotesingle{}, 28)"}\NormalTok{);}
     \FunctionTok{print}\NormalTok{(}\StringTok{"Inserted 3 users"}\NormalTok{);}
-\NormalTok{    db\_close(db)}
+\NormalTok{    }\ControlFlowTok{return}\NormalTok{ db\_close(db)}
 \NormalTok{\}}
 \end{Highlighting}
 \end{Shaded}
@@ -6350,7 +6339,7 @@ return value: 0 means success, -1 means the statement failed.
         \FunctionTok{print}\NormalTok{(name);}
         \FunctionTok{print}\NormalTok{(age)}
 \NormalTok{    \}}
-\NormalTok{    db\_close(db)}
+\NormalTok{    }\ControlFlowTok{return}\NormalTok{ db\_close(db)}
 \NormalTok{\}}
 \end{Highlighting}
 \end{Shaded}
@@ -6381,7 +6370,7 @@ should be bound separately from the SQL text.
     \KeywordTok{val}\NormalTok{ rows }\OperatorTok{=}\NormalTok{ db\_query\_params(db, }\StringTok{"SELECT name, age FROM users WHERE name = ?"}\NormalTok{, lookup\_params);}
 
     \FunctionTok{print}\NormalTok{(}\FunctionTok{concat}\NormalTok{(}\StringTok{"matched rows = "}\NormalTok{, }\FunctionTok{to\_str}\NormalTok{(}\FunctionTok{list\_len}\NormalTok{(rows))));}
-\NormalTok{    db\_close(db)}
+\NormalTok{    }\ControlFlowTok{return}\NormalTok{ db\_close(db)}
 \NormalTok{\}}
 \end{Highlighting}
 \end{Shaded}
@@ -6400,7 +6389,7 @@ wrappers over the same builtins.
 \NormalTok{    db\_exec(db, }\StringTok{"INSERT INTO users (name, age) VALUES (\textquotesingle{}Alice\textquotesingle{}, 30)"}\NormalTok{);}
 \NormalTok{    db\_exec(db, }\StringTok{"UPDATE users SET age = 31 WHERE name = \textquotesingle{}Alice\textquotesingle{}"}\NormalTok{);}
 \NormalTok{    db\_exec(db, }\StringTok{"DELETE FROM users WHERE name = \textquotesingle{}Alice\textquotesingle{}"}\NormalTok{);}
-\NormalTok{    db\_close(db)}
+\NormalTok{    }\ControlFlowTok{return}\NormalTok{ db\_close(db)}
 \NormalTok{\}}
 \end{Highlighting}
 \end{Shaded}
@@ -6420,7 +6409,7 @@ Always check the return value of \texttt{db\_exec}:
     \ControlFlowTok{if} \DataTypeTok{result} \OperatorTok{==} \OperatorTok{{-}}\DecValTok{1}\NormalTok{ \{}
         \FunctionTok{print}\NormalTok{(}\StringTok{"SQL error"}\NormalTok{)}
 \NormalTok{    \};}
-\NormalTok{    db\_close(db)}
+\NormalTok{    }\ControlFlowTok{return}\NormalTok{ db\_close(db)}
 \NormalTok{\}}
 \end{Highlighting}
 \end{Shaded}
@@ -6453,7 +6442,7 @@ tasks, marks one complete, and queries the results:
         \FunctionTok{print}\NormalTok{(title);}
         \FunctionTok{print}\NormalTok{(done)}
 \NormalTok{    \}}
-\NormalTok{    db\_close(db)}
+\NormalTok{    }\ControlFlowTok{return}\NormalTok{ db\_close(db)}
 \NormalTok{\}}
 \end{Highlighting}
 \end{Shaded}
@@ -6499,7 +6488,7 @@ support:
     \FunctionTok{print}\NormalTok{(}\FunctionTok{concat}\NormalTok{(}\StringTok{"Data: "}\NormalTok{, }\DataTypeTok{result}\OperatorTok{.}\DecValTok{1}\NormalTok{)); }\CommentTok{// Payload}
     
     \FunctionTok{udp\_close}\NormalTok{(socket);}
-    \DecValTok{0}
+    \ControlFlowTok{return} \DecValTok{0}
 \NormalTok{\}}
 \end{Highlighting}
 \end{Shaded}

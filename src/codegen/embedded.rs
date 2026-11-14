@@ -478,7 +478,17 @@ fn walk_allocation_free(
                     | IrInstr::CondBr { .. }
                     | IrInstr::Return { .. }
                     | IrInstr::ArrayLoad { .. }
-                    | IrInstr::ArrayStore { .. } => {}
+                    | IrInstr::ArrayStore { .. }
+                    | IrInstr::CellLoad { .. }
+                    | IrInstr::CellStore { .. } => {}
+                    IrInstr::CellNew { elem_ty, .. } => {
+                        if !matches!(elem_ty, IrType::Scalar(_)) {
+                            return Err(codegen_error(format!(
+                                "function '{}' allocates a non-scalar mutable cell; the allocation-free profile supports scalar cells only",
+                                name
+                            )));
+                        }
+                    }
                     IrInstr::AllocArray { elem_ty, size, .. } => {
                         if target == Some(EmbeddedTarget::ArduinoUno) {
                             return Err(codegen_error(format!(

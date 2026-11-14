@@ -81,6 +81,8 @@ fn is_side_effecting(instr: &IrInstr) -> bool {
             | IrInstr::TaskGroupCancel { .. }
             | IrInstr::ParFor { .. }
             | IrInstr::AtomicStore { .. }
+            | IrInstr::CellNew { .. }
+            | IrInstr::CellStore { .. }
             | IrInstr::AtomicAdd { .. }
             | IrInstr::MutexUnlock { .. }
             | IrInstr::Barrier
@@ -504,6 +506,16 @@ pub(crate) fn apply_replacements(instr: &mut IrInstr, reps: &HashMap<ValueId, Va
         }
         IrInstr::AtomicStore { atomic, value } => {
             replace(atomic);
+            replace(value);
+        }
+        IrInstr::CellNew { init, .. } => {
+            replace(init);
+        }
+        IrInstr::CellLoad { cell, .. } => {
+            replace(cell);
+        }
+        IrInstr::CellStore { cell, value } => {
+            replace(cell);
             replace(value);
         }
         IrInstr::AtomicAdd { atomic, value, .. } => {

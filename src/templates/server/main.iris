@@ -10,7 +10,7 @@ bring std.net
 
 // The answer to one message.
 def reply(message: str) -> str {
-    if message == "ping" { "pong" } else { "echo " + message }
+    return if message == "ping" { "pong" } else { "echo " + message }
 }
 
 async def handle(conn: TcpStream) -> str {
@@ -18,7 +18,7 @@ async def handle(conn: TcpStream) -> str {
     val message = if is_ok(received) { unwrap(received) } else { "" }
     unwrap(tcp_write_all_checked(conn, reply(message)))
     tcp_close_checked(conn)
-    message
+    return message
 }
 
 // Answer connections, one message each, until one says "quit". Returns how
@@ -34,7 +34,7 @@ async def serve(listener: TcpListener) -> i64 {
             if message == "quit" { running = false }
         }
     }
-    answered
+    return answered
 }
 
 def main() -> i64 {
@@ -52,7 +52,7 @@ def main() -> i64 {
 def test_reply() -> i64 {
     assert(reply("ping") == "pong")
     assert(reply("hi") == "echo hi")
-    0
+    return 0
 }
 
 def client(port: i64, message: str, delay_ms: i64, replies: chan<str>) -> i64 {
@@ -61,7 +61,7 @@ def client(port: i64, message: str, delay_ms: i64, replies: chan<str>) -> i64 {
     unwrap(tcp_write_all_checked(s, message))
     send(replies, unwrap(tcp_read_bounded(s, 100)))
     tcp_close_checked(s)
-    0
+    return 0
 }
 
 def test_serves_until_quit() -> i64 {
@@ -81,5 +81,5 @@ def test_serves_until_quit() -> i64 {
     assert(recv(replies) == "pong")
     assert(recv(replies) == "echo quit")
     tcp_close_listener(listener)
-    0
+    return 0
 }

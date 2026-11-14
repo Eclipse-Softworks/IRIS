@@ -269,6 +269,8 @@ pub(crate) fn set_result(instr: &mut IrInstr, v: ValueId) {
         IrInstr::TaskGroupNew { result, .. } => *result = v,
         IrInstr::AtomicNew { result, .. } => *result = v,
         IrInstr::AtomicLoad { result, .. } => *result = v,
+        IrInstr::CellNew { result, .. } => *result = v,
+        IrInstr::CellLoad { result, .. } => *result = v,
         IrInstr::AtomicAdd { result, .. } => *result = v,
         IrInstr::MutexNew { result, .. } => *result = v,
         IrInstr::MutexLock { result, .. } => *result = v,
@@ -378,6 +380,7 @@ pub(crate) fn set_result(instr: &mut IrInstr, v: ValueId) {
         | IrInstr::TaskGroupCancel { .. }
         | IrInstr::ParFor { .. }
         | IrInstr::AtomicStore { .. }
+        | IrInstr::CellStore { .. }
         | IrInstr::MutexUnlock { .. }
         | IrInstr::Barrier
         | IrInstr::Print { .. }

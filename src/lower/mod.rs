@@ -68,7 +68,8 @@ use self::errors::{
 };
 use self::rebound::{
     collect_rebound_vars_in_block, collect_rebound_vars_in_expr, collect_rebound_vars_in_thir_expr,
-    find_captured_mutation, find_captured_mutation_thir, find_rebound_vars,
+    find_captured_mutation, find_captured_mutation_thir, find_mut_borrowed_vars,
+    find_mut_borrowed_vars_expr, find_mut_borrowed_vars_thir_expr, find_rebound_vars,
     find_rebound_vars_thir_block, taped_inline_ok_block,
 };
 use self::thir_bridge::{
@@ -1656,6 +1657,16 @@ pub fn lower(ast: &AstModule, module_name: &str) -> Result<IrModule, LowerError>
         fn_sigs.insert(func.name.name.clone(), ret);
     }
 
+    // Merge impl method parameter types into `fn_param_types` so `&mut` call-site
+    // coercion works uniformly for free functions and inherent/trait methods.
+    let mut fn_param_types_merged = (*fn_param_types).clone();
+    for (k, v) in impl_method_param_types.iter() {
+        fn_param_types_merged
+            .entry(k.clone())
+            .or_insert_with(|| v.clone());
+    }
+    let fn_param_types = std::rc::Rc::new(fn_param_types_merged);
+
     // Shared monomorphization state across all top-level function lowerings.
     let mono_cache = std::rc::Rc::new(std::cell::RefCell::new(std::collections::HashSet::new()));
     let mono_sigs = std::rc::Rc::new(std::cell::RefCell::new(HashMap::new()));
@@ -1885,7 +1896,8 @@ pub fn lower(ast: &AstModule, module_name: &str) -> Result<IrModule, LowerError>
             | IrType::Grad(elem)
             | IrType::Sparse(elem)
             | IrType::List(elem)
-            | IrType::WeakRef(elem) => collect_concrete_structs(elem, module, out),
+            | IrType::WeakRef(elem)
+            | IrType::MutRef(elem) => collect_concrete_structs(elem, module, out),
             IrType::ResultType(a, b) | IrType::Map(a, b) => {
                 collect_concrete_structs(a, module, out);
                 collect_concrete_structs(b, module, out);
@@ -1979,6 +1991,10 @@ struct Lowerer<'m> {
     /// Declared parameter names per function, for resolving named arguments.
     fn_param_names: std::rc::Rc<HashMap<String, Vec<String>>>,
     fn_param_types: std::rc::Rc<HashMap<String, Vec<IrType>>>,
+    /// Variables in the current function whose `&mut var` reference is taken.
+    mut_borrowed_vars: std::collections::HashSet<String>,
+    /// Cell-backed locals (`name -> (cell_ptr_val, inner_elem_ty)`).
+    cell_vars: HashMap<String, (ValueId, IrType)>,
     /// Expected type from a `val x: T = expr` annotation — used by collection
     /// constructors (e.g. `list()`, `map()`) to infer the element/key/value type.
     binding_ty: Option<IrType>,
@@ -2216,6 +2232,8 @@ impl<'m> Lowerer<'m> {
             builder,
             scope: HashMap::new(),
             scope_slots: HashMap::new(),
+            mut_borrowed_vars: std::collections::HashSet::new(),
+            cell_vars: HashMap::new(),
             taped_inline_stack: Vec::new(),
             loop_stack: Vec::new(),
             module,
@@ -2262,8 +2280,172 @@ impl<'m> Lowerer<'m> {
     /// Inserts a variable into `scope` and binds a fresh IR place slot for it.
     fn bind_scope_var(&mut self, name: impl Into<String>, val: ValueId, ty: IrType) {
         let name = name.into();
-        self.bind_place_slot(&name, val);
+        if self.mut_borrowed_vars.contains(&name) {
+            let cell = self.builder.fresh_value();
+            let cell_ty = IrType::MutRef(Box::new(ty.clone()));
+            self.builder.push_instr(
+                IrInstr::CellNew {
+                    result: cell,
+                    init: val,
+                    elem_ty: ty.clone(),
+                },
+                Some(cell_ty),
+            );
+            self.bind_place_slot(&name, cell);
+            self.cell_vars.insert(name.clone(), (cell, ty.clone()));
+        } else {
+            self.cell_vars.remove(&name);
+            self.bind_place_slot(&name, val);
+        }
         self.scope.insert(name, (val, ty));
+    }
+
+    /// Reads the current runtime `(ValueId, IrType)` for an in-scope variable,
+    /// emitting `CellLoad` when the variable is backed by a mutable cell.
+    fn load_scope_var(&mut self, name: &str) -> Option<(ValueId, IrType)> {
+        if let Some((cell, elem_ty)) = self.cell_vars.get(name).cloned() {
+            let loaded = self.builder.fresh_value();
+            self.builder.push_instr(
+                IrInstr::CellLoad {
+                    result: loaded,
+                    cell,
+                    result_ty: elem_ty.clone(),
+                },
+                Some(elem_ty.clone()),
+            );
+            if let Some(&slot) = self.scope_slots.get(name) {
+                self.builder.map_value_slot_if_unset(loaded, slot);
+            }
+            return Some((loaded, elem_ty));
+        }
+        self.scope.get(name).cloned()
+    }
+
+    /// Unwraps one layer of `IrType::MutRef` via `CellLoad` for value contexts.
+    fn auto_deref_if_mut_ref(
+        &mut self,
+        val: ValueId,
+        ty: IrType,
+        span: crate::parser::lexer::Span,
+    ) -> (ValueId, IrType) {
+        if let IrType::MutRef(inner) = ty {
+            let loaded = self.builder.fresh_value();
+            let inner_ty = *inner;
+            self.builder.push_instr(
+                IrInstr::CellLoad {
+                    result: loaded,
+                    cell: val,
+                    result_ty: inner_ty.clone(),
+                },
+                Some(inner_ty.clone()),
+            );
+            self.builder.note_value_span(loaded, span.start.0);
+            (loaded, inner_ty)
+        } else {
+            (val, ty)
+        }
+    }
+
+    fn lower_expr_for_expected_ty(
+        &mut self,
+        expr: &AstExpr,
+        expected_ty: Option<&IrType>,
+    ) -> Result<(ValueId, IrType), LowerError> {
+        if expected_ty.is_some_and(|t| matches!(t, IrType::MutRef(_))) {
+            self.lower_expr_keep_ref(expr)
+        } else {
+            self.lower_expr(expr)
+        }
+    }
+
+    fn lower_thir_expr_for_expected_ty(
+        &mut self,
+        expr: &crate::thir::ThirExpr,
+        expected_ty: Option<&IrType>,
+    ) -> Result<(ValueId, IrType), LowerError> {
+        if expected_ty.is_some_and(|t| matches!(t, IrType::MutRef(_))) {
+            self.lower_thir_expr_keep_ref_req(expr)
+        } else {
+            self.lower_thir_expr_req(expr)
+        }
+    }
+
+    /// Coerces an AST/THIR conditional or match branch result `(val, ty)` when
+    /// other branches return `target_ty`, emitting `CellLoad` for `MutRef(target_ty)`.
+    fn coerce_branch_mut_ref(
+        &mut self,
+        val: ValueId,
+        ty: IrType,
+        target_ty: &IrType,
+        span: crate::parser::lexer::Span,
+    ) -> (ValueId, IrType) {
+        if matches!(ty, IrType::MutRef(_)) && !matches!(target_ty, IrType::MutRef(_)) {
+            self.auto_deref_if_mut_ref(val, ty, span)
+        } else {
+            (val, ty)
+        }
+    }
+
+    pub(super) fn deref_assign_error(ptr_ty: &IrType, span: Span) -> LowerError {
+        let msg =
+            format!("cannot assign through `*expr` of type `{ptr_ty}`: target must be `&mut T`");
+        LowerError::rich(
+            "E0128",
+            crate::diagnostics::Diagnostic::error(msg).with_primary_span(
+                span.start.0,
+                span.end.0,
+                None,
+            ),
+        )
+    }
+
+    pub(super) fn lower_deref_assign(
+        &mut self,
+        ptr_expr: &AstExpr,
+        op: Option<BinOp>,
+        value: &AstExpr,
+        span: Span,
+    ) -> Result<(), LowerError> {
+        let (ptr_val, ptr_ty) = self.lower_expr_keep_ref(ptr_expr)?;
+        let IrType::MutRef(inner_box) = ptr_ty else {
+            return Err(Self::deref_assign_error(&ptr_ty, span));
+        };
+        let elem_ty = *inner_box;
+        let new_val = if let Some(bin_op) = op {
+            let cur_val = self.builder.fresh_value();
+            self.builder.push_instr(
+                IrInstr::CellLoad {
+                    result: cur_val,
+                    cell: ptr_val,
+                    result_ty: elem_ty.clone(),
+                },
+                Some(elem_ty.clone()),
+            );
+            self.builder.note_value_span(cur_val, span.start.0);
+            let (rhs_val, _) = self.lower_expr(value)?;
+            self.compound(bin_op, cur_val, &elem_ty, rhs_val)
+        } else {
+            let prev_binding_ty = self.binding_ty.replace(elem_ty.clone());
+            let lowered = self.lower_expr_for_expected_ty(value, Some(&elem_ty));
+            self.binding_ty = prev_binding_ty;
+            let (val, val_ty) = lowered?;
+            if !assignable(&val_ty, &elem_ty) {
+                return Err(LowerError::TypeMismatch {
+                    expected: elem_ty.to_string(),
+                    found: val_ty.to_string(),
+                    span,
+                });
+            }
+            val
+        };
+        self.builder.push_instr(
+            IrInstr::CellStore {
+                cell: ptr_val,
+                value: new_val,
+            },
+            None,
+        );
+        Ok(())
     }
 
     /// Records a read of `name` at `span` for IR-level NLL borrow checking.
@@ -2366,9 +2548,9 @@ impl<'m> Lowerer<'m> {
         match &expr.kind {
             crate::thir::ThirExprKind::Value { name, .. } => {
                 let resolved = self.resolve_unqualified_name(name);
-                if let Some(&(val, ref ty)) = self.scope.get(&resolved) {
+                if let Some((val, ty)) = self.load_scope_var(&resolved) {
                     let slot = self.scope_slots.get(&resolved).copied();
-                    return Some(Ok((val, ty.clone(), slot.map(|s| (s, Vec::new())))));
+                    return Some(Ok((val, ty, slot.map(|s| (s, Vec::new())))));
                 }
                 self.try_lower_thir_expr(expr)
                     .map(|r| r.map(|(v, t)| (v, t, None)))
@@ -2448,9 +2630,9 @@ impl<'m> Lowerer<'m> {
         match expr {
             AstExpr::Ident(ident) => {
                 let resolved = self.resolve_unqualified_name(&ident.name);
-                if let Some(&(val, ref ty)) = self.scope.get(&resolved) {
+                if let Some((val, ty)) = self.load_scope_var(&resolved) {
                     let slot = self.scope_slots.get(&resolved).copied();
-                    return Ok((val, ty.clone(), slot.map(|s| (s, Vec::new()))));
+                    return Ok((val, ty, slot.map(|s| (s, Vec::new()))));
                 }
                 self.lower_expr(expr).map(|(v, t)| (v, t, None))
             }
@@ -3115,9 +3297,7 @@ impl<'m> Lowerer<'m> {
     fn lookup(&mut self, ident: &Ident) -> Result<(ValueId, IrType), LowerError> {
         let resolved_name = self.resolve_unqualified_name(&ident.name);
         let found = self
-            .scope
-            .get(&resolved_name)
-            .cloned()
+            .load_scope_var(&resolved_name)
             .ok_or_else(|| self.unknown_name(&ident.name, ident.span, None))?;
         self.record_read_place(&ident.name, ident.span);
         Ok(found)
@@ -3499,6 +3679,12 @@ impl<'m> Lowerer<'m> {
     }
 
     fn lower_expr(&mut self, expr: &AstExpr) -> Result<(ValueId, IrType), LowerError> {
+        let span = expr.span();
+        let (val, ty) = self.lower_expr_keep_ref(expr)?;
+        Ok(self.auto_deref_if_mut_ref(val, ty, span))
+    }
+
+    fn lower_expr_keep_ref(&mut self, expr: &AstExpr) -> Result<(ValueId, IrType), LowerError> {
         // Synthetic marker: an empty block with no statements and no tail is
         // how the THIR lowerer delegates a construct it owns (a call, a loop
         // body, an arms' body, ...). The marker carries its THIR payload in
@@ -3508,7 +3694,7 @@ impl<'m> Lowerer<'m> {
             if b.stmts.is_empty() && b.tail.is_none() {
                 match synth_marker_at(expr.span()) {
                     Some(SynthMarker::Expr(thir)) => {
-                        let result = self.try_lower_thir_expr(&thir).ok_or_else(|| {
+                        let result = self.try_lower_thir_expr_keep_ref(&thir).ok_or_else(|| {
                             LowerError::rich(
                                 "E0902",
                                 crate::diagnostics::Diagnostic::error(
@@ -3522,7 +3708,7 @@ impl<'m> Lowerer<'m> {
                         return Ok(lowered);
                     }
                     Some(SynthMarker::Block(tb)) => {
-                        let lowered = self.lower_thir_block(&tb)?;
+                        let lowered = self.lower_thir_block_with_keep_ref(&tb, true)?;
                         self.builder.note_value_span(lowered.0, expr.span().start.0);
                         return Ok(lowered);
                     }
@@ -3534,13 +3720,13 @@ impl<'m> Lowerer<'m> {
                             && crate::thir::is_source_span(span)
                         {
                             if let Some(thir) = crate::thir::expr_at(span) {
-                                if let Some(result) = self.try_lower_thir_expr(&thir) {
+                                if let Some(result) = self.try_lower_thir_expr_keep_ref(&thir) {
                                     let lowered = result?;
                                     self.builder.note_value_span(lowered.0, span.start.0);
                                     return Ok(lowered);
                                 }
                             } else if let Some(tb) = crate::thir::block_at(span) {
-                                let lowered = self.lower_thir_block(&tb)?;
+                                let lowered = self.lower_thir_block_with_keep_ref(&tb, true)?;
                                 self.builder.note_value_span(lowered.0, span.start.0);
                                 return Ok(lowered);
                             }
@@ -3558,7 +3744,7 @@ impl<'m> Lowerer<'m> {
             if !(span.start.0 == 0 && span.end.0 == 0) && crate::thir::is_source_span(span) {
                 if let Some(thir) = crate::thir::expr_at(span) {
                     if thir_matches_ast(&thir, expr) {
-                        if let Some(result) = self.try_lower_thir_expr(&thir) {
+                        if let Some(result) = self.try_lower_thir_expr_keep_ref(&thir) {
                             let lowered = result?;
                             self.builder.note_value_span(lowered.0, span.start.0);
                             return Ok(lowered);
@@ -3775,10 +3961,12 @@ impl<'m> Lowerer<'m> {
                 then_block,
                 else_block,
                 span,
-            } => self.lower_if_expr(cond, then_block, else_block.as_ref(), *span),
+            } => {
+                self.lower_if_expr_with_keep_ref(cond, then_block, else_block.as_ref(), *span, true)
+            }
 
             AstExpr::Block(block) => {
-                if let Some(v) = self.lower_block(block)? {
+                if let Some(v) = self.lower_block_with_keep_ref(block, true)? {
                     Ok(v)
                 } else if let Some((param_id, param_ty)) = self.builder.current_block_first_param()
                 {
@@ -3796,7 +3984,7 @@ impl<'m> Lowerer<'m> {
 
             AstExpr::Mask { body, .. } => {
                 // Effect mask: lower the body as if it were a normal block.
-                if let Some(v) = self.lower_block(body)? {
+                if let Some(v) = self.lower_block_with_keep_ref(body, true)? {
                     Ok(v)
                 } else if let Some((param_id, param_ty)) = self.builder.current_block_first_param()
                 {
@@ -4280,7 +4468,7 @@ impl<'m> Lowerer<'m> {
                 scrutinee,
                 arms,
                 span,
-            } => self.lower_when_expr(scrutinee, arms, *span),
+            } => self.lower_when_expr_with_keep_ref(scrutinee, arms, *span, true),
 
             AstExpr::Tuple { elements, span } => {
                 let mut elem_vals = Vec::with_capacity(elements.len());
@@ -5888,10 +6076,12 @@ impl<'m> Lowerer<'m> {
                         };
                         if let Some((_, fname)) = chosen {
                             let fname = fname.clone();
+                            let param_tys = self.fn_param_types.get(&fname).cloned();
                             let mut arg_vals = Vec::with_capacity(args.len() + 1);
                             arg_vals.push(base_val);
-                            for arg in args {
-                                let (v, _) = self.lower_expr(arg)?;
+                            for (i, arg) in args.iter().enumerate() {
+                                let expected = param_tys.as_ref().and_then(|t| t.get(i + 1));
+                                let (v, _) = self.lower_expr_for_expected_ty(arg, expected)?;
                                 arg_vals.push(v);
                             }
                             let ret_ty = self.sig_of(&fname, *span)?;
@@ -5916,8 +6106,17 @@ impl<'m> Lowerer<'m> {
                     IrType::TypeParam(tp_name) => {
                         let mut arg_vals = Vec::with_capacity(args.len() + 1);
                         arg_vals.push(base_val);
-                        for arg in args {
-                            let (v, _) = self.lower_expr(arg)?;
+                        let param_tys = self
+                            .trait_dispatch
+                            .get(method)
+                            .and_then(|cands| cands.first())
+                            .and_then(|(_, fname)| self.fn_param_types.get(fname).cloned());
+                        for (i, arg) in args.iter().enumerate() {
+                            let expected = param_tys
+                                .as_ref()
+                                .and_then(|pts| pts.get(i + 1))
+                                .filter(|t| matches!(t, IrType::MutRef(_)));
+                            let (v, _) = self.lower_expr_for_expected_ty(arg, expected)?;
                             arg_vals.push(v);
                         }
                         let ret_ty = self
@@ -5950,7 +6149,10 @@ impl<'m> Lowerer<'m> {
                     if let Some(fields) = self.module.struct_def(&type_name) {
                         if let Some((_, field_ty)) = fields.iter().find(|(name, _)| name == method)
                         {
-                            if let IrType::Fn { params: _, ret } = field_ty {
+                            if let IrType::Fn { params, ret } = field_ty {
+                                let params = params.clone();
+                                let ret = ret.clone();
+                                let offset = params.len().saturating_sub(args.len());
                                 let field_val = self.builder.fresh_value();
                                 self.builder.push_instr(
                                     IrInstr::GetField {
@@ -5965,11 +6167,12 @@ impl<'m> Lowerer<'m> {
                                     Some(field_ty.clone()),
                                 );
                                 let mut arg_vals = Vec::with_capacity(args.len());
-                                for arg in args {
-                                    let (v, _) = self.lower_expr(arg)?;
+                                for (i, arg) in args.iter().enumerate() {
+                                    let expected = params.get(offset + i);
+                                    let (v, _) = self.lower_expr_for_expected_ty(arg, expected)?;
                                     arg_vals.push(v);
                                 }
-                                let ret_ty = *ret.clone();
+                                let ret_ty = *ret;
                                 let result = self.builder.fresh_value();
                                 // Regular function via closure field: no env pointer.
                                 self.builder.push_instr(
@@ -6020,9 +6223,11 @@ impl<'m> Lowerer<'m> {
                 let ret_ty = self.sig_of(&mangled, *span)?;
 
                 // Lower remaining arguments.
+                let param_tys = self.fn_param_types.get(&mangled).cloned();
                 let mut arg_vals = vec![base_val];
-                for arg in args {
-                    let (v, _) = self.lower_expr(arg)?;
+                for (i, arg) in args.iter().enumerate() {
+                    let expected = param_tys.as_ref().and_then(|t| t.get(i + 1));
+                    let (v, _) = self.lower_expr_for_expected_ty(arg, expected)?;
                     arg_vals.push(v);
                 }
 
@@ -6224,14 +6429,58 @@ impl<'m> Lowerer<'m> {
             }
 
             AstExpr::Ref { expr, span } => {
+                if let Some(name) = crate::lower::rebound::unwrap_mut_borrow_target_ast(expr) {
+                    let resolved = self.resolve_unqualified_name(name);
+                    if self.cell_vars.contains_key(&resolved) {
+                        let (_, _, slot_proj) = self.resolve_ast_place(expr)?;
+                        let (loaded, elem_ty) = self
+                            .load_scope_var(&resolved)
+                            .expect("checked in cell_vars");
+                        return Ok(
+                            self.emit_borrow_marker(loaded, elem_ty, false, slot_proj, *span)
+                        );
+                    }
+                }
                 let (val, ty, slot_proj) = self.resolve_ast_place(expr)?;
                 Ok(self.emit_borrow_marker(val, ty, false, slot_proj, *span))
             }
             AstExpr::RefMut { expr, span } => {
+                if let Some(name) = crate::lower::rebound::unwrap_mut_borrow_target_ast(expr) {
+                    let resolved = self.resolve_unqualified_name(name);
+                    if let Some((cell_val, elem_ty)) = self.cell_vars.get(&resolved).cloned() {
+                        let (_, _, slot_proj) = self.resolve_ast_place(expr)?;
+                        let mut_ref_ty = IrType::MutRef(Box::new(elem_ty));
+                        return Ok(
+                            self.emit_borrow_marker(cell_val, mut_ref_ty, true, slot_proj, *span)
+                        );
+                    }
+                }
+                if let AstExpr::Deref { expr: inner, .. } = expr.as_ref() {
+                    let (inner_val, inner_ty) = self.lower_expr_keep_ref(inner)?;
+                    if matches!(inner_ty, IrType::MutRef(_)) {
+                        return Ok(self.emit_borrow_marker(inner_val, inner_ty, true, None, *span));
+                    }
+                }
                 let (val, ty, slot_proj) = self.resolve_ast_place(expr)?;
-                Ok(self.emit_borrow_marker(val, ty, true, slot_proj, *span))
+                if matches!(ty, IrType::Slice { .. } | IrType::MutRef(_)) {
+                    return Ok(self.emit_borrow_marker(val, ty, true, slot_proj, *span));
+                }
+                let cell = self.builder.fresh_value();
+                let mut_ref_ty = IrType::MutRef(Box::new(ty.clone()));
+                self.builder.push_instr(
+                    IrInstr::CellNew {
+                        result: cell,
+                        init: val,
+                        elem_ty: ty,
+                    },
+                    Some(mut_ref_ty.clone()),
+                );
+                Ok(self.emit_borrow_marker(cell, mut_ref_ty, true, slot_proj, *span))
             }
-            AstExpr::Deref { expr, .. } => self.lower_expr(expr),
+            AstExpr::Deref { expr, .. } => {
+                let (val, ty) = self.lower_expr_keep_ref(expr)?;
+                Ok(self.auto_deref_if_mut_ref(val, ty, expr.span()))
+            }
             AstExpr::Move { expr, span } => {
                 let (val, ty, slot_proj) = self.resolve_ast_place(expr)?;
                 Ok(self.emit_move_marker(val, ty, slot_proj.map(|(s, _)| s), *span))
@@ -6248,7 +6497,7 @@ impl<'m> Lowerer<'m> {
                 body,
                 catch_param,
                 catch_body,
-                span: _,
+                span,
             } => {
                 let prev_catch = self.try_catch_catch_bb.take();
                 let prev_cont = self.try_catch_cont_bb.take();
@@ -6262,16 +6511,9 @@ impl<'m> Lowerer<'m> {
                 self.try_catch_cont_bb = Some(cont_bb);
                 self.try_catch_param = Some(catch_param.clone());
 
-                let (body_val, body_ty) = self.lower_expr(body)?;
-                if !self.builder.is_current_block_terminated() {
-                    self.builder.push_instr(
-                        IrInstr::Br {
-                            target: cont_bb,
-                            args: vec![body_val],
-                        },
-                        None,
-                    );
-                }
+                let (mut body_val, mut body_ty) = self.lower_expr_keep_ref(body)?;
+                let body_end_bb = self.builder.current_block();
+                let body_terminated = self.builder.is_current_block_terminated();
 
                 self.builder.set_current_block(catch_bb);
                 // The error the body's `?`s carry; a body without one never
@@ -6282,8 +6524,45 @@ impl<'m> Lowerer<'m> {
                         .add_block_param(catch_bb, Some(catch_param), catch_ty.clone());
                 self.scope
                     .insert(catch_param.clone(), (catch_param_val, catch_ty));
-                let (catch_val, _catch_ty) = self.lower_expr(catch_body)?;
-                if !self.builder.is_current_block_terminated() {
+                let (mut catch_val, mut catch_val_ty) = self.lower_expr_keep_ref(catch_body)?;
+                let catch_end_bb = self.builder.current_block();
+                let catch_terminated = self.builder.is_current_block_terminated();
+
+                let result_ty = Self::unify_branch_ref_types(
+                    !body_terminated,
+                    &body_ty,
+                    !catch_terminated,
+                    &catch_val_ty,
+                )
+                .unwrap_or_else(|| body_ty.clone());
+                let any_shared_borrow = Self::expr_is_shared_borrow_ast(body)
+                    || Self::expr_is_shared_borrow_ast(catch_body);
+                if !any_shared_borrow {
+                    if !body_terminated {
+                        self.builder.set_current_block(body_end_bb);
+                        (body_val, body_ty) =
+                            self.coerce_branch_mut_ref(body_val, body_ty, &result_ty, *span);
+                    }
+                    if !catch_terminated {
+                        self.builder.set_current_block(catch_end_bb);
+                        (catch_val, catch_val_ty) =
+                            self.coerce_branch_mut_ref(catch_val, catch_val_ty, &result_ty, *span);
+                    }
+                }
+                let _ = (body_ty, catch_val_ty);
+
+                if !body_terminated {
+                    self.builder.set_current_block(body_end_bb);
+                    self.builder.push_instr(
+                        IrInstr::Br {
+                            target: cont_bb,
+                            args: vec![body_val],
+                        },
+                        None,
+                    );
+                }
+                if !catch_terminated {
+                    self.builder.set_current_block(catch_end_bb);
                     self.builder.push_instr(
                         IrInstr::Br {
                             target: cont_bb,
@@ -6296,14 +6575,14 @@ impl<'m> Lowerer<'m> {
                 self.builder.set_current_block(cont_bb);
                 let result =
                     self.builder
-                        .add_block_param(cont_bb, Some("try_result"), body_ty.clone());
+                        .add_block_param(cont_bb, Some("try_result"), result_ty.clone());
 
                 self.try_catch_catch_bb = prev_catch;
                 self.try_catch_cont_bb = prev_cont;
                 self.try_catch_param = prev_param;
                 self.try_catch_err_ty = prev_err_ty;
 
-                Ok((result, body_ty))
+                Ok((result, result_ty))
             }
 
             AstExpr::Raise {
@@ -6378,13 +6657,24 @@ impl<'m> Lowerer<'m> {
         // correct, but the same source compiled to different IR on every run.
         // Reproducible builds matter on their own, and non-reproducibility also
         // hid a real miscompilation for as long as it lasted (known-issues #17).
-        let mut captures: Vec<(String, ValueId, IrType)> = self
+        let mut captures: Vec<(String, ValueId, IrType, Option<IrType>)> = self
             .scope
             .iter()
             .filter(|(name, _)| {
                 !param_names.contains(*name) && crate::pass::lint::expr_uses_name(body, name)
             })
-            .map(|(name, (vid, ty))| (name.clone(), *vid, ty.clone()))
+            .map(|(name, (vid, ty))| {
+                if let Some((cell_vid, elem_ty)) = self.cell_vars.get(name) {
+                    (
+                        name.clone(),
+                        *cell_vid,
+                        IrType::MutRef(Box::new(elem_ty.clone())),
+                        Some(elem_ty.clone()),
+                    )
+                } else {
+                    (name.clone(), *vid, ty.clone(), None)
+                }
+            })
             .collect();
         captures.sort_by(|a, b| a.0.cmp(&b.0));
         let captures = captures;
@@ -6392,7 +6682,7 @@ impl<'m> Lowerer<'m> {
         // Build the lifted function: params = captures + lambda_params.
         let mut lifted_params: Vec<Param> = captures
             .iter()
-            .map(|(name, _, ty)| Param {
+            .map(|(name, _, ty, _)| Param {
                 name: name.clone(),
                 ty: ty.clone(),
             })
@@ -6409,23 +6699,33 @@ impl<'m> Lowerer<'m> {
         let temp_builder =
             IrFunctionBuilder::new_return_decided_by_body(&fn_name, lifted_params.clone());
         let mut lambda_lowerer = self.new_sub_lowerer(temp_builder);
+        lambda_lowerer.mut_borrowed_vars = find_mut_borrowed_vars_expr(body);
 
         let entry = lambda_lowerer.builder.create_block(Some("entry"));
         lambda_lowerer.builder.set_current_block(entry);
 
         // Populate the lambda scope with captured + param values.
-        for (name, _, ty) in &captures {
+        for (name, _, ty, cell_elem_ty) in &captures {
             let val = lambda_lowerer
                 .builder
                 .add_block_param(entry, Some(name), ty.clone());
-            lambda_lowerer.scope.insert(name.clone(), (val, ty.clone()));
+            if let Some(elem_ty) = cell_elem_ty {
+                lambda_lowerer
+                    .cell_vars
+                    .insert(name.clone(), (val, elem_ty.clone()));
+                lambda_lowerer
+                    .scope
+                    .insert(name.clone(), (val, elem_ty.clone()));
+            } else {
+                lambda_lowerer.scope.insert(name.clone(), (val, ty.clone()));
+            }
         }
         for p in params {
             let ty = self.resolve_ty(&p.ty)?;
             let val = lambda_lowerer
                 .builder
                 .add_block_param(entry, Some(&p.name.name), ty.clone());
-            lambda_lowerer.scope.insert(p.name.name.clone(), (val, ty));
+            lambda_lowerer.bind_scope_var(p.name.name.clone(), val, ty);
         }
 
         let (ret_val, ret_ty) = lambda_lowerer.lower_expr(body)?;
@@ -6448,7 +6748,7 @@ impl<'m> Lowerer<'m> {
         // (no direct mutation possible; closures are called via CallClosure).
 
         // Emit MakeClosure in the current context.
-        let capture_vals: Vec<ValueId> = captures.iter().map(|(_, v, _)| *v).collect();
+        let capture_vals: Vec<ValueId> = captures.iter().map(|(_, v, _, _)| *v).collect();
         let closure_ty = IrType::Fn {
             params: lifted_params.iter().map(|p| p.ty.clone()).collect(),
             ret: Box::new(ret_ty),
@@ -6786,12 +7086,78 @@ impl<'m> Lowerer<'m> {
     ///
     /// If a branch terminates early (e.g. via `return`), no `Br` to merge is
     /// emitted for that branch.
-    fn lower_if_expr(
+    pub(super) fn expr_is_shared_borrow_ast(expr: &AstExpr) -> bool {
+        match expr {
+            AstExpr::Ref { .. } => true,
+            AstExpr::Block(b) => Self::block_tail_is_shared_borrow_ast(b),
+            _ => false,
+        }
+    }
+
+    pub(super) fn block_tail_is_shared_borrow_ast(blk: &AstBlock) -> bool {
+        if blk.stmts.is_empty() && blk.tail.is_none() {
+            match synth_marker_at(blk.span) {
+                Some(SynthMarker::Block(tb)) => {
+                    return Self::block_tail_is_shared_borrow_thir(&tb);
+                }
+                Some(SynthMarker::Expr(te)) => {
+                    return Self::expr_is_shared_borrow_thir(&te);
+                }
+                None => {
+                    if let Some(tb) = crate::thir::block_at(blk.span) {
+                        return Self::block_tail_is_shared_borrow_thir(&tb);
+                    }
+                }
+            }
+        }
+        blk.tail
+            .as_deref()
+            .is_some_and(Self::expr_is_shared_borrow_ast)
+    }
+
+    pub(super) fn expr_is_shared_borrow_thir(expr: &crate::thir::ThirExpr) -> bool {
+        match &expr.kind {
+            crate::thir::ThirExprKind::Ref(_) => true,
+            crate::thir::ThirExprKind::Block(b) => Self::block_tail_is_shared_borrow_thir(b),
+            _ => false,
+        }
+    }
+
+    pub(super) fn block_tail_is_shared_borrow_thir(blk: &crate::thir::ThirBlock) -> bool {
+        blk.tail
+            .as_deref()
+            .is_some_and(Self::expr_is_shared_borrow_thir)
+    }
+
+    pub(super) fn unify_branch_ref_types(
+        a_live: bool,
+        a_ty: &IrType,
+        b_live: bool,
+        b_ty: &IrType,
+    ) -> Option<IrType> {
+        match (a_live, b_live) {
+            (true, true) => {
+                if matches!(a_ty, IrType::MutRef(_)) && matches!(b_ty, IrType::MutRef(_)) {
+                    Some(a_ty.clone())
+                } else if matches!(a_ty, IrType::MutRef(_)) {
+                    Some(b_ty.clone())
+                } else {
+                    Some(a_ty.clone())
+                }
+            }
+            (true, false) => Some(a_ty.clone()),
+            (false, true) => Some(b_ty.clone()),
+            (false, false) => None,
+        }
+    }
+
+    fn lower_if_expr_with_keep_ref(
         &mut self,
         cond: &AstExpr,
         then_blk: &AstBlock,
         else_blk: Option<&AstBlock>,
         span: Span,
+        keep_ref: bool,
     ) -> Result<(ValueId, IrType), LowerError> {
         let _ = span; // span used only for error messages which no longer apply
 
@@ -6802,6 +7168,7 @@ impl<'m> Lowerer<'m> {
         let expected_ty = self.expected_expr_ty.take();
         let outer_scope = self.scope.clone();
         let outer_slots = self.scope_slots.clone();
+        let outer_cells = self.cell_vars.clone();
         let mut rebound_names = find_rebound_vars(then_blk);
         if let Some(else_blk) = else_blk {
             for name in find_rebound_vars(else_blk) {
@@ -6810,7 +7177,8 @@ impl<'m> Lowerer<'m> {
                 }
             }
         }
-        rebound_names.retain(|name| outer_scope.contains_key(name));
+        rebound_names
+            .retain(|name| outer_scope.contains_key(name) && !outer_cells.contains_key(name));
 
         if let Some(else_blk) = else_blk {
             // Full if/else: three-block CFG (then / else / merge).
@@ -6842,23 +7210,85 @@ impl<'m> Lowerer<'m> {
                 None,
             );
 
+            // Lower THEN branch (defer `Br merge_bb` so both arms can unify `&mut T` vs `T`).
+            self.builder.set_current_block(then_bb);
+            self.scope = outer_scope.clone();
+            self.scope_slots = outer_slots.clone();
+            self.cell_vars = outer_cells.clone();
+            let mut then_result = self.lower_block_with_keep_ref(then_blk, keep_ref)?;
+            // Coerce to expected dyn Trait if needed.
+            if let (Some(ref expected), Some((tv, tt))) = (&expected_ty, then_result.clone()) {
+                let (tv, tt) = self.coerce_branch_mut_ref(tv, tt, expected, span);
+                let (cv, ct) = self.coerce_to_trait_object(tv, tt, expected, span)?;
+                then_result = Some((cv, ct));
+            }
+            let then_scope = self.scope.clone();
+            let then_end_bb = self.builder.current_block();
+            let then_terminated = self.builder.is_current_block_terminated();
+            self.scope = outer_scope.clone();
+            self.scope_slots = outer_slots.clone();
+            self.cell_vars = outer_cells.clone();
+
+            // Lower ELSE branch.
+            self.builder.set_current_block(else_bb);
+            self.scope = outer_scope.clone();
+            self.scope_slots = outer_slots.clone();
+            self.cell_vars = outer_cells.clone();
+            let mut else_result = self.lower_block_with_keep_ref(else_blk, keep_ref)?;
+            // Coerce to expected dyn Trait if needed.
+            if let (Some(ref expected), Some((ev, et))) = (&expected_ty, else_result.clone()) {
+                let (ev, et) = self.coerce_branch_mut_ref(ev, et, expected, span);
+                let (cv, ct) = self.coerce_to_trait_object(ev, et, expected, span)?;
+                else_result = Some((cv, ct));
+            }
+            let else_scope = self.scope.clone();
+            let else_end_bb = self.builder.current_block();
+            let else_terminated = self.builder.is_current_block_terminated();
+            self.scope = outer_scope.clone();
+            self.scope_slots = outer_slots.clone();
+            self.cell_vars = outer_cells.clone();
+
+            // Unify merge block parameter type across non-terminated arms.
+            let then_eff_ty = then_result
+                .as_ref()
+                .map(|(_, ty)| ty.clone())
+                .unwrap_or_else(|| unit_ty.clone());
+            let else_eff_ty = else_result
+                .as_ref()
+                .map(|(_, ty)| ty.clone())
+                .unwrap_or_else(|| unit_ty.clone());
+            let result_ty = Self::unify_branch_ref_types(
+                !then_terminated,
+                &then_eff_ty,
+                !else_terminated,
+                &else_eff_ty,
+            )
+            .unwrap_or_else(|| unit_ty.clone());
+
+            let any_shared_borrow = Self::block_tail_is_shared_borrow_ast(then_blk)
+                || Self::block_tail_is_shared_borrow_ast(else_blk);
+            if !any_shared_borrow {
+                if !then_terminated {
+                    if let Some((tv, tt)) = then_result.take() {
+                        self.builder.set_current_block(then_end_bb);
+                        then_result = Some(self.coerce_branch_mut_ref(tv, tt, &result_ty, span));
+                    }
+                }
+                if !else_terminated {
+                    if let Some((ev, et)) = else_result.take() {
+                        self.builder.set_current_block(else_end_bb);
+                        else_result = Some(self.coerce_branch_mut_ref(ev, et, &result_ty, span));
+                    }
+                }
+            }
+
             // Which block each arm's `Br` ended up in, so its arguments can be
             // extended once both arms are known (autodiff handles, #50).
             let mut then_br_block: Option<BlockId> = None;
             let mut else_br_block: Option<BlockId> = None;
 
-            // Lower THEN branch.
-            self.builder.set_current_block(then_bb);
-            self.scope = outer_scope.clone();
-            self.scope_slots = outer_slots.clone();
-            let mut then_result = self.lower_block(then_blk)?;
-            // Coerce to expected dyn Trait if needed.
-            if let (Some(ref expected), Some((tv, ref tt))) = (&expected_ty, &then_result) {
-                let (cv, ct) = self.coerce_to_trait_object(*tv, tt.clone(), expected, span)?;
-                then_result = Some((cv, ct));
-            }
-            let then_scope = self.scope.clone();
-            if !self.builder.is_current_block_terminated() {
+            if !then_terminated {
+                self.builder.set_current_block(then_end_bb);
                 let mut then_args = vec![then_result
                     .as_ref()
                     .map(|(then_val, _)| *then_val)
@@ -6871,7 +7301,7 @@ impl<'m> Lowerer<'m> {
                         .expect("rebound variable missing from then-scope");
                     then_args.push(rebound_val);
                 }
-                then_br_block = Some(self.builder.current_block());
+                then_br_block = Some(then_end_bb);
                 self.builder.push_instr(
                     IrInstr::Br {
                         target: merge_bb,
@@ -6880,21 +7310,9 @@ impl<'m> Lowerer<'m> {
                     None,
                 );
             }
-            self.scope = outer_scope.clone();
-            self.scope_slots = outer_slots.clone();
 
-            // Lower ELSE branch.
-            self.builder.set_current_block(else_bb);
-            self.scope = outer_scope.clone();
-            self.scope_slots = outer_slots.clone();
-            let mut else_result = self.lower_block(else_blk)?;
-            // Coerce to expected dyn Trait if needed.
-            if let (Some(ref expected), Some((ev, ref et))) = (&expected_ty, &else_result) {
-                let (cv, ct) = self.coerce_to_trait_object(*ev, et.clone(), expected, span)?;
-                else_result = Some((cv, ct));
-            }
-            let else_scope = self.scope.clone();
-            if !self.builder.is_current_block_terminated() {
+            if !else_terminated {
+                self.builder.set_current_block(else_end_bb);
                 let mut else_args = vec![else_result
                     .as_ref()
                     .map(|(else_val, _)| *else_val)
@@ -6907,7 +7325,7 @@ impl<'m> Lowerer<'m> {
                         .expect("rebound variable missing from else-scope");
                     else_args.push(rebound_val);
                 }
-                else_br_block = Some(self.builder.current_block());
+                else_br_block = Some(else_end_bb);
                 self.builder.push_instr(
                     IrInstr::Br {
                         target: merge_bb,
@@ -6916,15 +7334,6 @@ impl<'m> Lowerer<'m> {
                     None,
                 );
             }
-            self.scope = outer_scope.clone();
-            self.scope_slots = outer_slots.clone();
-
-            // Merge block parameter type = type of whichever branch produced a value.
-            let result_ty = match (&then_result, &else_result) {
-                (Some((_, ty)), _) => ty.clone(),
-                (_, Some((_, ty))) => ty.clone(),
-                (None, None) => unit_ty,
-            };
 
             let result =
                 self.builder
@@ -6966,6 +7375,7 @@ impl<'m> Lowerer<'m> {
             }
 
             self.builder.set_current_block(merge_bb);
+            self.cell_vars = outer_cells;
             for (name, param, ty) in rebound_params {
                 if let Some(&slot) = self.scope_slots.get(&name) {
                     self.builder.map_value_slot_if_unset(param, slot);
@@ -7012,7 +7422,8 @@ impl<'m> Lowerer<'m> {
             self.builder.set_current_block(then_bb);
             self.scope = outer_scope.clone();
             self.scope_slots = outer_slots.clone();
-            let _then_result = self.lower_block(then_blk)?;
+            self.cell_vars = outer_cells.clone();
+            let _then_result = self.lower_block_with_keep_ref(then_blk, false)?;
             let then_scope = self.scope.clone();
             if !self.builder.is_current_block_terminated() {
                 // Branch didn't return early: jump to merge with unit.
@@ -7035,6 +7446,7 @@ impl<'m> Lowerer<'m> {
             }
             self.scope = outer_scope.clone();
             self.scope_slots = outer_slots.clone();
+            self.cell_vars = outer_cells;
 
             let merge_param =
                 self.builder
@@ -7217,6 +7629,14 @@ impl<'m> Lowerer<'m> {
     }
 
     fn lower_block(&mut self, block: &AstBlock) -> Result<Option<(ValueId, IrType)>, LowerError> {
+        self.lower_block_with_keep_ref(block, false)
+    }
+
+    fn lower_block_with_keep_ref(
+        &mut self,
+        block: &AstBlock,
+        keep_ref: bool,
+    ) -> Result<Option<(ValueId, IrType)>, LowerError> {
         if block.stmts.is_empty() && block.tail.is_none() {
             let marker = synth_marker_at(block.span);
             let tb = match marker {
@@ -7226,7 +7646,7 @@ impl<'m> Lowerer<'m> {
             };
             if let Some(tb) = tb {
                 if tb.tail.is_some() {
-                    return Ok(Some(self.lower_thir_block(&tb)?));
+                    return Ok(Some(self.lower_thir_block_with_keep_ref(&tb, keep_ref)?));
                 }
                 self.lower_thir_block(&tb)?;
                 return Ok(None);
@@ -7239,7 +7659,12 @@ impl<'m> Lowerer<'m> {
                 // Block was terminated early (e.g. break in body) — skip tail.
                 Ok(None)
             } else {
-                Ok(Some(self.lower_expr(tail)?))
+                let val_ty = if keep_ref {
+                    self.lower_expr_keep_ref(tail)?
+                } else {
+                    self.lower_expr(tail)?
+                };
+                Ok(Some(val_ty))
             }
         } else {
             Ok(None)
@@ -7347,24 +7772,34 @@ impl<'m> Lowerer<'m> {
             } => {
                 // Set binding_ty from the annotation so constructors like list() can
                 // infer their element type (e.g. `val xs: list<f64> = list()`).
-                if let Some(ast_ty) = ann_ty {
-                    let ann = self.resolve_ty(ast_ty)?;
+                let resolved_ann = ann_ty.as_ref().map(|t| self.resolve_ty(t)).transpose()?;
+                let keep_ref = resolved_ann
+                    .as_ref()
+                    .map_or(true, |t| matches!(t, IrType::MutRef(_)));
+                if let Some(ref ann) = resolved_ann {
                     self.binding_ty = Some(ann.clone());
                     // Set expected_expr_ty so lower_if_expr can coerce branches
                     // before the merge (avoids branch-type mismatch).
-                    self.expected_expr_ty = Some(ann);
+                    self.expected_expr_ty = Some(ann.clone());
                 }
-                let (mut val, mut ty) = self.lower_expr(init)?;
+                let (mut val, mut ty) = if keep_ref {
+                    self.lower_expr_keep_ref(init)?
+                } else {
+                    self.lower_expr(init)?
+                };
                 self.binding_ty = None;
                 self.expected_expr_ty = None;
 
                 // Cohersion: if the binding is annotated `dyn Trait` and the
                 // initializer has a concrete struct type, materialize a
                 // trait-object fat pointer via MakeTraitObject.
-                if let Some(ast_ty_for_box) = ann_ty {
-                    let ann = self.resolve_ty(ast_ty_for_box)?;
-                    let (nv, nt) =
-                        self.coerce_to_trait_object(val, ty.clone(), &ann, ast_ty_for_box.span())?;
+                if let Some(ref ann) = resolved_ann {
+                    let (nv, nt) = self.coerce_to_trait_object(
+                        val,
+                        ty.clone(),
+                        ann,
+                        ann_ty.as_ref().expect("resolved_ann").span(),
+                    )?;
                     val = nv;
                     ty = nt;
                 }
@@ -7584,20 +8019,76 @@ impl<'m> Lowerer<'m> {
                         self.state_set(&ident.name, value_val);
                         Ok(())
                     }
-                    // Plain identifier assignment: rebind the name in scope (SSA-style).
+                    // Plain identifier assignment: rebind the name in scope (SSA-style),
+                    // or store through the mutable cell when the variable is `&mut`-borrowed.
                     AstExpr::Ident(ident) => {
+                        let resolved = self.resolve_unqualified_name(&ident.name);
+                        if let Some((cell, elem_ty)) = self.cell_vars.get(&resolved).cloned() {
+                            let new_val = if let Some(bin_op) = op {
+                                let (lhs_val, lhs_ty) = self
+                                    .load_scope_var(&resolved)
+                                    .expect("checked in cell_vars");
+                                let (rhs_val, _) = self.lower_expr(value)?;
+                                self.compound(*bin_op, lhs_val, &lhs_ty, rhs_val)
+                            } else {
+                                let prev_binding_ty = self.binding_ty.replace(elem_ty.clone());
+                                let lowered =
+                                    self.lower_expr_for_expected_ty(value, Some(&elem_ty));
+                                self.binding_ty = prev_binding_ty;
+                                let (val, val_ty) = lowered?;
+                                if !assignable(&val_ty, &elem_ty) {
+                                    return Err(LowerError::TypeMismatch {
+                                        expected: elem_ty.to_string(),
+                                        found: val_ty.to_string(),
+                                        span: *span,
+                                    });
+                                }
+                                val
+                            };
+                            self.builder.name_value(new_val, &ident.name);
+                            self.record_assign_place(&ident.name, None, new_val, *span);
+                            self.builder.push_instr(
+                                IrInstr::CellStore {
+                                    cell,
+                                    value: new_val,
+                                },
+                                None,
+                            );
+                            return Ok(());
+                        }
                         let new_val = if let Some(bin_op) = op {
-                            let (lhs_val, lhs_ty) = self.scope.get(&ident.name).cloned()
-                                .ok_or_else(|| LowerError::rich("E0100", crate::diagnostics::Diagnostic::error(format!("cannot find `{}` in this scope", ident.name)).with_primary_span(span.start.0, span.end.0, None)))?;
+                            let (lhs_val, lhs_ty) = self
+                                .scope
+                                .get(&ident.name)
+                                .cloned()
+                                .or_else(|| self.scope.get(&resolved).cloned())
+                                .ok_or_else(|| {
+                                    LowerError::rich(
+                                        "E0100",
+                                        crate::diagnostics::Diagnostic::error(format!(
+                                            "cannot find `{}` in this scope",
+                                            ident.name
+                                        ))
+                                        .with_primary_span(span.start.0, span.end.0, None),
+                                    )
+                                })?;
                             let (rhs_val, _) = self.lower_expr(value)?;
                             (self.compound(*bin_op, lhs_val, &lhs_ty, rhs_val), lhs_ty)
                         } else {
-                            self.lower_expr(value)?
+                            let expected_ty = self
+                                .scope
+                                .get(&ident.name)
+                                .or_else(|| self.scope.get(&resolved))
+                                .map(|(_, ty)| ty.clone());
+                            self.lower_expr_for_expected_ty(value, expected_ty.as_ref())?
                         };
                         self.builder.name_value(new_val.0, &ident.name);
                         self.record_assign_place(&ident.name, None, new_val.0, *span);
                         self.scope.insert(ident.name.clone(), (new_val.0, new_val.1));
                         Ok(())
+                    }
+                    AstExpr::Deref { expr: ptr_expr, .. } => {
+                        self.lower_deref_assign(ptr_expr, *op, value, *span)
                     }
                     // Array element store: `arr[i] = value`  or  tensor store
                     AstExpr::Index {
@@ -7641,65 +8132,12 @@ impl<'m> Lowerer<'m> {
                         Ok(())
                     }
                     AstExpr::FieldAccess { base, field, span } => {
-                        let value_val = if let Some(bin_op) = op {
-                            let (lhs_val, lhs_ty) = self.lower_expr(target)?;
-                            let (rhs_val, _) = self.lower_expr(value)?;
-                            self.compound(*bin_op, lhs_val, &lhs_ty, rhs_val)
-                        } else {
-                            let (v, _) = self.lower_expr(value)?;
-                            v
-                        };
+                        let value_val = self.lower_assign_rhs(*op, target, value)?;
                         self.lower_field_assignment(base, field, value_val, *span)
                     }
                     AstExpr::TupleIndex { base, index, span } => {
-                        if let AstExpr::Ident(base_ident) = base.as_ref() {
-                            let (base_val, base_ty) = self.lower_expr(base)?;
-                            let elem_types = match &base_ty {
-                                IrType::Tuple(elems) => elems.clone(),
-                                _ => {
-                                    return Err(LowerError::rich("E0124", crate::diagnostics::Diagnostic::error(format!("`.N` takes an element of a tuple, but this is `{}`", hints::type_name(&base_ty))).with_primary_span(span.start.0, span.end.0, None)));
-                                }
-                            };
-                            if *index >= elem_types.len() {
-                                return Err(LowerError::rich("E0125", crate::diagnostics::Diagnostic::error(format!("tuple index {} is out of range: the tuple has {} elements", index, elem_types.len())).with_primary_span(span.start.0, span.end.0, None)));
-                            }
-                            let (value_val, _) = self.lower_expr(value)?;
-
-                            let mut new_elements = Vec::with_capacity(elem_types.len());
-                            for (i, elem_ty) in elem_types.iter().enumerate() {
-                                if i == *index {
-                                    new_elements.push(value_val);
-                                } else {
-                                    let f_ty = elem_ty.clone();
-                                    let f_val = self.builder.fresh_value();
-                                    self.builder.push_instr(
-                                        IrInstr::GetElement {
-                                            result: f_val,
-                                            base: base_val,
-                                            index: i,
-                                            result_ty: f_ty.clone(),
-                                        },
-                                        Some(f_ty.clone()),
-                                    );
-                                    new_elements.push(f_val);
-                                }
-                            }
-                            let result_ty = base_ty.clone();
-                            let result = self.builder.fresh_value();
-                            self.builder.push_instr(
-                                IrInstr::MakeTuple {
-                                    result,
-                                    elements: new_elements,
-                                    result_ty: result_ty.clone(),
-                                },
-                                Some(result_ty.clone()),
-                            );
-                            self.record_assign_place(&base_ident.name, Some(*index), result, *span);
-                            self.scope.insert(base_ident.name.clone(), (result, result_ty));
-                            Ok(())
-                        } else {
-                            Err(LowerError::rich("E0128", crate::diagnostics::Diagnostic::error("cannot assign to this tuple element: the tuple must be a variable".to_string()).with_primary_span(span.start.0, span.end.0, None)))
-                        }
+                        let value_val = self.lower_assign_rhs(*op, target, value)?;
+                        self.lower_tuple_assignment(base, *index, value_val, *span)
                     }
                     _ => Err(LowerError::rich("E0128", crate::diagnostics::Diagnostic::error("cannot assign to this: the left of `=` must be a variable, an index, a field or a tuple element".to_string()).with_primary_span(span.start.0, span.end.0, None))),
                 }
@@ -7711,7 +8149,8 @@ impl<'m> Lowerer<'m> {
                     if self.expected_expr_ty.is_none() {
                         self.expected_expr_ty = self.current_return_ty.clone();
                     }
-                    let (val, ty) = self.lower_expr(expr)?;
+                    let expected_ret = self.current_return_ty.clone();
+                    let (val, ty) = self.lower_expr_for_expected_ty(expr, expected_ret.as_ref())?;
                     self.expected_expr_ty = None;
                     // If the function returns `dyn Trait` and we're returning a
                     // concrete struct, coerce it via MakeTraitObject.
@@ -7743,12 +8182,19 @@ impl<'m> Lowerer<'m> {
                 // unused parameters after lowering. Inspecting IR operands also
                 // handles indexed/named arguments, shadowing, and nested tasks
                 // without a second, potentially incomplete AST name walker.
-                let mut captures: Vec<(String, ValueId, IrType)> = self
-                    .scope
-                    .iter()
-                    .map(|(name, (vid, ty))| (name.clone(), *vid, ty.clone()))
-                    .collect();
-                captures.sort_by(|a, b| a.0.cmp(&b.0));
+                let mut capture_names: Vec<String> = self.scope.keys().cloned().collect();
+                capture_names.sort();
+                let mut captures: Vec<(String, ValueId, IrType)> = Vec::new();
+                let mut capture_scope_ids: Vec<(ValueId, ValueId)> = Vec::new();
+                for name in &capture_names {
+                    let Some(orig_vid) = self.scope.get(name).map(|(v, _)| *v) else {
+                        continue;
+                    };
+                    if let Some((loaded_vid, ty)) = self.load_scope_var(name) {
+                        captures.push((name.clone(), loaded_vid, ty));
+                        capture_scope_ids.push((orig_vid, loaded_vid));
+                    }
+                }
 
                 let lifted_params: Vec<crate::ir::function::Param> = captures
                     .iter()
@@ -7774,7 +8220,9 @@ impl<'m> Lowerer<'m> {
                 spawn_lowerer.builder.set_current_block(entry);
                 // Track outer_val → inner_val mapping to propagate chan_elem_types back.
                 let mut capture_val_map: Vec<(ValueId, ValueId)> = Vec::new();
-                for (name, outer_val, ty) in &captures {
+                for ((name, outer_val, ty), (orig_vid, _)) in
+                    captures.iter().zip(capture_scope_ids.iter())
+                {
                     let inner_val =
                         spawn_lowerer
                             .builder
@@ -7782,7 +8230,10 @@ impl<'m> Lowerer<'m> {
                     spawn_lowerer
                         .scope
                         .insert(name.clone(), (inner_val, ty.clone()));
-                    capture_val_map.push((*outer_val, inner_val));
+                    capture_val_map.push((*orig_vid, inner_val));
+                    if *outer_val != *orig_vid {
+                        capture_val_map.push((*outer_val, inner_val));
+                    }
                 }
                 // Pre-populate spawn_lowerer's chan_elem_types from parent (inner val → elem ty).
                 for (outer_val, inner_val) in &capture_val_map {
@@ -7903,13 +8354,19 @@ impl<'m> Lowerer<'m> {
                 // the loop var), sorted by name so the generated
                 // `__par_body_N` signature does not depend on `HashMap`
                 // iteration order. See the note in `lower_lambda`.
-                let mut captures: Vec<(String, ValueId, IrType)> = self
+                let mut capture_names: Vec<String> = self
                     .scope
-                    .iter()
-                    .filter(|(name, _)| *name != &var.name)
-                    .map(|(name, (vid, ty))| (name.clone(), *vid, ty.clone()))
+                    .keys()
+                    .filter(|name| *name != &var.name)
+                    .cloned()
                     .collect();
-                captures.sort_by(|a, b| a.0.cmp(&b.0));
+                capture_names.sort();
+                let mut captures: Vec<(String, ValueId, IrType)> = Vec::new();
+                for name in &capture_names {
+                    if let Some((vid, ty)) = self.load_scope_var(name) {
+                        captures.push((name.clone(), vid, ty));
+                    }
+                }
                 let captures = captures;
 
                 // Reject mutation of a captured collection from the loop body.
@@ -8060,6 +8517,7 @@ impl<'m> Lowerer<'m> {
             }
             AstStmt::Select { arms, default, .. } => {
                 let outer_scope = self.scope.clone();
+                let outer_cells = self.cell_vars.clone();
 
                 // Collect rebound variable names from all arm bodies and default body.
                 let mut rebound_names: Vec<String> = Vec::new();
@@ -8069,7 +8527,9 @@ impl<'m> Lowerer<'m> {
                 if let Some(d) = default {
                     collect_rebound_vars_in_block(d, &mut rebound_names, false);
                 }
-                rebound_names.retain(|name| outer_scope.contains_key(name));
+                rebound_names.retain(|name| {
+                    outer_scope.contains_key(name) && !outer_cells.contains_key(name)
+                });
 
                 let loop_bb = self.builder.create_block(Some("select_loop"));
                 let merge_bb = self.builder.create_block(Some("select_merge"));
@@ -8165,6 +8625,7 @@ impl<'m> Lowerer<'m> {
                     // arm_body_bb: recv from channel and execute body
                     self.builder.set_current_block(arm_body_bb);
                     self.scope = outer_scope.clone();
+                    self.cell_vars = outer_cells.clone();
                     let (channel, channel_ty) = &channels[i];
                     let elem_ty = match self.chan_elem_types.get(channel) {
                         Some(ty) => ty.clone(),
@@ -8218,6 +8679,7 @@ impl<'m> Lowerer<'m> {
                 // next_check_bb: no arm matched — check default
                 self.builder.set_current_block(next_check_bb);
                 self.scope = outer_scope.clone();
+                self.cell_vars = outer_cells.clone();
                 if let Some(default_block) = default {
                     self.lower_block_stmts(default_block)?;
                     if !self.builder.is_current_block_terminated() {
@@ -8269,12 +8731,29 @@ impl<'m> Lowerer<'m> {
 
                 // merge_bb: insert block params into scope for rebound variables
                 self.scope = outer_scope;
+                self.cell_vars = outer_cells;
                 for (name, param, ty) in rebound_params {
                     self.scope.insert(name, (param, ty));
                 }
                 self.builder.set_current_block(merge_bb);
                 Ok(())
             }
+        }
+    }
+
+    fn lower_assign_rhs(
+        &mut self,
+        op: Option<BinOp>,
+        target: &AstExpr,
+        value: &AstExpr,
+    ) -> Result<ValueId, LowerError> {
+        if let Some(bin_op) = op {
+            let (lhs_val, lhs_ty) = self.lower_expr(target)?;
+            let (rhs_val, _) = self.lower_expr(value)?;
+            Ok(self.compound(bin_op, lhs_val, &lhs_ty, rhs_val))
+        } else {
+            let (v, _) = self.lower_expr(value)?;
+            Ok(v)
         }
     }
 
@@ -8343,6 +8822,98 @@ impl<'m> Lowerer<'m> {
             Some(result_ty.clone()),
         );
 
+        self.store_aggregate_to_base(
+            base,
+            field_index,
+            result,
+            result_ty,
+            span,
+            "cannot assign to this field: it must belong to a variable",
+        )
+    }
+
+    fn lower_tuple_assignment(
+        &mut self,
+        base: &AstExpr,
+        index: usize,
+        value_val: ValueId,
+        span: Span,
+    ) -> Result<(), LowerError> {
+        let (base_val, base_ty) = self.lower_expr(base)?;
+        let elem_types = match &base_ty {
+            IrType::Tuple(elems) => elems.clone(),
+            _ => {
+                return Err(LowerError::rich(
+                    "E0124",
+                    crate::diagnostics::Diagnostic::error(format!(
+                        "`.N` takes an element of a tuple, but this is `{}`",
+                        hints::type_name(&base_ty)
+                    ))
+                    .with_primary_span(span.start.0, span.end.0, None),
+                ));
+            }
+        };
+        if index >= elem_types.len() {
+            return Err(LowerError::rich(
+                "E0125",
+                crate::diagnostics::Diagnostic::error(format!(
+                    "tuple index {} is out of range: the tuple has {} elements",
+                    index,
+                    elem_types.len()
+                ))
+                .with_primary_span(span.start.0, span.end.0, None),
+            ));
+        }
+
+        let mut new_elements = Vec::with_capacity(elem_types.len());
+        for (i, elem_ty) in elem_types.iter().enumerate() {
+            if i == index {
+                new_elements.push(value_val);
+            } else {
+                let f_ty = elem_ty.clone();
+                let f_val = self.builder.fresh_value();
+                self.builder.push_instr(
+                    IrInstr::GetElement {
+                        result: f_val,
+                        base: base_val,
+                        index: i,
+                        result_ty: f_ty.clone(),
+                    },
+                    Some(f_ty.clone()),
+                );
+                new_elements.push(f_val);
+            }
+        }
+        let result_ty = base_ty.clone();
+        let result = self.builder.fresh_value();
+        self.builder.push_instr(
+            IrInstr::MakeTuple {
+                result,
+                elements: new_elements,
+                result_ty: result_ty.clone(),
+            },
+            Some(result_ty.clone()),
+        );
+
+        self.store_aggregate_to_base(
+            base,
+            index,
+            result,
+            result_ty,
+            span,
+            "cannot assign to this tuple element: the tuple must be a variable",
+        )
+    }
+
+    fn store_aggregate_to_base(
+        &mut self,
+        base: &AstExpr,
+        place_idx: usize,
+        result: ValueId,
+        result_ty: IrType,
+        span: Span,
+        not_var_msg: &str,
+    ) -> Result<(), LowerError> {
         match base {
             // `state.field = value` on program state stores the updated record.
             AstExpr::Ident(base_ident)
@@ -8353,9 +8924,44 @@ impl<'m> Lowerer<'m> {
                 Ok(())
             }
             AstExpr::Ident(base_ident) => {
-                self.record_assign_place(&base_ident.name, Some(field_index), result, span);
+                let resolved = self.resolve_unqualified_name(&base_ident.name);
+                if let Some((cell, _)) = self.cell_vars.get(&resolved).cloned() {
+                    self.builder.push_instr(
+                        IrInstr::CellStore {
+                            cell,
+                            value: result,
+                        },
+                        None,
+                    );
+                    return Ok(());
+                }
+                if let Some((cell, IrType::MutRef(_))) = self.load_scope_var(&resolved) {
+                    self.builder.push_instr(
+                        IrInstr::CellStore {
+                            cell,
+                            value: result,
+                        },
+                        None,
+                    );
+                    return Ok(());
+                }
+                self.record_assign_place(&base_ident.name, Some(place_idx), result, span);
                 self.scope
                     .insert(base_ident.name.clone(), (result, result_ty));
+                Ok(())
+            }
+            AstExpr::Deref { expr: ptr_expr, .. } => {
+                let (ptr_val, ptr_ty) = self.lower_expr_keep_ref(ptr_expr)?;
+                if !matches!(ptr_ty, IrType::MutRef(_)) {
+                    return Err(Self::deref_assign_error(&ptr_ty, span));
+                }
+                self.builder.push_instr(
+                    IrInstr::CellStore {
+                        cell: ptr_val,
+                        value: result,
+                    },
+                    None,
+                );
                 Ok(())
             }
             AstExpr::FieldAccess {
@@ -8363,13 +8969,18 @@ impl<'m> Lowerer<'m> {
                 field: parent_field,
                 span: parent_span,
             } => self.lower_field_assignment(parent_base, parent_field, result, *parent_span),
-            _ => Err(LowerError::rich(
-                "E0128",
-                crate::diagnostics::Diagnostic::error(
-                    "cannot assign to this field: it must belong to a variable".to_string(),
-                )
-                .with_primary_span((span).start.0, (span).end.0, None),
-            )),
+            AstExpr::TupleIndex {
+                base: parent_base,
+                index: parent_index,
+                span: parent_span,
+            } => self.lower_tuple_assignment(parent_base, *parent_index, result, *parent_span),
+            _ => {
+                Err(LowerError::rich(
+                    "E0128",
+                    crate::diagnostics::Diagnostic::error(not_var_msg.to_string())
+                        .with_primary_span((span).start.0, (span).end.0, None),
+                ))
+            }
         }
     }
 }

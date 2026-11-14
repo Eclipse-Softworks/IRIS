@@ -1008,12 +1008,12 @@ as a catch-all pattern.
 ```iris
 def function_name(param1: Type1, param2: Type2) -> ReturnType {
     // body
-    tail_expression
+    return expr
 }
 ```
 
-The return value is the value of the tail expression (the last expression in
-the block without a trailing `;`). The `return` keyword provides early exit.
+Use `return expr` to return a value from a function (the final tail expression
+in a block without a trailing `;` is also returned implicitly).
 
 ### 8.2 Recursion
 

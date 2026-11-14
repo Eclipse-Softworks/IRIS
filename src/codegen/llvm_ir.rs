@@ -1878,9 +1878,15 @@ fn emit_function_body(
                 }
                 | IrInstr::GetElement {
                     result, result_ty, ..
+                }
+                | IrInstr::CellLoad {
+                    result, result_ty, ..
                 } => {
                     let s = llvm_type_complete(result_ty).unwrap_or_else(|_| "ptr".to_owned());
                     emitted_types.insert(*result, s);
+                }
+                IrInstr::CellNew { result, .. } => {
+                    emitted_types.insert(*result, "ptr".to_owned());
                 }
                 IrInstr::UnaryOp { result, ty, .. }
                 | IrInstr::Cast {
@@ -2059,10 +2065,29 @@ fn emit_function_body(
         }
         let blabel = block_label(block.name.as_deref(), block.id);
         writeln!(out, "{}:", blabel)?;
-        if block.id == func.blocks()[0].id && reports_locations(module, func) {
-            writeln!(out, "  store ptr @.iris_src_files, ptr @iris_loc_files")?;
-            // This thread's position slot, which the stores below write.
-            writeln!(out, "  %__iris_locp = call ptr @iris_loc_slot()")?;
+        if block.id == func.blocks()[0].id {
+            if reports_locations(module, func) {
+                writeln!(out, "  store ptr @.iris_src_files, ptr @iris_loc_files")?;
+                // This thread's position slot, which the stores below write.
+                writeln!(out, "  %__iris_locp = call ptr @iris_loc_slot()")?;
+            }
+            for b in func.blocks().iter().filter(|b| reachable.contains(&b.id)) {
+                for instr in &b.instrs {
+                    if let IrInstr::CellNew {
+                        result, elem_ty, ..
+                    } = instr
+                    {
+                        let ety_s = llvm_type_complete(elem_ty)?;
+                        writeln!(
+                            out,
+                            "  %v{} = alloca {}, align {}",
+                            result.0,
+                            ety_s,
+                            ety_align(elem_ty)
+                        )?;
+                    }
+                }
+            }
         }
 
         // Capture extraction in the entry block, for both conventions:
@@ -2544,6 +2569,7 @@ fn runtime_box_helper_for_value(
                 | IrInstr::ResultUnwrap { result_ty: ty, .. }
                 | IrInstr::ResultUnwrapErr { result_ty: ty, .. }
                 | IrInstr::AtomicLoad { result_ty: ty, .. }
+                | IrInstr::CellLoad { result_ty: ty, .. }
                 | IrInstr::MutexLock { result_ty: ty, .. } => runtime_box_helper_for_type(ty),
                 IrInstr::CallExtern { ret_ty, .. } => runtime_box_helper_for_type(ret_ty),
                 IrInstr::ListGet { elem_ty, .. }
@@ -3172,6 +3198,34 @@ pub(crate) fn is_matmul_notation(notation: &str) -> bool {
         && lhs[1] == rhs[0]
         && out[0] == lhs[0]
         && out[1] == rhs[1]
+}
+
+fn coerce_llvm_store_val(
+    out: &mut String,
+    store_val: &str,
+    actual: &str,
+    expected: &str,
+    gep_counter: &mut u32,
+) -> Result<String, CodegenError> {
+    if actual != expected {
+        if expected == "ptr" && actual.starts_with('i') {
+            *gep_counter += 1;
+            let tmp = format!("%fcoerce{}", gep_counter);
+            writeln!(out, "  {} = inttoptr {} {} to ptr", tmp, actual, store_val)?;
+            return Ok(tmp);
+        }
+        if actual == "ptr" && expected.starts_with('i') {
+            *gep_counter += 1;
+            let tmp = format!("%fcoerce{}", gep_counter);
+            writeln!(
+                out,
+                "  {} = ptrtoint ptr {} to {}",
+                tmp, store_val, expected
+            )?;
+            return Ok(tmp);
+        }
+    }
+    Ok(store_val.to_owned())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4405,27 +4459,8 @@ fn emit_instr_ir(
                             .and_then(|t| llvm_type_complete(t).ok())
                     });
                     if let Some(actual) = actual_ty {
-                        if actual != fty_s {
-                            if fty_s == "ptr" && actual.starts_with('i') {
-                                *gep_counter += 1;
-                                let tmp = format!("%fcoerce{}", gep_counter);
-                                writeln!(
-                                    out,
-                                    "  {} = inttoptr {} {} to ptr",
-                                    tmp, actual, store_val
-                                )?;
-                                store_val = tmp;
-                            } else if actual == "ptr" && fty_s.starts_with('i') {
-                                *gep_counter += 1;
-                                let tmp = format!("%fcoerce{}", gep_counter);
-                                writeln!(
-                                    out,
-                                    "  {} = ptrtoint ptr {} to {}",
-                                    tmp, store_val, fty_s
-                                )?;
-                                store_val = tmp;
-                            }
-                        }
+                        store_val =
+                            coerce_llvm_store_val(out, &store_val, &actual, &fty_s, gep_counter)?;
                     }
 
                     writeln!(
@@ -4878,6 +4913,81 @@ fn emit_instr_ir(
                     val(*place)
                 )?;
             }
+        }
+
+        IrInstr::CellNew {
+            result,
+            init,
+            elem_ty,
+        } => {
+            let ety_s = llvm_type_complete(elem_ty)?;
+            let mut store_val = val(*init);
+            let actual_ty = emitted_types.get(init).cloned().or_else(|| {
+                func.value_type(*init)
+                    .and_then(|t| llvm_type_complete(t).ok())
+            });
+            if let Some(actual) = actual_ty {
+                store_val = coerce_llvm_store_val(out, &store_val, &actual, &ety_s, gep_counter)?;
+            }
+            writeln!(
+                out,
+                "  store {} {}, ptr %v{}, align {}",
+                ety_s,
+                store_val,
+                result.0,
+                ety_align(elem_ty)
+            )?;
+        }
+
+        IrInstr::CellLoad {
+            result,
+            cell,
+            result_ty,
+        } => {
+            let rty_s = llvm_type_complete(result_ty)?;
+            writeln!(
+                out,
+                "  %v{} = load {}, ptr {}, align {}",
+                result.0,
+                rty_s,
+                val(*cell),
+                ety_align(result_ty)
+            )?;
+        }
+
+        IrInstr::CellStore { cell, value } => {
+            let inner_ty = match inferred_value_type(func, *cell, None) {
+                Some(IrType::MutRef(inner)) => Some((*inner).clone()),
+                _ => func.value_type(*value).cloned(),
+            };
+            let (slot_ty_s, align) = match &inner_ty {
+                Some(t) => (llvm_type_complete(t)?, ety_align(t)),
+                None => {
+                    let s = emitted_types
+                        .get(value)
+                        .cloned()
+                        .unwrap_or_else(|| "i64".to_owned());
+                    let a = if s == "i1" { 1 } else { 8 };
+                    (s, a)
+                }
+            };
+            let mut store_val = val(*value);
+            let actual_ty = emitted_types.get(value).cloned().or_else(|| {
+                func.value_type(*value)
+                    .and_then(|t| llvm_type_complete(t).ok())
+            });
+            if let Some(actual) = actual_ty {
+                store_val =
+                    coerce_llvm_store_val(out, &store_val, &actual, &slot_ty_s, gep_counter)?;
+            }
+            writeln!(
+                out,
+                "  store {} {}, ptr {}, align {}",
+                slot_ty_s,
+                store_val,
+                val(*cell),
+                align
+            )?;
         }
 
         // ── Memory / Tensor ops ────────────────────────────────────────────
@@ -8353,6 +8463,7 @@ pub fn llvm_type_complete(ty: &IrType) -> Result<String, CodegenError> {
         IrType::Fn { .. } => Ok("ptr".to_owned()), // function pointer
         IrType::TaskGroup => Ok("ptr".to_owned()),
         IrType::WeakRef(_) => Ok("ptr".to_owned()),
+        IrType::MutRef(_) => Ok("ptr".to_owned()),
         IrType::TraitObject { .. } => Ok("ptr".to_owned()),
         IrType::TypeParam(name) => Err(crate::error::CodegenError::Unsupported {
             backend: "llvm".to_owned(),
@@ -8400,6 +8511,7 @@ fn inferred_value_type(
                 | IrInstr::ResultUnwrap { result_ty: ty, .. }
                 | IrInstr::ResultUnwrapErr { result_ty: ty, .. }
                 | IrInstr::AtomicLoad { result_ty: ty, .. }
+                | IrInstr::CellLoad { result_ty: ty, .. }
                 | IrInstr::MutexLock { result_ty: ty, .. }
                 | IrInstr::MakeStruct { result_ty: ty, .. }
                 | IrInstr::MakeVariant { result_ty: ty, .. }
@@ -8420,6 +8532,7 @@ fn inferred_value_type(
                     elem: Box::new(elem_ty.clone()),
                     len: *size,
                 }),
+                IrInstr::CellNew { elem_ty, .. } => Some(IrType::MutRef(Box::new(elem_ty.clone()))),
                 // Carries no type field: an element count is always i64.
                 IrInstr::SparseNnz { .. } => Some(IrType::Scalar(DType::I64)),
                 IrInstr::ListNew { elem_ty, .. } => Some(IrType::List(Box::new(elem_ty.clone()))),
@@ -8544,6 +8657,8 @@ fn is_side_effecting(instr: &IrInstr) -> bool {
             | IrInstr::ArrayStore { .. }
             | IrInstr::AtomicStore { .. }
             | IrInstr::AtomicAdd { .. }
+            | IrInstr::CellNew { .. }
+            | IrInstr::CellStore { .. }
             | IrInstr::MutexLock { .. }
             | IrInstr::MutexUnlock { .. }
             | IrInstr::ChanSend { .. }

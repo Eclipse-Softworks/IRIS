@@ -41,14 +41,17 @@ def lqr_gains(dt: f64, q_pos: f64, q_vel: f64, r: f64) -> Gains {
         p01 = apa01 - bpa0 * bpa1 / s;
         p11 = q_vel + apa11 - bpa1 * bpa1 / s
     };
-    Gains { k_error: k0, k_velocity: k1 }
+    return Gains { k_error: k0, k_velocity: k1 }
 }
 
 def optimal_force(g: Gains, error: f64, velocity: f64) -> f64 {
-    g.k_error * error - g.k_velocity * velocity
+    return g.k_error * error - g.k_velocity * velocity
 }
 
-def saturate(u: f64) -> f64 { max(-10.0, min(10.0, u)) }
+
+def saturate(u: f64) -> f64 {
+    return max(-10.0, min(10.0, u))
+}
 
 def main() -> i64 {
     val dt = 0.02
@@ -67,7 +70,14 @@ def main() -> i64 {
     for t in 0..list_len(targets) {
         val target = list_get(targets, t)
         for step in 0..400 {
-            val s = plant(PlantInput { position: x, velocity: v, force: saturate(optimal_force(g, target - x, v)), dt: dt })
+            val s = plant(
+                PlantInput {
+                    position: x,
+                    velocity: v,
+                    force: saturate(optimal_force(g, target - x, v)),
+                    dt: dt,
+                },
+            )
             x = s.position;
             v = s.velocity
         };
@@ -85,8 +95,17 @@ def main() -> i64 {
             val velocity = 0.25 * (j to f64) - 0.5
             val u = optimal_force(g, error, velocity)
             biggest = max(biggest, abs(u));
-            if count > 0 { json = json + ", " };
-            json = json + "{\"inputs\": [" + to_str(error) + ", " + to_str(velocity) + "], \"expected\": " + to_str(u) + "}";
+            if count > 0 {
+                json = json + ", "
+            };
+            json = json
+                + "{\"inputs\": ["
+                + to_str(error)
+                + ", "
+                + to_str(velocity)
+                + "], \"expected\": "
+                + to_str(u)
+                + "}";
             count = count + 1
         };
     };

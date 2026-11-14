@@ -359,6 +359,7 @@ pub(super) fn thir_stmt_migratable(s: &crate::thir::ThirStmt) -> bool {
                     | crate::thir::ThirExprKind::Index { .. }
                     | crate::thir::ThirExprKind::Field { .. }
                     | crate::thir::ThirExprKind::TupleIndex { .. }
+                    | crate::thir::ThirExprKind::Deref(_)
             ) && thir_expr_migratable(target)
                 && thir_expr_migratable(value)
         }

@@ -110,6 +110,7 @@ fn opaque_kind(ty: &IrType) -> Option<&'static str> {
         IrType::Chan(_) => "chan",
         IrType::Atomic(_) => "atomic",
         IrType::Mutex(_) => "mutex",
+        IrType::MutRef(_) => "mut_ref",
         IrType::Task(_) => "task",
         IrType::TaskGroup => "task_group",
         IrType::WeakRef(_) => "weak_ref",

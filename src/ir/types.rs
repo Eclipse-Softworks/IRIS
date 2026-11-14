@@ -183,6 +183,8 @@ pub enum IrType {
     TaskGroup,
     /// WeakRef type: `weak_ref<T>` — non-owning reference.
     WeakRef(Box<IrType>),
+    /// Mutable borrow reference `&mut T` (backed by a mutable cell).
+    MutRef(Box<IrType>),
     /// A handle to a reverse-mode autodiff tape node.
     ///
     /// Opaque: a pointer into the runtime's tape, not a value the program can
@@ -276,6 +278,7 @@ impl std::fmt::Display for IrType {
             IrType::Map(k, v) => write!(f, "map<{}, {}>", k, v),
             IrType::TaskGroup => f.write_str("task_group"),
             IrType::WeakRef(inner) => write!(f, "weak_ref<{}>", inner),
+            IrType::MutRef(inner) => write!(f, "&mut {}", inner),
             IrType::TraitObject { name, methods } => {
                 write!(f, "dyn {}", name)?;
                 if !methods.is_empty() {

@@ -95,6 +95,7 @@ pub(super) fn assignable(value: &IrType, declared: &IrType) -> bool {
         | (IrType::Grad(a), IrType::Grad(b))
         | (IrType::Sparse(a), IrType::Sparse(b))
         | (IrType::WeakRef(a), IrType::WeakRef(b)) => assignable(a, b),
+        (IrType::MutRef(a), IrType::MutRef(b)) => assignable(a, b),
         (IrType::Map(ka, va), IrType::Map(kb, vb))
         | (IrType::ResultType(ka, va), IrType::ResultType(kb, vb)) => {
             assignable(ka, kb) && assignable(va, vb)
@@ -236,7 +237,7 @@ pub fn lower_type(ty: &AstType) -> Result<IrType, LowerError> {
                 elem: Box::new(lower_type(elem)?),
                 is_mut: true,
             },
-            other => lower_type(other)?,
+            other => IrType::MutRef(Box::new(lower_type(other)?)),
         },
         AstType::Slice(elem, _) => IrType::Slice {
             elem: Box::new(lower_type(elem)?),
@@ -405,6 +406,7 @@ pub(super) fn parse_mangled_type(s: &str) -> (IrType, &str) {
         "grad" => one(IrType::Grad, rest),
         "sparse" => one(IrType::Sparse, rest),
         "weakref" => one(IrType::WeakRef, rest),
+        "mutref" => one(IrType::MutRef, rest),
         "map" => {
             let (k, r1) = parse_mangled_type(rest);
             let (v, r2) = parse_mangled_type(r1);
@@ -459,6 +461,7 @@ pub(crate) fn mangle_ir_type(ty: &IrType) -> String {
         IrType::TraitObject { name, .. } => format!("dyn{}", name),
         IrType::TaskGroup => "taskgroup".to_owned(),
         IrType::WeakRef(inner) => format!("weakref_{}", mangle_ir_type(inner)),
+        IrType::MutRef(inner) => format!("mutref_{}", mangle_ir_type(inner)),
         IrType::Tuple(elems) => {
             let inner: Vec<String> = elems.iter().map(mangle_ir_type).collect();
             format!("tuple_{}", inner.join("_"))
@@ -682,7 +685,7 @@ pub fn lower_type_with_structs(ty: &AstType, module: &IrModule) -> Result<IrType
                 elem: Box::new(lower_type_with_structs(elem, module)?),
                 is_mut: true,
             },
-            other => lower_type_with_structs(other, module)?,
+            other => IrType::MutRef(Box::new(lower_type_with_structs(other, module)?)),
         },
         AstType::Slice(inner, _) => IrType::Slice {
             elem: Box::new(lower_type_with_structs(inner, module)?),
@@ -1378,6 +1381,24 @@ pub fn resolve_ast_type_with_subs(
                 }
             }
         }
+        AstType::Ref(inner, _) => match inner.as_ref() {
+            AstType::Slice(elem, _) => IrType::Slice {
+                elem: Box::new(resolve_ast_type_with_subs(elem, subs, module)?),
+                is_mut: false,
+            },
+            _ => resolve_ast_type_with_subs(inner, subs, module)?,
+        },
+        AstType::RefMut(inner, _) => match inner.as_ref() {
+            AstType::Slice(elem, _) => IrType::Slice {
+                elem: Box::new(resolve_ast_type_with_subs(elem, subs, module)?),
+                is_mut: true,
+            },
+            _ => IrType::MutRef(Box::new(resolve_ast_type_with_subs(inner, subs, module)?)),
+        },
+        AstType::Slice(elem, _) => IrType::Slice {
+            elem: Box::new(resolve_ast_type_with_subs(elem, subs, module)?),
+            is_mut: false,
+        },
         AstType::ConstInt(n, _) => IrType::ConstInt(*n),
         AstType::AssocType { .. } => return Err(type_not_lowerable(ty)),
         AstType::DynTrait { trait_name, .. } => {
@@ -1418,6 +1439,7 @@ pub(crate) fn resolve_concrete_field(ft: &IrType, subs: &HashMap<String, IrType>
         IrType::Grad(inner) => IrType::Grad(Box::new(resolve_concrete_field(inner, subs))),
         IrType::Sparse(inner) => IrType::Sparse(Box::new(resolve_concrete_field(inner, subs))),
         IrType::WeakRef(inner) => IrType::WeakRef(Box::new(resolve_concrete_field(inner, subs))),
+        IrType::MutRef(inner) => IrType::MutRef(Box::new(resolve_concrete_field(inner, subs))),
         IrType::Fn { params, ret } => IrType::Fn {
             params: params
                 .iter()
@@ -1484,6 +1506,7 @@ pub fn populate_struct_fields(ty: &mut IrType, module: &IrModule) {
             populate_struct_fields(v, module);
         }
         IrType::WeakRef(inner) => populate_struct_fields(inner, module),
+        IrType::MutRef(inner) => populate_struct_fields(inner, module),
         IrType::Fn { params, ret } => {
             for p in params {
                 populate_struct_fields(p, module);

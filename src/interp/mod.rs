@@ -147,6 +147,8 @@ pub enum IrValue {
     TaskGroup(Arc<Mutex<TaskGroupState>>),
     /// An atomic/mutex value: a shared mutable cell (thread-safe for Spawn).
     Atomic(std::sync::Arc<std::sync::Mutex<IrValue>>),
+    /// Mutable cell backing `&mut T` references.
+    MutCell(std::sync::Arc<std::sync::Mutex<IrValue>>),
     /// Unit (void) value for side-effecting calls with no return.
     Unit,
     /// A dual number for forward-mode automatic differentiation.
@@ -359,6 +361,7 @@ impl fmt::Display for IrValue {
             IrValue::Task(_) => write!(f, "<task>"),
             IrValue::TaskGroup(_) => write!(f, "<task_group>"),
             IrValue::Atomic(cell) => write!(f, "atomic({})", cell.lock().unwrap()),
+            IrValue::MutCell(cell) => write!(f, "&mut {}", cell.lock().unwrap()),
             IrValue::Unit => write!(f, "()"),
             IrValue::Grad { value, tangent } => write!(f, "grad({}, {})", value, tangent),
             IrValue::Sparse(pairs) => write!(f, "sparse({} nonzeros)", pairs.len()),
@@ -400,6 +403,7 @@ impl PartialEq for IrValue {
             // Channels and atomics use pointer equality.
             (IrValue::Chan(a), IrValue::Chan(b)) => std::sync::Arc::ptr_eq(a, b),
             (IrValue::Atomic(a), IrValue::Atomic(b)) => std::sync::Arc::ptr_eq(a, b),
+            (IrValue::MutCell(a), IrValue::MutCell(b)) => std::sync::Arc::ptr_eq(a, b),
             (IrValue::Unit, IrValue::Unit) => true,
             (
                 IrValue::Grad {
@@ -2297,6 +2301,38 @@ impl<'m> Interpreter<'m> {
                         let cell = std::sync::Arc::new(std::sync::Mutex::new(v));
                         let _ = result_ty;
                         self.values.insert(*result, IrValue::Atomic(cell));
+                    }
+
+                    IrInstr::CellNew { result, init, .. } => {
+                        let v = self.get(*init)?;
+                        let cell = std::sync::Arc::new(std::sync::Mutex::new(v));
+                        self.values.insert(*result, IrValue::MutCell(cell));
+                    }
+
+                    IrInstr::CellLoad { result, cell, .. } => match self.get(*cell)? {
+                        IrValue::MutCell(cell) => {
+                            let val = cell.lock().unwrap().clone();
+                            self.values.insert(*result, val);
+                        }
+                        other => {
+                            return Err(InterpError::TypeError {
+                                detail: format!("CellLoad on non-mut-cell: {:?}", other),
+                            });
+                        }
+                    },
+
+                    IrInstr::CellStore { cell, value } => {
+                        let new_val = self.get(*value)?;
+                        match self.get(*cell)? {
+                            IrValue::MutCell(cell) => {
+                                *cell.lock().unwrap() = new_val;
+                            }
+                            other => {
+                                return Err(InterpError::TypeError {
+                                    detail: format!("CellStore on non-mut-cell: {:?}", other),
+                                });
+                            }
+                        }
                     }
 
                     IrInstr::AtomicLoad { result, atomic, .. } => {
@@ -7323,6 +7359,7 @@ fn interp_builtin(name: &str, args: &[IrValue]) -> Result<IrValue, InterpError> 
                 IrValue::Task(_) => "task",
                 IrValue::TaskGroup(_) => "task_group",
                 IrValue::Atomic(_) => "atomic",
+                IrValue::MutCell(_) => "mut_ref",
                 IrValue::Unit => "unit",
                 IrValue::Grad { .. } => "grad",
                 IrValue::Sparse(_) => "sparse",

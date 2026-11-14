@@ -225,6 +225,17 @@ impl Pass for TypeInferPass {
                             }
                         }
 
+                        IrInstr::CellLoad { cell, .. } | IrInstr::CellStore { cell, .. } => {
+                            if let Some(ty) = func.value_type(*cell) {
+                                if !matches!(ty, IrType::MutRef(_) | IrType::Infer) {
+                                    return Err(at(format!(
+                                        "cannot dereference `{}`: expected `&mut`",
+                                        src(ty)
+                                    )));
+                                }
+                            }
+                        }
+
                         IrInstr::GetElement { base, .. } => {
                             if let Some(ty) = func.value_type(*base) {
                                 if !matches!(ty, IrType::Tuple(_) | IrType::Struct { .. }) {

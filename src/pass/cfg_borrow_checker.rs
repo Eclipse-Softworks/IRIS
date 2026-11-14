@@ -625,33 +625,127 @@ impl CfgBorrowCheckerPass {
                 }
             }
         }
-        if direct_reps.is_empty() {
-            return;
-        }
-
-        // Resolve chains like Move(Borrow(x)) down to x.
-        let mut resolved_reps: HashMap<ValueId, ValueId> =
-            HashMap::with_capacity(direct_reps.len());
-        for &k in direct_reps.keys() {
-            let mut cur = k;
-            let mut steps = 0usize;
-            while let Some(&next) = direct_reps.get(&cur) {
-                if next == cur || steps > direct_reps.len() {
-                    break;
+        if !direct_reps.is_empty() {
+            // Resolve chains like Move(Borrow(x)) down to x.
+            let mut resolved_reps: HashMap<ValueId, ValueId> =
+                HashMap::with_capacity(direct_reps.len());
+            for &k in direct_reps.keys() {
+                let mut cur = k;
+                let mut steps = 0usize;
+                while let Some(&next) = direct_reps.get(&cur) {
+                    if next == cur || steps > direct_reps.len() {
+                        break;
+                    }
+                    cur = next;
+                    steps += 1;
                 }
-                cur = next;
-                steps += 1;
+                resolved_reps.insert(k, cur);
             }
-            resolved_reps.insert(k, cur);
+
+            for block in &mut func.blocks {
+                block
+                    .instrs
+                    .retain(|i| !matches!(i, IrInstr::Borrow { .. } | IrInstr::Move { .. }));
+                for instr in &mut block.instrs {
+                    apply_replacements(instr, &resolved_reps);
+                }
+            }
         }
 
-        for block in &mut func.blocks {
-            block
-                .instrs
-                .retain(|i| !matches!(i, IrInstr::Borrow { .. } | IrInstr::Move { .. }));
-            for instr in &mut block.instrs {
-                apply_replacements(instr, &resolved_reps);
+        // Mixed-branch compatibility checking (`if c { &x } else { &mut y }`) can
+        // leave `MutRef(T)` branch arguments targeting a non-`MutRef` block
+        // parameter so `check_cross_arm_block_params` sees both loans. After
+        // borrow checking passes, materialize a `CellLoad` before the terminator.
+        let block_param_tys: HashMap<BlockId, Vec<crate::ir::types::IrType>> = func
+            .blocks
+            .iter()
+            .map(|b| (b.id, b.params.iter().map(|p| p.ty.clone()).collect()))
+            .collect();
+        let num_blocks = func.blocks.len();
+        for bi in 0..num_blocks {
+            let block_id = func.blocks[bi].id;
+            let Some(term_idx) = func.blocks[bi].instrs.len().checked_sub(1) else {
+                continue;
+            };
+            let mut term = match func.blocks[bi].instrs.get(term_idx) {
+                Some(t @ (IrInstr::Br { .. } | IrInstr::CondBr { .. })) => t.clone(),
+                _ => continue,
+            };
+
+            let mut loads: Vec<(ValueId, crate::ir::types::IrType, IrInstr)> = Vec::new();
+            let mut loaded_cache: HashMap<ValueId, ValueId> = HashMap::new();
+            let mut coerce_edges = |edges: &mut [(BlockId, &mut Vec<ValueId>)]| {
+                for (target, args) in edges.iter_mut() {
+                    let Some(param_tys) = block_param_tys.get(target) else {
+                        continue;
+                    };
+                    for (arg, param_ty) in args.iter_mut().zip(param_tys.iter()) {
+                        if matches!(param_ty, crate::ir::types::IrType::MutRef(_)) {
+                            continue;
+                        }
+                        let Some(crate::ir::types::IrType::MutRef(inner)) =
+                            func.value_types.get(arg).cloned()
+                        else {
+                            continue;
+                        };
+                        let loaded = if let Some(&existing) = loaded_cache.get(arg) {
+                            existing
+                        } else {
+                            let loaded_id = func.fresh_value();
+                            loads.push((
+                                loaded_id,
+                                (*inner).clone(),
+                                IrInstr::CellLoad {
+                                    result: loaded_id,
+                                    cell: *arg,
+                                    result_ty: (*inner).clone(),
+                                },
+                            ));
+                            loaded_cache.insert(*arg, loaded_id);
+                            loaded_id
+                        };
+                        *arg = loaded;
+                    }
+                }
+            };
+
+            match &mut term {
+                IrInstr::Br { target, args } => {
+                    coerce_edges(&mut [(*target, args)]);
+                }
+                IrInstr::CondBr {
+                    then_block,
+                    then_args,
+                    else_block,
+                    else_args,
+                    ..
+                } => {
+                    coerce_edges(&mut [(*then_block, then_args), (*else_block, else_args)]);
+                }
+                _ => {}
             }
+
+            if loads.is_empty() {
+                continue;
+            }
+
+            let mut instrs_to_insert = Vec::with_capacity(loads.len());
+            for (offset, (loaded_id, inner_ty, instr)) in loads.into_iter().enumerate() {
+                let tid = func.intern_type(inner_ty.clone());
+                func.value_types.insert(loaded_id, inner_ty);
+                func.value_type_ids.insert(loaded_id, tid);
+                func.value_defs.insert(
+                    loaded_id,
+                    crate::ir::value::ValueDef::InstrResult {
+                        block: block_id,
+                        instr: crate::ir::instr::InstrId((term_idx + offset) as u32),
+                    },
+                );
+                instrs_to_insert.push(instr);
+            }
+            let block = &mut func.blocks[bi];
+            block.instrs[term_idx] = term;
+            block.instrs.splice(term_idx..term_idx, instrs_to_insert);
         }
     }
 
@@ -1212,6 +1306,7 @@ fn mutating_container_operand(instr: &IrInstr) -> Option<ValueId> {
         IrInstr::MapSet { map, .. } | IrInstr::MapRemove { map, .. } => Some(*map),
         IrInstr::Store { tensor, .. } => Some(*tensor),
         IrInstr::AtomicStore { atomic, .. } | IrInstr::AtomicAdd { atomic, .. } => Some(*atomic),
+        IrInstr::CellStore { cell, .. } => Some(*cell),
         _ => None,
     }
 }

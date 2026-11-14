@@ -459,6 +459,69 @@ pub(super) fn extract_from_ast_type(
                 );
             }
         }
+        crate::parser::ast::AstType::Ref(inner_ast, _) => {
+            if let crate::parser::ast::AstType::Slice(elem_ast, _) = inner_ast.as_ref() {
+                if let IrType::Slice { elem: elem_c, .. } = concrete_ty {
+                    extract_from_ast_type(
+                        elem_ast,
+                        elem_c,
+                        type_params,
+                        hkt_params,
+                        const_params,
+                        module,
+                        subs,
+                    );
+                }
+            } else {
+                extract_from_ast_type(
+                    inner_ast,
+                    concrete_ty,
+                    type_params,
+                    hkt_params,
+                    const_params,
+                    module,
+                    subs,
+                );
+            }
+        }
+        crate::parser::ast::AstType::RefMut(inner_ast, _) => {
+            if let crate::parser::ast::AstType::Slice(elem_ast, _) = inner_ast.as_ref() {
+                if let IrType::Slice { elem: elem_c, .. } = concrete_ty {
+                    extract_from_ast_type(
+                        elem_ast,
+                        elem_c,
+                        type_params,
+                        hkt_params,
+                        const_params,
+                        module,
+                        subs,
+                    );
+                }
+            } else if let IrType::MutRef(elem_c) = concrete_ty {
+                extract_from_ast_type(
+                    inner_ast,
+                    elem_c,
+                    type_params,
+                    hkt_params,
+                    const_params,
+                    module,
+                    subs,
+                );
+            }
+        }
+        crate::parser::ast::AstType::Slice(elem_ast, _) => {
+            if let IrType::Slice { elem: elem_c, .. } = concrete_ty {
+                extract_from_ast_type(
+                    elem_ast,
+                    elem_c,
+                    type_params,
+                    hkt_params,
+                    const_params,
+                    module,
+                    subs,
+                );
+            }
+        }
         _ => {}
     }
 }
@@ -850,6 +913,7 @@ pub(super) fn lower_function_with_generics_and_subs(
         }
         lowerer.local_struct_defaults = local_defaults;
     }
+    lowerer.mut_borrowed_vars = super::find_mut_borrowed_vars(&func.body);
 
     // An async poll body receives only its task; each declared parameter is
     // read from the task's frame, where the constructor stored it.
@@ -965,6 +1029,7 @@ pub(super) fn lower_function_with_generics_and_subs(
         .map(thir_block_migratable)
         .unwrap_or(false);
 
+    let keep_ret_ref = matches!(return_ty, IrType::MutRef(_));
     let tail_val = if use_thir_body {
         let tb = thir_block.unwrap();
         if lowerer.builder.is_current_block_terminated() {
@@ -975,7 +1040,7 @@ pub(super) fn lower_function_with_generics_and_subs(
             } else {
                 None
             };
-            let (value, ty) = lowerer.lower_thir_block(&tb)?;
+            let (value, ty) = lowerer.lower_thir_block_with_keep_ref(&tb, keep_ret_ref)?;
             lowerer.expected_expr_ty = None;
             Some(if returns_dyn {
                 lowerer.coerce_to_trait_object(value, ty, &return_ty, func.name.span)?
@@ -994,7 +1059,11 @@ pub(super) fn lower_function_with_generics_and_subs(
                 if returns_dyn {
                     lowerer.expected_expr_ty = Some(return_ty.clone());
                 }
-                let (value, ty) = lowerer.lower_expr(tail)?;
+                let (value, ty) = if keep_ret_ref {
+                    lowerer.lower_expr_keep_ref(tail)?
+                } else {
+                    lowerer.lower_expr(tail)?
+                };
                 lowerer.expected_expr_ty = None;
                 Some(if returns_dyn {
                     lowerer.coerce_to_trait_object(value, ty, &return_ty, tail.span())?

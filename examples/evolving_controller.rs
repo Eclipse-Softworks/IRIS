@@ -33,13 +33,13 @@ def test_transaction_rollback() -> i64 effect alloc, transaction {
     transaction_begin();
     push(state, 99);
     transaction_rollback();
-    if list_len(state) == 1 && list_get(state, 0) == 10 { 0 } else { 1 }
+    return if list_len(state) == 1 && list_get(state, 0) == 10 { 0 } else { 1 }
 }
 "#;
 
 /// Generation 0: a sluggish proportional controller.
 const BASELINE: &str = r#"
-def policy(error: f64, velocity: f64) -> f64 effect pure { 0.5 * error }
+def policy(error: f64, velocity: f64) -> f64 effect pure { return 0.5 * error }
 "#;
 
 /// Each candidate: a name, what it is meant to show, and its source.
@@ -50,42 +50,42 @@ const CANDIDATES: &[(&str, &str)] = &[
 def policy(error: f64, velocity: f64) -> f64 effect alloc {
     val history: list<f64> = list()
     push(history, error);
-    4.0 * error - 2.5 * velocity
+    return 4.0 * error - 2.5 * velocity
 }
-def test_policy() -> i64 effect throw, alloc { assert(policy(1.0, 0.0) == 4.0); 0 }
+def test_policy() -> i64 effect throw, alloc { assert(policy(1.0, 0.0) == 4.0); return 0 }
 "#,
     ),
     (
         "sqrt-gain",
         r#"
 def policy(error: f64, velocity: f64) -> f64 effect pure {
-    4.0 * sqrt(error) - 2.5 * velocity
+    return 4.0 * sqrt(error) - 2.5 * velocity
 }
-def test_policy() -> i64 effect throw { assert(policy(1.0, 0.0) == 4.0); 0 }
+def test_policy() -> i64 effect throw { assert(policy(1.0, 0.0) == 4.0); return 0 }
 "#,
     ),
     (
         "pd-unclamped",
         r#"
 def policy(error: f64, velocity: f64) -> f64 effect pure {
-    4.0 * error - 2.5 * velocity
+    return 4.0 * error - 2.5 * velocity
 }
-def test_policy() -> i64 effect throw { assert(policy(1.0, 0.0) == 4.0); 0 }
+def test_policy() -> i64 effect throw { assert(policy(1.0, 0.0) == 4.0); return 0 }
 "#,
     ),
     (
         "pd-saturated",
         r#"
 def saturate(u: f64) -> f64 effect pure {
-    if u > 10.0 { 10.0 } else { if u < -10.0 { -10.0 } else { u } }
+    return if u > 10.0 { 10.0 } else { if u < -10.0 { -10.0 } else { u } }
 }
 def policy(error: f64, velocity: f64) -> f64 effect pure {
-    saturate(4.0 * error - 2.5 * velocity)
+    return saturate(4.0 * error - 2.5 * velocity)
 }
 def test_policy() -> i64 effect throw {
     assert(policy(1.0, 0.0) == 4.0);
     assert(policy(50.0, 0.0) == 10.0);
-    0
+    return 0
 }
 "#,
     ),

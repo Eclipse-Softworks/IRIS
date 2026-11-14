@@ -1470,6 +1470,19 @@ impl LspState {
         )
     }
 
+    /// Computes a full-document replacement edit for LSP `textDocument/formatting`.
+    /// Returns `None` when the document is unknown, has syntax errors (so invalid
+    /// code is never rewritten), or is already identically formatted (empty edit list).
+    pub fn formatting_edits(&self, uri: &str) -> Option<(u32, u32, String)> {
+        let source = self.documents.get(uri)?;
+        let formatted = crate::formatter::format_source(source, &self.format_options).ok()?;
+        if formatted == *source {
+            return None;
+        }
+        let (end_line, end_char) = byte_to_lsp_pos(source, source.len() as u32);
+        Some((end_line, end_char, formatted))
+    }
+
     fn configure_formatter(&mut self, indent: usize, max_line_width: usize) {
         self.format_options.indent = indent.clamp(1, 16);
         self.format_options.max_line_width = max_line_width.clamp(40, 240);
@@ -2890,6 +2903,36 @@ mod tests {
         assert!(result.is_some());
         // Should return the source unchanged (or something non-empty).
         assert!(!result.unwrap().is_empty());
+    }
+
+    #[test]
+    fn formatting_edits_returns_none_on_parse_error_and_noop() {
+        let broken = state_with("def broken( -> { }");
+        assert!(broken.formatting_edits(URI).is_none());
+
+        let clean = state_with("def main() -> i64 {\n    return 0\n}\n");
+        assert!(clean.formatting_edits(URI).is_none());
+    }
+
+    #[test]
+    fn formatting_edits_uses_exact_utf16_eof_position_with_trailing_newline() {
+        // Line 0: "// café 😀\n" -> ends on line 1; line 1: "def main()->i64{return 0}\n" -> ends at (2, 0)
+        let src = "// café 😀\ndef main()->i64{return 0}\n";
+        let s = state_with(src);
+        let (end_line, end_char, formatted) = s.formatting_edits(URI).expect("expected edit");
+        assert_eq!((end_line, end_char), (2, 0));
+        assert!(formatted.contains("// café 😀"));
+        assert!(formatted.contains("def main() -> i64"));
+    }
+
+    #[test]
+    fn formatting_edits_uses_exact_utf16_eof_position_without_trailing_newline() {
+        let src = "def main()->i64{val s=\"😀\";return 0}";
+        let s = state_with(src);
+        let (end_line, end_char, _) = s.formatting_edits(URI).expect("expected edit");
+        // 😀 is 1 UTF-16 surrogate pair = 2 code units instead of 4 UTF-8 bytes
+        let expected_utf16_len: u32 = src.encode_utf16().count() as u32;
+        assert_eq!((end_line, end_char), (0, expected_utf16_len));
     }
 
     // ── signature help ────────────────────────────────────────────────────────
@@ -5212,22 +5255,18 @@ pub fn run_lsp_server() -> std::io::Result<()> {
                     .as_str()
                     .unwrap_or("")
                     .to_owned();
-                let source = state.documents.get(&uri).cloned().unwrap_or_default();
                 let result = state
-                    .format(&uri)
-                    .map(|formatted| {
-                        let line_count = source.lines().count() as u32;
-                        let last_line_len =
-                            source.lines().last().map(|l| l.len()).unwrap_or(0) as u32;
+                    .formatting_edits(&uri)
+                    .map(|(end_line, end_char, formatted)| {
                         serde_json::json!([{
                             "range": {
                                 "start": { "line": 0, "character": 0 },
-                                "end":   { "line": line_count, "character": last_line_len }
+                                "end":   { "line": end_line, "character": end_char }
                             },
                             "newText": formatted
                         }])
                     })
-                    .unwrap_or(serde_json::json!([]));
+                    .unwrap_or_else(|| serde_json::json!([]));
                 write_message(
                     &mut stdout.lock(),
                     &make_response(request_id.clone(), result),

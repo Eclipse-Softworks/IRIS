@@ -536,6 +536,26 @@ fn emit_instr(out: &mut String, instr: &IrInstr) -> Result<(), CodegenError> {
             write!(out, "atomic_store {}, {}", atomic, value)?;
         }
 
+        IrInstr::CellNew {
+            result,
+            init,
+            elem_ty,
+        } => {
+            write!(out, "{} = cell_new {} : {}", result, init, elem_ty)?;
+        }
+
+        IrInstr::CellLoad {
+            result,
+            cell,
+            result_ty,
+        } => {
+            write!(out, "{} = cell_load {} : {}", result, cell, result_ty)?;
+        }
+
+        IrInstr::CellStore { cell, value } => {
+            write!(out, "cell_store {}, {}", cell, value)?;
+        }
+
         IrInstr::AtomicAdd {
             result,
             atomic,

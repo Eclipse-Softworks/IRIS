@@ -579,7 +579,7 @@ fn live_across_awaits(
     for value in &ordered {
         if matches!(
             function.value_types.get(value),
-            Some(IrType::Array { .. } | IrType::Slice { .. })
+            Some(IrType::Array { .. } | IrType::Slice { .. } | IrType::MutRef(_))
         ) {
             return Err(error(
                 function,

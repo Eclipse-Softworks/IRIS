@@ -13,6 +13,23 @@ use super::{
 };
 
 impl<'m> Lowerer<'m> {
+    fn collect_loop_rebound_vars(
+        &self,
+        rebound: &[String],
+        skip: Option<&str>,
+    ) -> Vec<(String, ValueId, IrType)> {
+        let mut vars = Vec::new();
+        for name in rebound {
+            if skip.is_some_and(|s| s == name) || self.cell_vars.contains_key(name) {
+                continue;
+            }
+            if let Some((val, ty)) = self.scope.get(name).cloned() {
+                vars.push((name.clone(), val, ty));
+            }
+        }
+        vars
+    }
+
     pub(super) fn lower_thir_while(
         &mut self,
         cond: &crate::thir::ThirExpr,
@@ -21,16 +38,12 @@ impl<'m> Lowerer<'m> {
         span: Span,
     ) -> Result<(), LowerError> {
         let outer_names = self.scope_names();
+        let outer_cells = self.cell_vars.clone();
         let mut rebound = find_rebound_vars_thir_block(body, true);
         rebound.sort();
         rebound.dedup();
 
-        let mut loop_vars: Vec<(String, ValueId, IrType)> = Vec::new();
-        for name in &rebound {
-            if let Some((val, ty)) = self.scope.get(name).cloned() {
-                loop_vars.push((name.clone(), val, ty));
-            }
-        }
+        let loop_vars = self.collect_loop_rebound_vars(&rebound, None);
 
         let mut initial_vals: Vec<ValueId> = loop_vars.iter().map(|(_, v, _)| *v).collect();
         let taped_loop_vars: Vec<(usize, ValueId)> = loop_vars
@@ -154,6 +167,7 @@ impl<'m> Lowerer<'m> {
         }
 
         self.builder.set_current_block(merge_bb);
+        self.cell_vars = outer_cells;
         for ((name, _, ty), &merge_val) in loop_vars.iter().zip(merge_params.iter()) {
             self.scope.insert(name.clone(), (merge_val, ty.clone()));
         }
@@ -174,16 +188,12 @@ impl<'m> Lowerer<'m> {
         span: Span,
     ) -> Result<(), LowerError> {
         let outer_names = self.scope_names();
+        let outer_cells = self.cell_vars.clone();
         let mut rebound = find_rebound_vars_thir_block(body, true);
         rebound.sort();
         rebound.dedup();
 
-        let mut loop_vars: Vec<(String, ValueId, IrType)> = Vec::new();
-        for name in &rebound {
-            if let Some((val, ty)) = self.scope.get(name).cloned() {
-                loop_vars.push((name.clone(), val, ty));
-            }
-        }
+        let loop_vars = self.collect_loop_rebound_vars(&rebound, None);
 
         let initial_vals: Vec<ValueId> = loop_vars.iter().map(|(_, v, _)| *v).collect();
 
@@ -264,6 +274,7 @@ impl<'m> Lowerer<'m> {
         }
 
         self.builder.set_current_block(merge_bb);
+        self.cell_vars = outer_cells;
         for ((name, _, ty), &merge_val) in loop_vars.iter().zip(merge_params.iter()) {
             self.scope.insert(name.clone(), (merge_val, ty.clone()));
         }
@@ -308,6 +319,7 @@ impl<'m> Lowerer<'m> {
         }
 
         let outer_names = self.scope_names();
+        let outer_cells = self.cell_vars.clone();
         let mut rebound = find_rebound_vars_thir_block(body, true);
         rebound.sort();
         rebound.dedup();
@@ -317,14 +329,7 @@ impl<'m> Lowerer<'m> {
 
         let mut loop_vars: Vec<(String, ValueId, IrType)> = Vec::new();
         loop_vars.push((var.to_string(), start_val, loop_var_ty.clone()));
-        for name in &rebound {
-            if name == var {
-                continue;
-            }
-            if let Some((val, ty)) = self.scope.get(name).cloned() {
-                loop_vars.push((name.clone(), val, ty));
-            }
-        }
+        loop_vars.extend(self.collect_loop_rebound_vars(&rebound, Some(var)));
 
         let mut initial_vals: Vec<ValueId> = loop_vars.iter().map(|(_, v, _)| *v).collect();
         let taped_loop_vars: Vec<(usize, ValueId)> = loop_vars
@@ -494,6 +499,7 @@ impl<'m> Lowerer<'m> {
         }
 
         self.builder.set_current_block(merge_bb);
+        self.cell_vars = outer_cells;
         for ((name, _, ty), &merge_val) in loop_vars.iter().zip(merge_params.iter()) {
             if name == var {
                 self.scope.remove(name);
@@ -526,11 +532,15 @@ impl<'m> Lowerer<'m> {
         self.lambda_counter.set(counter + 1);
         let fn_name = format!("__par_body_{}", counter);
 
-        let mut captures: Vec<(String, ValueId, IrType)> = self
+        let capture_names: Vec<String> = self
             .scope
-            .iter()
-            .filter(|(name, _)| name.as_str() != var)
-            .map(|(name, (vid, ty))| (name.clone(), *vid, ty.clone()))
+            .keys()
+            .filter(|name| name.as_str() != var)
+            .cloned()
+            .collect();
+        let mut captures: Vec<(String, ValueId, IrType)> = capture_names
+            .into_iter()
+            .filter_map(|name| self.load_scope_var(&name).map(|(vid, ty)| (name, vid, ty)))
             .collect();
         captures.sort_by(|a, b| a.0.cmp(&b.0));
 
@@ -676,6 +686,7 @@ impl<'m> Lowerer<'m> {
         );
 
         let outer_names = self.scope_names();
+        let outer_cells = self.cell_vars.clone();
         let mut rebound = find_rebound_vars_thir_block(body, true);
         rebound.sort();
         rebound.dedup();
@@ -686,14 +697,7 @@ impl<'m> Lowerer<'m> {
 
         let mut loop_vars: Vec<(String, ValueId, IrType)> = Vec::new();
         loop_vars.push((idx_name.clone(), idx_init, i64_ty.clone()));
-        for name in &rebound {
-            if name == &idx_name {
-                continue;
-            }
-            if let Some((val, ty)) = self.scope.get(name).cloned() {
-                loop_vars.push((name.clone(), val, ty));
-            }
-        }
+        loop_vars.extend(self.collect_loop_rebound_vars(&rebound, Some(&idx_name)));
 
         let initial_vals: Vec<ValueId> = loop_vars.iter().map(|(_, v, _)| *v).collect();
 
@@ -846,6 +850,7 @@ impl<'m> Lowerer<'m> {
         }
 
         self.builder.set_current_block(merge_bb);
+        self.cell_vars = outer_cells;
         for ((name, _, ty), &merge_val) in loop_vars.iter().zip(merge_params.iter()) {
             if name != &idx_name {
                 self.scope.insert(name.clone(), (merge_val, ty.clone()));
@@ -889,6 +894,7 @@ impl<'m> Lowerer<'m> {
         for n in introduced {
             self.scope.remove(&n);
         }
+        self.cell_vars.retain(|n, _| outer.contains(n));
     }
 
     /// Snapshot the names currently in scope, for `drop_body_locals`.
@@ -905,15 +911,11 @@ impl<'m> Lowerer<'m> {
     ) -> Result<(), LowerError> {
         // Pre-scan body to find which variables get rebound.
         let outer_names = self.scope_names();
+        let outer_cells = self.cell_vars.clone();
         let rebound = find_rebound_vars(body);
 
         // Collect the loop variables that exist in the current scope.
-        let mut loop_vars: Vec<(String, ValueId, IrType)> = Vec::new();
-        for name in &rebound {
-            if let Some((val, ty)) = self.scope.get(name).cloned() {
-                loop_vars.push((name.clone(), val, ty));
-            }
-        }
+        let loop_vars = self.collect_loop_rebound_vars(&rebound, None);
 
         let mut initial_vals: Vec<ValueId> = loop_vars.iter().map(|(_, v, _)| *v).collect();
 
@@ -1054,6 +1056,7 @@ impl<'m> Lowerer<'m> {
 
         // Move to merge block and update scope with loop var final values.
         self.builder.set_current_block(merge_bb);
+        self.cell_vars = outer_cells;
         for ((name, _, ty), &merge_val) in loop_vars.iter().zip(merge_params.iter()) {
             self.scope.insert(name.clone(), (merge_val, ty.clone()));
         }
@@ -1118,6 +1121,7 @@ impl<'m> Lowerer<'m> {
 
         // 2. Pre-scan body for rebounded variables; loop var is always rebound.
         let outer_names = self.scope_names();
+        let outer_cells = self.cell_vars.clone();
         let mut rebound = find_rebound_vars(body);
         if !rebound.contains(&var.name) {
             rebound.push(var.name.clone());
@@ -1126,14 +1130,7 @@ impl<'m> Lowerer<'m> {
         // 3. Collect loop variables: loop var first, then other rebound outer vars.
         let mut loop_vars: Vec<(String, ValueId, IrType)> = Vec::new();
         loop_vars.push((var.name.clone(), start_val, loop_var_ty.clone()));
-        for name in &rebound {
-            if name == &var.name {
-                continue;
-            }
-            if let Some((val, ty)) = self.scope.get(name).cloned() {
-                loop_vars.push((name.clone(), val, ty));
-            }
-        }
+        loop_vars.extend(self.collect_loop_rebound_vars(&rebound, Some(&var.name)));
 
         let mut initial_vals: Vec<ValueId> = loop_vars.iter().map(|(_, v, _)| *v).collect();
 
@@ -1313,6 +1310,7 @@ impl<'m> Lowerer<'m> {
         // 11. Move to merge block; update scope with final values of rebound outer
         //     variables, but remove the loop variable (it's no longer in scope).
         self.builder.set_current_block(merge_bb);
+        self.cell_vars = outer_cells;
         for ((name, _, ty), &merge_val) in loop_vars.iter().zip(merge_params.iter()) {
             if name == &var.name {
                 // Loop variable goes out of scope at the end of the for loop.
@@ -1412,6 +1410,7 @@ impl<'m> Lowerer<'m> {
 
         // Pre-scan body for rebound outer vars (the loop index is always rebound).
         let outer_names = self.scope_names();
+        let outer_cells = self.cell_vars.clone();
         let mut rebound = find_rebound_vars(body);
         let idx_name = format!("__foreach_idx_{}", var.span.start.0);
         if !rebound.contains(&idx_name) {
@@ -1421,14 +1420,7 @@ impl<'m> Lowerer<'m> {
         // Collect loop variables: index first, then other rebound outer vars.
         let mut loop_vars: Vec<(String, ValueId, IrType)> = Vec::new();
         loop_vars.push((idx_name.clone(), idx_init, i64_ty.clone()));
-        for name in &rebound {
-            if name == &idx_name {
-                continue;
-            }
-            if let Some((val, ty)) = self.scope.get(name).cloned() {
-                loop_vars.push((name.clone(), val, ty));
-            }
-        }
+        loop_vars.extend(self.collect_loop_rebound_vars(&rebound, Some(&idx_name)));
 
         let initial_vals: Vec<ValueId> = loop_vars.iter().map(|(_, v, _)| *v).collect();
 
@@ -1600,6 +1592,7 @@ impl<'m> Lowerer<'m> {
         self.scope.remove(&var.name);
 
         let _ = span;
+        self.cell_vars = outer_cells;
         // A `val` declared in the body is local to it (#27).
         self.drop_body_locals(&outer_names);
         Ok(())
@@ -1614,15 +1607,11 @@ impl<'m> Lowerer<'m> {
     ) -> Result<(), LowerError> {
         // Pre-scan body to find which variables get rebound inside the loop.
         let outer_names = self.scope_names();
+        let outer_cells = self.cell_vars.clone();
         let rebound = find_rebound_vars(body);
 
         // Collect the loop variables that exist in the current scope.
-        let mut loop_vars: Vec<(String, ValueId, IrType)> = Vec::new();
-        for name in &rebound {
-            if let Some((val, ty)) = self.scope.get(name).cloned() {
-                loop_vars.push((name.clone(), val, ty));
-            }
-        }
+        let loop_vars = self.collect_loop_rebound_vars(&rebound, None);
 
         let initial_vals: Vec<ValueId> = loop_vars.iter().map(|(_, v, _)| *v).collect();
 
@@ -1707,6 +1696,7 @@ impl<'m> Lowerer<'m> {
 
         // Move to merge block and update scope with final values.
         self.builder.set_current_block(merge_bb);
+        self.cell_vars = outer_cells;
         for ((name, _, ty), &merge_val) in loop_vars.iter().zip(merge_params.iter()) {
             self.scope.insert(name.clone(), (merge_val, ty.clone()));
         }

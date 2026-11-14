@@ -1,5 +1,12 @@
 # IRIS Language Extension Changelog
 
+## 1.0.9
+
+### Improvements & Fixes
+
+- **Format on save (`iris.formatOnSave`)**: Updated `onWillSaveTextDocument` to request edits from `vscode.executeFormatDocumentProvider` with the editor's active `tabSize` / `insertSpaces` (falling back to `iris.format.indentSize`) and apply `TextEdit[]` synchronously inside `e.waitUntil(...)`, pairing cleanly with the language server's Prettier-style `Doc` formatter and UTF-16 `textDocument/formatting` ranges.
+- **Extension branding & documentation**: Updated extension `icon.png` (Iso View logo), added the logo banner to `README.md`, and updated the README code snippet to use explicit `return 0`.
+
 ## 1.0.8
 
 ### New Features

@@ -1,5 +1,4 @@
 bring std.string
-bring std.io
 
 def main() -> i64 {
     val s = concat("iris", "-lang");

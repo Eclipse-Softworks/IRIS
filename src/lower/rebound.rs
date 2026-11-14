@@ -409,6 +409,465 @@ pub(super) fn taped_inline_ok_expr(expr: &AstExpr) -> bool {
     }
 }
 
+/// Scans a block for local variable names whose `&mut name` reference is taken.
+///
+/// Used during lowering to allocate mutable cell slots for those variables so
+/// `*ref = val` writes propagate back to reads of the original binding. Nested
+/// `Lambda`, `Spawn`, and `ParFor` bodies form separate lowered functions and are
+/// excluded so shadowed parameter names do not pollute outer scopes.
+pub(super) fn find_mut_borrowed_vars(block: &AstBlock) -> std::collections::HashSet<String> {
+    let mut names = std::collections::HashSet::new();
+    collect_mut_borrowed_in_block(block, &mut names);
+    names
+}
+
+/// Expression-level sibling of [`find_mut_borrowed_vars`] for lambda bodies.
+pub(super) fn find_mut_borrowed_vars_expr(expr: &AstExpr) -> std::collections::HashSet<String> {
+    let mut names = std::collections::HashSet::new();
+    collect_mut_borrowed_in_expr(expr, &mut names);
+    names
+}
+
+/// THIR expression sibling of [`find_mut_borrowed_vars_expr`].
+pub(super) fn find_mut_borrowed_vars_thir_expr(
+    expr: &crate::thir::ThirExpr,
+) -> std::collections::HashSet<String> {
+    let mut names = std::collections::HashSet::new();
+    collect_mut_borrowed_in_thir_expr(expr, &mut names);
+    names
+}
+
+fn collect_mut_borrowed_in_block(block: &AstBlock, out: &mut std::collections::HashSet<String>) {
+    if block.stmts.is_empty() && block.tail.is_none() {
+        match synth_marker_at(block.span) {
+            Some(SynthMarker::Block(tb)) => {
+                collect_mut_borrowed_in_thir_block(&tb, out);
+                return;
+            }
+            Some(SynthMarker::Expr(e)) => {
+                collect_mut_borrowed_in_thir_expr(&e, out);
+                return;
+            }
+            None => {
+                if let Some(tb) = crate::thir::block_at(block.span) {
+                    collect_mut_borrowed_in_thir_block(&tb, out);
+                    return;
+                }
+            }
+        }
+    }
+    for stmt in &block.stmts {
+        collect_mut_borrowed_in_stmt(stmt, out);
+    }
+    if let Some(tail) = &block.tail {
+        collect_mut_borrowed_in_expr(tail, out);
+    }
+}
+
+fn collect_mut_borrowed_in_stmt(stmt: &AstStmt, out: &mut std::collections::HashSet<String>) {
+    match stmt {
+        AstStmt::Let { init, .. } | AstStmt::LetTuple { init, .. } => {
+            collect_mut_borrowed_in_expr(init, out)
+        }
+        AstStmt::Expr(expr) | AstStmt::Defer { expr, .. } | AstStmt::Yield { expr, .. } => {
+            collect_mut_borrowed_in_expr(expr, out)
+        }
+        AstStmt::Assign { target, value, .. } => {
+            collect_mut_borrowed_in_expr(target, out);
+            collect_mut_borrowed_in_expr(value, out);
+        }
+        AstStmt::Return { value, .. } => {
+            if let Some(e) = value {
+                collect_mut_borrowed_in_expr(e, out);
+            }
+        }
+        AstStmt::While { cond, body, .. } => {
+            collect_mut_borrowed_in_expr(cond, out);
+            collect_mut_borrowed_in_block(body, out);
+        }
+        AstStmt::Loop { body, .. } | AstStmt::MaskStmt { body, .. } => {
+            collect_mut_borrowed_in_block(body, out);
+        }
+        AstStmt::ForRange {
+            start,
+            end,
+            step,
+            body,
+            ..
+        } => {
+            collect_mut_borrowed_in_expr(start, out);
+            collect_mut_borrowed_in_expr(end, out);
+            if let Some(s) = step {
+                collect_mut_borrowed_in_expr(s, out);
+            }
+            collect_mut_borrowed_in_block(body, out);
+        }
+        AstStmt::ForEach { iter, body, .. } => {
+            collect_mut_borrowed_in_expr(iter, out);
+            collect_mut_borrowed_in_block(body, out);
+        }
+        AstStmt::HandleStmt { expr, arms, .. } => {
+            collect_mut_borrowed_in_expr(expr, out);
+            for arm in arms {
+                collect_mut_borrowed_in_expr(&arm.body, out);
+            }
+        }
+        AstStmt::Select { arms, default, .. } => {
+            for arm in arms {
+                collect_mut_borrowed_in_expr(&arm.channel, out);
+                collect_mut_borrowed_in_block(&arm.body, out);
+            }
+            if let Some(d) = default {
+                collect_mut_borrowed_in_block(d, out);
+            }
+        }
+        AstStmt::Break { .. }
+        | AstStmt::Continue { .. }
+        | AstStmt::Spawn { .. }
+        | AstStmt::ParFor { .. } => {}
+    }
+}
+
+pub(super) fn unwrap_mut_borrow_target_ast(expr: &AstExpr) -> Option<&str> {
+    match expr {
+        AstExpr::Ident(id) => Some(&id.name),
+        AstExpr::Unsafe { body, .. } => unwrap_mut_borrow_target_ast(body),
+        AstExpr::Block(b) if b.stmts.is_empty() => {
+            b.tail.as_deref().and_then(unwrap_mut_borrow_target_ast)
+        }
+        _ => None,
+    }
+}
+
+fn collect_mut_borrowed_in_expr(expr: &AstExpr, out: &mut std::collections::HashSet<String>) {
+    match expr {
+        AstExpr::RefMut { expr: inner, .. } => {
+            if let Some(name) = unwrap_mut_borrow_target_ast(inner) {
+                out.insert(name.to_string());
+            }
+            collect_mut_borrowed_in_expr(inner, out);
+        }
+        AstExpr::UnaryOp { expr: inner, .. }
+        | AstExpr::Cast { expr: inner, .. }
+        | AstExpr::FieldAccess { base: inner, .. }
+        | AstExpr::TupleIndex { base: inner, .. }
+        | AstExpr::Await { expr: inner, .. }
+        | AstExpr::Try { expr: inner, .. }
+        | AstExpr::Ref { expr: inner, .. }
+        | AstExpr::Deref { expr: inner, .. }
+        | AstExpr::Move { expr: inner, .. }
+        | AstExpr::Splat { expr: inner, .. }
+        | AstExpr::Unsafe { body: inner, .. } => collect_mut_borrowed_in_expr(inner, out),
+        AstExpr::BinOp { lhs, rhs, .. }
+        | AstExpr::NullCoal {
+            expr: lhs,
+            default: rhs,
+            ..
+        }
+        | AstExpr::TryCatch {
+            body: lhs,
+            catch_body: rhs,
+            ..
+        } => {
+            collect_mut_borrowed_in_expr(lhs, out);
+            collect_mut_borrowed_in_expr(rhs, out);
+        }
+        AstExpr::Call {
+            args, named_args, ..
+        } => {
+            for a in args {
+                collect_mut_borrowed_in_expr(a, out);
+            }
+            for (_, a) in named_args {
+                collect_mut_borrowed_in_expr(a, out);
+            }
+        }
+        AstExpr::MethodCall { base, args, .. } => {
+            collect_mut_borrowed_in_expr(base, out);
+            for a in args {
+                collect_mut_borrowed_in_expr(a, out);
+            }
+        }
+        AstExpr::Raise { args, .. } | AstExpr::MacroCall { args, .. } => {
+            for a in args {
+                collect_mut_borrowed_in_expr(a, out);
+            }
+        }
+        AstExpr::If {
+            cond,
+            then_block,
+            else_block,
+            ..
+        } => {
+            collect_mut_borrowed_in_expr(cond, out);
+            collect_mut_borrowed_in_block(then_block, out);
+            if let Some(eb) = else_block {
+                collect_mut_borrowed_in_block(eb, out);
+            }
+        }
+        AstExpr::Block(b) | AstExpr::Mask { body: b, .. } => {
+            collect_mut_borrowed_in_block(b, out);
+        }
+        AstExpr::Index { base, indices, .. } => {
+            collect_mut_borrowed_in_expr(base, out);
+            for i in indices {
+                collect_mut_borrowed_in_expr(i, out);
+            }
+        }
+        AstExpr::StructLit { fields, spread, .. } => {
+            for (_, v) in fields {
+                collect_mut_borrowed_in_expr(v, out);
+            }
+            if let Some(s) = spread {
+                collect_mut_borrowed_in_expr(s, out);
+            }
+        }
+        AstExpr::When {
+            scrutinee, arms, ..
+        } => {
+            collect_mut_borrowed_in_expr(scrutinee, out);
+            for arm in arms {
+                if let Some(g) = &arm.guard {
+                    collect_mut_borrowed_in_expr(g, out);
+                }
+                collect_mut_borrowed_in_expr(&arm.body, out);
+            }
+        }
+        AstExpr::Handle { expr, arms, .. } => {
+            collect_mut_borrowed_in_expr(expr, out);
+            for arm in arms {
+                collect_mut_borrowed_in_expr(&arm.body, out);
+            }
+        }
+        AstExpr::Tuple { elements, .. }
+        | AstExpr::ArrayLit {
+            elems: elements, ..
+        } => {
+            for e in elements {
+                collect_mut_borrowed_in_expr(e, out);
+            }
+        }
+        AstExpr::MapLiteral { entries, .. } => {
+            for (k, v) in entries {
+                collect_mut_borrowed_in_expr(k, out);
+                collect_mut_borrowed_in_expr(v, out);
+            }
+        }
+        AstExpr::Ident(_)
+        | AstExpr::IntLit { .. }
+        | AstExpr::FloatLit { .. }
+        | AstExpr::BoolLit { .. }
+        | AstExpr::StringLit { .. }
+        | AstExpr::Lambda { .. } => {}
+    }
+}
+
+fn collect_mut_borrowed_in_thir_block(
+    block: &crate::thir::ThirBlock,
+    out: &mut std::collections::HashSet<String>,
+) {
+    for stmt in &block.stmts {
+        collect_mut_borrowed_in_thir_stmt(stmt, out);
+    }
+    if let Some(tail) = &block.tail {
+        collect_mut_borrowed_in_thir_expr(tail, out);
+    }
+}
+
+fn collect_mut_borrowed_in_thir_stmt(
+    stmt: &crate::thir::ThirStmt,
+    out: &mut std::collections::HashSet<String>,
+) {
+    use crate::thir::ThirStmtKind;
+    match &stmt.kind {
+        ThirStmtKind::Let { init, .. } => collect_mut_borrowed_in_thir_expr(init, out),
+        ThirStmtKind::Expr(e) | ThirStmtKind::Defer(e) | ThirStmtKind::Yield(e) => {
+            collect_mut_borrowed_in_thir_expr(e, out)
+        }
+        ThirStmtKind::Assign { target, value, .. } => {
+            collect_mut_borrowed_in_thir_expr(target, out);
+            collect_mut_borrowed_in_thir_expr(value, out);
+        }
+        ThirStmtKind::Return(value) => {
+            if let Some(e) = value {
+                collect_mut_borrowed_in_thir_expr(e, out);
+            }
+        }
+        ThirStmtKind::While { cond, body, .. } => {
+            collect_mut_borrowed_in_thir_expr(cond, out);
+            collect_mut_borrowed_in_thir_block(body, out);
+        }
+        ThirStmtKind::Loop { body, .. } | ThirStmtKind::Mask { body, .. } => {
+            collect_mut_borrowed_in_thir_block(body, out);
+        }
+        ThirStmtKind::ForRange {
+            start,
+            end,
+            step,
+            body,
+            ..
+        } => {
+            collect_mut_borrowed_in_thir_expr(start, out);
+            collect_mut_borrowed_in_thir_expr(end, out);
+            if let Some(s) = step {
+                collect_mut_borrowed_in_thir_expr(s, out);
+            }
+            collect_mut_borrowed_in_thir_block(body, out);
+        }
+        ThirStmtKind::ForEach { iter, body, .. } => {
+            collect_mut_borrowed_in_thir_expr(iter, out);
+            collect_mut_borrowed_in_thir_block(body, out);
+        }
+        ThirStmtKind::Handle { expr, arms, .. } => {
+            collect_mut_borrowed_in_thir_expr(expr, out);
+            for arm in arms {
+                collect_mut_borrowed_in_thir_expr(&arm.body, out);
+            }
+        }
+        ThirStmtKind::Select { arms, default } => {
+            for arm in arms {
+                collect_mut_borrowed_in_thir_expr(&arm.channel, out);
+                collect_mut_borrowed_in_thir_block(&arm.body, out);
+            }
+            if let Some(d) = default {
+                collect_mut_borrowed_in_thir_block(d, out);
+            }
+        }
+        ThirStmtKind::Break { .. }
+        | ThirStmtKind::Continue { .. }
+        | ThirStmtKind::Spawn { .. }
+        | ThirStmtKind::ParFor { .. } => {}
+    }
+}
+
+pub(super) fn unwrap_mut_borrow_target_thir(expr: &crate::thir::ThirExpr) -> Option<&str> {
+    use crate::thir::ThirExprKind;
+    match &expr.kind {
+        ThirExprKind::Value { name, .. } => Some(name.as_str()),
+        ThirExprKind::Unsafe(inner) => unwrap_mut_borrow_target_thir(inner),
+        ThirExprKind::Block(b) if b.stmts.is_empty() => {
+            b.tail.as_deref().and_then(unwrap_mut_borrow_target_thir)
+        }
+        _ => None,
+    }
+}
+
+fn collect_mut_borrowed_in_thir_expr(
+    expr: &crate::thir::ThirExpr,
+    out: &mut std::collections::HashSet<String>,
+) {
+    use crate::thir::ThirExprKind;
+    match &expr.kind {
+        ThirExprKind::RefMut(inner) => {
+            if let Some(name) = unwrap_mut_borrow_target_thir(inner) {
+                out.insert(name.to_string());
+            }
+            collect_mut_borrowed_in_thir_expr(inner, out);
+        }
+        ThirExprKind::UnaryOp { expr: inner, .. }
+        | ThirExprKind::Cast { expr: inner, .. }
+        | ThirExprKind::Field { base: inner, .. }
+        | ThirExprKind::TupleIndex { base: inner, .. }
+        | ThirExprKind::Destructure { base: inner, .. }
+        | ThirExprKind::Await(inner)
+        | ThirExprKind::Try(inner)
+        | ThirExprKind::Ref(inner)
+        | ThirExprKind::Deref(inner)
+        | ThirExprKind::Move(inner)
+        | ThirExprKind::Splat(inner)
+        | ThirExprKind::Unsafe(inner) => collect_mut_borrowed_in_thir_expr(inner, out),
+        ThirExprKind::BinOp { lhs, rhs, .. }
+        | ThirExprKind::NullCoal {
+            expr: lhs,
+            default: rhs,
+        }
+        | ThirExprKind::TryCatch {
+            body: lhs,
+            catch_body: rhs,
+            ..
+        } => {
+            collect_mut_borrowed_in_thir_expr(lhs, out);
+            collect_mut_borrowed_in_thir_expr(rhs, out);
+        }
+        ThirExprKind::Call {
+            args, named_args, ..
+        } => {
+            for a in args {
+                collect_mut_borrowed_in_thir_expr(a, out);
+            }
+            for (_, a) in named_args {
+                collect_mut_borrowed_in_thir_expr(a, out);
+            }
+        }
+        ThirExprKind::MethodCall { receiver, args, .. } => {
+            collect_mut_borrowed_in_thir_expr(receiver, out);
+            for a in args {
+                collect_mut_borrowed_in_thir_expr(a, out);
+            }
+        }
+        ThirExprKind::Raise { args, .. } | ThirExprKind::MacroCall { args, .. } => {
+            for a in args {
+                collect_mut_borrowed_in_thir_expr(a, out);
+            }
+        }
+        ThirExprKind::If {
+            cond,
+            then_block,
+            else_block,
+        } => {
+            collect_mut_borrowed_in_thir_expr(cond, out);
+            collect_mut_borrowed_in_thir_block(then_block, out);
+            if let Some(eb) = else_block {
+                collect_mut_borrowed_in_thir_block(eb, out);
+            }
+        }
+        ThirExprKind::Block(b) | ThirExprKind::Mask { body: b, .. } => {
+            collect_mut_borrowed_in_thir_block(b, out);
+        }
+        ThirExprKind::Index { base, indices } => {
+            collect_mut_borrowed_in_thir_expr(base, out);
+            for i in indices {
+                collect_mut_borrowed_in_thir_expr(i, out);
+            }
+        }
+        ThirExprKind::StructLit { fields, spread, .. } => {
+            for f in fields {
+                collect_mut_borrowed_in_thir_expr(&f.value, out);
+            }
+            if let Some(s) = spread {
+                collect_mut_borrowed_in_thir_expr(s, out);
+            }
+        }
+        ThirExprKind::When { scrutinee, arms } => {
+            collect_mut_borrowed_in_thir_expr(scrutinee, out);
+            for arm in arms {
+                if let Some(g) = &arm.guard {
+                    collect_mut_borrowed_in_thir_expr(g, out);
+                }
+                collect_mut_borrowed_in_thir_expr(&arm.body, out);
+            }
+        }
+        ThirExprKind::Handle { expr, arms, .. } => {
+            collect_mut_borrowed_in_thir_expr(expr, out);
+            for arm in arms {
+                collect_mut_borrowed_in_thir_expr(&arm.body, out);
+            }
+        }
+        ThirExprKind::Tuple(elems) | ThirExprKind::Array(elems) => {
+            for e in elems {
+                collect_mut_borrowed_in_thir_expr(e, out);
+            }
+        }
+        ThirExprKind::Map { entries, .. } => {
+            for (k, v) in entries {
+                collect_mut_borrowed_in_thir_expr(k, out);
+                collect_mut_borrowed_in_thir_expr(v, out);
+            }
+        }
+        ThirExprKind::Value { .. } | ThirExprKind::Literal(_) | ThirExprKind::Lambda { .. } => {}
+    }
+}
+
 /// Scans a block for variables that get rebound, returning unique names.
 ///
 /// At the direct level: includes `val`/`var` binding names, `x = expr`

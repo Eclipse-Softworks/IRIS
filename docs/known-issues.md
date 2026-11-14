@@ -122,12 +122,12 @@ calls; non-constant runtime values remain dynamic lists (`list<T>`). See
 `f(a=1, b=2)` parses and is accepted, but the arguments do not reach the callee.
 
 ```iris
-def add(a: i64, b: i64) -> i64 { a + b }
+def add(a: i64, b: i64) -> i64 { return a + b }
 
 def main() -> i64 {
     val t: i64 = add(a=3, b=4);   // expected 7
     println(to_str(t));           // prints 0
-    0
+    return 0
 }
 ```
 
@@ -330,8 +330,8 @@ emitted as `ptr`.
 ```iris
 choice K { A, B }
 record R { k: K, n: i64 }
-def mk() -> R { R { k: K.A, n: 1 } }      // <- the trigger
-def main() -> i64 { val r = mk(); assert(r.n == 1); 0 }
+def mk() -> R { return R { k: K.A, n: 1 } } // <- the trigger
+def main() -> i64 { val r = mk(); assert(r.n == 1); return 0 }
 ```
 
 ```
@@ -343,7 +343,7 @@ Constructing the same record **inline** is fine — only the function-return pat
 fails, which is why this hides easily:
 
 ```iris
-def main() -> i64 { val r = R { k: K.B }; 0 }   // compiles and runs
+def main() -> i64 { val r = R { k: K.B }; return 0 }   // compiles and runs
 ```
 
 **Severity is higher than it looks.** Modelling a domain with `choice` and
@@ -377,7 +377,7 @@ record were generic over that field.
 ```iris
 bring std.ais
 record Holder { s: RunningStats, n: i64 }
-def make() -> Holder { Holder { s: running_stats_new(), n: 0 } }
+def make() -> Holder { return Holder { s: running_stats_new(), n: 0 } }
 ```
 
 ```
@@ -421,8 +421,8 @@ Comparison must go through `when`. The idiomatic workaround is to define
 equality on a rank function:
 
 ```iris
-def health_rank(h: Health) -> i64 { when h { Health.Nominal => 0, Health.Degraded => 1 } }
-def health_eq(a: Health, b: Health) -> bool { health_rank(a) == health_rank(b) }
+def health_rank(h: Health) -> i64 { return when h { Health.Nominal => 0, Health.Degraded => 1 } }
+def health_eq(a: Health, b: Health) -> bool { return health_rank(a) == health_rank(b) }
 ```
 
 **Status:** open. Note the error arrives at *runtime*, not compile time, so an
@@ -574,7 +574,7 @@ def main() -> i64 {
     var t = atomic(0)
     par for i in 0..4 { atomic_add(t, 1); }
     assert(atomic_load(t) == 4);
-    0
+    return 0
 }
 ```
 
@@ -658,11 +658,11 @@ A non-`pub` function in a brought module is callable from the importing module.
 
 ```iris
 // utils.iris
-def secret(x: i64) -> i64 { x + 100 }   // no `pub`
+def secret(x: i64) -> i64 { return x + 100 } // no `pub`
 
 // main.iris
 bring "utils.iris"
-def f() -> i64 { secret(0) }            // compiles; should not
+def f() -> i64 { return secret(0) }     // compiles; should not
 ```
 
 `tests/module_system_..._visibility_...rs::test_bring_file_private_not_visible`
@@ -753,11 +753,11 @@ cannot, so the annotation is required rather than merely usual.
 ### Original report
 
 ```iris
-def band(a: i64, b: i64) -> i64 { 999 }
+def band(a: i64, b: i64) -> i64 { return 999 }
 
 def main() -> i64 {
     println(to_str(band(12, 10)));   // prints 8, not 999
-    0
+    return 0
 }
 ```
 
@@ -825,7 +825,7 @@ def intercepted() -> str {
 
 def main() -> i64 {
     println(intercepted());
-    0
+    return 0
 }
 ```
 
@@ -919,7 +919,7 @@ def main() -> i64 {
         evens = evens + 1
     };
     assert(evens == 5);
-    0
+    return 0
 }
 ```
 
@@ -996,9 +996,9 @@ else.
 ```iris
 record Cat { name: str }
 trait Speaker { def speak(self) -> str }
-impl Speaker for Cat { def speak(self) -> str { "meow" } }
+impl Speaker for Cat { def speak(self) -> str { return "meow" } }
 
-def describe(s: dyn Speaker) -> str { s.speak() }
+def describe(s: dyn Speaker) -> str { return s.speak() }
 
 def main() -> i64 {
     val c = Cat { name: "tom" }
@@ -1012,7 +1012,7 @@ def main() -> i64 {
     val xs: list<dyn Speaker> = list()
     push(xs, c);                      // compile error:
     //   type mismatch: dyn Speaker {...} vs %Cat -- ListPush
-    0
+    return 0
 }
 ```
 
@@ -1106,7 +1106,7 @@ runtime):
 was a visible constant, so whether it applied depended on *inlining*:
 
 ```iris
-def small_div(a: i64, b: i64) -> i64 { a / b }          // inlined, then reduced
+def small_div(a: i64, b: i64) -> i64 { return a / b }   // inlined, then reduced
 def big_div(a: i64, b: i64) -> i64 { /* padded */ }     // stays a real call
 
 small_div(0 - 7, 2)   ->  -4
@@ -1184,7 +1184,7 @@ def main() -> i64 {
     assert(a == 1);
     assert(b == 2);
     assert(c == 99);   // line 7 — this is what fails
-    0
+    return 0
 }
 ```
 
@@ -1241,14 +1241,14 @@ resolves the staleness across instruction motion.
 
 ```iris
 record Box[T] { item: T }
-def box_of[T](v: T) -> Box<T> { Box { item: v } }
+def box_of[T](v: T) -> Box<T> { return Box { item: v } }
 
 def main() -> i64 {
     val inner: Box<i64> = box_of(3)
     val outer: Box<Box<i64>> = box_of(inner)
     val mid = outer.item
     assert(mid.item == 3);
-    0
+    return 0
 }
 ```
 
@@ -1309,14 +1309,14 @@ type error in function 'box_of__Box__i64'
 
 ```iris
 record Box[T] { item: T }
-def box_of[T](v: T) -> Box<T> { Box { item: v } }
-def unbox[T](b: Box<T>) -> T { b.item }
+def box_of[T](v: T) -> Box<T> { return Box { item: v } }
+def unbox[T](b: Box<T>) -> T { return b.item }
 
 def main() -> i64 {
     val bl: Box<list<i64>> = box_of(list())
     push(unbox(bl), 5);
     assert(list_len(unbox(bl)) == 1);
-    0
+    return 0
 }
 ```
 
@@ -1471,8 +1471,8 @@ rejected pattern, but they are not proven safe either.
 > **Fixed**: Guard was threaded through CLI options (`--max-depth`) and interpreter recursion footprint reduced. Frame stack depth verified via `tests/test_issue25_recursion_depth.iris` up to configured depth limits across native and interpreter backends.
 
 ```iris
-def sum_to(n: i64, acc: i64) -> i64 { if n == 0 { acc } else { sum_to(n - 1, acc + n) } }
-def main() -> i64 { println(to_str(sum_to(200, 0))); 0 }
+def sum_to(n: i64, acc: i64) -> i64 { return if n == 0 { acc } else { sum_to(n - 1, acc + n) } }
+def main() -> i64 { println(to_str(sum_to(200, 0))); return 0 }
 ```
 
 **Status:** FIXED.
@@ -2065,7 +2065,7 @@ further down.
 ### Original report
 
 ```iris
-def passthrough[F[_], T](c: F<T>) -> F<T> { c }
+def passthrough[F[_], T](c: F<T>) -> F<T> { return c }
 
 val lst: list<i64> = list();
 passthrough(lst)
@@ -2218,15 +2218,15 @@ Verified 2026-08-20. This was the remaining hole in the allocation-freedom
 proof, and a different mechanism from #64.
 
 ```iris
-def noisy(x: i64) -> i64 effect io { println("noisy"); x }
+def noisy(x: i64) -> i64 effect io { println("noisy"); return x }
 
 // Declares nothing. Performs `io` by calling its own parameter.
-def hidden(f: |i64| -> i64) -> i64 { f(1) }
+def hidden(f: |i64| -> i64) -> i64 { return f(1) }
 
 def main() -> i64 effect io {
     val g = |x: i64| noisy(x);
     val r = hidden(g);
-    0
+    return 0
 }
 ```
 
@@ -2247,7 +2247,7 @@ argument's row where the call is made — effect polymorphism, e.g.
 The implemented surface is:
 
 ```iris
-def apply(f: |i64| -> i64 effect E) -> i64 effect E { f(1) }
+def apply(f: |i64| -> i64 effect E) -> i64 effect E { return f(1) }
 ```
 
 The old unannotated type is a pure callback contract, so passing `noisy` to it
@@ -2311,7 +2311,7 @@ bring std.container
 
 // Declares nothing at all. Calls a method that allocates.
 def sneaky(xs: list<i64>) -> i64 {
-    xs.size()
+    return xs.size()
 }
 ```
 
@@ -2481,7 +2481,7 @@ far from the cause. Guards now reject both.
 **#42 — `std.http`'s client wrappers were unbounded recursion.**
 
 ```iris
-pub def http_get(url: str) -> str effect net { http_get(url) }
+pub def http_get(url: str) -> str effect net { return http_get(url) }
 ```
 
 A self-call, not a forward. It worked only while a builtin silently beat a
@@ -2573,7 +2573,7 @@ its values independently.
 `nnz` in a one-line helper was enough to trigger it:
 
 ```iris
-def count_nz(a: [i64; 6]) -> i64 { val s = sparsify(a); nnz(s) }
+def count_nz(a: [i64; 6]) -> i64 { val s = sparsify(a); return nnz(s) }
 ```
 
 ```text
@@ -2971,9 +2971,9 @@ Three constructs reproduce the bad IR, all the same shape — a pointer-typed
 result passed to the `i64` print helper:
 
 ```iris
-def main() -> i64 { val s = "hello world"; println(s.find("world")); 0 }   // option<i64>
-def main() -> i64 { val x = some(42); println(x.map(|v: i64| v * 2)); 0 }  // option<i64>
-def main() -> i64 { val c = channel(); c.send(99); println(c.recv()); 0 }  // chan payload
+def main() -> i64 { val s = "hello world"; println(s.find("world")); return 0 }   // option<i64>
+def main() -> i64 { val x = some(42); println(x.map(|v: i64| v * 2)); return 0 }  // option<i64>
+def main() -> i64 { val c = channel(); c.send(99); println(c.recv()); return 0 }  // chan payload
 ```
 
 `s.index(0)`, `m.len()`, `m.contains(..)`, `l.get(..)` and `unwrap_or(..)` are
@@ -3112,7 +3112,7 @@ verification, rather than a one-line change.
 ```iris
 def test_option_non_exhaustive() -> i64 {
     val o = some(42)
-    when o {
+    return when o {
         some(x) => x,
         // no `none` arm
     }
@@ -3264,10 +3264,10 @@ the right answers; using the operators does not.
 ```iris
 record V { x: i64 }
 impl Ord for V {
-    def lt(self, other: V) -> bool { self.x < other.x }
-    def le(self, other: V) -> bool { self.x <= other.x }
-    def gt(self, other: V) -> bool { self.x > other.x }
-    def ge(self, other: V) -> bool { self.x >= other.x }
+    def lt(self, other: V) -> bool { return self.x < other.x }
+    def le(self, other: V) -> bool { return self.x <= other.x }
+    def gt(self, other: V) -> bool { return self.x > other.x }
+    def ge(self, other: V) -> bool { return self.x >= other.x }
 }
 val a = V { x: 1 };  val b = V { x: 1 };  val c = V { x: 2 };
 ```
@@ -3322,7 +3322,7 @@ def main() -> i64 {
     val m = map();
     map_set(m, "a", 1);
     println(to_str(list_len(map_entries(m))));
-    0
+    return 0
 }
 ```
 
@@ -3566,7 +3566,7 @@ Diagnostics belong on stderr; stdout belongs to the program.
 def sum_bytes(s: str) -> i64 {
     var total = 0;
     for b in s { total = total + b }
-    total
+    return total
 }
 ```
 

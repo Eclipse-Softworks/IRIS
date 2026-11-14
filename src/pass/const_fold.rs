@@ -845,6 +845,16 @@ fn apply_reps(instr: &mut IrInstr, reps: &HashMap<ValueId, ValueId>) {
             replace(atomic);
             replace(value);
         }
+        IrInstr::CellNew { init, .. } => {
+            replace(init);
+        }
+        IrInstr::CellLoad { cell, .. } => {
+            replace(cell);
+        }
+        IrInstr::CellStore { cell, value } => {
+            replace(cell);
+            replace(value);
+        }
         IrInstr::AtomicAdd { atomic, value, .. } => {
             replace(atomic);
             replace(value);

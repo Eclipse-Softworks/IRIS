@@ -22,7 +22,7 @@ If applicable, show what the feature would look like in IRIS code:
 // Example usage of the proposed feature
 def main() -> i64 {
     // ...
-    0
+    return 0
 }
 ```
 

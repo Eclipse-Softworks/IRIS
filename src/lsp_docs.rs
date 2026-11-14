@@ -47,18 +47,18 @@ const DOCS: &[Doc] = &[
         name: "def",
         kind: "keyword",
         summary: "define a function",
-        detail: "`def name(param: Type, ...) -> Ret { body }`. The body's final expression \
-(without `;`) is the return value. Optional parts: generic parameters `def f[T](x: T) -> T`, \
+        detail: "`def name(param: Type, ...) -> Ret { body }`. Use `return expr` to return a value \
+(tail expressions without `;` also work). Optional parts: generic parameters `def f[T](x: T) -> T`, \
 an effect clause `-> i64 effect io`, `pub` to export, `async`, and `const def` for \
 compile-time evaluation.",
-        idiom: Some("prefer a tail expression over `return` for the final value; keep `return` for early exits."),
+        idiom: Some("use explicit `return` for function return values (`return value`); expression tails work inside blocks and closures."),
         example: Some(
             r#"
-def add(a: i64, b: i64) -> i64 { a + b }
+def add(a: i64, b: i64) -> i64 { return a + b }
 
 def main() -> i64 {
     assert(add(2, 3) == 5);
-    0
+    return 0
 }
 "#,
         ),
@@ -73,14 +73,14 @@ Items without `pub` are private to their file once it is brought into another.",
         example: Some(
             r#"
 mod geometry {
-    pub def area(w: i64, h: i64) -> i64 { w * h }
+    pub def area(w: i64, h: i64) -> i64 { return w * h }
 }
 
 bring geometry
 
 def main() -> i64 {
     assert(area(3, 4) == 12);
-    0
+    return 0
 }
 "#,
         ),
@@ -105,7 +105,7 @@ def main() -> i64 {
     val c: Config = Config { port: 443 };
     assert(c.port == 443);
     assert(c.host == "localhost");
-    0
+    return 0
 }
 "#,
         ),
@@ -122,7 +122,7 @@ def main() -> i64 {
 choice Mode { Idle, Heating, Cooling }
 
 def power(m: Mode) -> i64 {
-    when m {
+    return when m {
         Mode.Idle => 0,
         Mode.Heating => 100,
         Mode.Cooling => 60,
@@ -132,7 +132,7 @@ def power(m: Mode) -> i64 {
 def main() -> i64 {
     assert(power(Mode.Heating) == 100);
     assert(power(Mode.Idle) == 0);
-    0
+    return 0
 }
 "#,
         ),
@@ -150,7 +150,7 @@ const MAX_SPEED: i64 = 120
 
 def main() -> i64 {
     assert(MAX_SPEED * 2 == 240);
-    0
+    return 0
 }
 "#,
         ),
@@ -166,11 +166,11 @@ documents intent without creating a new type. Inside a `trait`, `type` declares 
             r#"
 type Meters = f64
 
-def double(d: Meters) -> Meters { d * 2.0 }
+def double(d: Meters) -> Meters { return d * 2.0 }
 
 def main() -> i64 {
     assert(double(1.5) == 3.0);
-    0
+    return 0
 }
 "#,
         ),
@@ -192,13 +192,13 @@ trait Shape {
 record Square { side: i64 }
 
 impl Shape for Square {
-    def area(self) -> i64 { self.side * self.side }
+    def area(self) -> i64 { return self.side * self.side }
 }
 
 def main() -> i64 {
     val s: Square = Square { side: 4 };
     assert(s.area() == 16);
-    0
+    return 0
 }
 "#,
         ),
@@ -229,7 +229,7 @@ def main() -> i64 {
         lookup(k) => "simulated"
     };
     assert(v == "simulated");
-    0
+    return 0
 }
 "#,
         ),
@@ -244,14 +244,14 @@ into scope with `bring name`, then call its public items directly.",
         example: Some(
             r#"
 mod arithmetic {
-    pub def triple(v: i64) -> i64 { v * 3 }
+    pub def triple(v: i64) -> i64 { return v * 3 }
 }
 
 bring arithmetic
 
 def main() -> i64 {
     assert(triple(14) == 42);
-    0
+    return 0
 }
 "#,
         ),
@@ -280,7 +280,7 @@ defmacro double(x) => x * 2
 def main() -> i64 {
     val v: i64 = double!(21);
     assert(v == 42);
-    0
+    return 0
 }
 "#,
         ),
@@ -312,7 +312,7 @@ def main() -> i64 {
     val ratio: f64 = 0.5;
     assert(answer == 42);
     assert(ratio == 0.5);
-    0
+    return 0
 }
 "#,
         ),
@@ -335,7 +335,7 @@ def main() -> i64 {
         total = total + i;
     };
     assert(total == 6);
-    0
+    return 0
 }
 "#,
         ),
@@ -350,13 +350,13 @@ pattern matches, binding `v`. `while let` loops while it matches.",
         example: Some(
             r#"
 def describe(maybe: option<i64>) -> i64 {
-    if let some(v) = maybe { v } else { -1 }
+    return if let some(v) = maybe { v } else { -1 }
 }
 
 def main() -> i64 {
     assert(describe(some(7)) == 7);
     assert(describe(none()) == -1);
-    0
+    return 0
 }
 "#,
         ),
@@ -373,7 +373,7 @@ def main() -> i64 {
     val a: list<i64> = list(1, 2, 3);
     val b = move a;
     assert(list_len(b) == 3);
-    0
+    return 0
 }
 "#,
         ),
@@ -389,14 +389,14 @@ same type. Used as a statement followed by more code, end it with `;`.",
         example: Some(
             r#"
 def sign(x: i64) -> i64 {
-    if x < 0 { -1 } else { if x == 0 { 0 } else { 1 } }
+    return if x < 0 { -1 } else { if x == 0 { 0 } else { 1 } }
 }
 
 def main() -> i64 {
     assert(sign(-5) == -1);
     assert(sign(0) == 0);
     assert(sign(9) == 1);
-    0
+    return 0
 }
 "#,
         ),
@@ -421,7 +421,7 @@ Matches on a `choice` must be exhaustive. `match` is a synonym.",
         example: Some(
             r#"
 def bucket(n: i64) -> str {
-    when n {
+    return when n {
         0 => "zero",
         1..=9 => "small",
         _ => "large",
@@ -432,7 +432,7 @@ def main() -> i64 {
     assert(bucket(0) == "zero");
     assert(bucket(5) == "small");
     assert(bucket(50) == "large");
-    0
+    return 0
 }
 "#,
         ),
@@ -461,7 +461,7 @@ def main() -> i64 {
         evens = evens + 1;
     };
     assert(evens == 5);
-    0
+    return 0
 }
 "#,
         ),
@@ -496,7 +496,7 @@ def main() -> i64 {
         n = n * 2;
     };
     assert(n == 128);
-    0
+    return 0
 }
 "#,
         ),
@@ -516,7 +516,7 @@ def main() -> i64 {
         if i == 3 { break };
     };
     assert(i == 3);
-    0
+    return 0
 }
 "#,
         ),
@@ -541,20 +541,20 @@ only; the interpreter rejects it (known issue #17).",
     Doc {
         name: "return",
         kind: "keyword",
-        summary: "return early from a function",
-        detail: "`return expr`. Not needed for the final value, which is the body's tail expression.",
-        idiom: Some("guard clauses: `if bad { return -1 };` at the top, tail expression at the end."),
+        summary: "return a value from a function",
+        detail: "`return expr` exits the enclosing function with `expr`. Expression tails without `;` are also supported for final block expressions.",
+        idiom: Some("use explicit `return` for function return values and guard clauses (`if bad { return -1 };`)."),
         example: Some(
             r#"
 def safe_div(a: i64, b: i64) -> i64 {
     if b == 0 { return 0 };
-    a / b
+    return a / b
 }
 
 def main() -> i64 {
     assert(safe_div(10, 2) == 5);
     assert(safe_div(1, 0) == 0);
-    0
+    return 0
 }
 "#,
         ),
@@ -572,7 +572,7 @@ def main() -> i64 {
     val half = (n to f64) / 2.0;
     assert(half == 1.5);
     assert((2.9 to i64) == 2);
-    0
+    return 0
 }
 "#,
         ),
@@ -588,19 +588,19 @@ def main() -> i64 {
             r#"
 def note(log: list<str>, msg: str) -> i64 {
     list_push(log, msg);
-    0
+    return 0
 }
 
 def work(log: list<str>) -> i64 {
     defer note(log, "closed");
-    42
+    return 42
 }
 
 def main() -> i64 {
     val log: list<str> = list();
     assert(work(log) == 42);
     assert(list_get(log, 0) == "closed");
-    0
+    return 0
 }
 "#,
         ),
@@ -626,7 +626,7 @@ def main() -> i64 {
     val xs = evens(6);
     assert(list_len(xs) == 3);
     assert(list_get(xs, 2) == 6);
-    0
+    return 0
 }
 "#,
         ),
@@ -642,7 +642,7 @@ def main() -> i64 {
         example: Some(
             r#"
 def safe_divide(a: i64, b: i64) -> result<i64, str> {
-    if b == 0 { err("division by zero") } else { ok(a / b) }
+    return if b == 0 { err("division by zero") } else { ok(a / b) }
 }
 
 def main() -> i64 {
@@ -653,7 +653,7 @@ def main() -> i64 {
         -1
     };
     assert(r == -1);
-    0
+    return 0
 }
 "#,
         ),
@@ -688,17 +688,17 @@ that covers its body, so `effect pure` is a checked proof of no I/O and no alloc
         idiom: Some("mark control-loop code `effect pure` and build with `--strict-effects`."),
         example: Some(
             r#"
-def gain(error: f64) -> f64 effect pure { 2.0 * error }
+def gain(error: f64) -> f64 effect pure { return 2.0 * error }
 
 def report(x: f64) -> i64 effect io {
     println(to_str(x));
-    0
+    return 0
 }
 
 def main() -> i64 effect io, throw {
     assert(gain(1.5) == 3.0);
     assert(report(gain(1.0)) == 0);
-    0
+    return 0
 }
 "#,
         ),
@@ -730,7 +730,7 @@ def main() -> i64 {
         echo(s) -> resume(v) => v("intercepted")
     };
     assert(result == "intercepted");
-    0
+    return 0
 }
 "#,
         ),
@@ -760,7 +760,7 @@ def main() -> i64 {
         x + 20
     };
     assert(v == 30);
-    0
+    return 0
 }
 "#,
         ),
@@ -779,7 +779,7 @@ def main() -> i64 {
     val ch = channel();
     spawn { send(ch, 41) };
     assert(recv(ch) + 1 == 42);
-    0
+    return 0
 }
 "#,
         ),
@@ -799,7 +799,7 @@ def main() -> i64 {
         atomic_add(count, 1);
     };
     assert(atomic_load(count) == 100);
-    0
+    return 0
 }
 "#,
         ),
@@ -818,7 +818,7 @@ the same under the interpreter and natively.",
             r#"
 async def fetch(id: i64, delay: i64) -> i64 {
     await async_sleep(delay);
-    id * 10
+    return id * 10
 }
 
 def main() -> i64 {
@@ -826,7 +826,7 @@ def main() -> i64 {
     val b = fetch(2, 10);
     // Both wait at the same time: about 30 ms in total, not 40.
     assert(await a + await b == 30);
-    0
+    return 0
 }
 "#,
         ),
@@ -841,17 +841,17 @@ current task until `t` is done; elsewhere it runs this thread's tasks until then
         idiom: None,
         example: Some(
             r#"
-async def add1(x: i64) -> i64 { x + 1 }
+async def add1(x: i64) -> i64 { return x + 1 }
 
 async def twice(x: i64) -> i64 {
     val a = await add1(x);
-    await add1(a)
+    return await add1(a)
 }
 
 def main() -> i64 {
     val r = await twice(40);
     assert(r == 42);
-    0
+    return 0
 }
 "#,
         ),
@@ -1013,7 +1013,7 @@ def main() -> i64 {
     val total = 7;
     val s = f"sum = {total}";
     assert(s == "sum = 7");
-    0
+    return 0
 }
 "#,
         ),
@@ -1066,7 +1066,7 @@ gives way to other tasks at each `await`. `async_sleep(ms)`, `async_yield()` and
             r#"
 async def leaf(i: i64) -> i64 {
     await async_yield();
-    i * 2
+    return i * 2
 }
 
 def main() -> i64 {
@@ -1083,7 +1083,7 @@ def main() -> i64 {
         j = j + 1;
     }
     assert(total == 9900);
-    0
+    return 0
 }
 "#,
         ),

@@ -73,7 +73,7 @@ You should have received a copy of the GNU General Public License along with thi
   - [Try It Yourself](#try-it-yourself)
 - [Chapter 3: Functions](#chapter-3-functions)
   - [3.1 Defining Functions](#31-defining-functions)
-  - [3.2 Tail Expressions (No `return` Needed)](#32-tail-expressions-no-return-needed)
+  - [3.2 Explicit `return` Statements](#32-explicit-return-statements)
   - [3.3 Early Return](#33-early-return)
   - [3.4 Recursive Functions](#34-recursive-functions)
   - [3.5 Public Functions](#35-public-functions)
@@ -438,7 +438,7 @@ Create a file named `hello.iris`:
 ```iris
 def main() -> i64 {
     print("Hello, World!");
-    0
+    return 0
 }
 ```
 
@@ -606,7 +606,7 @@ def demo() -> i64 {
     val x = 10         // immutable — cannot reassign
     var y = 20         // mutable — can be reassigned
     y = y + 5          // ok: y is now 25
-    x + y              // returns 35
+    return x + y              // returns 35
 }
 ```
 
@@ -616,7 +616,7 @@ If you try to reassign a `val`, you get a compile error:
 def bad() -> i64 {
     val x = 10
     x = 20   // ERROR: cannot assign to immutable binding 'x'
-    x
+    return x
 }
 ```
 
@@ -628,7 +628,7 @@ IRIS infers types from context, so you rarely need to annotate them explicitly:
 def inferred() -> i64 {
     val a = 10        // inferred as i64
     val b = 20        // inferred as i64
-    a + b             // returns i64
+    return a + b             // returns i64
 }
 ```
 
@@ -637,7 +637,7 @@ You can add a type annotation after the binding name with `:`:
 ```iris
 def annotated() -> f32 {
     val pi: f32 = 3.14159
-    pi
+    return pi
 }
 ```
 
@@ -653,7 +653,7 @@ def casts() -> f64 {
     val f: f64 = 3.14
     val small: f32 = f to f32     // f32 -> f64
     val also: f64 = n to f64    // i64 -> f64
-    also + big
+    return also + big
 }
 ```
 
@@ -663,7 +663,7 @@ Common cast patterns:
 def cast_examples() -> i64 {
     val x: f64 = 9.7 to f64
     val rounded: i64 = floor(x) to i64     // 9
-    rounded
+    return rounded
 }
 ```
 
@@ -678,7 +678,7 @@ const APP_NAME: str = "MyApp"
 
 def show_constants() -> i64 {
     print(APP_NAME);
-    MAX_SIZE
+    return MAX_SIZE
 }
 ```
 
@@ -694,7 +694,7 @@ type Score = f64
 type Name = str
 
 def greet(name: Name) -> str {
-    concat("Hello, ", name)
+    return concat("Hello, ", name)
 }
 ```
 
@@ -737,61 +737,51 @@ The `def` keyword introduces a function:
 
 ```iris
 def add(a: i64, b: i64) -> i64 {
-    a + b
+    return a + b
 }
 ```
 
 Every parameter has a name and a type separated by `:`. The return type follows `->`. The function body is enclosed in `{ }`.
 
-### 3.2 Tail Expressions (No `return` Needed)
+### 3.2 Explicit `return` Statements
 
-The last expression in a function body is implicitly returned. This is the *tail expression*:
-
-```iris
-def multiply(a: i64, b: i64) -> i64 {
-    val product = a * b
-    product          // tail expression — this is the return value
-}
-```
-
-Most of the time, you do not need an explicit `return`. Note that `val product = a * b` has no semicolon? That's wrong — it's a statement, not a tail expression. Let's be precise:
+Non-`unit` functions use `return` to send a value back to the caller:
 
 ```iris
 def multiply(a: i64, b: i64) -> i64 {
-    val product = a * b;   // statement — needs semicolon
-    product                // tail expression — no semicolon
+    val product = a * b;
+    return product
 }
 ```
 
-Actually, `val` bindings do need a semicolon. Let me show the complete picture:
+Statements inside a function body end with `;`, while block expressions such as `if`/`else` and `when` produce a value from their final expression without `;`:
 
-- **Statements** (non-tail): need `;` at the end — `val x = 5;`, `print("hi");`, `f();`
-- **Tail expression** (last line): no `;` — this is the return value
+- **Statements**: end with `;` — `val x = 5;`, `print("hi");`, `f();`
+- **Return statement**: `return expr` exits the function with a value (followed by `;` if another statement follows in an enclosing block)
 
 ```iris
 def example() -> i64 {
     val a = 10;          // statement: val binding
     val b = 20;          // statement: val binding
     print("computing");  // statement: side effect call
-    a + b                // tail expression: no semicolon, this is returned
+    return a + b         // explicit return of expression value
 }
 ```
 
 ### 3.3 Early Return
 
-Sometimes you want to return early from a function. Use `return`:
+Use `return` inside conditional branches whenever a function should exit early:
 
 ```iris
 def safe_divide(a: i64, b: i64) -> i64 {
     if b == 0 {
         return 0;
-    } else {
-        a / b
-    }
+    };
+    return a / b
 }
 ```
 
-> **Note:** `return` exits the function immediately. It must be inside a statement context (followed by `;` if not at the end of a block).
+> **Note:** `return` exits the function immediately. Use `;` after an early `if { return ...; }` statement when more statements follow.
 
 ### 3.4 Recursive Functions
 
@@ -799,7 +789,7 @@ Recursion works naturally in IRIS. Here's factorial:
 
 ```iris
 def factorial(n: i64) -> i64 {
-    if n <= 1 {
+    return if n <= 1 {
         1
     } else {
         n * factorial(n - 1)
@@ -808,7 +798,7 @@ def factorial(n: i64) -> i64 {
 
 def main() -> i64 {
     print(factorial(10));
-    0
+    return 0
 }
 ```
 
@@ -816,7 +806,7 @@ And Fibonacci:
 
 ```iris
 def fib(n: i64) -> i64 {
-    if n <= 1 {
+    return if n <= 1 {
         n
     } else {
         fib(n - 1) + fib(n - 2)
@@ -825,7 +815,7 @@ def fib(n: i64) -> i64 {
 
 def main() -> i64 {
     print(fib(20));
-    0
+    return 0
 }
 ```
 
@@ -835,7 +825,7 @@ Here is an iterative Fibonacci that avoids stack overflow:
 
 ```iris
 def fib_iter(n: i64) -> i64 {
-    if n <= 1 {
+    return if n <= 1 {
         n
     } else {
         var a = 0;
@@ -859,12 +849,12 @@ By default, functions are private to their module. Use `pub def` to make a funct
 ```iris
 // In mylib.iris
 pub def greet(name: str) -> str {
-    concat("Hello, ", name)
+    return concat("Hello, ", name)
 }
 
 // Private helper — not exported
 def helper() -> i64 {
-    42
+    return 42
 }
 ```
 
@@ -876,13 +866,13 @@ Functions can have default parameter values:
 
 ```iris
 def repeat_char(c: str, n: i64 = 3) -> str {
-    repeat(c, n)
+    return repeat(c, n)
 }
 
 def main() -> i64 {
     print(repeat_char("-"));      // uses default n=3: "---"
     print(repeat_char("*", 5));   // overrides: "*****"
-    0
+    return 0
 }
 ```
 
@@ -892,17 +882,17 @@ Functions can be stored and passed around using function types. The type `(i64, 
 
 ```iris
 def apply(f: (i64) -> i64, x: i64) -> i64 {
-    f(x)
+    return f(x)
 }
 
 def double(x: i64) -> i64 {
-    x * 2
+    return x * 2
 }
 
 def main() -> i64 {
     val result = apply(double, 21);
     print(result);   // prints 42
-    0
+    return 0
 }
 ```
 
@@ -912,7 +902,7 @@ is bound from the supplied callback:
 
 ```iris
 def apply_effectful(f: |i64| -> i64 effect E, x: i64) -> i64 effect E {
-    f(x)
+    return f(x)
 }
 ```
 
@@ -944,7 +934,7 @@ The `if` expression in IRIS **always** requires an `else` branch:
 
 ```iris
 def abs_val(x: i64) -> i64 {
-    if x < 0 { 0 - x } else { x }
+    return if x < 0 { 0 - x } else { x }
 }
 ```
 
@@ -952,7 +942,7 @@ def abs_val(x: i64) -> i64 {
 
 ```iris
 def classify(n: i64) -> str {
-    if n > 0 {
+    return if n > 0 {
         "positive"
     } else {
         if n < 0 {
@@ -969,7 +959,7 @@ You can use `if` inline in expressions:
 ```iris
 def max_of(a: i64, b: i64) -> i64 {
     val bigger = if a > b { a } else { b };
-    bigger
+    return bigger
 }
 ```
 
@@ -986,7 +976,7 @@ def count_down(from: i64) -> i64 {
         print(n);
         n = n - 1
     }
-    0
+    return 0
 }
 ```
 
@@ -1000,7 +990,7 @@ def sum_one_to_hundred() -> i64 {
         total = total + i;
         i = i + 1
     }
-    total
+    return total
 }
 ```
 
@@ -1013,7 +1003,7 @@ def print_range() -> i64 {
     for i in 0..5 {
         print(i)
     }
-    0
+    return 0
 }
 // prints: 0 1 2 3 4
 ```
@@ -1026,7 +1016,7 @@ def sum_range(n: i64) -> i64 {
     for i in 1..n + 1 {
         total = total + i
     }
-    total
+    return total
 }
 ```
 
@@ -1048,7 +1038,7 @@ def find_first_even(start: i64) -> i64 {
             n = n + 1
         }
     }
-    result
+    return result
 }
 ```
 
@@ -1067,7 +1057,7 @@ def skip_multiples_of_3(limit: i64) -> i64 {
             printed = printed + 1
         }
     }
-    printed
+    return printed
 }
 ```
 
@@ -1083,7 +1073,7 @@ def multiplication_table(n: i64) -> i64 {
             print(product)
         }
     }
-    0
+    return 0
 }
 ```
 
@@ -1096,11 +1086,11 @@ IRIS supports short-circuit logical operators:
 
 ```iris
 def check(x: i64, y: i64) -> bool {
-    x > 0 && y > 0
+    return x > 0 && y > 0
 }
 
 def either_positive(x: i64, y: i64) -> bool {
-    x > 0 || y > 0
+    return x > 0 || y > 0
 }
 ```
 
@@ -1118,7 +1108,7 @@ def main() -> i64 {
     for x in items {
         print(to_str(x))
     }
-    0
+    return 0
 }
 ```
 
@@ -1128,14 +1118,14 @@ You can bind multiple values at once by destructuring tuples:
 
 ```iris
 def get_coords() -> (i64, i64) {
-    (100, 200)
+    return (100, 200)
 }
 
 def main() -> i64 {
     val (x, y) = get_coords();
     print(concat("X: ", to_str(x)));
     print(concat("Y: ", to_str(y)));
-    0
+    return 0
 }
 ```
 
@@ -1145,15 +1135,15 @@ In addition to `&&`, `||`, and `!`, IRIS supports readable keyword operators:
 
 ```iris
 def eligible(age: i64, registered: bool) -> bool {
-    age >= 18 and registered
+    return age >= 18 and registered
 }
 
 def can_enter(has_ticket: bool, is_vip: bool) -> bool {
-    has_ticket or is_vip
+    return has_ticket or is_vip
 }
 
 def is_minor(age: i64) -> bool {
-    not (age >= 18)
+    return not (age >= 18)
 }
 ```
 
@@ -1171,7 +1161,7 @@ def main() -> i64 {
     for x in items {
         print(to_str(x))
     }
-    0
+    return 0
 }
 ```
 
@@ -1181,14 +1171,14 @@ You can bind multiple values at once by destructuring tuples:
 
 ```iris
 def get_coords() -> (i64, i64) {
-    (100, 200)
+    return (100, 200)
 }
 
 def main() -> i64 {
     val (x, y) = get_coords();
     print(concat("X: ", to_str(x)));
     print(concat("Y: ", to_str(y)));
-    0
+    return 0
 }
 ```
 
@@ -1198,15 +1188,15 @@ In addition to `&&`, `||`, and `!`, IRIS supports readable keyword operators:
 
 ```iris
 def eligible(age: i64, registered: bool) -> bool {
-    age >= 18 and registered
+    return age >= 18 and registered
 }
 
 def can_enter(has_ticket: bool, is_vip: bool) -> bool {
-    has_ticket or is_vip
+    return has_ticket or is_vip
 }
 
 def is_minor(age: i64) -> bool {
-    not (age >= 18)
+    return not (age >= 18)
 }
 ```
 
@@ -1239,18 +1229,18 @@ record Point {
 }
 
 def make_point(x: f64, y: f64) -> Point {
-    Point { x: x, y: y }
+    return Point { x: x, y: y }
 }
 
 def distance(p: Point) -> f64 {
-    sqrt((p.x * p.x) + (p.y * p.y)) to f64
+    return sqrt((p.x * p.x) + (p.y * p.y)) to f64
 }
 
 def main() -> i64 {
     val p = Point { x: 3.0 to f64, y: 4.0 to f64 };
     val d = distance(p);
     print(d);   // 5.0
-    0
+    return 0
 }
 ```
 
@@ -1270,7 +1260,7 @@ record Pixel {
 }
 
 def make_red_pixel(x: i64, y: i64) -> Pixel {
-    Pixel {
+    return Pixel {
         x: x,
         y: y,
         color: Color { r: 1.0, g: 0.0, b: 0.0 }
@@ -1291,7 +1281,7 @@ choice Direction {
 }
 
 def opposite(d: Direction) -> Direction {
-    when d {
+    return when d {
         Direction.North => Direction.South,
         Direction.South => Direction.North,
         Direction.East  => Direction.West,
@@ -1312,7 +1302,7 @@ choice Shape {
 }
 
 def sides(s: Shape) -> i64 {
-    when s {
+    return when s {
         Shape.Circle   => 0,
         Shape.Square   => 4,
         Shape.Triangle => 3
@@ -1320,7 +1310,7 @@ def sides(s: Shape) -> i64 {
 }
 
 def describe(s: Shape) -> str {
-    when s {
+    return when s {
         Shape.Circle   => "A round shape with no sides",
         Shape.Square   => "A four-sided shape",
         Shape.Triangle => "A three-sided shape"
@@ -1334,7 +1324,7 @@ Tuples are ordered collections of values with potentially different types. Acces
 
 ```iris
 def make_pair(a: i64, b: str) -> (i64, str) {
-    (a, b)
+    return (a, b)
 }
 
 def main() -> i64 {
@@ -1343,7 +1333,7 @@ def main() -> i64 {
     val text = pair.1;  // "hello"
     print(num);
     print(text);
-    0
+    return 0
 }
 ```
 
@@ -1353,14 +1343,14 @@ Tuples are great for returning multiple values from a function:
 def min_max(a: i64, b: i64, c: i64) -> (i64, i64) {
     val lo = if a < b { if a < c { a } else { c } } else { if b < c { b } else { c } };
     val hi = if a > b { if a > c { a } else { c } } else { if b > c { b } else { c } };
-    (lo, hi)
+    return (lo, hi)
 }
 
 def main() -> i64 {
     val result = min_max(7, 2, 9);
     print(result.0);   // 2
     print(result.1);   // 9
-    0
+    return 0
 }
 ```
 
@@ -1375,7 +1365,7 @@ def sum_array() -> i64 {
     for i in 0..5 {
         total = total + nums[i]
     }
-    total
+    return total
 }
 ```
 
@@ -1387,7 +1377,7 @@ def zero_fill(size: i64) -> i64 {
     for i in 0..4 {
         arr[i] = i * 2
     }
-    arr[3]   // returns 6
+    return arr[3]   // returns 6
 }
 ```
 
@@ -1403,7 +1393,7 @@ def build_list() -> i64 {
     push(nums, 30);
     print(list_len(nums));       // 3
     print(list_get(nums, 1));    // 20
-    list_len(nums)
+    return list_len(nums)
 }
 ```
 
@@ -1429,7 +1419,7 @@ def list_demo() -> i64 {
     // Pop from end
     val last = list_pop(items);    // returns last element
 
-    n
+    return n
 }
 ```
 
@@ -1442,7 +1432,7 @@ def string_list() -> i64 {
     push(names, "Bob");
     push(names, "Charlie");
     print(list_get(names, 0));   // Alice
-    list_len(names)
+    return list_len(names)
 }
 ```
 
@@ -1458,7 +1448,7 @@ def word_count() -> i64 {
     map_set(counts, "cherry", 2);
 
     val found = map_get(counts, "banana");
-    if is_some(found) {
+    return if is_some(found) {
         print(unwrap(found))   // prints 7
     } else {
         print(0)
@@ -1483,7 +1473,7 @@ Options represent a value that may or may not be present. `option<T>` is either 
 
 ```iris
 def safe_head(lst: list<i64>) -> option<i64> {
-    if list_len(lst) == 0 {
+    return if list_len(lst) == 0 {
         none
     } else {
         some(list_get(lst, 0))
@@ -1494,7 +1484,7 @@ def main() -> i64 {
     val lst = list();
     push(lst, 42);
     val head = safe_head(lst);
-    if is_some(head) {
+    return if is_some(head) {
         print(unwrap(head))   // prints 42
     } else {
         print(-1)
@@ -1520,7 +1510,7 @@ Results represent either success or failure. `result<T, E>` is either `ok(v)` (s
 ```iris
 def parse_age(s: str) -> result<i64, str> {
     val parsed = parse_i64(s);
-    if is_some(parsed) {
+    return if is_some(parsed) {
         val age = unwrap(parsed);
         if age < 0 || age > 150 {
             err("age out of range")
@@ -1534,7 +1524,7 @@ def parse_age(s: str) -> result<i64, str> {
 
 def main() -> i64 {
     val r = parse_age("25");
-    if is_ok(r) {
+    return if is_ok(r) {
         print(unwrap(r))   // 25
     } else {
         print("error")
@@ -1556,7 +1546,7 @@ def deque_demo() -> i64 {
     
     print(to_str(deque_pop_front(dq))); // 10
     print(to_str(deque_pop_back(dq)));  // 30
-    0
+    return 0
 }
 ```
 
@@ -1573,7 +1563,7 @@ def bitset_demo() -> i64 {
     print(to_str(bitset_get(bs, 5)));   // true
     print(to_str(bitset_get(bs, 7)));   // false
     print(to_str(bitset_count(bs)));    // 2
-    0
+    return 0
 }
 ```
 
@@ -1590,7 +1580,7 @@ def mutex_demo() -> i64 {
         // Locks are managed safely by built-ins
         0
     };
-    0
+    return 0
 }
 ```
 
@@ -1608,7 +1598,7 @@ def deque_demo() -> i64 {
     
     print(to_str(deque_pop_front(dq))); // 10
     print(to_str(deque_pop_back(dq)));  // 30
-    0
+    return 0
 }
 ```
 
@@ -1625,7 +1615,7 @@ def bitset_demo() -> i64 {
     print(to_str(bitset_get(bs, 5)));   // true
     print(to_str(bitset_get(bs, 7)));   // false
     print(to_str(bitset_count(bs)));    // 2
-    0
+    return 0
 }
 ```
 
@@ -1642,7 +1632,7 @@ def mutex_demo() -> i64 {
         // Locks are managed safely by built-ins
         0
     };
-    0
+    return 0
 }
 ```
 
@@ -1695,7 +1685,7 @@ record Point {
 
 impl Printable for Point {
     def to_string(self: Point) -> str {
-        format("({}, {})", self.x, self.y)
+        return format("({}, {})", self.x, self.y)
     }
 }
 ```
@@ -1706,7 +1696,7 @@ Once a trait is implemented, its methods can be called on instances of that type
 def main() -> i64 {
     val p = Point { x: 3.5, y: -2.0 };
     print(p.to_string());
-    0
+    return 0
 }
 ```
 
@@ -1716,11 +1706,11 @@ Generic functions declare type parameters inside square brackets `[T]`:
 
 ```iris
 def identity[T](x: T) -> T {
-    x
+    return x
 }
 
 def my_max[T](a: T, b: T) -> T {
-    if a >= b { a } else { b }
+    return if a >= b { a } else { b }
 }
 ```
 
@@ -1733,7 +1723,7 @@ You can constrain generic parameters using the `where` keyword, enforcing that t
 ```iris
 def print_item[T where T: Printable](x: T) -> i64 {
     print(x.to_string());
-    0
+    return 0
 }
 ```
 
@@ -1763,7 +1753,7 @@ against literals, bound to names, or both:
 record Point { x: i64, y: i64 }
 
 def match_point(p: Point) -> i64 {
-    when p {
+    return when p {
         Point { x: 1, y: 2 } => {
             print("exact match: x=1, y=2");
             1
@@ -1799,7 +1789,7 @@ Several shapes can share one arm with `|`:
 choice Color { Red, Green, Blue }
 
 def is_warm(c: Color) -> bool {
-    when c {
+    return when c {
         Color.Red | Color.Green => true,
         Color.Blue => false,
     }
@@ -1816,7 +1806,7 @@ Inclusive ranges match numeric spans:
 
 ```iris
 def classify(n: i64) -> str {
-    when n {
+    return when n {
         0 => "zero",
         1..=9 => "single digit",
         10..=99 => "double digit",
@@ -1831,7 +1821,7 @@ A guard adds a condition that must also hold for the arm to be taken:
 
 ```iris
 def describe(p: Point) -> str {
-    when p {
+    return when p {
         Point { x, y } if x == y => "on the diagonal",
         Point { x, y } if x > y => "below the diagonal",
         _ => "above the diagonal",
@@ -1849,7 +1839,7 @@ Lists can be matched by shape, with an optional rest binding:
 
 ```iris
 def summarise(xs: list<i64>) -> str {
-    when xs {
+    return when xs {
         [] => "empty",
         [a] => "one element: " + to_str(a),
         [a, b] => "two elements",
@@ -1867,14 +1857,14 @@ remainder.
 
 ```iris
 def unwrap_or_zero(o: option<i64>) -> i64 {
-    when o {
+    return when o {
         some(v) => v,
         none => 0,
     }
 }
 
 def report(r: result<i64, str>) -> str {
-    when r {
+    return when r {
         ok(v) => "ok: " + to_str(v),
         err(e) => "failed: " + e,
     }
@@ -1913,7 +1903,7 @@ def main() -> i64 {
         }
     }
     println("done");
-    0
+    return 0
 }
 ```
 
@@ -1941,7 +1931,7 @@ choice Mode { Idle, Heating, Cooling }
 
 // error: non-exhaustive match — Mode.Cooling is not covered
 def name(m: Mode) -> str {
-    when m {
+    return when m {
         Mode.Idle => "idle",
         Mode.Heating => "heating",
     }
@@ -1990,7 +1980,7 @@ def main() -> i64 {
         odd_count = odd_count + 1;
     };
 
-    0
+    return 0
 }
 ```
 
@@ -2022,7 +2012,7 @@ def main() -> i64 {
     val add_ten = |x: i64| x + 10;
     print(double(21));    // 42
     print(add_ten(32));   // 42
-    0
+    return 0
 }
 ```
 
@@ -2044,7 +2034,7 @@ def main() -> i64 {
     print(clamp_to_100(150));   // 100
     print(clamp_to_100(50));    // 50
     print(clamp_to_100(-5));    // 0
-    0
+    return 0
 }
 ```
 
@@ -2054,13 +2044,13 @@ Closures can be passed to functions using function type notation `(ParamType) ->
 
 ```iris
 def apply_twice(f: (i64) -> i64, x: i64) -> i64 {
-    f(f(x))
+    return f(f(x))
 }
 
 def main() -> i64 {
     val triple = |x: i64| x * 3;
     print(apply_twice(triple, 2));   // 3*(3*2) = 18
-    0
+    return 0
 }
 ```
 
@@ -2075,7 +2065,7 @@ def list_map(lst: list<i64>, f: (i64) -> i64) -> list<i64> {
     for i in 0..n {
         push(result, f(list_get(lst, i)))
     }
-    result
+    return result
 }
 
 def main() -> i64 {
@@ -2090,7 +2080,7 @@ def main() -> i64 {
     for i in 0..list_len(doubled) {
         print(list_get(doubled, i))
     }
-    0
+    return 0
 }
 // prints: 2 4 6 8 10
 ```
@@ -2109,7 +2099,7 @@ def list_filter(lst: list<i64>, pred: (i64) -> bool) -> list<i64> {
             0
         }
     }
-    result
+    return result
 }
 
 def main() -> i64 {
@@ -2125,7 +2115,7 @@ def main() -> i64 {
     for i in 0..list_len(evens) {
         print(list_get(evens, i))
     }
-    0
+    return 0
 }
 // prints: 2 4 6
 ```
@@ -2139,7 +2129,7 @@ def list_reduce(lst: list<i64>, init: i64, f: (i64, i64) -> i64) -> i64 {
     for i in 0..n {
         acc = f(acc, list_get(lst, i))
     }
-    acc
+    return acc
 }
 
 def main() -> i64 {
@@ -2154,7 +2144,7 @@ def main() -> i64 {
     val product = list_reduce(nums, 1, |acc: i64, x: i64| acc * x);
     print(total);    // 15
     print(product);  // 120
-    0
+    return 0
 }
 ```
 
@@ -2164,7 +2154,7 @@ Closures capture variables from the surrounding scope by value at the point of c
 
 ```iris
 def make_adder(n: i64) -> (i64) -> i64 {
-    |x: i64| x + n
+    return |x: i64| x + n
 }
 
 def main() -> i64 {
@@ -2172,7 +2162,7 @@ def main() -> i64 {
     val add10 = make_adder(10);
     print(add5(3));    // 8
     print(add10(3));   // 13
-    0
+    return 0
 }
 ```
 
@@ -2197,7 +2187,7 @@ def regex_demo() -> i64 {
     // Replace regex match
     val masked = regex_replace(text, pattern, "[redacted]");
     print(masked);
-    0
+    return 0
 }
 ```
 
@@ -2212,7 +2202,7 @@ def datetime_demo() -> i64 {
     
     val formatted = datetime_format(now, "%Y-%m-%d %H:%M:%S");
     print(concat("Formatted: ", formatted));
-    0
+    return 0
 }
 ```
 
@@ -2227,7 +2217,7 @@ def hex_demo() -> i64 {
     val blue = 0x0000FF;
     
     print(concat("Red: ", to_str(red))); // 16711680
-    0
+    return 0
 }
 ```
 
@@ -2260,7 +2250,7 @@ def main() -> i64 {
     print("Line one\nLine two");
     print("Tab\there");
     print("She said \"hello\"");
-    0
+    return 0
 }
 ```
 
@@ -2270,13 +2260,13 @@ F-strings let you embed expressions directly in strings using `{expr}`:
 
 ```iris
 def greet(name: str, age: i64) -> str {
-    f"Hello, {name}! You are {age} years old."
+    return f"Hello, {name}! You are {age} years old."
 }
 
 def main() -> i64 {
     val msg = greet("Alice", 30);
     print(msg);   // Hello, Alice! You are 30 years old.
-    0
+    return 0
 }
 ```
 
@@ -2316,7 +2306,7 @@ def repeat_greeting(name: str, times: i64) -> str {
         result = concat(result, concat("Hello, ", concat(name, "! ")));
         i = i + 1
     }
-    result
+    return result
 }
 ```
 
@@ -2337,13 +2327,13 @@ def capitalize_words(s: str) -> str {
             push(out, concat(first, rest))
         }
     }
-    join(out, " ")
+    return join(out, " ")
 }
 
 def main() -> i64 {
     print(capitalize_words("hello world from iris"));
     // Hello World From Iris
-    0
+    return 0
 }
 ```
 
@@ -2362,11 +2352,11 @@ def parse_csv_line(line: str) -> i64 {
         val i_str = to_str(i);
         print(concat("  [", concat(i_str, concat("] = ", field))))
     }
-    n
+    return n
 }
 
 def main() -> i64 {
-    parse_csv_line("Alice, 30, Engineer, London")
+    return parse_csv_line("Alice, 30, Engineer, London")
 }
 ```
 
@@ -2374,7 +2364,7 @@ Build a delimited string from a list:
 
 ```iris
 def list_to_csv(items: list<str>) -> str {
-    join(items, ",")
+    return join(items, ",")
 }
 
 def main() -> i64 {
@@ -2383,7 +2373,7 @@ def main() -> i64 {
     push(parts, "age");
     push(parts, "city");
     print(list_to_csv(parts));   // name,age,city
-    0
+    return 0
 }
 ```
 
@@ -2392,7 +2382,7 @@ def main() -> i64 {
 ```iris
 def find_and_extract(text: str, marker: str) -> str {
     val pos = find(text, marker);
-    if is_some(pos) {
+    return if is_some(pos) {
         val idx = unwrap(pos);
         val after = slice(text, idx + len(marker), len(text));
         after
@@ -2404,7 +2394,7 @@ def find_and_extract(text: str, marker: str) -> str {
 def main() -> i64 {
     val result = find_and_extract("key=value", "=");
     print(result);   // value
-    0
+    return 0
 }
 ```
 
@@ -2427,7 +2417,7 @@ def regex_demo() -> i64 {
     // Replace regex match
     val masked = regex_replace(text, pattern, "[redacted]");
     print(masked);
-    0
+    return 0
 }
 ```
 
@@ -2442,7 +2432,7 @@ def datetime_demo() -> i64 {
     
     val formatted = datetime_format(now, "%Y-%m-%d %H:%M:%S");
     print(concat("Formatted: ", formatted));
-    0
+    return 0
 }
 ```
 
@@ -2457,7 +2447,7 @@ def hex_demo() -> i64 {
     val blue = 0x0000FF;
     
     print(concat("Red: ", to_str(red))); // 16711680
-    0
+    return 0
 }
 ```
 
@@ -2492,7 +2482,7 @@ This pattern forces you to explicitly handle both success and failure cases, mak
 
 ```iris
 def divide(a: f64, b: f64) -> result<f64, str> {
-    if b == 0.0 {
+    return if b == 0.0 {
         err("division by zero")
     } else {
         ok(a / b)
@@ -2509,7 +2499,7 @@ def main() -> i64 {
         print("error")
     };
 
-    if is_ok(r2) {
+    return if is_ok(r2) {
         print(unwrap(r2))
     } else {
         print("error: division by zero")
@@ -2526,7 +2516,7 @@ The error must be the function's error type `E`. `?` anywhere else -- in a funct
 ```iris
 def read_positive(s: str) -> result<i64, str> {
     val parsed = parse_i64(s);
-    if is_some(parsed) {
+    return if is_some(parsed) {
         val n = unwrap(parsed);
         if n > 0 {
             ok(n)
@@ -2541,12 +2531,12 @@ def read_positive(s: str) -> result<i64, str> {
 def compute(a_str: str, b_str: str) -> result<i64, str> {
     val a = read_positive(a_str)?;
     val b = read_positive(b_str)?;
-    ok(a + b)
+    return ok(a + b)
 }
 
 def main() -> i64 {
     val r = compute("10", "20");
-    if is_ok(r) {
+    return if is_ok(r) {
         print(unwrap(r))   // 30
     } else {
         print("error")
@@ -2561,7 +2551,7 @@ You can use `when` to match on a result and handle both cases expressively:
 ```iris
 def process_file(path: str) -> str {
     val r = file_read_all(path);
-    when r {
+    return when r {
         ok(content) => concat("File contents: ", content),
         err(msg)    => concat("Failed to read file: ", msg)
     }
@@ -2575,7 +2565,7 @@ Results can be chained when each step depends on the previous success:
 ```iris
 def parse_and_double(s: str) -> result<i64, str> {
     val parsed = parse_i64(s);
-    if is_some(parsed) {
+    return if is_some(parsed) {
         ok(unwrap(parsed) * 2)
     } else {
         err(concat("cannot parse: ", s))
@@ -2585,7 +2575,7 @@ def parse_and_double(s: str) -> result<i64, str> {
 def parse_two_and_add(a: str, b: str) -> result<i64, str> {
     val x = parse_and_double(a)?;
     val y = parse_and_double(b)?;
-    ok(x + y)
+    return ok(x + y)
 }
 
 def main() -> i64 {
@@ -2595,7 +2585,7 @@ def main() -> i64 {
     if is_ok(good) { print(unwrap(good)) } else { print("failed") };
     // 16
 
-    if is_ok(bad) { print(unwrap(bad)) } else { print("failed") }
+    return if is_ok(bad) { print(unwrap(bad)) } else { print("failed") }
     // failed
 }
 ```
@@ -2606,7 +2596,7 @@ Options and results often appear together. A common pattern is to convert `optio
 
 ```iris
 def option_to_result(opt: option<i64>, msg: str) -> result<i64, str> {
-    if is_some(opt) {
+    return if is_some(opt) {
         ok(unwrap(opt))
     } else {
         err(msg)
@@ -2614,7 +2604,7 @@ def option_to_result(opt: option<i64>, msg: str) -> result<i64, str> {
 }
 
 def safe_parse(s: str) -> result<i64, str> {
-    option_to_result(parse_i64(s), concat("not a number: ", s))
+    return option_to_result(parse_i64(s), concat("not a number: ", s))
 }
 ```
 
@@ -2624,7 +2614,7 @@ For truly unrecoverable situations, use `panic` to abort with a message:
 
 ```iris
 def must_be_positive(n: i64) -> i64 {
-    if n <= 0 {
+    return if n <= 0 {
         panic(f"expected positive, got {n}")
     } else {
         n
@@ -2637,7 +2627,7 @@ Use `assert` for debugging invariants:
 ```iris
 def safe_sqrt(x: f64) -> f64 {
     assert(x >= 0.0 to f64);
-    sqrt(x)
+    return sqrt(x)
 }
 ```
 
@@ -2651,7 +2641,7 @@ In addition to threads and channels, IRIS supports async/await for lightweight, 
 ```iris
 async def slow_op() -> i64 {
     // asynchronous operation
-    42
+    return 42
 }
 
 def main() -> i64 {
@@ -2661,7 +2651,7 @@ def main() -> i64 {
     // Await pauses execution until the future is ready
     val result = await future;
     print(to_str(result));
-    0
+    return 0
 }
 ```
 
@@ -2687,7 +2677,7 @@ def main() -> i64 {
     send(ch, 42);
     val value = recv(ch);
     print(value);             // 42
-    0
+    return 0
 }
 ```
 
@@ -2711,7 +2701,7 @@ def main() -> i64 {
         val v = recv(ch);
         print(v)
     }
-    0
+    return 0
 }
 // prints: 0 1 2 3 4
 ```
@@ -2723,7 +2713,7 @@ def main() -> i64 {
 ```iris
 def heavy_work(i: i64) -> i64 {
     // simulate work
-    i * i
+    return i * i
 }
 
 def main() -> i64 {
@@ -2734,7 +2724,7 @@ def main() -> i64 {
     for i in 0..10 {
         print(results[i])
     }
-    0
+    return 0
 }
 ```
 
@@ -2754,7 +2744,7 @@ def main() -> i64 {
 
     val total = atomic_load(counter);
     print(total);
-    0
+    return 0
 }
 ```
 
@@ -2793,7 +2783,7 @@ def main() -> i64 {
         }
     }
     print(total);   // sum of squares: 0+1+4+9+...+81 = 285
-    0
+    return 0
 }
 ```
 
@@ -2810,7 +2800,7 @@ def main() -> i64 {
     val t1 = time_now_ms();
     val elapsed = t1 - t0;
     print(f"elapsed: {elapsed} ms");
-    0
+    return 0
 }
 ```
 
@@ -2824,7 +2814,7 @@ In addition to threads and channels, IRIS supports async/await for lightweight, 
 ```iris
 async def slow_op() -> i64 {
     // asynchronous operation
-    42
+    return 42
 }
 
 def main() -> i64 {
@@ -2834,7 +2824,7 @@ def main() -> i64 {
     // Await pauses execution until the future is ready
     val result = await future;
     print(to_str(result));
-    0
+    return 0
 }
 ```
 
@@ -2858,7 +2848,7 @@ def main() -> i64 {
     // 4. Retrieve gradients
     print(concat("dz/dx: ", to_str(grad_of(x)))); // 2*x + y = 7
     print(concat("dz/dy: ", to_str(grad_of(y)))); // x = 2
-    0
+    return 0
 }
 ```
 
@@ -2885,7 +2875,7 @@ def main() -> i64 {
     // Derivative of f(x) = x at x=3.0 is 1.0
     val g = grad_of(|x: f32| x, 3.0);
     print(g);   // 1.0
-    0
+    return 0
 }
 ```
 
@@ -2900,7 +2890,7 @@ The power of `grad_of` comes from computing derivatives automatically through an
 def main() -> i64 {
     val deriv = grad_of(|x: f32| x * x, 3.0);
     print(deriv);    // 6.0 (derivative of x^2 at x=3 is 2*3=6)
-    0
+    return 0
 }
 ```
 
@@ -2911,13 +2901,13 @@ def poly_deriv(x_val: f64) -> f64 {
     // f(x) = x^3 + 2x + 1
     // f'(x) = 3x^2 + 2
     val x_sq = x_val * x_val;
-    (3.0 to f64) * x_sq + (2.0 to f64)
+    return (3.0 to f64) * x_sq + (2.0 to f64)
 }
 
 def main() -> i64 {
     // At x = 2: f'(2) = 3*4 + 2 = 14
     print(poly_deriv(2.0 to f64));   // 14.0
-    0
+    return 0
 }
 ```
 
@@ -2928,12 +2918,12 @@ Gradient descent uses derivatives to minimize a function. Here we minimize `f(x)
 ```iris
 def f(x: f64) -> f64 {
     val diff = x - (3.0 to f64);
-    diff * diff
+    return diff * diff
 }
 
 def f_prime(x: f64) -> f64 {
     // Derivative of (x-3)^2 = 2*(x-3)
-    (2.0 to f64) * (x - (3.0 to f64))
+    return (2.0 to f64) * (x - (3.0 to f64))
 }
 
 def gradient_descent(start: f64, lr: f64, steps: i64) -> f64 {
@@ -2942,13 +2932,13 @@ def gradient_descent(start: f64, lr: f64, steps: i64) -> f64 {
         val grad_val = f_prime(x);
         x = x - lr * grad_val
     }
-    x
+    return x
 }
 
 def main() -> i64 {
     val result = gradient_descent(10.0 to f64, 0.1 to f64, 50);
     print(result);   // approximately 3.0
-    0
+    return 0
 }
 ```
 
@@ -2959,23 +2949,23 @@ A more realistic example — linear regression with gradient descent:
 ```iris
 // Linear regression: minimize (y - (w*x + b))^2 over w and b
 def predict(w: f64, b: f64, x: f64) -> f64 {
-    w * x + b
+    return w * x + b
 }
 
 def loss(w: f64, b: f64, x: f64, y: f64) -> f64 {
     val diff = y - predict(w, b, x);
-    diff * diff
+    return diff * diff
 }
 
 // Compute gradients numerically (finite differences)
 def grad_w(w: f64, b: f64, x: f64, y: f64) -> f64 {
     val h = 0.0001 to f64;
-    (loss(w + h, b, x, y) - loss(w - h, b, x, y)) / ((2.0 to f64) * h)
+    return (loss(w + h, b, x, y) - loss(w - h, b, x, y)) / ((2.0 to f64) * h)
 }
 
 def grad_b(w: f64, b: f64, x: f64, y: f64) -> f64 {
     val h = 0.0001 to f64;
-    (loss(w, b + h, x, y) - loss(w, b - h, x, y)) / ((2.0 to f64) * h)
+    return (loss(w, b + h, x, y) - loss(w, b - h, x, y)) / ((2.0 to f64) * h)
 }
 
 def train(epochs: i64) -> i64 {
@@ -3000,11 +2990,11 @@ def train(epochs: i64) -> i64 {
 
     print(f"w = {w}, b = {b}");
     // Should converge to w ≈ 2.0, b ≈ 1.0
-    0
+    return 0
 }
 
 def main() -> i64 {
-    train(200)
+    return train(200)
 }
 ```
 
@@ -3028,7 +3018,7 @@ def main() -> i64 {
     // 4. Retrieve gradients
     print(concat("dz/dx: ", to_str(grad_of(x)))); // 2*x + y = 7
     print(concat("dz/dy: ", to_str(grad_of(y)))); // x = 2
-    0
+    return 0
 }
 ```
 
@@ -3076,7 +3066,7 @@ Tensors are the primary data structure for ML workloads. The type `tensor<f32, [
 // A 3x3 identity-like matrix (type signature demonstration)
 def make_identity(t: tensor<f32, [3, 3]>) -> tensor<f32, [3, 3]> {
     // Tensor operations use einsum notation
-    einsum("ij->ij", t)
+    return einsum("ij->ij", t)
 }
 ```
 
@@ -3092,12 +3082,12 @@ Einstein summation notation provides a concise way to express tensor contraction
 ```iris
 // Matrix multiplication: C[m,n] = sum_k A[m,k] * B[k,n]
 def matmul(a: tensor<f32, [M, K]>, b: tensor<f32, [K, N]>) -> tensor<f32, [M, N]> {
-    einsum("mk,kn->mn", a, b)
+    return einsum("mk,kn->mn", a, b)
 }
 
 // Dot product: scalar = sum_i a[i] * b[i]
 def dot(a: tensor<f32, [N]>, b: tensor<f32, [N]>) -> tensor<f32, []> {
-    einsum("i,i->", a, b)
+    return einsum("i,i->", a, b)
 }
 
 // Batch matrix multiply: C[b,m,n] = sum_k A[b,m,k] * B[b,k,n]
@@ -3105,7 +3095,7 @@ def batch_matmul(
     a: tensor<f32, [B, M, K]>,
     b: tensor<f32, [B, K, N]>
 ) -> tensor<f32, [B, M, N]> {
-    einsum("bmk,bkn->bmn", a, b)
+    return einsum("bmk,bkn->bmn", a, b)
 }
 ```
 
@@ -3134,7 +3124,7 @@ def linear_forward(
     lyr: LinearLayer,
     x: tensor<f32, [IN]>
 ) -> tensor<f32, [OUT]> {
-    einsum("oi,i->o", lyr.weights, x)
+    return einsum("oi,i->o", lyr.weights, x)
     // Note: bias addition would be a separate step
 }
 ```
@@ -3146,17 +3136,17 @@ Activation functions are applied element-wise using built-in tensor operations:
 ```iris
 // ReLU: f(x) = max(0, x)
 def relu(x: tensor<f32, [N]>) -> tensor<f32, [N]> {
-    einsum("i->i", x)
+    return einsum("i->i", x)
 }
 
 // Sigmoid: f(x) = 1 / (1 + exp(-x))
 def sigmoid(x: tensor<f32, [N]>) -> tensor<f32, [N]> {
-    einsum("i->i", x)
+    return einsum("i->i", x)
 }
 
 // Tanh activation
 def tanh_act(x: tensor<f32, [N]>) -> tensor<f32, [N]> {
-    einsum("i->i", x)
+    return einsum("i->i", x)
 }
 ```
 
@@ -3180,7 +3170,7 @@ def forward(mdl: MLP, x: tensor<f32, [IN]>) -> tensor<f32, [OUT]> {
     val h = einsum("hi,i->h", mdl.w1, x);
     val h_act = einsum("i->i", h);
     // Output layer
-    einsum("oh,h->o", mdl.w2, h_act)
+    return einsum("oh,h->o", mdl.w2, h_act)
 }
 ```
 
@@ -3194,7 +3184,7 @@ For data with many zero values, IRIS supports sparse representations:
 def process_sparse(data: tensor<f32, [N]>) -> i64 {
     val sparse = sparsify(data);      // convert to sparse
     val dense = densify(sparse);      // convert back to dense
-    0
+    return 0
 }
 ```
 
@@ -3322,7 +3312,7 @@ extern def puts(s: str) -> i64
 def main() -> i64 {
     val msg = "Hello from C!";
     puts(msg);
-    0
+    return 0
 }
 ```
 
@@ -3337,7 +3327,7 @@ extern def pow_c(base: f64, exp: f64) -> f64
 def compute_power() -> i64 {
     val result = pow_c(2.0 to f64, 10.0 to f64);
     print(result);   // 1024.0
-    0
+    return 0
 }
 ```
 
@@ -3365,7 +3355,7 @@ def sum_fixed() -> i64 {
     for i in 0..8 {
         total = total + data[i]
     }
-    total
+    return total
 }
 ```
 
@@ -3382,7 +3372,7 @@ def benchmark() -> i64 {
     val t1 = time_now_ms();
     val elapsed = t1 - t0;
     print(f"elapsed: {elapsed}ms");
-    0
+    return 0
 }
 ```
 
@@ -3419,7 +3409,7 @@ def main() -> i64 {
     print(is_even(7));            // false
     print(is_odd(7));             // true
     print(clamp_i64(150, 0, 100)); // 100
-    0
+    return 0
 }
 ```
 
@@ -3452,7 +3442,7 @@ def main() -> i64 {
 
     val joined = str_join(ws, "-");
     print(joined);    // "hello-world-foo"
-    0
+    return 0
 }
 ```
 
@@ -3492,7 +3482,7 @@ def main() -> i64 {
 
     val z = zero_pad_int(42, 6);
     print(z);   // "000042"
-    0
+    return 0
 }
 ```
 
@@ -3536,7 +3526,7 @@ def main() -> i64 {
     // Read lines
     val lns = read_lines("output.txt");
     print(list_len(lns));
-    0
+    return 0
 }
 ```
 
@@ -3560,7 +3550,7 @@ def main() -> i64 {
     json_set(obj, "version", "1.0.0-rc1");
     val s = json_emit(obj);
     print(s);   // {"name": "IRIS", "version": "1.0.0-rc1"}
-    0
+    return 0
 }
 ```
 
@@ -3575,7 +3565,7 @@ def main() -> i64 {
 
     val out = csv_emit_row(row);
     print(out);   // Alice,30,Engineer
-    0
+    return 0
 }
 ```
 
@@ -3591,7 +3581,7 @@ def main() -> i64 {
     print(id);                   // random UUID v4
     val enc = hex_encode("hi");
     val dec = hex_decode(enc);
-    0
+    return 0
 }
 ```
 
@@ -3613,7 +3603,7 @@ def main() -> i64 {
     // Rust cdylib FFI
     val rlib = rust_lib_open("mylib.dll");
     val n = rust_call_i64(rlib, "compute", 42);
-    0
+    return 0
 }
 ```
 
@@ -3627,7 +3617,7 @@ def main() -> i64 {
     print(home);
     val p = pid();
     print(to_str(p));
-    0
+    return 0
 }
 ```
 
@@ -3640,7 +3630,7 @@ def test_addition() -> i64 {
     assert_eq(2 + 2, 4, "basic addition");
     assert_ne(2 + 2, 5, "should not be 5");
     assert_true(true, "truthy");
-    0
+    return 0
 }
 ```
 
@@ -3653,7 +3643,7 @@ def main() -> i64 {
     log_info("Application started");
     log_warn("Low memory");
     log_error("Failed to connect");
-    0
+    return 0
 }
 ```
 
@@ -3691,7 +3681,7 @@ def generate_chart() -> i64 {
     svg.circle(canvas, 400, 300, 150, "fill: blue; opacity: 0.5");
     svg.text(canvas, 400, 80, "IRIS Standard Visualization", "font-size: 24px; text-anchor: middle");
     svg.save(canvas, "chart.svg");
-    0
+    return 0
 }
 ```
 
@@ -3707,7 +3697,7 @@ def plot_live() -> i64 {
     
     // Plots a clean Unicode line chart
     termplot.line(data, "Performance Profile");
-    0
+    return 0
 }
 ```
 
@@ -3918,7 +3908,7 @@ The LSP server can display inline type annotations next to `val` and `var` bindi
 def example() -> i64 {
     val x = 42;          // inlay hint: `: i64`
     var name = "IRIS";   // inlay hint: `: str`
-    0
+    return 0
 }
 ```
 
@@ -4186,11 +4176,11 @@ The `bring` statement imports another IRIS file. All `pub def` functions from th
 ```iris
 // src/utils.iris
 pub def clamp(x: i64, lo: i64, hi: i64) -> i64 {
-    if x < lo { lo } else { if x > hi { hi } else { x } }
+    return if x < lo { lo } else { if x > hi { hi } else { x } }
 }
 
 pub def square(x: i64) -> i64 {
-    x * x
+    return x * x
 }
 ```
 
@@ -4201,7 +4191,7 @@ bring utils
 def main() -> i64 {
     print(clamp(150, 0, 100));   // 100
     print(square(7));            // 49
-    0
+    return 0
 }
 ```
 
@@ -4241,7 +4231,7 @@ def main() -> i64 {
             print("Please enter a valid number:")
         }
     }
-    0
+    return 0
 }
 ```
 
@@ -4255,17 +4245,17 @@ bring std.fs
 
 def count_words_in_text(text: str) -> i64 {
     val ws = words(text);
-    list_len(ws)
+    return list_len(ws)
 }
 
 def count_lines_in_text(text: str) -> i64 {
     val ls = lines(text);
-    list_len(ls)
+    return list_len(ls)
 }
 
 def main() -> i64 {
     val args = process_args();
-    if list_len(args) < 2 {
+    return if list_len(args) < 2 {
         print("Usage: wc <filename>");
         1
     } else {
@@ -4309,7 +4299,7 @@ def handle_connection(conn: i64) -> i64 {
         }
     }
     tcp_close(conn);
-    0
+    return 0
 }
 
 def main() -> i64 {
@@ -4322,7 +4312,7 @@ def main() -> i64 {
     print("Connection accepted");
     handle_connection(conn);
     tcp_close(listener);
-    0
+    return 0
 }
 ```
 
@@ -4347,15 +4337,15 @@ def main() -> i64 {
     val time_iterative = t3 - t2;
     print(f"Recursive: {r1} in {time_recursive}ms");
     print(f"Iterative: {r2} in {time_iterative}ms");
-    0
+    return 0
 }
 
 def fib_recursive(n: i64) -> i64 {
-    if n <= 1 { n } else { fib_recursive(n-1) + fib_recursive(n-2) }
+    return if n <= 1 { n } else { fib_recursive(n-1) + fib_recursive(n-2) }
 }
 
 def fib_iter(n: i64) -> i64 {
-    if n <= 1 {
+    return if n <= 1 {
         n
     } else {
         var a = 0;
@@ -4383,11 +4373,11 @@ def parse_command(line: str) -> (str, str, str) {
     val cmd = if n > 0 { list_get(parts, 0) } else { "" };
     val key = if n > 1 { list_get(parts, 1) } else { "" };
     val val_ = if n > 2 { list_get(parts, 2) } else { "" };
-    (cmd, key, val_)
+    return (cmd, key, val_)
 }
 
 def handle_cmd(store: map<str, str>, conn: i64, cmd: str, key: str, value: str) -> bool {
-    when cmd {
+    return when cmd {
         "SET" => {
             map_set(store, key, value);
             tcp_write(conn, "OK\n");
@@ -4439,7 +4429,7 @@ def main() -> i64 {
     }
     tcp_close(conn);
     tcp_close(listener);
-    0
+    return 0
 }
 ```
 
@@ -4476,7 +4466,7 @@ def main() -> i64 {
     val x: i64 = double!(21);        // 42
     val y: i64 = add3!(10, 20, 30);  // 60
     val z: i64 = double!(add3!(1, 2, 3));  // 12 — macros nest
-    x + y + z
+    return x + y + z
 }
 ```
 
@@ -4501,11 +4491,11 @@ can initialise a constant:
 
 ```iris
 const def square(x: i64) -> i64 {
-    x * x
+    return x * x
 }
 
 const def clamp(v: i64, lo: i64, hi: i64) -> i64 {
-    if v < lo {
+    return if v < lo {
         lo
     } else if v > hi {
         hi
@@ -4531,21 +4521,21 @@ IRIS has a preprocessor for build-time configuration:
 
 #ifdef WINDOWS
 def platform() -> str {
-    "windows"
+    return "windows"
 }
 #else
 def platform() -> str {
-    "unix"
+    return "unix"
 }
 #endif
 
 #ifndef DEBUG
 def is_debug() -> bool {
-    false
+    return false
 }
 #else
 def is_debug() -> bool {
-    true
+    return true
 }
 #endif
 ```
@@ -4585,7 +4575,7 @@ def main() -> i64 {
     };
 
     print(result);
-    if result == "intercepted_via_resume" { 0 } else { 1 }
+    return if result == "intercepted_via_resume" { 0 } else { 1 }
 }
 ```
 
@@ -4603,7 +4593,7 @@ resume, and with what value.
 
 ```iris
 def pure_computation() -> i64 {
-    with pure {
+    return with pure {
         // any I/O here is a compile-time error
         1 + 2
     }
@@ -4618,7 +4608,7 @@ bottom-up and verifies them at each call site:
 ```iris
 def log_and_add(a: i64, b: i64) -> i64 effect io {
     println("adding");
-    a + b
+    return a + b
 }
 ```
 
@@ -4630,14 +4620,14 @@ function; by default they are inferred silently for backward compatibility.
 Arguments may be passed by name, in any order, and mixed with positional ones:
 
 ```iris
-def add(a: i64, b: i64) -> i64 { a + b }
+def add(a: i64, b: i64) -> i64 { return a + b }
 
 def main() -> i64 {
     val t1 = add(a=3, b=4);     // named, in order
     val t2 = add(b=10, a=5);    // named, out of order
     val t3 = add(2, b=8);       // positional then named
     val t4 = add(7, 3);         // positional only
-    t1 + t2 + t3 + t4
+    return t1 + t2 + t3 + t4
 }
 ```
 
@@ -4662,7 +4652,7 @@ def main() -> i64 {
     val c3: Config = Config {
         host: "example.com", port: 80, debug: true
     };
-    0
+    return 0
 }
 ```
 
@@ -4677,11 +4667,11 @@ types:
 
 ```iris
 def double(x: i64) -> i64 {
-    x * 2
+    return x * 2
 }
 
 def add_prefix(s: str, prefix: str) -> str {
-    prefix + s
+    return prefix + s
 }
 
 record Point { x: i64, y: i64 }
@@ -4689,7 +4679,7 @@ record Point { x: i64, y: i64 }
 def distance_to(a: Point, b: Point) -> i64 {
     val dx = a.x - b.x;
     val dy = a.y - b.y;
-    dx * dx + dy * dy
+    return dx * dx + dy * dy
 }
 
 def main() -> i64 {
@@ -4698,7 +4688,7 @@ def main() -> i64 {
     val p = Point { x: 0, y: 0 };
     val q = Point { x: 3, y: 4 };
     val dist = p.distance_to(q);               // 25
-    d
+    return d
 }
 ```
 
@@ -4758,7 +4748,7 @@ def main() -> i64 {
     val db = db_open("app.db");
     db_exec(db, "CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, age INTEGER)");
     print("Table created");
-    db_close(db)
+    return db_close(db)
 }
 ```
 
@@ -4774,7 +4764,7 @@ def main() -> i64 {
     db_exec(db, "INSERT INTO users (name, age) VALUES ('Bob', 25)");
     db_exec(db, "INSERT INTO users (name, age) VALUES ('Carol', 28)");
     print("Inserted 3 users");
-    db_close(db)
+    return db_close(db)
 }
 ```
 
@@ -4797,7 +4787,7 @@ def main() -> i64 {
         print(name);
         print(age)
     }
-    db_close(db)
+    return db_close(db)
 }
 ```
 
@@ -4822,7 +4812,7 @@ def main() -> i64 {
     val rows = db_query_params(db, "SELECT name, age FROM users WHERE name = ?", lookup_params);
 
     print(concat("matched rows = ", to_str(list_len(rows))));
-    db_close(db)
+    return db_close(db)
 }
 ```
 
@@ -4837,7 +4827,7 @@ def main() -> i64 {
     db_exec(db, "INSERT INTO users (name, age) VALUES ('Alice', 30)");
     db_exec(db, "UPDATE users SET age = 31 WHERE name = 'Alice'");
     db_exec(db, "DELETE FROM users WHERE name = 'Alice'");
-    db_close(db)
+    return db_close(db)
 }
 ```
 
@@ -4854,7 +4844,7 @@ def main() -> i64 {
     if result == -1 {
         print("SQL error")
     };
-    db_close(db)
+    return db_close(db)
 }
 ```
 
@@ -4882,7 +4872,7 @@ def main() -> i64 {
         print(title);
         print(done)
     }
-    db_close(db)
+    return db_close(db)
 }
 ```
 
@@ -4913,7 +4903,7 @@ def udp_demo() -> i64 {
     print(concat("Data: ", result.1)); // Payload
     
     udp_close(socket);
-    0
+    return 0
 }
 ```
 

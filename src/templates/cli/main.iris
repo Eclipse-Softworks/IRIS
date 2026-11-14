@@ -28,7 +28,7 @@ def parse(argv: list<str>) -> Options {
         }
         i = i + 1
     }
-    Options { name: name, times: times, error: error }
+    return Options { name: name, times: times, error: error }
 }
 
 def greeting(o: Options) -> str {
@@ -37,7 +37,7 @@ def greeting(o: Options) -> str {
         if i > 0 { out = out + "\n" }
         out = out + "hello, " + o.name
     }
-    out
+    return out
 }
 
 def main() -> i64 {
@@ -58,25 +58,25 @@ def argv_of(a: str, b: str, c: str, d: str) -> list<str> {
     if len(b) > 0 { push(v, b) }
     if len(c) > 0 { push(v, c) }
     if len(d) > 0 { push(v, d) }
-    v
+    return v
 }
 
 def test_defaults() -> i64 {
     val o = parse(argv_of("", "", "", ""))
     assert(o.name == "world" && o.times == 1 && len(o.error) == 0)
     assert(greeting(o) == "hello, world")
-    0
+    return 0
 }
 
 def test_options() -> i64 {
     val o = parse(argv_of("--name", "Ada", "--times", "2"))
     assert(o.name == "Ada" && o.times == 2)
     assert(greeting(o) == "hello, Ada\nhello, Ada")
-    0
+    return 0
 }
 
 def test_bad_arguments() -> i64 {
     assert(parse(argv_of("--times", "many", "", "")).error == "--times needs a number")
     assert(parse(argv_of("--loud", "", "", "")).error == "unknown argument --loud")
-    0
+    return 0
 }

@@ -4,7 +4,7 @@
 
 [![License: GPL v2+](https://img.shields.io/badge/License-GPL%20v2%2B-blue.svg)](LICENSE)
 [![Compiler](https://img.shields.io/badge/compiler-LLVM%2023.1.1%20%2B%20SSA%20IR-blueviolet.svg)](docs/REQUIREMENTS.md)
-[![VS Code Extension](https://img.shields.io/badge/vscode--iris-1.0.8-007ACC.svg)](vscode-iris/README.md)
+[![VS Code Extension](https://img.shields.io/badge/vscode--iris-1.0.9-007ACC.svg)](vscode-iris/README.md)
 
 IRIS is a statically typed, dual-backend programming language designed to build, train, verify, deploy, and safely evolve intelligent, concurrent, and cyber-physical software inside a single toolchain.
 

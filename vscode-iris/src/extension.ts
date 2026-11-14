@@ -41,28 +41,28 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
     // Register Commands
     context.subscriptions.push(
-        vscode.commands.registerCommand('iris.runFile',    () => runIrisFile(context, 'run', getIrisExe, outputChannel)),
-        vscode.commands.registerCommand('iris.buildFile',  () => runIrisFile(context, 'build', getIrisExe, outputChannel)),
-        vscode.commands.registerCommand('iris.debugFile',  (uri?: vscode.Uri | string) => debugIrisFile(uri, getIrisExe)),
+        vscode.commands.registerCommand('iris.runFile', () => runIrisFile(context, 'run', getIrisExe, outputChannel)),
+        vscode.commands.registerCommand('iris.buildFile', () => runIrisFile(context, 'build', getIrisExe, outputChannel)),
+        vscode.commands.registerCommand('iris.debugFile', (uri?: vscode.Uri | string) => debugIrisFile(uri, getIrisExe)),
         vscode.commands.registerCommand('iris.debugFileNative', (uri?: vscode.Uri | string) => debugIrisFile(uri, getIrisExe, true)),
-        vscode.commands.registerCommand('iris.openRepl',   () => openRepl(context, getIrisExe)),
+        vscode.commands.registerCommand('iris.openRepl', () => openRepl(context, getIrisExe)),
         vscode.commands.registerCommand('iris.restartLsp', () => restartLsp(context, getIrisExe, serverOutputChannel)),
-        vscode.commands.registerCommand('iris.stopLsp',    () => stopLsp(getIrisExe)),
-        vscode.commands.registerCommand('iris.showIR',     () => showEmit('ir', getIrisExe, outputChannel)),
-        vscode.commands.registerCommand('iris.showLLVM',   () => showEmit('llvm', getIrisExe, outputChannel)),
+        vscode.commands.registerCommand('iris.stopLsp', () => stopLsp(getIrisExe)),
+        vscode.commands.registerCommand('iris.showIR', () => showEmit('ir', getIrisExe, outputChannel)),
+        vscode.commands.registerCommand('iris.showLLVM', () => showEmit('llvm', getIrisExe, outputChannel)),
         vscode.commands.registerCommand('iris.showVersion', () => showFullVersion(getIrisExe, outputChannel)),
-        vscode.commands.registerCommand('iris.showEmit',    () => showEmitPick(getIrisExe, outputChannel)),
-        vscode.commands.registerCommand('iris.showGraph',   () => showEmit('graph', getIrisExe, outputChannel)),
-        vscode.commands.registerCommand('iris.showCuda',    () => showEmit('cuda', getIrisExe, outputChannel)),
-        vscode.commands.registerCommand('iris.showSimd',    () => showEmit('simd', getIrisExe, outputChannel)),
+        vscode.commands.registerCommand('iris.showEmit', () => showEmitPick(getIrisExe, outputChannel)),
+        vscode.commands.registerCommand('iris.showGraph', () => showEmit('graph', getIrisExe, outputChannel)),
+        vscode.commands.registerCommand('iris.showCuda', () => showEmit('cuda', getIrisExe, outputChannel)),
+        vscode.commands.registerCommand('iris.showSimd', () => showEmit('simd', getIrisExe, outputChannel)),
         vscode.commands.registerCommand('iris.explainError', () => explainErrorCode(getIrisExe, outputChannel)),
         vscode.commands.registerCommand('iris.checkFormat', () => checkFormatting(getIrisExe, outputChannel)),
-        vscode.commands.registerCommand('iris.runTests',    () => runFileTests(getIrisExe)),
+        vscode.commands.registerCommand('iris.runTests', () => runFileTests(getIrisExe)),
         vscode.commands.registerCommand('iris.runWorkspaceTests', () => runWorkspaceTests(getIrisExe)),
         vscode.commands.registerCommand('iris.fmtWorkspace', () => fmtWorkspace(getIrisExe)),
-        vscode.commands.registerCommand('iris.runBench',    () => runBenchmarks(getIrisExe)),
+        vscode.commands.registerCommand('iris.runBench', () => runBenchmarks(getIrisExe)),
         vscode.commands.registerCommand('iris.generateDocs', () => generateDocs(getIrisExe)),
-        vscode.commands.registerCommand('iris.pkg',         () => pkgCommand(getIrisExe)),
+        vscode.commands.registerCommand('iris.pkg', () => pkgCommand(getIrisExe)),
         vscode.commands.registerCommand('iris.diagnostics', () => {
             outputChannel.clear();
             outputChannel.appendLine('=== IRIS executable resolution ===');
@@ -137,7 +137,26 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         vscode.workspace.onWillSaveTextDocument(e => {
             const cfg = vscode.workspace.getConfiguration('iris');
             if (cfg.get<boolean>('formatOnSave', false) && e.document.languageId === 'iris') {
-                e.waitUntil(vscode.commands.executeCommand('editor.action.formatDocument'));
+                const editor = vscode.window.visibleTextEditors.find(
+                    ed => ed.document.uri.toString() === e.document.uri.toString(),
+                );
+                const tabSize =
+                    typeof editor?.options.tabSize === 'number'
+                        ? editor.options.tabSize
+                        : cfg.get<number>('format.indentSize', 4);
+                const insertSpaces =
+                    typeof editor?.options.insertSpaces === 'boolean'
+                        ? editor.options.insertSpaces
+                        : true;
+                e.waitUntil(
+                    vscode.commands
+                        .executeCommand<vscode.TextEdit[]>(
+                            'vscode.executeFormatDocumentProvider',
+                            e.document.uri,
+                            { tabSize, insertSpaces },
+                        )
+                        .then(edits => edits ?? []),
+                );
             }
         }),
     );

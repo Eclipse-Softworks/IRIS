@@ -16,7 +16,7 @@ def summarize(values: list<i64>) -> Stats {
         total = total + v
         if v > largest { largest = v }
     }
-    Stats { count: list_len(values), total: total, largest: largest }
+    return Stats { count: list_len(values), total: total, largest: largest }
 }
 
 def main() -> i64 {
@@ -32,12 +32,12 @@ def test_summarize() -> i64 {
     assert(s.count == 3)
     assert(s.total == 16)
     assert(s.largest == 9)
-    0
+    return 0
 }
 
 def test_summarize_empty() -> i64 {
     val empty: list<i64> = list()
     val s = summarize(empty)
     assert(s.count == 0 && s.total == 0 && s.largest == 0)
-    0
+    return 0
 }

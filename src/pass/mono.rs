@@ -187,7 +187,8 @@ pub fn contains_type_param(ty: &IrType) -> bool {
         | IrType::Grad(elem)
         | IrType::Sparse(elem)
         | IrType::List(elem)
-        | IrType::WeakRef(elem) => contains_type_param(elem),
+        | IrType::WeakRef(elem)
+        | IrType::MutRef(elem) => contains_type_param(elem),
         IrType::ResultType(ok, err) | IrType::Map(ok, err) => {
             contains_type_param(ok) || contains_type_param(err)
         }
@@ -211,6 +212,7 @@ fn extract_hkt_ctor_name(ty: &IrType) -> String {
         IrType::Grad(_) => "grad".to_owned(),
         IrType::Sparse(_) => "sparse".to_owned(),
         IrType::WeakRef(_) => "weak".to_owned(),
+        IrType::MutRef(_) => "mutref".to_owned(),
         IrType::Struct { name, .. } => name.split("__").next().unwrap_or(name).to_owned(),
         other => format!("{}", other),
     }
@@ -259,6 +261,7 @@ pub fn substitute_ir_type_with_hkt(
                 "grad" if !sub_args.is_empty() => IrType::Grad(Box::new(sub_args[0].clone())),
                 "sparse" if !sub_args.is_empty() => IrType::Sparse(Box::new(sub_args[0].clone())),
                 "weak" if !sub_args.is_empty() => IrType::WeakRef(Box::new(sub_args[0].clone())),
+                "mutref" if !sub_args.is_empty() => IrType::MutRef(Box::new(sub_args[0].clone())),
                 "map" if sub_args.len() >= 2 => {
                     IrType::Map(Box::new(sub_args[0].clone()), Box::new(sub_args[1].clone()))
                 }
@@ -411,6 +414,12 @@ pub fn substitute_ir_type_with_hkt(
             hkt_subs,
             struct_defs,
         ))),
+        IrType::MutRef(inner) => IrType::MutRef(Box::new(substitute_ir_type_with_hkt(
+            inner,
+            subs,
+            hkt_subs,
+            struct_defs,
+        ))),
         IrType::TraitObject { name, methods } => IrType::TraitObject {
             name: name.clone(),
             methods: methods
@@ -556,6 +565,12 @@ fn substitute_instr_types_with_context(
         IrInstr::Cast { from_ty, to_ty, .. } => {
             *from_ty = substitute_ir_type_with_hkt(from_ty, subs, hkt_subs, struct_defs);
             *to_ty = substitute_ir_type_with_hkt(to_ty, subs, hkt_subs, struct_defs);
+        }
+        IrInstr::CellNew { elem_ty, .. } => {
+            *elem_ty = substitute_ir_type_with_hkt(elem_ty, subs, hkt_subs, struct_defs);
+        }
+        IrInstr::CellLoad { result_ty, .. } => {
+            *result_ty = substitute_ir_type_with_hkt(result_ty, subs, hkt_subs, struct_defs);
         }
         _ => {}
     }

@@ -1086,6 +1086,26 @@ pub enum IrInstr {
         /// Where to store the resumed value (the handler's return value).
         result: ValueId,
     },
+
+    // ---- Mutable cells (dereference write-back) ----
+    /// Allocate a mutable cell initialized with `init` of type `elem_ty`.
+    /// Produces a value of type `IrType::MutRef(elem_ty)`.
+    CellNew {
+        result: ValueId,
+        init: ValueId,
+        elem_ty: IrType,
+    },
+    /// Load the current value from a mutable cell of type `IrType::MutRef(result_ty)`.
+    CellLoad {
+        result: ValueId,
+        cell: ValueId,
+        result_ty: IrType,
+    },
+    /// Store a new value into a mutable cell of type `IrType::MutRef(_)`.
+    CellStore {
+        cell: ValueId,
+        value: ValueId,
+    },
 }
 
 /// A handler arm describing how to handle an effect operation.
@@ -1151,6 +1171,8 @@ impl IrInstr {
             IrInstr::MutexUnlock { .. } => None,
             IrInstr::Borrow { result, .. } => Some(*result),
             IrInstr::Move { result, .. } => Some(*result),
+            IrInstr::CellNew { result, .. } | IrInstr::CellLoad { result, .. } => Some(*result),
+            IrInstr::CellStore { .. } => None,
             IrInstr::EnterScope { .. } | IrInstr::ExitScope { .. } | IrInstr::Drop { .. } => None,
             IrInstr::MakeSome { result, .. } => Some(*result),
             IrInstr::MakeNone { result, .. } => Some(*result),
@@ -1357,6 +1379,9 @@ impl IrInstr {
             IrInstr::MutexUnlock { mutex } => vec![*mutex],
             IrInstr::Borrow { place, .. } => vec![*place],
             IrInstr::Move { place, .. } => vec![*place],
+            IrInstr::CellNew { init, .. } => vec![*init],
+            IrInstr::CellLoad { cell, .. } => vec![*cell],
+            IrInstr::CellStore { cell, value } => vec![*cell, *value],
             IrInstr::EnterScope { .. } | IrInstr::ExitScope { .. } => vec![],
             IrInstr::Drop { value, .. } => vec![*value],
             IrInstr::MakeSome { value, .. } => vec![*value],
