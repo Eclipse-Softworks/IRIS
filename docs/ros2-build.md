@@ -100,7 +100,7 @@ def main() -> i64 {
         if is_timer(ev, ticker) { log_info(node, "waiting for requests"); };
     };
     assert(context_destroy(ctx));
-    0
+    return 0
 }
 ```
 

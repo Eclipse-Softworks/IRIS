@@ -164,7 +164,7 @@ choice Shape {
 }
 
 def area(s: Shape) -> f64 {
-    when s {
+    return when s {
         Shape.Circle(r) => 3.14159 * r * r,
         Shape.Rect(w, h) => w * h,
     }

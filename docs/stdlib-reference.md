@@ -265,7 +265,7 @@ def main() -> f64 {
     val x = tape(3.0)
     val y = x * x + 2.0 * x
     val _ = backward(y)
-    grad(x)
+    return grad(x)
 }
 ```
 
@@ -283,7 +283,7 @@ bring std.testing
 def test_basic() -> bool {
     val ok = assert_eq(1 + 1, 2, "addition");
     val ok2 = assert_str_eq("hi", "hi", "strings");
-    ok && ok2
+    return ok && ok2
 }
 ```
 
@@ -985,7 +985,7 @@ bring std.async
 
 async def fetch(id: i64, delay: i64) -> i64 {
     await async_sleep(delay);
-    id * 10
+    return id * 10
 }
 
 def main() -> i64 effect alloc, thread, time {
@@ -996,7 +996,7 @@ def main() -> i64 effect alloc, thread, time {
     val results = await join_all(tasks)
     // A deadline: none if the task has not finished in 20 ms.
     val late = await timeout_after(fetch(3, 500), 20)
-    0
+    return 0
 }
 ```
 
@@ -1059,7 +1059,7 @@ def main() -> i64 {
         publish_twist(cmd, make_twist(param_f64(node, "gain") * nearest, 0.0, 0.0, 0.0, 0.0, 0.0));
     };
     assert(context_destroy(ctx));
-    0
+    return 0
 }
 ```
 
@@ -1212,9 +1212,9 @@ bring std.http
 def handle(req: str) -> str {
     val path = http_request_path(req)
     if path == "/health" {
-        http_response(200, "OK", "{\"status\":\"ok\"}")
+        return http_response(200, "OK", "{\"status\":\"ok\"}")
     } else {
-        http_response(404, "Not Found", "not found")
+        return http_response(404, "Not Found", "not found")
     }
 }
 

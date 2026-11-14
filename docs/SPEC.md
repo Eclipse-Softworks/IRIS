@@ -67,7 +67,7 @@ Line comments begin with `//` and extend to the end of the line:
 
 ```iris
 // This is a comment
-def main() -> i64 { 0 }  // inline comment
+def main() -> i64 { return 0 }  // inline comment
 ```
 
 Block comments `/* ... */` are supported and may be nested.
@@ -429,8 +429,8 @@ type Pair = (i64, i64)
 ```
 
 ```iris
-def add(a: i64, b: i64) -> i64 { a + b }
-pub def square(x: f64) -> f64 { x * x }
+def add(a: i64, b: i64) -> i64 { return a + b }
+pub def square(x: f64) -> f64 { return x * x }
 async def fetch(url: str) -> str { /* ... */ }
 def greet(name: str) { println("hello " + name); }   // returns unit
 ```
@@ -442,7 +442,7 @@ an error there (E0209).
 Parameters may have default values:
 
 ```iris
-def greet(name: str = "world") -> str { concat("Hello, ", name) }
+def greet(name: str = "world") -> str { return concat("Hello, ", name) }
 ```
 
 ### 4.2 Record Declaration
@@ -512,7 +512,7 @@ impl TRAIT_NAME for TYPE_NAME { METHOD_DEF ... }
 ```iris
 impl Printable for Point {
     def to_string(self: Point) -> str {
-        concat(concat(to_str(self.x), ", "), to_str(self.y))
+        return concat(concat(to_str(self.x), ", "), to_str(self.y))
     }
 }
 ```
@@ -1021,7 +1021,7 @@ Functions may call themselves recursively:
 
 ```iris
 def fib(n: i64) -> i64 {
-    if n <= 1 { n } else { fib(n - 1) + fib(n - 2) }
+    if n <= 1 { return n } else { return fib(n - 1) + fib(n - 2) }
 }
 ```
 
@@ -1030,11 +1030,11 @@ def fib(n: i64) -> i64 {
 Functions can accept and return function values:
 
 ```iris
-def apply(f: fn(i64) -> i64, x: i64) -> i64 { f(x) }
+def apply(f: fn(i64) -> i64, x: i64) -> i64 { return f(x) }
 
 def main() -> i64 {
     val double = |x: i64| x * 2;
-    apply(double, 21)    // 42
+    return apply(double, 21)    // 42
 }
 ```
 
@@ -1042,7 +1042,7 @@ def main() -> i64 {
 
 ```iris
 def greet(name: str = "world") -> str {
-    concat("Hello, ", name)
+    return concat("Hello, ", name)
 }
 ```
 
@@ -1053,7 +1053,7 @@ Parameters with defaults must appear after parameters without defaults.
 ```iris
 async def fetch_data(url: str) -> str {
     // asynchronous operations
-    http_get(url)
+    return http_get(url)
 }
 ```
 
@@ -1066,7 +1066,7 @@ Functions may be annotated with `@attribute`:
 
 ```iris
 @differentiable
-def f(x: grad<f64>) -> grad<f64> { x * x }
+def f(x: grad<f64>) -> grad<f64> { return x * x }
 ```
 
 ---
@@ -1078,8 +1078,8 @@ def f(x: grad<f64>) -> grad<f64> { x * x }
 Type parameters are declared in square brackets:
 
 ```iris
-def identity[T](x: T) -> T { x }
-def pair[A, B](a: A, b: B) -> (A, B) { (a, b) }
+def identity[T](x: T) -> T { return x }
+def pair[A, B](a: A, b: B) -> (A, B) { return (a, b) }
 ```
 
 Generic functions are monomorphized: the compiler generates a specialized
@@ -1104,7 +1104,7 @@ trait Comparable {
 ```iris
 impl Printable for Point {
     def to_string(self: Point) -> str {
-        format("({}, {})", self.x, self.y)
+        return format("({}, {})", self.x, self.y)
     }
 }
 ```
@@ -1141,7 +1141,7 @@ bring std.math
 
 def main() -> i64 {
     val g = math.gcd(24, 36);
-    g
+    return g
 }
 ```
 
@@ -1151,8 +1151,8 @@ Only declarations marked `pub` are visible to importing modules:
 
 ```iris
 // math.iris
-pub def square(x: i64) -> i64 { x * x }
-def helper() -> i64 { 42 }          // private — not importable
+pub def square(x: i64) -> i64 { return x * x }
+def helper() -> i64 { return 42 }          // private — not importable
 ```
 
 ---
@@ -1243,7 +1243,7 @@ val result = timeout(ch, 1000)       // recv with 1000ms timeout
 ```iris
 async def slow_op() -> i64 {
     sleep(1000);
-    42
+    return 42
 }
 
 def main() -> i64 {
@@ -1270,17 +1270,16 @@ execution is the authoritative bounded parallel scheduler.
 
 ```iris
 def safe_div(a: i64, b: i64) -> option<i64> {
-    if b == 0 { none } else { some(a / b) }
+    if b == 0 { return none } else { return some(a / b) }
 }
 ```
 
 ### 12.2 Result Type
 
 ```iris
-def parse_number(s: str) -> result<i64, str> {
-    val n = parse_i64(s);
-    // parse_i64 returns result<i64, str>
-    n
+def divide(a: i64, b: i64) -> result<i64, str> {
+    if b == 0 { return err("division by zero") }
+    return ok(a / b)
 }
 ```
 
@@ -1292,10 +1291,10 @@ The `?` operator propagates errors upward. When applied to:
 - `result<T,E>`: if `err(e)`, immediately returns `err(e)` from the enclosing function
 
 ```iris
-def process(s: str) -> result<i64, str> {
-    val n = parse_i64(s)?;    // returns err() if parse fails
-    val doubled = n * 2;
-    ok(doubled)
+def process(a: i64, b: i64) -> result<i64, str> {
+    val q = divide(a, b)?;    // returns err() if b == 0
+    val doubled = q * 2;
+    return ok(doubled)
 }
 ```
 
@@ -1318,7 +1317,7 @@ The `grad<T>` type carries a primal value and its derivative:
 
 ```iris
 def f(x: grad<f64>) -> grad<f64> {
-    x * x + x
+    return x * x + x
 }
 ```
 
@@ -1336,7 +1335,7 @@ val dense = densify(sparse);    // back to dense
 @differentiable
 def loss(x: grad<f64>, target: grad<f64>) -> grad<f64> {
     val diff = x - target;
-    diff * diff
+    return diff * diff
 }
 ```
 
@@ -1351,7 +1350,7 @@ def matmul(
     a: tensor<f32, [M, K]>,
     b: tensor<f32, [K, N]>,
 ) -> tensor<f32, [M, N]> {
-    a @ b                       // matrix multiplication via einsum
+    return a @ b                // matrix multiplication via einsum
 }
 ```
 

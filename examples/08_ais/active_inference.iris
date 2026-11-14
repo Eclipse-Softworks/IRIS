@@ -38,13 +38,13 @@ def tmaze() -> Pomdp {
     }
     pomdp_set_preferences(m, list(0.0, 0.0, 0.0, 3.0, 0.0 - 3.0, 3.0, 0.0 - 3.0))
     pomdp_set_prior(m, list(0.5, 0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0))
-    m
+    return m
 }
 
 def observe_world(m: Pomdp, s: i64) -> i64 effect random {
     val col: list<f64> = list()
     for o in 0..m.n_obs { list_push(col, list_get(m.a, o * m.n_states + s)) }
-    probs_sample(col)
+    return probs_sample(col)
 }
 
 // Trials in which the agent ends in the rewarded arm.
@@ -62,7 +62,7 @@ def score(agent: AifAgent, world: Pomdp, trials: i64) -> i64 effect random {
         }
         if loc == 2 + ctx { correct = correct + 1 }
     }
-    correct
+    return correct
 }
 
 def main() -> i64 {

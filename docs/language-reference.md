@@ -30,13 +30,13 @@ IRIS source files use the `.iris` extension. The entry point is a zero-argument 
 ```iris
 def main() -> i64 {
     print("Hello, world!");
-    0
+    return 0
 }
 ```
 
-Functions return the value of their last expression — no explicit `return` required (though `return expr` is supported for early exit).
+Functions return via explicit `return expr` (conventional in entrypoints and examples), or evaluate to the value of their last tail expression when `return` and the trailing semicolon are omitted.
 
-Statements are separated by semicolons `;` when they appear inside blocks and are not the final expression. The tail expression of a block is its return value.
+Statements are separated by semicolons `;` when they appear inside blocks and are not a final tail expression.
 
 ---
 
@@ -98,20 +98,20 @@ counter = counter + 1
 
 ```iris
 pub def add(a: i64, b: i64) -> i64 {
-    a + b
+    return a + b
 }
 ```
 
 - `pub` makes a function visible when the file is brought into another file.
 - Parameters have the form `name: type`.
 - Return type follows `->`.
-- The last expression is the return value; `return expr` exits early.
+- Explicit `return expr` exits immediately and is used in entrypoints and examples; omitting it lets the final expression serve as a tail return value.
 
 ### Async functions
 
 ```iris
 async def fetch(url: str) -> str {
-    await http_get(url)
+    return await http_get(url)
 }
 ```
 
@@ -195,7 +195,7 @@ def find_first(xs: list<i64>, target: i64) -> i64 {
         if list_get(xs, i) == target { return i }
         i = i + 1
     }
-    -1
+    return -1
 }
 ```
 
@@ -286,7 +286,7 @@ val msg = format("x={}, y={}", x, y)
 record Point { x: f64, y: f64 }
 
 def make_point(x: f64, y: f64) -> Point {
-    Point { x: x, y: y }
+    return Point { x: x, y: y }
 }
 
 val p = make_point(1.0, 2.0)
@@ -336,9 +336,14 @@ val success = is_ok(r)    // true
 val value   = unwrap(r)   // 42
 
 // ? propagation (inside a result-returning function)
-def parse_and_double(s: str) -> result<i64, str> {
-    val n = parse_i64(s)?
-    ok(n * 2)
+def divide(a: i64, b: i64) -> result<i64, str> {
+    if b == 0 { return err("division by zero") }
+    return ok(a / b)
+}
+
+def half_and_double(a: i64, b: i64) -> result<i64, str> {
+    val q = divide(a, b)?
+    return ok(q * 2)
 }
 ```
 
@@ -371,7 +376,7 @@ record Circle { radius: f64 }
 
 impl Shape for Circle {
     def area(self) -> f64 {
-        3.14159 * self.radius * self.radius
+        return 3.14159 * self.radius * self.radius
     }
 }
 

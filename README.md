@@ -117,13 +117,14 @@ iris fmt --check main.iris  # verify formatting
 **Reverse-mode automatic differentiation:**
 
 ```iris
-def square(x: f64) -> f64 { x * x }
+def square(x: f64) -> f64 { return x * x }
 
-def main() -> f64 {
+def main() -> i64 {
     val x = tape(3.0)
     val loss = square(x)
-    val _ = backward(loss)
-    grad(x) // 6.0
+    backward(loss)
+    assert(grad(x) == 6.0)
+    return 0
 }
 ```
 
@@ -132,13 +133,13 @@ def main() -> f64 {
 ```iris
 choice Direction { North, South, East, West }
 
-def parse_and_double(s: str) -> result<i64, str> {
+def parse_and_double(s: str) -> option<i64> {
     val n = parse_i64(s)?
-    ok(n * 2)
+    return some(n * 2)
 }
 
 def describe(dir: Direction) -> str {
-    when dir {
+    return when dir {
         Direction.North => "north",
         Direction.South => "south",
         _               => "east or west",
@@ -156,7 +157,7 @@ def main() -> i64 {
     }
     val v = recv(ch)
     assert(v == 42)
-    0
+    return 0
 }
 ```
 

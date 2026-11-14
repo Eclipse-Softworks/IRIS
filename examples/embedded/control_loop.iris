@@ -4,7 +4,7 @@
 // iris embedded examples/embedded/control_loop.iris --target arduino-uno
 
 def control_step(sensor: i64, target: i64) -> i64 {
-    if sensor < target { target - sensor } else { return 0 }
+    if sensor < target { return target - sensor } else { return 0 }
 }
 
 def main() -> i64 {

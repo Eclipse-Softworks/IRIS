@@ -16,7 +16,7 @@ def closest(ranges: list<f64>) -> f64 {
         val r = list_get(ranges, i)
         if r < best { best = r };
     };
-    best
+    return best
 }
 
 def main() -> i64 {
