@@ -281,6 +281,9 @@ pub fn instrument(module: &IrModule, base: &str) -> Result<String, CodegenError>
             )?;
         }
         writeln!(out, "{line}")?;
+        if line.trim() == "call void @iris_set_argv(i32 %argc, ptr %argv)" {
+            writeln!(out, "  call void @iris_profile_init()")?;
+        }
         if let Some(b) = bump.get(&i) {
             pending = Some(b.clone());
         }
@@ -322,10 +325,18 @@ pub fn instrument(module: &IrModule, base: &str) -> Result<String, CodegenError>
     }
     writeln!(
         out,
+        "@__iris_profile_initialized = internal global i1 false"
+    )?;
+    writeln!(
+        out,
         "declare void @iris_profile_register(ptr, ptr, ptr, i64)"
     )?;
     writeln!(out, "define internal void @iris_profile_init() {{")?;
     writeln!(out, "entry:")?;
+    writeln!(out, "  %already = load i1, ptr @__iris_profile_initialized")?;
+    writeln!(out, "  br i1 %already, label %done, label %init")?;
+    writeln!(out, "init:")?;
+    writeln!(out, "  store i1 true, ptr @__iris_profile_initialized")?;
     for (fi, f) in funcs.iter().enumerate() {
         let sym = format!("{fi}_{}", symbol(&f.name));
         writeln!(
@@ -334,6 +345,8 @@ pub fn instrument(module: &IrModule, base: &str) -> Result<String, CodegenError>
             f.blocks.len()
         )?;
     }
+    writeln!(out, "  br label %done")?;
+    writeln!(out, "done:")?;
     writeln!(out, "  ret void")?;
     writeln!(out, "}}")?;
 

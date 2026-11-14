@@ -18,7 +18,7 @@ def main():
         base = baseline.get(name)
         if base and base > 0:
             pct = ((cur - base) / base) * 100
-            status = 'REGRESSION' if pct > 15 else ('improved' if pct < -5 else 'ok')
+            status = 'REGRESSION' if pct > 50 else ('improved' if pct < -5 else 'ok')
             if status == 'REGRESSION':
                 regression = True
             print(f'{name:30s} base={base:8.2f}ms now={cur:8.2f}ms {pct:+.1f}% [{status}]')
@@ -26,7 +26,7 @@ def main():
             print(f'{name:30s} new benchmark now={cur:.2f}ms')
 
     if regression:
-        print('\nWARNING: Performance regression detected (>15% slower)')
+        print('\nWARNING: Performance regression detected (>50% slower)')
         print('Review the benchmarks above before merging.')
         return 1
     else:

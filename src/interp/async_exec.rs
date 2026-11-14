@@ -534,10 +534,22 @@ fn tick_leaves(after_idle: bool) -> (bool, Option<Duration>) {
             None => pending.push(task),
         }
     }
-    EXECUTOR.with(|e| e.borrow_mut().leaves.extend(pending));
-    let progressed = !finished.is_empty();
     finished.sort_by_key(|(_, _, ready_at)| *ready_at);
-    for (task, value, _) in finished {
+    let cutoff = finished
+        .first()
+        .map(|(_, _, earliest)| *earliest + Duration::from_millis(5));
+    let mut ready_now = Vec::new();
+    for item in finished {
+        if cutoff.is_some_and(|c| item.2 > c) {
+            wait = Some(Duration::ZERO);
+            pending.push(item.0);
+        } else {
+            ready_now.push(item);
+        }
+    }
+    EXECUTOR.with(|e| e.borrow_mut().leaves.extend(pending));
+    let progressed = !ready_now.is_empty();
+    for (task, value, _) in ready_now {
         complete(&task, value);
     }
     (progressed, wait)
