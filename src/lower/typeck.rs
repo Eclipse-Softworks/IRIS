@@ -2053,6 +2053,30 @@ impl<'a> Checker<'a> {
                         }
                     }
                 }
+                if let Some(enum_name) = super::get_qualified_enum_name(base.as_ref()) {
+                    let resolved = self.resolve_name(&enum_name);
+                    if let Some(variants) = self.reg.module.enum_def(&resolved) {
+                        let variants = variants.clone();
+                        return match variants.iter().position(|v| v == field) {
+                            Some(_) => Ty::Named(resolved),
+                            None => {
+                                self.errors.push(
+                                    Diagnostic::error(format!(
+                                        "`{1}` has no variant `{0}`",
+                                        field, resolved
+                                    ))
+                                    .with_code("E0122")
+                                    .with_primary_span(
+                                        span.start.0,
+                                        span.end.0,
+                                        None,
+                                    ),
+                                );
+                                Ty::Unknown
+                            }
+                        };
+                    }
+                }
                 let b = self.infer(base);
                 match self.resolve(&b, false) {
                     Ty::Named(n) => match self.reg.module.struct_def(&n) {
@@ -2562,7 +2586,7 @@ impl<'a> Checker<'a> {
         }
         let n = args.len();
         Some(match (name, n) {
-            ("list", _) => {
+            ("list" | "list_new", _) => {
                 let e = self.fresh(Kind::Any);
                 for a in args {
                     let t = self.infer(a);
@@ -2851,7 +2875,7 @@ impl<'a> Checker<'a> {
                 self.unify(&a, &f64t, args[0].span(), Why::Argument);
                 f64t
             }
-            ("map", 0) => {
+            ("map" | "map_new", 0) => {
                 let k = self.fresh(Kind::Any);
                 let v = self.fresh(Kind::Any);
                 Ty::Map(Box::new(k), Box::new(v))
@@ -2940,6 +2964,25 @@ impl<'a> Checker<'a> {
                         self.taint(&t);
                     }
                     return Ty::Unknown;
+                }
+            }
+        }
+        if let Some(enum_name) = super::get_qualified_enum_name(base) {
+            let resolved = self.resolve_name(&enum_name);
+            if let (Some(variants), Some(fields)) = (
+                self.reg.module.enum_def(&resolved).cloned(),
+                self.reg.module.enum_variant_fields(&resolved).cloned(),
+            ) {
+                if let Some(i) = variants.iter().position(|v| v == method) {
+                    let ft = fields.get(i).cloned().unwrap_or_default();
+                    let arg_tys: Vec<Ty> = args.iter().map(|a| self.infer(a)).collect();
+                    if ft.len() == arg_tys.len() {
+                        for ((a, f), e) in arg_tys.iter().zip(ft.iter()).zip(args) {
+                            let f = self.ty_from_ir(f);
+                            self.unify(a, &f, e.span(), Why::Argument);
+                        }
+                    }
+                    return Ty::Named(resolved);
                 }
             }
         }

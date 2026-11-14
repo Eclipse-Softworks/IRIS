@@ -33,6 +33,8 @@ pub(crate) struct NativeBridge {
     work_dir: PathBuf,
     relay: Option<std::thread::JoinHandle<()>>,
     supports_step_back: Arc<AtomicBool>,
+    is_gdb: bool,
+    pending_launch_args: Option<Value>,
 }
 
 impl Drop for NativeBridge {
@@ -64,6 +66,10 @@ impl NativeBridge {
         let relay_step_back = Arc::clone(&supports_step_back);
         let relay = std::thread::spawn(move || relay_to_client(stdout, relay_step_back));
 
+        let is_gdb = Path::new(&command[0])
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .is_some_and(|s| s.eq_ignore_ascii_case("gdb"));
         let mut bridge = Self {
             child: Some(child),
             stdin: Some(stdin),
@@ -71,6 +77,8 @@ impl NativeBridge {
             work_dir,
             relay: Some(relay),
             supports_step_back,
+            is_gdb,
+            pending_launch_args: None,
         };
         bridge.inject("initialize", initialize_args.clone())?;
         Ok((bridge, description))
@@ -112,9 +120,7 @@ impl NativeBridge {
 
         let (mut bridge, description) = Self::spawn(work_dir, initialize_args, Some(&exe))?;
 
-        let mut launch = launch_request.clone();
         let mut native_args = json!({
-            "program": exe.to_string_lossy(),
             "cwd": arguments["cwd"].as_str().map(str::to_owned).unwrap_or_else(|| {
                 source_path
                     .parent()
@@ -122,6 +128,9 @@ impl NativeBridge {
                     .unwrap_or_default()
             }),
         });
+        if !bridge.is_gdb {
+            native_args["program"] = json!(exe.to_string_lossy());
+        }
         if let Some(args) = arguments.get("args") {
             native_args["args"] = args.clone();
         }
@@ -130,11 +139,32 @@ impl NativeBridge {
             native_args["stopAtBeginningOfMainSubprogram"] = json!(true);
             native_args["stopOnEntry"] = json!(true);
         }
-        launch["arguments"] = native_args;
-        bridge.forward(&launch)?;
 
         for (command, arguments) in recorded {
             bridge.inject(command, arguments.clone())?;
+        }
+
+        if bridge.is_gdb {
+            // Defer sending `launch` to GDB until `configurationDone` so that
+            // any `setBreakpoints` requests sent between `launch` and
+            // `configurationDone` execute while GDB is still stopped (with
+            // symbols already loaded from the `gdb -i dap <exe>` command line).
+            // On GDB 14–15, `launch` immediately runs the inferior rather than
+            // deferring to `configurationDone`.
+            bridge.pending_launch_args = Some(native_args);
+            let response = json!({
+                "type": "response",
+                "request_seq": launch_request["seq"],
+                "success": true,
+                "command": "launch",
+            });
+            let out = std::io::stdout();
+            let mut lock = out.lock();
+            write_frame(&mut lock, &response).map_err(|error| format!("stdout: {error}"))?;
+        } else {
+            let mut launch = launch_request.clone();
+            launch["arguments"] = native_args;
+            bridge.forward(&launch)?;
         }
         Ok((bridge, format!("{} (built {})", description, exe.display())))
     }
@@ -203,6 +233,13 @@ impl NativeBridge {
 
     /// Relay a client message, normalizing breakpoint source paths to match DWARF `!DIFile`.
     pub(crate) fn forward(&mut self, message: &Value) -> Result<(), String> {
+        if message["type"].as_str() == Some("request")
+            && message["command"].as_str() == Some("configurationDone")
+        {
+            if let Some(launch_args) = self.pending_launch_args.take() {
+                self.inject("launch", launch_args)?;
+            }
+        }
         let Some(stdin) = self.stdin.as_mut() else {
             return Err("native adapter stdin is closed".into());
         };
@@ -501,6 +538,15 @@ fn relay_to_client(stdout: impl Read, supports_step_back: Arc<AtomicBool>) {
             continue;
         }
         let mut message = message;
+        if message["type"] == "response"
+            && message["command"] == "configurationDone"
+            && message["message"] == "notStopped"
+        {
+            message["success"] = Value::Bool(true);
+            if let Some(obj) = message.as_object_mut() {
+                obj.remove("message");
+            }
+        }
         show_iris_names(&mut message);
         let out = std::io::stdout();
         let mut lock = out.lock();
@@ -515,9 +561,13 @@ fn relay_to_client(stdout: impl Read, supports_step_back: Arc<AtomicBool>) {
 /// the debugger would otherwise show.
 fn show_iris_names(message: &mut serde_json::Value) {
     let prefix = crate::codegen::llvm_ir::USER_SYMBOL_PREFIX;
-    if let Some(frames) = message["body"]["stackFrames"].as_array_mut() {
+    if let Some(frames) = message
+        .get_mut("body")
+        .and_then(|b| b.get_mut("stackFrames"))
+        .and_then(|f| f.as_array_mut())
+    {
         for frame in frames {
-            if let Some(name) = frame["name"].as_str() {
+            if let Some(name) = frame.get("name").and_then(|n| n.as_str()).map(String::from) {
                 if let Some(short) = name.strip_prefix(prefix) {
                     frame["name"] = serde_json::Value::String(short.to_string());
                 }

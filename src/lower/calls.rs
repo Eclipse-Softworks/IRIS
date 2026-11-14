@@ -3351,7 +3351,7 @@ impl<'m> Lowerer<'m> {
         }
 
         // Built-in: list() or list(a, b, c) → ListNew + optional ListPush
-        if dispatch_name == "list" {
+        if dispatch_name == "list" || dispatch_name == "list_new" {
             // An annotation `list<T>` types the elements, and each element is
             // lowered against `T`: a nested `list(...)` used to see the outer
             // `list<list<T>>` and reject its own elements. Each element is
@@ -3684,7 +3684,7 @@ impl<'m> Lowerer<'m> {
         }
 
         // Built-in: map() → MapNew — create an empty hash map (keys: str, values: i64 default)
-        if dispatch_name == "map" {
+        if dispatch_name == "map" || dispatch_name == "map_new" {
             if !args.is_empty() {
                 return Err(builtin_arity_error(
                     "map() takes no arguments — it creates an empty hash map",

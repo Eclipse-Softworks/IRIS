@@ -159,6 +159,8 @@ int invoke_cb(CombineCb cb, int a, int b) {
     let shim_out = root.join("shim.cpp");
     let lib_input = if cfg!(target_os = "windows") {
         root.join("libiris_cppdemo.a")
+    } else if cfg!(target_os = "macos") {
+        root.join("libiris_cppdemo.dylib")
     } else {
         root.join("libiris_cppdemo.so")
     };
