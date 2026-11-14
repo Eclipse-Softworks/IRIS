@@ -1,6 +1,8 @@
+![IRIS](icon.png)
+
 # IRIS Language for Visual Studio Code
 
-Full-featured IDE support for the [IRIS programming language](https://github.com/moon9t/iris) — syntax highlighting, Language Server Protocol, debugging, REPL, and more.
+Full-featured IDE support for the [IRIS programming language](https://github.com/Eclipse-Softworks/IRIS) — syntax highlighting, Language Server Protocol, debugging, REPL, and more.
 
 ![VS Code](https://img.shields.io/badge/VS%20Code-1.85+-blue?logo=visualstudiocode)
 ![License](https://img.shields.io/badge/license-GPL--2.0--or--later-green)
