@@ -94,6 +94,7 @@ jobs:
         run: |
           C:/msys64/usr/bin/pacman.exe -S --noconfirm --needed \
             mingw-w64-ucrt-x86_64-gcc \
+            mingw-w64-ucrt-x86_64-gdb \
             mingw-w64-ucrt-x86_64-sqlite3
           cp -f /c/msys64/ucrt64/bin/libsqlite3-0.dll /c/msys64/ucrt64/bin/sqlite3.dll || true
           echo "C:/msys64/ucrt64/bin" >> "$GITHUB_PATH"
@@ -206,10 +207,20 @@ jobs:
             if [ -f "$f" ]; then
               BENCH_NAME=$(basename "$f" .iris)
               echo "=== Benchmarking $f ==="
-              OUTPUT=$(cargo run --release -- bench "$f" -n 20 2>&1 || true)
-              # Extract the mean time in ms (the bench command prints it)
-              TMP_MEAN=$(echo "$OUTPUT" | grep -oP '[\d.]+\s*ms' | head -1)
-              MEAN=$(echo "$TMP_MEAN" | grep -oP '[\d.]+' || echo "0")
+              OUTPUT=$(./target/release/iris bench "$f" -n 20 2>&1 || true)
+              # Extract the Total row's Mean time in ms (converting µs to ms when needed)
+              MEAN=$(echo "$OUTPUT" | python3 -c '
+          import re, sys
+          text = sys.stdin.read()
+          m = re.search(r"Total\s+[\d.]+(?:ms|µs)\s+([\d.]+)(ms|µs)", text)
+          if m:
+              val = float(m.group(1))
+              if m.group(2) == "µs":
+                  val /= 1000.0
+              print(f"{val:.4f}")
+          else:
+              print("0")
+          ')
               if [ "$FIRST" = true ]; then
                 FIRST=false
               else
@@ -236,8 +247,8 @@ jobs:
         id: bench-baseline
         with:
           path: bench-baseline/
-          key: bench-baseline-${{ runner.os }}
-          restore-keys: bench-baseline-
+          key: bench-baseline-v2-${{ runner.os }}
+          restore-keys: bench-baseline-v2-
 
       - name: Check for performance regressions
         run: |

@@ -9,6 +9,7 @@
 
 #define _POSIX_C_SOURCE 200809L
 #define _GNU_SOURCE
+#define _DARWIN_C_SOURCE
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -6420,6 +6421,10 @@ static int64_t iris_tcp_connect_raw(const char* host, int64_t port) {
     return (int64_t)s;
 #endif
 }
+
+#ifndef INADDR_LOOPBACK
+#define INADDR_LOOPBACK ((uint32_t)0x7f000001)
+#endif
 
 /* Listen on every interface (`address` INADDR_ANY) or on loopback only. */
 static int64_t iris_tcp_listen_at_raw(uint32_t address, int64_t port);

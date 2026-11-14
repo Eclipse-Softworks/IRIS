@@ -42,8 +42,12 @@ impl Drop for NativeBridge {
 }
 
 impl NativeBridge {
-    fn spawn(work_dir: PathBuf, initialize_args: &Value) -> Result<(Self, String), String> {
-        let command = native_adapter_command()?;
+    fn spawn(
+        work_dir: PathBuf,
+        initialize_args: &Value,
+        program: Option<&Path>,
+    ) -> Result<(Self, String), String> {
+        let command = native_adapter_command(program)?;
         let description = command.join(" ");
         let mut child = Command::new(&command[0])
             .args(&command[1..])
@@ -82,14 +86,15 @@ impl NativeBridge {
         recorded: &[(String, Value)],
     ) -> Result<(Self, String), String> {
         let arguments = &launch_request["arguments"];
-        let source_path = PathBuf::from(arguments["program"].as_str().unwrap_or_default());
+        let raw_source_path = PathBuf::from(arguments["program"].as_str().unwrap_or_default());
+        let source_path = canonicalize_source_path(&raw_source_path);
         let stem = source_path
             .file_stem()
             .and_then(|stem| stem.to_str())
             .unwrap_or("main")
             .to_owned();
 
-        let work_dir = std::env::temp_dir().join(format!(
+        let work_dir = canonicalize_source_path(&std::env::temp_dir()).join(format!(
             "iris_dap_native_{}_{}",
             std::process::id(),
             std::time::SystemTime::now()
@@ -105,7 +110,7 @@ impl NativeBridge {
         let exe = crate::codegen::build::build_binary_debug(&module, &source_map, &exe)
             .map_err(|error| format!("native debug build failed: {error}"))?;
 
-        let (mut bridge, description) = Self::spawn(work_dir, initialize_args)?;
+        let (mut bridge, description) = Self::spawn(work_dir, initialize_args, Some(&exe))?;
 
         let mut launch = launch_request.clone();
         let mut native_args = json!({
@@ -168,7 +173,7 @@ impl NativeBridge {
             native_args["cwd"] = cwd.clone();
         }
 
-        let work_dir = std::env::temp_dir().join(format!(
+        let work_dir = canonicalize_source_path(&std::env::temp_dir()).join(format!(
             "iris_dap_native_attach_{}_{}",
             std::process::id(),
             std::time::SystemTime::now()
@@ -178,7 +183,8 @@ impl NativeBridge {
         ));
         let _ = std::fs::create_dir_all(&work_dir);
 
-        let (mut bridge, description) = Self::spawn(work_dir, initialize_args)?;
+        let attach_program = arguments["program"].as_str().map(Path::new);
+        let (mut bridge, description) = Self::spawn(work_dir, initialize_args, attach_program)?;
 
         let mut attach = attach_request.clone();
         attach["arguments"] = native_args;
@@ -195,15 +201,24 @@ impl NativeBridge {
         self.supports_step_back.load(Ordering::Relaxed)
     }
 
-    /// Relay a client message unchanged.
+    /// Relay a client message, normalizing breakpoint source paths to match DWARF `!DIFile`.
     pub(crate) fn forward(&mut self, message: &Value) -> Result<(), String> {
         let Some(stdin) = self.stdin.as_mut() else {
             return Err("native adapter stdin is closed".into());
         };
+        if message["type"].as_str() == Some("request")
+            && message["command"].as_str() == Some("setBreakpoints")
+        {
+            let mut normalized = message.clone();
+            normalize_dap_arguments("setBreakpoints", &mut normalized["arguments"]);
+            return write_frame(stdin, &normalized)
+                .map_err(|error| format!("native adapter: {error}"));
+        }
         write_frame(stdin, message).map_err(|error| format!("native adapter: {error}"))
     }
 
-    fn inject(&mut self, command: &str, arguments: Value) -> Result<(), String> {
+    fn inject(&mut self, command: &str, mut arguments: Value) -> Result<(), String> {
+        normalize_dap_arguments(command, &mut arguments);
         let seq = self.next_seq;
         self.next_seq += 1;
         self.forward(&json!({
@@ -252,12 +267,43 @@ impl NativeBridge {
     }
 }
 
+/// Canonicalize a source path and strip Windows `\\?\` verbatim prefixes so
+/// paths sent in DAP `setBreakpoints` requests match DWARF `!DIFile` entries
+/// produced by `compile_file_to_module_debug` (including on Windows runners
+/// where `TEMP` uses 8.3 short names such as `RUNNER~1`).
+fn canonicalize_source_path(path: &Path) -> PathBuf {
+    let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    #[cfg(windows)]
+    {
+        let s = canonical.to_string_lossy();
+        if let Some(stripped) = s.strip_prefix(r"\\?\") {
+            if !stripped.starts_with(r"UNC\") {
+                return PathBuf::from(stripped);
+            }
+        }
+    }
+    canonical
+}
+
+fn normalize_dap_arguments(command: &str, arguments: &mut Value) {
+    if command == "setBreakpoints" {
+        if let Some(path_str) = arguments
+            .pointer("/source/path")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+        {
+            let canonical = canonicalize_source_path(Path::new(&path_str));
+            arguments["source"]["path"] = json!(canonical.to_string_lossy());
+        }
+    }
+}
+
 /// Probe the active native debug adapter for diagnostics such as `iris doctor`.
 ///
 /// Returns a human-readable adapter/version summary on success, or an error
 /// description paired with an actionable remediation hint when unavailable.
 pub(crate) fn probe_native_debugger() -> Result<String, (String, &'static str)> {
-    match native_adapter_command() {
+    match native_adapter_command(None) {
         Ok(cmd) => {
             let desc = cmd.join(" ");
             let version = Command::new(&cmd[0])
@@ -294,10 +340,28 @@ pub(crate) fn probe_native_debugger() -> Result<String, (String, &'static str)> 
 
 /// The native DAP adapter to run: `IRIS_NATIVE_DAP` (a whitespace-separated
 /// command line) if set, else GDB's built-in DAP mode, else LLDB's adapter.
-fn native_adapter_command() -> Result<Vec<String>, String> {
+///
+/// When `program` is provided and GDB is selected, the executable path is
+/// passed on the GDB command line (`gdb -i dap <exe>`) so GDB loads the symbol
+/// table immediately at startup. Without this, GDB 14–15 rejects
+/// `setBreakpoints` requests sent between `launch` and `configurationDone`
+/// (`No symbol table is loaded. Use the "file" command.`) because `launch` in
+/// `gdb/dap/launch.py` is a `DeferredRequest` that defers `file_command` until
+/// `configurationDone`.
+fn native_adapter_command(program: Option<&Path>) -> Result<Vec<String>, String> {
     if let Ok(command) = std::env::var("IRIS_NATIVE_DAP") {
-        let parts: Vec<String> = command.split_whitespace().map(str::to_owned).collect();
+        let mut parts: Vec<String> = command.split_whitespace().map(str::to_owned).collect();
         if !parts.is_empty() {
+            if let Some(exe) = program {
+                let is_gdb_dap = Path::new(&parts[0])
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .is_some_and(|s| s.eq_ignore_ascii_case("gdb"))
+                    && parts.iter().any(|p| p == "dap");
+                if is_gdb_dap {
+                    parts.push(exe.to_string_lossy().into_owned());
+                }
+            }
             return Ok(parts);
         }
     }
@@ -308,11 +372,15 @@ fn native_adapter_command() -> Result<Vec<String>, String> {
     }
     for gdb in gdb_candidates {
         if gdb_supports_dap(&gdb) {
-            return Ok(vec![
+            let mut cmd = vec![
                 gdb.to_string_lossy().into_owned(),
                 "-i".into(),
                 "dap".into(),
-            ]);
+            ];
+            if let Some(exe) = program {
+                cmd.push(exe.to_string_lossy().into_owned());
+            }
+            return Ok(cmd);
         }
     }
     let mut lldb_candidates: Vec<PathBuf> = vec![

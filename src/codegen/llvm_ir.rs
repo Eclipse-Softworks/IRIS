@@ -433,10 +433,19 @@ pub(crate) fn emit_llvm_ir_for_named_eval_with_target(
     };
 
     // Append the eval wrapper.
+    let state_ctor_call = if !module.state_vars().is_empty()
+        && module
+            .function_by_name(crate::ir::module::STATE_INIT_FN)
+            .is_some()
+    {
+        "  call void @__iris_state_ctor()\n"
+    } else {
+        ""
+    };
     use std::fmt::Write as _;
     let _ = writeln!(
         base,
-        "\ndefine i32 @main(i32 %argc, ptr %argv) {{\nentry:\n  call void @iris_set_argv(i32 %argc, ptr %argv)\n{call_line}\n{print_line}\n  ret i32 0\n}}\n",
+        "\ndefine i32 @main(i32 %argc, ptr %argv) {{\nentry:\n  call void @iris_set_argv(i32 %argc, ptr %argv)\n{state_ctor_call}{call_line}\n{print_line}\n  ret i32 0\n}}\n",
     );
 
     Ok(embed_security_policy_in_ir(
@@ -611,9 +620,18 @@ pub(crate) fn emit_llvm_ir_for_harness(
             }
         }
     }
+    let state_ctor_call = if !module.state_vars().is_empty()
+        && module
+            .function_by_name(crate::ir::module::STATE_INIT_FN)
+            .is_some()
+    {
+        "  call void @__iris_state_ctor()\n"
+    } else {
+        ""
+    };
     let _ = writeln!(
         base,
-        "\ndefine i32 @main(i32 %argc, ptr %argv) {{\nentry:\n  call void @iris_set_argv(i32 %argc, ptr %argv)\n{body}  ret i32 0\n}}\n"
+        "\ndefine i32 @main(i32 %argc, ptr %argv) {{\nentry:\n  call void @iris_set_argv(i32 %argc, ptr %argv)\n{state_ctor_call}{body}  ret i32 0\n}}\n"
     );
     Ok(base)
 }
@@ -640,22 +658,31 @@ pub(crate) fn emit_llvm_ir_for_test_entry_with_target(
     let test_entry = fresh_wrapper_symbol(module, "__iris_test_entry");
     rename_emitted_function(&mut base, &entry_fn.name, &test_entry);
 
+    let state_ctor_call = if !module.state_vars().is_empty()
+        && module
+            .function_by_name(crate::ir::module::STATE_INIT_FN)
+            .is_some()
+    {
+        "  call void @__iris_state_ctor()\n"
+    } else {
+        ""
+    };
     let ret_llvm = llvm_type_complete(&entry_fn.return_ty).unwrap_or_else(|_| "void".to_owned());
     let wrapper = match ret_llvm.as_str() {
         "void" => {
-            format!("\ndefine i32 @main(i32 %argc, ptr %argv) {{\nentry:\n  call void @iris_set_argv(i32 %argc, ptr %argv)\n  call void @{test_entry}()\n  ret i32 0\n}}\n")
+            format!("\ndefine i32 @main(i32 %argc, ptr %argv) {{\nentry:\n  call void @iris_set_argv(i32 %argc, ptr %argv)\n{state_ctor_call}  call void @{test_entry}()\n  ret i32 0\n}}\n")
         }
         "i1" => {
-            format!("\ndefine i32 @main(i32 %argc, ptr %argv) {{\nentry:\n  call void @iris_set_argv(i32 %argc, ptr %argv)\n  %test_ret = call i1 @{test_entry}()\n  br i1 %test_ret, label %pass, label %fail\npass:\n  ret i32 0\nfail:\n  %test_ret_i32 = zext i1 %test_ret to i32\n  call void @iris_print_bool(i32 %test_ret_i32)\n  ret i32 1\n}}\n")
+            format!("\ndefine i32 @main(i32 %argc, ptr %argv) {{\nentry:\n  call void @iris_set_argv(i32 %argc, ptr %argv)\n{state_ctor_call}  %test_ret = call i1 @{test_entry}()\n  br i1 %test_ret, label %pass, label %fail\npass:\n  ret i32 0\nfail:\n  %test_ret_i32 = zext i1 %test_ret to i32\n  call void @iris_print_bool(i32 %test_ret_i32)\n  ret i32 1\n}}\n")
         }
         "i64" => {
-            format!("\ndefine i32 @main(i32 %argc, ptr %argv) {{\nentry:\n  call void @iris_set_argv(i32 %argc, ptr %argv)\n  %test_ret = call i64 @{test_entry}()\n  %test_ok = icmp eq i64 %test_ret, 0\n  br i1 %test_ok, label %pass, label %fail\npass:\n  ret i32 0\nfail:\n  call void @iris_print_i64(i64 %test_ret)\n  ret i32 1\n}}\n")
+            format!("\ndefine i32 @main(i32 %argc, ptr %argv) {{\nentry:\n  call void @iris_set_argv(i32 %argc, ptr %argv)\n{state_ctor_call}  %test_ret = call i64 @{test_entry}()\n  %test_ok = icmp eq i64 %test_ret, 0\n  br i1 %test_ok, label %pass, label %fail\npass:\n  ret i32 0\nfail:\n  call void @iris_print_i64(i64 %test_ret)\n  ret i32 1\n}}\n")
         }
         "i32" => {
-            format!("\ndefine i32 @main(i32 %argc, ptr %argv) {{\nentry:\n  call void @iris_set_argv(i32 %argc, ptr %argv)\n  %test_ret = call i32 @{test_entry}()\n  %test_ok = icmp eq i32 %test_ret, 0\n  br i1 %test_ok, label %pass, label %fail\npass:\n  ret i32 0\nfail:\n  call void @iris_print_i32(i32 %test_ret)\n  ret i32 1\n}}\n")
+            format!("\ndefine i32 @main(i32 %argc, ptr %argv) {{\nentry:\n  call void @iris_set_argv(i32 %argc, ptr %argv)\n{state_ctor_call}  %test_ret = call i32 @{test_entry}()\n  %test_ok = icmp eq i32 %test_ret, 0\n  br i1 %test_ok, label %pass, label %fail\npass:\n  ret i32 0\nfail:\n  call void @iris_print_i32(i32 %test_ret)\n  ret i32 1\n}}\n")
         }
         _ => format!(
-            "\ndefine i32 @main(i32 %argc, ptr %argv) {{\nentry:\n  call void @iris_set_argv(i32 %argc, ptr %argv)\n  %test_ret = call {ret_llvm} @{test_entry}()\n  ret i32 2\n}}\n",
+            "\ndefine i32 @main(i32 %argc, ptr %argv) {{\nentry:\n  call void @iris_set_argv(i32 %argc, ptr %argv)\n{state_ctor_call}  %test_ret = call {ret_llvm} @{test_entry}()\n  ret i32 2\n}}\n",
         ),
     };
     base.push_str(&wrapper);
@@ -729,19 +756,20 @@ fn emit_llvm_ir_impl(
         )?;
     }
     let bare_metal = triple.starts_with("avr") || triple.contains("-none");
-    if !module.state_vars().is_empty()
+    let has_state_ctor = !module.state_vars().is_empty()
         && !bare_metal
         && module
             .function_by_name(crate::ir::module::STATE_INIT_FN)
-            .is_some()
-    {
+            .is_some();
+    if has_state_ctor {
+        writeln!(out, "@__iris_state_initialized = internal global i1 false")?;
         writeln!(
             out,
             "@llvm.global_ctors = appending global [1 x {{ i32, ptr, ptr }}] [{{ i32, ptr, ptr }} {{ i32 65535, ptr @__iris_state_ctor, ptr null }}]"
         )?;
         writeln!(
             out,
-            "define internal void @__iris_state_ctor() {{\nentry:\n  %ready = call i64 @{}()\n  ret void\n}}",
+            "define internal void @__iris_state_ctor() {{\nentry:\n  %already = load i1, ptr @__iris_state_initialized\n  br i1 %already, label %done, label %init\ninit:\n  store i1 true, ptr @__iris_state_initialized\n  %ready = call i64 @{}()\n  br label %done\ndone:\n  ret void\n}}",
             crate::ir::module::STATE_INIT_FN
         )?;
         writeln!(out)?;
@@ -1156,6 +1184,9 @@ fn emit_llvm_ir_impl(
     if entry_llvm_name.is_some() {
         writeln!(out, "define i32 @main(i32 %argc, ptr %argv) {{")?;
         writeln!(out, "  call void @iris_set_argv(i32 %argc, ptr %argv)")?;
+        if has_state_ctor {
+            writeln!(out, "  call void @__iris_state_ctor()")?;
+        }
         writeln!(out, "  %r = call i64 @iris_main()")?;
         writeln!(out, "  %r32 = trunc i64 %r to i32")?;
         writeln!(out, "  ret i32 %r32")?;
