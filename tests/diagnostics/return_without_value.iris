@@ -1,0 +1,8 @@
+// expect: E0209 at 5:5
+// message: `return` needs a value
+
+def f() -> i64 {
+    return
+}
+
+def main() -> i64 { f() }

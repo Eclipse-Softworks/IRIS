@@ -22,6 +22,37 @@ release bundles and installers use LLVM 23.1.1.
 On Windows install LLVM and a MinGW UCRT64 sysroot. See
 [requirements](REQUIREMENTS.md) for discovery settings and platform dependencies.
 
+## Check the toolchain
+
+```text
+iris doctor
+```
+
+It builds and runs a program natively and in the interpreter, and checks
+clang, the linker, LLVM-C, the debugger and (if present) ROS 2. Anything
+missing is listed with the command that fixes it.
+
+## Start a project
+
+```text
+iris new app hello          # also: cli, server, ros2, controller
+cd hello
+iris run main.iris
+iris test
+```
+
+Each template comes with tests that pass. While you work:
+
+```text
+iris watch main.iris        # run again on every save (--test, --check)
+iris check                  # every error, without building
+iris explain E0109          # what an error code means
+```
+
+When the compiler itself fails ("internal compiler error"), `iris bug-report
+main.iris` collects the program, the compiler's output and the environment
+into one folder to attach to an issue. Nothing is sent anywhere.
+
 ## First program
 
 ```iris

@@ -28,5 +28,6 @@
 
   // Surface clippy findings without a second flag set fighting the check above.
   "rust-analyzer.check.command": "check",
-  "rust-analyzer.check.allTargets": true
+  "rust-analyzer.check.allTargets": true,
+  "rust-analyzer.checkOnSave": false
 }

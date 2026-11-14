@@ -1,0 +1,12 @@
+// expect: E0403 at 9:18
+// message: index 10 is out of bounds for length 10
+// The range runs one past the tensor; only that iteration fails.
+bring std.tensor
+def main() -> i64 {
+    val a = tensor_ad_from_data(list(1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0), list(10))
+    val out = tensor_ad_from_data(list(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0), list(11))
+    par for i in 0..11 {
+        out[i] = a[i] * a[i]
+    }
+    return 0
+}

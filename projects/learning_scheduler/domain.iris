@@ -1,0 +1,119 @@
+pub record Job { id: i64, arrival: i64, size: i64, kind: i64, work: i64 }
+pub record CostModel { first: f64, second: f64, bias: f64 }
+pub choice Policy { Fifo, Size, Learned }
+pub record Report {
+    mean_turnaround: f64, p95: i64, p99: i64, max_wait: i64,
+    makespan: i64, aged: i64, order: list<i64>
+}
+// Initialize a new cost model with default parameters.
+pub def initial_model() -> CostModel {
+    return CostModel { first: 0.3, second: 0.3, bias: 0.02 }
+}
+
+// validate that the cost model parameters are within reasonable bounds. If not, scheduling falls back to FIFO.
+pub def valid_model(weights: CostModel) -> bool {
+    return weights.first >= 0.01 && weights.first <= 2.0
+        && weights.second >= 0.01 && weights.second <= 2.0
+        && weights.bias >= 0.0 && weights.bias <= 1.0
+}
+
+// Labels are execution observations. Scheduling scores never read job.work.
+pub def estimate(weights: CostModel, job: Job) -> f64 {
+    val slope = if job.kind == 0 { weights.first } else { weights.second };
+    return 100.0 * (slope * to_f64(job.size) / 12.0 + weights.bias)
+}
+
+// workload generator: deterministic, reproducible, and tunable. Each job has
+// a size (1..12), a kind (0 or 1), and a work
+pub def workload(count: i64, seed: i64, regime: i64) -> list<Job> {
+    assert(count >= 8 && count <= 128 && seed >= 1 && seed <= 1000000);
+    val jobs: list<Job> = list();
+    var rng = seed;
+    for index in 0 .. count {
+        rng = (rng * 48271) % 2147483647;
+        val size = 1 + rng % 12;
+        val kind = (rng / 17) % 2;
+        val shifted = regime == 1 || (regime == 2 && index >= count / 2);
+        val heavy = if shifted { kind == 0 } else { kind == 1 };
+        val work = size * if heavy { 8 } else { 2 } + 2;
+        list_push(jobs, Job { id: index, arrival: index * 3, size: size, kind: kind, work: work });
+    };
+    return jobs
+}
+
+// policy_name returns a human-readable name for a scheduling policy.
+pub def policy_name(policy: Policy) -> str {
+    return when policy { Policy.Fifo => "FIFO", Policy.Size => "SIZE", Policy.Learned => "LEARNED" }
+}
+
+// Work-conserving, nonpreemptive, one-worker replay. Aging takes precedence
+// over prediction; once a job waits 120 work units, choose oldest arrival.
+pub def replay(jobs: list<Job>, weights: CostModel, policy: Policy) -> Report {
+    val done: list<bool> = list();
+    val turns: list<i64> = list();
+    val order: list<i64> = list();
+    for index in 0 .. list_len(jobs) { list_push(done, false) };
+    var clock = 0;
+    var sum = 0;
+    var max_wait = 0;
+    var aged = 0;
+    for completed in 0 .. list_len(jobs) {
+        var chosen = -1;
+        var best = 1.0e30;
+        var oldest = -1;
+        var oldest_time = 1000000000;
+        var next_arrival = 1000000000;
+        for index in 0 .. list_len(jobs) {
+            val job = list_get(jobs, index);
+            if !list_get(done, index) {
+                if job.arrival < next_arrival { next_arrival = job.arrival };
+                if job.arrival <= clock {
+                    if clock - job.arrival >= 120 && job.arrival < oldest_time {
+                        oldest = index;
+                        oldest_time = job.arrival;
+                    };
+                    val score = when policy {
+                        Policy.Fifo => to_f64(job.arrival),
+                        Policy.Size => to_f64(job.size),
+                        Policy.Learned => if valid_model(weights) { estimate(weights, job) } else { to_f64(job.arrival) }
+                    };
+                    if score < best { best = score; chosen = index };
+                };
+            };
+        };
+        if oldest >= 0 { chosen = oldest; aged = aged + 1 };
+        // No arrived jobs: advance to the earliest remaining arrival.
+        if chosen < 0 {
+            clock = next_arrival;
+            for index in 0 .. list_len(jobs) {
+                if !list_get(done, index) && list_get(jobs, index).arrival == clock && chosen < 0 { chosen = index };
+            };
+        };
+        assert(chosen >= 0);
+        val job = list_get(jobs, chosen);
+        val wait = clock - job.arrival;
+        if wait > max_wait { max_wait = wait };
+        clock = clock + job.work;
+        val turnaround = clock - job.arrival;
+        sum = sum + turnaround;
+        list_push(turns, turnaround);
+        list_push(order, chosen);
+        list_set(done, chosen, true);
+    };
+    // Explicit order statistics rather than interpolating small-sample tails.
+    for left in 0 .. list_len(turns) {
+        for right in (left + 1) .. list_len(turns) {
+            if list_get(turns, right) < list_get(turns, left) {
+                val previous = list_get(turns, left);
+                list_set(turns, left, list_get(turns, right));
+                list_set(turns, right, previous);
+            };
+        };
+    };
+    return Report {
+        mean_turnaround: to_f64(sum) / to_f64(list_len(jobs)),
+        p95: list_get(turns, (list_len(turns) * 95 + 99) / 100 - 1),
+        p99: list_get(turns, (list_len(turns) * 99 + 99) / 100 - 1),
+        max_wait: max_wait, makespan: clock, aged: aged, order: order
+    }
+}

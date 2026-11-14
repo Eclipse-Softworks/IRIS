@@ -12,7 +12,7 @@ bring std.fs
 
 ## math
 
-Numeric utilities implemented in pure IRIS.
+Numeric utilities, constants, trigonometry, interpolation, number theory, and descriptive statistics implemented in pure IRIS.
 
 ```iris
 bring std.math
@@ -25,7 +25,7 @@ val e = is_even(4)           // true
 val o = is_odd(3)            // true
 ```
 
-**Functions:** `gcd`, `lcm`, `abs_i64`, `clamp_i64`, `min_i64`, `max_i64`, `sign_i64`, `is_even`, `is_odd`
+**Functions:** `gcd`, `lcm`, `abs_i64`, `clamp_i64`, `min_i64`, `max_i64`, `sign_i64`, `is_even`, `is_odd`, `pi`, `tau`, `e_const`, `sqrt2`, `ln2`, `ln10`, `abs_f64`, `clamp_f64`, `min_f64`, `max_f64`, `sign_f64`, `deg_to_rad`, `rad_to_deg`, `atan2`, `hypot`, `sinh`, `cosh`, `tanh`, `lerp`, `inv_lerp`, `remap`, `smoothstep`, `is_close`, `round_to_decimals`, `is_prime`, `next_prime`, `factorial`, `permutations`, `combinations`, `is_power_of_two`, `next_power_of_two`, `integer_sqrt`, `pow_i64`, `sum_f64`, `mean`, `variance`, `std_dev`, `min_in_list`, `max_in_list`
 
 ---
 
@@ -47,7 +47,7 @@ val tl  = trim_start("  hello  ")    // "hello  "
 val te  = trim_end("  hello  ")      // "  hello"
 ```
 
-**Functions:** `words`, `lines`, `str_join`, `is_empty`, `pad_left`, `pad_right`, `str_repeat`, `trim_start`, `trim_end`, `count`, `strip_prefix`, `strip_suffix`, `split_once`, `split_n`, `replace_n`, `normalize_whitespace`, `is_blank`
+**Functions:** `words`, `lines`, `str_join`, `is_empty`, `pad_left`, `pad_right`, `str_repeat`, `trim_start`, `trim_end`, `count`, `strip_prefix`, `strip_suffix`, `split_once`, `split_n`, `replace_n`, `normalize_whitespace`, `is_blank`, `capitalize`, `truncate`, `reverse_str`, `is_ascii_digit`, `is_ascii_alphabetic`, `is_ascii_alphanumeric`, `is_ascii_whitespace`, `levenshtein_distance`, `hamming_distance`
 
 `trim_start`, `trim_end`, and `words` recognize ASCII whitespace (space and
 bytes 9-13). They preserve UTF-8 content; `words` collapses whitespace runs and
@@ -630,13 +630,17 @@ bring std.crypto
 
 val id  = generate_uuid()               // UUID v4 string
 val h   = hash_code("hello")            // i64 hash
-val b64 = encode_b64("hello")           // base64 string
-val raw = decode_b64(b64)               // original string
+val b64 = to_base64("hello")            // base64 string
+val raw = from_base64(b64)              // original string
 val hex = to_hex("hello")               // hex-encoded
 val dec = from_hex(hex)                 // decoded
+val sha = hash_sha256("hello")          // hex digest
+val md5 = md5_str("hello")              // hex digest (for identifiers such as JA3, not security)
 ```
 
-**Functions:** `generate_uuid`, `hash_code`, `encode_b64`, `decode_b64`, `to_hex`, `from_hex`
+**Functions:** `generate_uuid`, `hash_code`, `to_base64`, `from_base64`, `to_hex`, `from_hex`,
+`hash_sha256`, `sha1_str`, `sha1_bytes`, `md5_str`, `md5_bytes`, `md5_hex`, `hmac_simple`,
+`hmac_verify`, `timing_safe_equal`, and AES-128 (`aes128_encrypt_cbc`, `aes128_decrypt_cbc`)
 
 ---
 
@@ -672,6 +676,10 @@ val line = csv_emit_row(cells)        // "a,b,c"
 ```
 
 **Functions:** `csv_row_count`, `csv_col_count`, `csv_get_row`, `csv_parse_row`, `csv_emit_row`
+
+These split on every comma and every line: a quoted field that holds a
+comma, a quote or a line break is split wrongly. For RFC 4180 input use
+`csv_records` in [projects/cli_tools/csvkit.iris](../projects/cli_tools/csvkit.iris).
 
 ---
 
@@ -716,36 +724,84 @@ val reward = bandit_pull(2, 4)
 
 ## ais
 
-Autonomous Intelligent Systems framework for perceptions, decisions, actions, and persistence.
+Autonomous intelligent systems: an agent that infers its state, chooses by
+expected free energy and learns its model; an online world model that keeps a
+plant viable as its dynamics change; a safety policy over the state and the
+model's predictions; and the older building blocks (homeostat, MAPE-K loop,
+evolution, EWC, bandit strategies). Each part is shown working in a
+`tests/test_ais_*.iris` file, on both backends.
 
 ```iris
 bring std.ais
 
-// Run autonomous agent loop
-val total_steps = agent_loop(
-    || sensor_read(), 
-    |obs| predict(obs), 
-    |act| actuate(act), 
-    1000
-)
+// Active inference: a two-state world where action a leads to state a.
+val m = pomdp_new(2, 2, 2)
+pomdp_set_likelihood(m, 0, list(1.0, 0.0), 100.0)   // state 0 shows obs 0
+pomdp_set_likelihood(m, 1, list(0.0, 1.0), 100.0)
+for a in 0..2 {
+    for s in 0..2 {
+        val row: list<f64> = list(0.0, 0.0)
+        list_set(row, a, 1.0)
+        pomdp_set_transition(m, a, s, row, 100.0)
+    }
+}
+pomdp_set_preferences(m, list(0.0, 3.0))            // prefer observation 1
+var agent = aif_agent_new(m, 1, 4.0)                 // horizon 1, precision 4
+agent = aif_observe(agent, 0)                        // exact Bayes
+val step = aif_decide(agent)                         // (agent, decision)
+assert(step.1.action == 1)
 
-// Decision strategy sampling
-val best = argmax([1.0, 2.5, 0.5])         // 1
-val a1   = epsilon_greedy([1.0, 2.5], 0.1) // random or best
-val a2   = softmax_sample([1.0, 2.0, 0.5])
-val a3   = boltzmann_sample([1.0, 2.0], 1.5)
+// An online world model: next = W [state, action, 1], fitted by RLS.
+var wm = wm_new(1, 1, 0.98)
+wm = wm_learn(wm, list(20.0), list(1.0), list(21.5))
+val next = wm_predict(wm, list(20.0), list(1.0))
 
-// Reward engineering pipelines
-val returns = discount_rewards([0.0, 1.0], 0.99)
-val norm_returns = normalize_input(returns)
-val clipped = clip_list(norm_returns, 0.0, 1.0)
-
-// Model persistence
-val ok = model_save(weights, "weights.txt")
-val loaded_weights = model_load("weights.txt")
+// A safety policy: never heat above 58, cool above 70.
+val safety = safety_policy_new()
+safety_forbid_when(safety, "no heat above 58", 0, ">", 58.0, 1, 5)
+safety_require_when(safety, "cool above 70", 0, ">", 70.0, 2, 10)
+val allowed = safety_permitted_now(safety, list(60.0), 3)   // heat forbidden
+assert(!list_get(allowed, 1))
 ```
 
-**Functions:** `agent_loop`, `agent_loop_rewards`, `argmax`, `epsilon_greedy`, `softmax_sample`, `boltzmann_sample`, `discount_rewards`, `gae`, `normalize_list`, `normalize_input`, `clip_list`, `model_save`, `model_load`
+**Active inference** (`Pomdp`, `AifAgent`, `AifDecision`, `PolicyValue`):
+`pomdp_new`, `pomdp_set_likelihood`, `pomdp_set_transition`,
+`pomdp_set_preferences`, `pomdp_set_prior`, `pomdp_predict`,
+`pomdp_observation_probs`, `pomdp_posterior`, `pomdp_policy_value` (risk,
+ambiguity, information gain, utility, novelty and G), `policies_all`,
+`pomdp_learn_likelihood`, `pomdp_learn_transition`, `aif_agent_new`,
+`aif_with_drives` (weights on information and on novelty: 0, 0 is a purely
+reward-seeking agent), `aif_with_learning`, `aif_with_sampling`, `aif_reset`,
+`aif_observe`, `aif_decide`, `aif_decide_permitted`.
+
+**World model and viability** (`LinearModel`, `ViabilityChoice`):
+`linear_model_new`, `linear_model_predict`, `linear_model_update`,
+`linear_model_variance`, `wm_new`, `wm_features`, `wm_learn`, `wm_predict`,
+`wm_rollout`, `viability_choose`, and from v2 `viability_bound_new`,
+`viability_assess`.
+
+**Safety** (`SafetyPolicy`, `SafetyRule`, `SafetyVerdict`):
+`safety_policy_new`, `safety_forbid_when`, `safety_require_when`,
+`safety_keep_within` (forbids an action the world model predicts would leave
+a range), `safety_condition`, `safety_permitted_now`, `safety_permitted`,
+`safety_required`, `safety_resolve` (with an audit trail).
+
+**Autopilot** (`Autopilot`, `AutopilotStep`): `autopilot_new`,
+`autopilot_step`, `autopilot_with_learning` -- learns the model from each
+step, applies the safety policy, and chooses the viable action.
+
+**Governor, continual learning, persistence:** `software_governor_step`
+(`GovernorStep`), `ewc_consolidate`, `ewc_penalty_grad`, `pomdp_save`,
+`pomdp_load`, `linear_model_save`, `linear_model_load`.
+
+**Building blocks:** `probs_normalize`, `probs_softmax`, `probs_log_softmax`,
+`probs_kl`, `probs_argmax`, `probs_sample`, `agent_loop`,
+`agent_loop_rewards`, `mapek_agent_new`, `mapek_step`, `mapek_run`,
+`homeostat_new`, `homeostat_update`, `homeostat_is_safe`, `argmax`,
+`epsilon_greedy`, `softmax_sample`, `boltzmann_sample`, `ucb_select`,
+`discount_rewards`, `gae`, `normalize_list`, `normalize_input`, `clip_list`,
+`population_new`, `population_evolve`, `ewc_new`, `ewc_penalty`,
+`model_save`, `model_load`.
 
 ---
 
@@ -760,18 +816,85 @@ bring std.net
 val connected = tcp_connect_checked("127.0.0.1", 8080, 2000, 5000)
 if is_ok(connected) {
     val stream = unwrap(connected)
-    val sent = tcp_write_exact(stream, "ping")
-    val reply = tcp_read_bounded(stream, 4096)
-    tcp_shutdown(stream, 2);
-    tcp_close_stream(stream);
+    val sent = tcp_write_all_checked(stream, "ping")
+    val reply = tcp_read_with_timeout(stream, 2000, 4096)
+    tcp_shutdown_checked(stream);
+    tcp_close_checked(stream);
 }
 ```
+
+`tcp_listen_checked` and `tcp_listen_on` listen on every interface;
+`tcp_listen_local_checked` and `tcp_listen_local` on 127.0.0.1 only, which
+is what a service meant for this machine should use. The `_checked` reads
+and accepts block their thread (bounded by the timeouts). In an `async def`,
+`await tcp_accept_async(listener, read_ms, write_ms)` and
+`await tcp_read_async(stream, max_bytes)` wait for a connection or for data
+without blocking: other tasks and timers run meanwhile, so one thread can
+serve many connections. They wait on the socket's readiness (`poll`, or
+`WSAPoll` on Windows) through the builtin `async_readable(handle)`; writes
+still block until the data is handed to the operating system.
 
 **Records:** `TcpStream`, `TcpListener`
 
 **Functions:** `tcp_connect_checked`, `tcp_listen_checked`,
-`tcp_accept_checked`, `tcp_set_timeouts`, `tcp_write_exact`,
-`tcp_read_bounded`, `tcp_shutdown`, `tcp_close_stream`, `tcp_close_listener`
+`tcp_listen_local_checked`, `tcp_accept_checked`, `tcp_accept_async`,
+`tcp_write_all_checked`, `tcp_read_bounded`, `tcp_read_async`, `tcp_read_with_timeout`, `tcp_shutdown_checked`,
+`tcp_close_checked`, `tcp_close_listener`, and the raw-handle forms
+`tcp_listen_on`, `tcp_listen_local`, `tcp_accept_conn`, `tcp_read_conn`,
+`tcp_write_conn`, `tcp_close_conn`
+
+---
+
+## pcap
+
+libpcap captures and Ethernet, IPv4, TCP and UDP dissection. Reads classic
+libpcap in either byte order, with microsecond or nanosecond timestamps (not
+pcapng); writes big-endian microsecond files.
+
+```iris
+bring std.buffer
+bring std.pcap
+
+val bytes = file_read_bytes("capture.pcap")      // list<i64>, NULs kept
+val buf = ByteBuffer { data: bytes, len: list_len(bytes) }
+val header = unwrap(pcap_parse_global_header(buf))
+var offset = 24
+val first = pcap_read_packet(buf, offset, header)  // next: offset + 16 + incl_len
+```
+
+**Records:** `PcapGlobalHeader`, `PcapPacket`, `EthernetFrame`, `Ipv4Packet`,
+`TcpSegment`, `UdpDatagram`
+
+**Functions:** `pcap_parse_global_header`, `pcap_read_packet`,
+`dissect_ethernet`, `dissect_ipv4`, `dissect_tcp`, `dissect_udp`,
+`pcap_create_global_header`, `pcap_create_packet_record`, `pcap_format_ip`,
+`pcap_format_mac`
+
+---
+
+## tls
+
+TLS ClientHello dissection and fingerprints. JA3 follows Salesforce's
+definition (version, ciphers, extensions, groups, point formats, GREASE
+removed; MD5) and JA4 FoxIO's.
+
+```iris
+bring std.tls
+
+val tls_record = tls_parse_record(payload)             // a TCP payload
+val hello = unwrap(tls_parse_client_hello(unwrap(tls_record).payload))
+val ja3 = tls_calculate_ja3(hello)                     // .ja3_str, .ja3_hash
+val ja4 = tls_calculate_ja4(hello, false)              // .ja4
+```
+
+**Records:** `TlsRecord`, `TlsClientHello`, `Ja3Result`, `Ja4Result`
+
+**Functions:** `tls_parse_record`, `tls_parse_client_hello`,
+`tls_calculate_ja3`, `tls_calculate_ja4`, `tls_is_grease`
+
+`matched_threat` is a coarse heuristic over the cipher and extension lists,
+not a lookup in a fingerprint database; compare fingerprints with a list you
+trust, as `projects/cli_tools/tlsfp.iris --known` does.
 
 ---
 
@@ -789,12 +912,29 @@ list_push(messages, llm_message("user", "Summarize this event"));
 val response = llm_chat(client, messages, 0.2, 256)
 ```
 
-**Records:** `LlmClient`, `LlmMessage`, `LlmTool`, `LlmResponse`,
+A tool loop: send the tool table, run what the model asks for, and send each
+result back tied to its call:
+
+```iris
+val reply = unwrap(llm_chat_with_tools(client, messages, 0.0, 512, tools_json))
+val calls = llm_tool_calls(reply)                  // list<LlmToolCall>: id, name, arguments_json
+if list_len(calls) > 0 {
+    list_push(messages, llm_assistant_turn(reply));
+    val call = list_get(calls, 0)
+    list_push(messages, llm_tool_result(call.id, run_my_tool(call.name, call.arguments_json)));
+}
+```
+
+Treat `arguments_json` as untrusted input: decode and check it before acting
+([projects/llm_agent](../projects/llm_agent/README.md) does this per tool).
+
+**Records:** `LlmClient`, `LlmMessage`, `LlmTool`, `LlmToolCall`, `LlmResponse`,
 `EmbeddingResponse`, `LocalModel`
 
-**Functions:** `llm_chat`, `llm_chat_with_tools`, `llm_embed`,
-`llm_request_json`, `llm_response_from_json`, `local_onnx_model`,
-`local_model_run`, `local_pytorch_train_step`
+**Functions:** `llm_chat`, `llm_chat_with_tools`, `llm_tool_calls`,
+`llm_assistant_turn`, `llm_tool_result`, `llm_embed`, `llm_request_json`,
+`llm_response_from_json`, `local_onnx_model`, `local_model_run`,
+`local_pytorch_train_step`
 
 ---
 
@@ -828,7 +968,40 @@ Standalone native programs currently report the compiler service unavailable.
 
 ## async
 
-Structured concurrency helpers and scheduler telemetry.
+Task helpers, structured concurrency, and scheduler telemetry.
+
+Calling an `async def` returns a `task<T>` and schedules it on the calling
+thread's executor; `await` it for the result. The compiler turns each
+`async def` body into a state machine, so an `await` inside one suspends only
+that task. The language builtins for tasks are `async_sleep(ms)`,
+`async_yield()`, `async_recv(ch)`, `async_readable(socket)` (the socket
+can be read; see `net`), `async_any(t1, t2, ...)` /
+`async_any(tasks)` (the index of the first to finish; losing timers and
+receives are cancelled), `task_done(t)`, `task_cancel(t)` and
+`task_cancelled(t)`.
+
+```iris
+bring std.async
+
+async def fetch(id: i64, delay: i64) -> i64 {
+    await async_sleep(delay);
+    id * 10
+}
+
+def main() -> i64 effect alloc, thread, time {
+    // Both tasks run concurrently.
+    val tasks: list<task<i64>> = list()
+    list_push(tasks, fetch(1, 30));
+    list_push(tasks, fetch(2, 10));
+    val results = await join_all(tasks)
+    // A deadline: none if the task has not finished in 20 ms.
+    val late = await timeout_after(fetch(3, 500), 20)
+    0
+}
+```
+
+**Task functions:** `timeout_after[T](t, ms) -> option<T>`,
+`join_all[T](tasks) -> list<T>`, `cancel_all[T](tasks) -> i64`
 
 ```iris
 bring std.async
@@ -844,16 +1017,405 @@ task_group_join(group);
 val cancelled = task_group_cancelled(group)
 ```
 
-**Functions:** `new_task_group`, `cancellation_requested`,
+**Structured concurrency and channels:** `new_task_group`, `cancellation_requested`,
 `task_group_cancelled`, `async_worker_count`, `async_queued_tasks`,
 `try_recv`, `channel_bounded`, `channel_unbounded`, `channel_len`, `delay`,
 `sleep`, `num_threads`, `select_first`, `recv_timeout_ms`,
 `gc_collect_sweep`, `gc_get_stats`
 
-Native `spawn`, `spawn(group)`, and lowered `async def` work run on the bounded
-executor. Cancellation is cooperative: queued grouped tasks skip their body at
-entry, and long-running tasks should call `cancellation_requested()` at bounded
+Native `spawn` and `spawn(group)` jobs run on the bounded worker pool
+(`async_worker_count`, `async_queued_tasks`); `async def` tasks do not use it.
+Task-group cancellation is cooperative: queued grouped jobs skip their body at
+entry, and long-running jobs should call `cancellation_requested()` at bounded
 intervals.
+
+---
+
+## ros2
+
+ROS 2 on rclcpp, rclcpp_action, rclcpp_lifecycle and tf2_ros, through the
+IRIS ROS 2 bridge (build it with `python build_ros2_bridge.py`; run in a
+sourced ROS 2 environment). Verified on Windows Humble with Cyclone DDS;
+Linux is not built yet and each context has one single-threaded executor.
+Build, model and limits: [ros2-build.md](ros2-build.md).
+
+Callbacks become events: `spin_once(ctx, timeout_ms)` runs the context's
+executor and returns a `ROS2Event` (`kind`, `source`, `message`, `id`, `aux`).
+Messages are handles to real ROS 2 messages of any installed type, read and
+written by field path.
+
+```iris
+bring std.ros2
+
+def main() -> i64 {
+    val ctx = context_create()
+    val node = node_create(ctx, "follower", "")
+    val scans = subscription_create_qos(node, "/scan", "sensor_msgs/msg/LaserScan", qos_sensor_data())
+    val cmd = publisher_create(node, "/cmd_vel", "geometry_msgs/msg/Twist")
+    val gain = param_declare_f64_range(node, "gain", 0.5, 0.0, 2.0, "speed per metre")
+    val ev = spin_once(ctx, 100)
+    if is_message(ev, scans) {
+        val nearest = msg_f64(ev.message, "range_min")
+        publish_twist(cmd, make_twist(param_f64(node, "gain") * nearest, 0.0, 0.0, 0.0, 0.0, 0.0));
+    };
+    assert(context_destroy(ctx));
+    0
+}
+```
+
+**Nodes and the executor:** `context_create`, `context_create_with(args,
+domain_id)`, `node_create`, `node_create_with(ctx, name, ns, args, flags)`,
+`lifecycle_node_create`, `spin_once`, `spin_some`, `event_text`, `is_message`,
+`is_timer`, `is_request`, `is_response`, `is_goal`, `is_cancel`,
+`is_parameter_change`, `is_transition`, `node_now_ns`, `log_info`/`warn`/
+`error`/`debug`, `graph_topics`/`services`/`nodes`
+
+**Messages:** `msg_new`, `msg_from_json`, `msg_free`, `msg_clone`,
+`msg_type`, `msg_json`, `msg_get_json`/`msg_set_json`, `msg_f64`/`i64`/
+`bool`/`str` and their `msg_set_*`, `msg_f64s`/`msg_set_f64s`, `msg_len`,
+`msg_resize`, `msg_has`, `msg_stamp`/`msg_set_stamp`, `msg_schema`
+
+**Topics:** `publisher_create(_qos)`, `publisher_msg`, `publish_msg`,
+`publish_json`, `subscription_create(_qos)`, `take_msg`, `wait_for_message`,
+typed `publish_*`/`take_*` for Float64, Int64, String, Vector3, Twist, Pose;
+QoS presets `qos_default`, `qos_sensor_data`, `qos_control`, `qos_latched`,
+`qos_keep_last`, `qos_best_effort`
+
+**Services, timers, parameters, lifecycle:** `service_create`, `request_of`,
+`response_of`, `service_reply`, `client_create`, `client_request`,
+`client_call`, `client_send`, `client_wait_response`, `timer_create`,
+`wall_timer_create`, `param_declare_f64`/`i64`/`bool`/`str`/`json`,
+`param_declare_*_range`, `param_f64`/…, `param_set_*` (false when rclcpp
+rejects the value), `lifecycle_configure`/`activate`/`deactivate`/`cleanup`/
+`shutdown`, `lifecycle_state`, `lifecycle_set_result`
+
+**Actions:** `action_server_create(_with)`, `goal_of`, `goal_request`,
+`goal_feedback_msg`, `goal_publish_feedback`, `goal_result_msg`,
+`goal_succeed`/`abort`/`canceled`, `action_client_create`, `action_goal_msg`,
+`action_send_goal`, `action_cancel`, `action_status`, `action_wait_result`
+
+**tf2:** `tf_buffer_create(node)` (listener on /tf and /tf_static),
+`tf_buffer_local()`, `tf_set`, `tf_lookup`, `tf_lookup_at`,
+`tf_can_transform`, `tf_broadcaster_create`, `tf_static_broadcaster_create`,
+`tf_send`, plus pure transform arithmetic (`transform_compose`,
+`transform_inverse`, `transform_point`, quaternion helpers) that needs no
+ROS 2 install.
+
+---
+
+## adaptive
+
+Adaptive AI runtime primitives for online learning, risk awareness, self-training, and adaptive behavior.
+
+```iris
+bring std.adaptive
+
+val handle = adaptive_new("controller", 4, 0.05, 0.1)
+adaptive_record_error(handle, 0.02);
+val safe = !adaptive_is_unsafe(handle)
+val conf = adaptive_confidence(handle)
+adaptive_free(handle);
+```
+
+**Types:** `RiskMetrics = (f64, f64, i64, i64, f64, f64)`
+
+**Functions:** `adaptive_new`, `adaptive_free`, `adaptive_name`, `adaptive_get_param`, `adaptive_set_param`, `adaptive_n_params`, `adaptive_learning_rate`, `adaptive_set_learning_rate`, `adaptive_record_error`, `adaptive_is_unsafe`, `adaptive_set_risk_threshold`, `adaptive_should_retrain`, `adaptive_set_retrain_threshold`, `adaptive_adapt_threshold`, `adaptive_current_threshold`, `adaptive_observation_count`, `adaptive_mean_error`, `adaptive_max_error`, `adaptive_error_count`, `adaptive_last_risk`, `adaptive_confidence`, `adaptive_reset_stats`, `adaptive_predict`, `adaptive_train_step`, `adaptive_train_batch`, `risk_mean_error`, `risk_max_error`, `risk_observations`, `risk_errors`
+
+---
+
+## buffer
+
+Safe, length-tracked binary byte buffers handling arbitrary binary protocols and embedded null bytes (`0x00`) without truncation.
+
+```iris
+bring std.buffer
+
+val buf = byte_buffer_new()
+val b1  = byte_buffer_push(buf, 0x7F)
+val b2  = byte_buffer_push(b1, 0x00)
+val len = byte_buffer_len(b2)            // 2
+val hex = byte_buffer_to_hex(b2)         // "7f00"
+```
+
+**Records:** `ByteBuffer { data: list<i64>, len: i64 }`
+
+**Functions:** `byte_buffer_new`, `byte_buffer_zeros`, `byte_buffer_push`, `byte_buffer_get`, `byte_buffer_set`, `byte_buffer_len`, `byte_buffer_to_hex`, `byte_buffer_from_hex`, `byte_buffer_slice`, `byte_buffer_append`, `byte_buffer_read_u16_be`, `byte_buffer_write_u16_be`, `byte_buffer_read_u32_be`, `byte_buffer_write_u32_be`
+
+---
+
+## container
+
+Unified generic container interfaces and higher-kinded type abstractions across `list` and `option`.
+
+```iris
+bring std.container
+
+val xs = list(1, 2, 3)
+val sz = xs.size()                      // 3
+val has = xs.has_any()                  // true
+val f = xs.first()                      // some(1)
+```
+
+**Traits:** `Sized` (`size`, `is_empty`, `has_any`), `Linear[T]` (`first`, `contains`), `Appendable[T]` (`push`)
+
+**Implementations:** Generic `Sized` and `Linear` implementations for `list<T>` and `option<T>`.
+
+---
+
+## dataframe
+
+Column-based structured tabular storage (mini pandas) with contiguous flat data storage in `list<f64>`.
+
+```iris
+bring std.dataframe
+
+val df0 = df_new(list("x", "y"))
+val df1 = df_add_row(df0, list(1.0, 2.0))
+val df2 = df_add_row(df1, list(3.0, 4.0))
+val n   = df_len(df2)                   // 2
+val xs  = df_col(df2, "x")              // list(1.0, 3.0)
+val avg = df_mean(df2, "y")             // 3.0
+```
+
+**Records:** `DataFrame { columns: list<str>, data: list<f64>, n_rows: i64, n_cols: i64 }`
+
+**Functions:** `df_new`, `df_add_row`, `df_len`, `df_col_idx`, `df_col`, `df_row`, `df_get`, `df_mean`, `df_sum`, `df_filter`
+
+---
+
+## dataset
+
+Machine learning dataset preprocessing, statistical summaries, and feature normalization for numerical data vectors.
+
+```iris
+bring std.dataset
+
+val raw = list(10.0, 20.0, 30.0, 40.0, 50.0)
+val m   = dataset_mean(raw)             // 30.0
+val s   = dataset_std(raw)
+val nrm = dataset_normalize(raw)        // zero-mean, unit-variance
+val pair = dataset_split(raw, 0.8)      // (train_set, test_set)
+```
+
+**Functions:** `dataset_mean`, `dataset_std`, `dataset_normalize`, `dataset_split`, `dataset_batch`, `dataset_min`, `dataset_max`, `dataset_minmax_scale`, `dataset_shuffle`
+
+---
+
+## http_server
+
+HTTP/1.1 server primitives supporting single-threaded blocking and multi-threaded connection handling.
+
+```iris
+bring std.http_server
+bring std.http
+
+def handle(req: str) -> str {
+    val path = http_request_path(req)
+    if path == "/health" {
+        http_response(200, "OK", "{\"status\":\"ok\"}")
+    } else {
+        http_response(404, "Not Found", "not found")
+    }
+}
+
+// Single-threaded server loop:
+// http_serve(8080, |req: str| handle(req))
+
+// Multi-threaded worker pool server loop:
+// http_serve_mt(8080, |req: str| handle(req))
+```
+
+**Functions:**
+- `http_serve(port: i64, handler: |str| -> str) -> i64 effect net`
+- `http_serve_mt(port: i64, handler: |str| -> str) -> i64 effect net, thread`
+
+---
+
+## meta_learning
+
+Adaptive meta-learning and Model-Agnostic Meta-Learning (MAML) style few-shot adaptation routines.
+
+```iris
+bring std.meta_learning
+bring std.adaptive
+
+val task = few_shot_task(support_x, support_y, query_x, query_y)
+val h = adaptive_new("meta_agent", 4, 0.01, 0.1)
+maml_inner_update(h, support_x, support_y, 5, 4, 0.01);
+val q_loss = maml_eval(h, query_x, query_y, 5, 4)
+```
+
+**Types:** `FewShotTask = (list<f64>, list<f64>, list<f64>, list<f64>)`
+
+**Functions:** `few_shot_task`, `maml_inner_update`, `maml_eval`, `meta_loss`
+
+---
+
+## reflect
+
+In-process reflection, program introspection, and dynamic code evaluation.
+
+```iris
+bring std.reflect
+
+if reflect_available() {
+    val res = reflect_eval_i64("def main() -> i64 { 21 * 2 }")
+    when res {
+        ok(v)  => print("Evaluated: " + to_str(v)),
+        err(e) => print("Failed: " + e)
+    }
+}
+```
+
+**Functions:** `reflect_available`, `reflect_eval`, `reflect_eval_i64`, `reflect_validate`
+
+---
+
+## serial
+
+Line-oriented serial I/O communication for microcontrollers and peripheral sensor buses.
+
+```iris
+bring std.serial
+
+val port = serial_open("COM3", 115200)
+serial_write_line(port, "PING\n");
+val line = serial_read_line(port)
+serial_close(port);
+```
+
+**Records:** `Serial { file: i64, port: str, baud: i64 }`
+
+**Functions:** `serial_open`, `serial_close`, `serial_read_line`, `serial_write_line`, `serial_configure`, `serial_encode_packet`, `serial_decode_packet`
+
+---
+
+## speculation
+
+Speculative execution, invariant sandboxing, and reversible transactional rollbacks for safety-critical control pipelines.
+
+```iris
+bring std.speculation
+
+val candidate = || { 40 + 2 }
+val validator = |x: i64| { x > 0 && x <= 100 }
+val result = speculate(candidate, validator) // some(42)
+
+val tx_res = speculate_transactional(validator, || {
+    // Reversible allocations and staged writes
+    42
+})
+```
+
+**Records:** `SpeculationOutcome[T] { success: bool, value: option<T>, reason: str }`
+
+**Functions:** `speculate`, `speculate_transactional`, `speculate_with_fallback`
+
+---
+
+## sql
+
+Embedded SQLite connector helpers and tabular query extraction for supervised learning.
+
+```iris
+bring std.sql
+
+val db = sql_open("telemetry.db")
+val _  = sql_exec(db, "CREATE TABLE IF NOT EXISTS log (id INT, val REAL);")
+val rows = sql_query(db, "SELECT * FROM log;")
+sql_close(db);
+```
+
+**Functions:** `sql_open`, `sql_exec`, `sql_query`, `sql_query_params`, `sql_exec_params`, `sql_close`, `sql_query_xy_params`
+
+---
+
+## svg
+
+Lightweight vector graphics generation in XML SVG format.
+
+```iris
+bring std.svg
+
+var ctx = svg_new(200, 200)
+ctx = svg_rect(ctx, 10.0, 10.0, 50.0, 50.0, "#ff0000");
+ctx = svg_circle(ctx, 100.0, 100.0, 30.0, "#00ff00");
+val xml = svg_finish(ctx)
+```
+
+**Records:** `SVGContext { width: i64, height: i64, content: str }`
+
+**Functions:** `svg_new`, `svg_rect`, `svg_circle`, `svg_line`, `svg_text`, `svg_finish`, `svg_save`
+
+---
+
+## table
+
+In-memory relational table manipulation with column schemas and tab-encoded rows.
+
+```iris
+bring std.table
+
+var t = table_new(list("id", "status"))
+t = table_insert(t, list("1", "active"));
+t = table_insert(t, list("2", "pending"));
+val len = table_len(t)                  // 2
+val row = table_get_row(t, 0)           // list("1", "active")
+```
+
+**Records:** `Table { columns: list<str>, rows: list<str> }`
+
+**Functions:** `table_new`, `table_insert`, `table_len`, `table_col_idx`, `table_get_row`, `table_get`, `table_select`, `table_filter`, `table_encode_row`, `table_decode_row`
+
+---
+
+## termplot
+
+ASCII text-mode plotting for terminal diagnostics and console visualization.
+
+```iris
+bring std.termplot
+
+val vals = list(1.0, 3.5, 7.2, 5.0, 2.1)
+term_plot_bar(vals, 20, "Telemetry Distribution");
+```
+
+**Functions:** `term_plot_bar`
+
+---
+
+## uncertainty
+
+Confidence estimation, Bayesian updating, and uncertainty quantification for adaptive control systems.
+
+```iris
+bring std.uncertainty
+
+val prior = nig_default()
+val post1 = nig_update(prior, 12.5)
+val mean  = nig_mean(post1)
+val var_e = nig_predictive_variance(post1)
+```
+
+**Types:** `NormalInvGamma = (f64, f64, f64, f64)`
+
+**Functions:** `nig_prior`, `nig_default`, `nig_update`, `nig_update_batch`, `nig_mean`, `nig_variance`, `nig_predictive_variance`, `nig_confidence`, `entropy_shannon`, `epistemic_uncertainty`
+
+---
+
+## unicode
+
+Unicode UTF-8 codepoint decoding, character properties, and multibyte string utilities.
+
+```iris
+bring std.unicode
+
+val text = "hello 🌍"
+val count = codepoint_count(text)       // 7
+val first_cp = decode_at(text, 0)       // (104, 1)
+```
+
+**Functions:** `is_continuation`, `codepoint_count`, `decode_at`, `codepoint_to_utf8`, `is_combining`, `is_cjk`, `codepoints`
 
 ---
 

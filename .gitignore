@@ -123,8 +123,11 @@ tests/_all_tests.txt
 /build_errors.txt
 /wasm_test_output.txt
 
-# Scratch directory for one-off reproductions.
+# Scratch directories and runtime-generated note/checkpoint files.
 /tmp/
+/scratch/
+iris-example-note.txt
+iris-scheduler-model.txt
 
 # Generated IDE and example runtime state. These files were previously tracked,
 # but are host/user-specific outputs and must not ship in source releases.

@@ -1,0 +1,62 @@
+// The agent against the scripted model: a two-step tool chain, a single
+// call, a turn of bad calls answered with typed errors, and a model that
+// never stops. No network.
+
+bring std.llm
+bring "agent.iris"
+
+def ask(question: str) -> AgentRun {
+    println(question);
+    val run = run_agent(llm_client("script:warehouse", "", "scripted", "", 1000), question, 4);
+    print_run(run);
+    run
+}
+
+def main() -> i64 {
+    // Check, then act on the typed result.
+    val reorder = ask("Check A-100 and reorder if we have fewer than 20 on hand.");
+    assert(reorder.stopped == "answered");
+    assert(reorder.steps == 3);
+    assert(list_len(reorder.trace) == 2);
+    assert(list_get(reorder.trace, 0) == "stock_level -> {\"sku\":\"A-100\",\"on_hand\":12,\"reserved\":4,\"warehouse\":\"JNB-1\"}");
+    assert(list_get(reorder.trace, 1) == "reorder_stock -> {\"order_id\":\"R-1\",\"sku\":\"A-100\",\"quantity\":50,\"eta_days\":3}");
+    assert(reorder.answer == "A-100 had 12 on hand, so I ordered 50 (order R-1, arriving in 3 days).");
+    assert(orders_placed_count() == 1);
+
+    val ship = ask("How much to ship 2.5 kg to the EU?");
+    assert(ship.answer == "Shipping 2.5 kg to the EU costs $31.50 and takes 6 days.");
+
+    // Bad calls are refused before anything runs, and the model sees why.
+    val bad = ask("Clear out the warehouse.");
+    assert(bad.stopped == "answered");
+    assert(list_len(bad.trace) == 3);
+    assert(contains(list_get(bad.trace, 0), "\"code\":\"unknown_tool\""));
+    assert(contains(list_get(bad.trace, 1), "\"code\":\"out_of_range\""));
+    assert(contains(list_get(bad.trace, 1), "quantity must be between 1 and 1000, got 5000"));
+    assert(contains(list_get(bad.trace, 2), "\"code\":\"invalid_arguments\""));
+    assert(bad.answer == "I could not do that: unknown_tool, out_of_range, invalid_arguments.");
+    // The refused order was never placed.
+    assert(orders_placed_count() == 1);
+
+    val endless = ask("Keep checking stock forever.");
+    assert(endless.stopped == "step limit");
+    assert(endless.steps == 4);
+    assert(list_len(endless.trace) == 4);
+
+    // The request the agent sends: the tool table with JSON Schema, and, after
+    // a tool call, the assistant turn and a tool message carrying its id.
+    val messages: list<LlmMessage> = list();
+    push(messages, llm_message("user", "q"));
+    val turn = unwrap(llm_response_from_json(200, scripted_reply("{\"messages\":[{\"role\":\"system\",\"content\":\"s\"},{\"role\":\"user\",\"content\":\"How much to ship?\"}]}")));
+    assert(turn.content == "");
+    push(messages, llm_assistant_turn(turn));
+    push(messages, llm_tool_result("call_1", "{\"days\":6}"));
+    val request = llm_request_json(llm_client("script:x", "", "m", "", 1000), messages, 0.0, 64, tools_json());
+    assert(json_query(request, "tools.1.function.parameters.properties.quantity.maximum") == "1000");
+    assert(json_query(request, "messages.1.tool_calls.0.function.name") == "shipping_quote");
+    assert(json_query(request, "messages.1.content") == "null");
+    assert(json_query(request, "messages.2.role") == "tool");
+    assert(json_query(request, "messages.2.tool_call_id") == "call_1");
+    println("llm agent: tool chain, typed results, refused calls and the step limit checked");
+    return 0
+}

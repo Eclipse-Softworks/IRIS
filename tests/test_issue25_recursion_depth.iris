@@ -11,3 +11,9 @@ pub def test_recursion_depth() -> i64 {
     assert(res == 20100);
     0
 }
+
+def main() -> i64 {
+    test_recursion_depth();
+    0
+}
+

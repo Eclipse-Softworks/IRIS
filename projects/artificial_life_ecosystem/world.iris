@@ -1,0 +1,292 @@
+// projects/artificial_life_ecosystem/world.iris
+// 2D Spatial Ecology & Multi-Agent Biological Interactions
+
+bring "brain.iris"
+
+pub record FoodItem {
+    x: f64,
+    y: f64,
+    energy_val: f64,
+}
+
+pub record Organism {
+    id: i64,
+    species: i64, // 0 = Herbivore, 1 = Predator
+    x: f64,
+    y: f64,
+    heading: f64, // radians
+    energy: f64,
+    age: i64,
+    food_eaten: i64,
+    generation: i64,
+    brain: NeuralBrain,
+}
+
+pub record EcoStats {
+    herbivore_count: i64,
+    predator_count: i64,
+    total_food: i64,
+    avg_herbivore_energy: f64,
+    max_generation: i64,
+}
+
+pub def atan2_approx(y: f64, x: f64) -> f64 {
+    if x > 0.0 {
+        val r = y / x;
+        r / (1.0 + 0.28 * r * r)
+    } else if x < 0.0 {
+        val r = y / x;
+        if y >= 0.0 {
+            (r / (1.0 + 0.28 * r * r)) + 3.14159265
+        } else {
+            (r / (1.0 + 0.28 * r * r)) - 3.14159265
+        }
+    } else {
+        if y > 0.0 { 1.5707963 } else if y < 0.0 { -1.5707963 } else { 0.0 }
+    }
+}
+
+/// Calculate wrapped toroidal Euclidean distance squared
+pub def toroidal_dist_sq(x1: f64, y1: f64, x2: f64, y2: f64, w: f64, h: f64) -> f64 {
+    var dx = x1 - x2;
+    if dx > 0.5 * w { dx = dx - w; }
+    else if dx < -0.5 * w { dx = dx + w; };
+
+    var dy = y1 - y2;
+    if dy > 0.5 * h { dy = dy - h; }
+    else if dy < -0.5 * h { dy = dy + h; };
+
+    dx * dx + dy * dy
+}
+
+/// Create a newly spawned food item
+pub def spawn_food(seed: i64, w: f64, h: f64) -> FoodItem {
+    var s = seed;
+    s = wrapping_add(wrapping_mul(s, 6364136223846793005), 1442695040888963407);
+    val fx = to_f64(s % 1000) / 10.0; // 0.0 to 100.0
+    s = wrapping_add(wrapping_mul(s, 6364136223846793005), 1442695040888963407);
+    val fy = to_f64(s % 1000) / 10.0;
+    FoodItem { x: fx, y: fy, energy_val: 20.0 }
+}
+
+/// Initialize an ecosystem world with herbivores, predators, and food patches
+pub def init_ecosystem(herb_count: i64, pred_count: i64, food_count: i64) -> (list<Organism>, list<FoodItem>) {
+    val orgs: list<Organism> = list();
+    val foods: list<FoodItem> = list();
+
+    // Spawn foods
+    for f in 0 .. food_count {
+        list_push(foods, spawn_food(f * 177 + 91, 100.0, 100.0));
+    }
+
+    // Spawn Herbivores (species 0)
+    for h in 0 .. herb_count {
+        val brain = create_random_brain(h * 313 + 7);
+        list_push(orgs, Organism {
+            id: h + 1,
+            species: 0,
+            x: to_f64((h * 13) % 95 + 2),
+            y: to_f64((h * 19) % 95 + 2),
+            heading: to_f64(h) * 0.3,
+            energy: 50.0,
+            age: 0,
+            food_eaten: 0,
+            generation: 0,
+            brain: brain,
+        });
+    }
+
+    // Spawn Predators (species 1)
+    for p in 0 .. pred_count {
+        val brain = create_random_brain((p + 100) * 521 + 13);
+        list_push(orgs, Organism {
+            id: herb_count + p + 1,
+            species: 1,
+            x: to_f64((p * 23 + 45) % 95 + 2),
+            y: to_f64((p * 29 + 50) % 95 + 2),
+            heading: to_f64(p) * 0.5,
+            energy: 65.0,
+            age: 0,
+            food_eaten: 0,
+            generation: 0,
+            brain: brain,
+        });
+    }
+
+    (orgs, foods)
+}
+
+/// Simulate 1 tick of the multi-agent ecosystem
+pub def step_ecosystem(
+    orgs: list<Organism>,
+    foods: list<FoodItem>,
+    tick: i64,
+) -> (list<Organism>, list<FoodItem>, EcoStats) {
+    val next_orgs: list<Organism> = list();
+    val next_foods: list<FoodItem> = list();
+    val eaten_foods: list<i64> = list();
+
+    val w = 100.0;
+    val h = 100.0;
+    var max_gen: i64 = 0;
+    var total_herb_energy = 0.0;
+    var herb_count: i64 = 0;
+    var pred_count: i64 = 0;
+
+    // 1. Process each organism
+    for i in 0 .. list_len(orgs) {
+        val o = list_get(orgs, i);
+
+        // Find nearest food
+        var min_food_dist_sq = 99999.0;
+        var min_food_angle = 0.0;
+        for f_idx in 0 .. list_len(foods) {
+            val f = list_get(foods, f_idx);
+            val d_sq = toroidal_dist_sq(o.x, o.y, f.x, f.y, w, h);
+            if d_sq < min_food_dist_sq {
+                min_food_dist_sq = d_sq;
+                min_food_angle = atan2_approx(f.y - o.y, f.x - o.x);
+            }
+        }
+
+        // Find nearest predator (if herbivore) or nearest herbivore (if predator)
+        var min_target_dist_sq = 99999.0;
+        var min_target_angle = 0.0;
+        val target_species = if o.species == 0 { 1 } else { 0 };
+
+        for other_idx in 0 .. list_len(orgs) {
+            if other_idx != i {
+                val other = list_get(orgs, other_idx);
+                if other.species == target_species {
+                    val d_sq = toroidal_dist_sq(o.x, o.y, other.x, other.y, w, h);
+                    if d_sq < min_target_dist_sq {
+                        min_target_dist_sq = d_sq;
+                        min_target_angle = atan2_approx(other.y - o.y, other.x - o.x);
+                    }
+                }
+            }
+        }
+
+        // Normalize sensory inputs for neural brain:
+        // [dist_food, angle_food, dist_target, angle_target, energy_level, bias]
+        val inputs: list<f64> = list();
+        list_push(inputs, min_food_dist_sq / 1000.0);
+        list_push(inputs, min_food_angle - o.heading);
+        list_push(inputs, min_target_dist_sq / 1000.0);
+        list_push(inputs, min_target_angle - o.heading);
+        list_push(inputs, o.energy / 100.0);
+        list_push(inputs, 1.0); // constant bias input
+
+        // Run neural policy
+        val (thrust, steer) = brain_forward(o.brain, inputs);
+
+        // Movement dynamics
+        val speed = 0.8 + 1.2 * thrust;
+        var next_heading = o.heading + steer * 0.35;
+        var next_x = o.x + speed * cos(next_heading);
+        var next_y = o.y + speed * sin(next_heading);
+
+        // Toroidal wrap-around
+        if next_x < 0.0 { next_x = next_x + w; }
+        else if next_x >= w { next_x = next_x - w; };
+
+        if next_y < 0.0 { next_y = next_y + h; }
+        else if next_y >= h { next_y = next_y - h; };
+
+        // Metabolic energy expenditure
+        val energy_cost = 0.15 + (speed * speed * 0.08);
+        var cur_energy = o.energy - energy_cost;
+        var food_eaten = o.food_eaten;
+
+        // Foraging: Eat food if within contact radius (2.2m)
+        if o.species == 0 {
+            for f_idx in 0 .. list_len(foods) {
+                val f = list_get(foods, f_idx);
+                val d_sq = toroidal_dist_sq(next_x, next_y, f.x, f.y, w, h);
+                if d_sq < 4.84 { // 2.2^2
+                    cur_energy = cur_energy + f.energy_val;
+                    food_eaten = food_eaten + 1;
+                    list_push(eaten_foods, f_idx);
+                }
+            }
+        }
+
+        // Check survival
+        if cur_energy > 0.0 {
+            // Check Darwinian reproduction threshold (Energy >= 75)
+            if cur_energy >= 75.0 {
+                // Mitotic reproduction: split energy
+                cur_energy = cur_energy * 0.5;
+                val offspring_brain = mutate_brain(o.brain, tick * 97 + o.id, 0.15);
+                val offspring = Organism {
+                    id: o.id + 10000 + tick,
+                    species: o.species,
+                    x: next_x + 0.5,
+                    y: next_y + 0.5,
+                    heading: next_heading + 0.5,
+                    energy: cur_energy,
+                    age: 0,
+                    food_eaten: 0,
+                    generation: o.generation + 1,
+                    brain: offspring_brain,
+                };
+                list_push(next_orgs, offspring);
+                if o.generation + 1 > max_gen {
+                    max_gen = o.generation + 1;
+                }
+            }
+
+            val updated_org = Organism {
+                id: o.id,
+                species: o.species,
+                x: next_x,
+                y: next_y,
+                heading: next_heading,
+                energy: cur_energy,
+                age: o.age + 1,
+                food_eaten: food_eaten,
+                generation: o.generation,
+                brain: o.brain,
+            };
+            list_push(next_orgs, updated_org);
+
+            if o.species == 0 {
+                herb_count = herb_count + 1;
+                total_herb_energy = total_herb_energy + cur_energy;
+            } else {
+                pred_count = pred_count + 1;
+            };
+
+            if o.generation > max_gen {
+                max_gen = o.generation;
+            }
+        }
+    }
+
+    // 2. Re-spawn consumed foods to maintain carrying capacity
+    for f_idx in 0 .. list_len(foods) {
+        var is_eaten = false;
+        for e in 0 .. list_len(eaten_foods) {
+            if list_get(eaten_foods, e) == f_idx {
+                is_eaten = true;
+            }
+        }
+        if is_eaten == false {
+            list_push(next_foods, list_get(foods, f_idx));
+        } else {
+            // Respawn newly located food pellet
+            list_push(next_foods, spawn_food(tick * 37 + f_idx, w, h));
+        }
+    }
+
+    val avg_energy = if herb_count > 0 { total_herb_energy / to_f64(herb_count) } else { 0.0 };
+    val stats = EcoStats {
+        herbivore_count: herb_count,
+        predator_count: pred_count,
+        total_food: list_len(next_foods),
+        avg_herbivore_energy: avg_energy,
+        max_generation: max_gen,
+    };
+
+    (next_orgs, next_foods, stats)
+}

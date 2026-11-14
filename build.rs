@@ -465,11 +465,14 @@ fn generate_jit_runtime_resolver(out_dir: &std::path::Path) -> std::path::PathBu
         definitions.extend(extract_iris_function_names(&source, true));
     }
     let target = std::env::var("TARGET").unwrap_or_default();
-    let names: Vec<String> = declarations
+    let mut names: Vec<String> = declarations
         .intersection(&definitions)
         .filter(|name| target.starts_with("wasm32") || !name.starts_with("iris_wasm_"))
         .cloned()
         .collect();
+    // Data the generated code writes: the file table a runtime error's
+    // position indexes. Not a function, so the scan above does not find it.
+    names.push("iris_loc_files".to_string());
     assert!(
         names.iter().any(|name| name == "iris_add_checked"),
         "generated JIT runtime table omitted iris_add_checked"

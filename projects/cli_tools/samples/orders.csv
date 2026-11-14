@@ -1,0 +1,49 @@
+order_id,customer,region,amount,note
+A001,cust-9,US,1190.88,"Rush, please"
+A002,cust-8,APAC,2251.21,"He said ""ship it"""
+A003,cust-9,EU,1189.45,"Leave at door
+side gate"
+A004,cust-4,US,2246.45,gift
+A005,cust-9,APAC,489.07,
+A006,cust-3,EU,1252.18,"Rush, please"
+A007,cust-8,US,251.73,"He said ""ship it"""
+A008,cust-3,APAC,800.34,"Leave at door
+side gate"
+A009,cust-9,EU,242.68,gift
+A010,cust-1,US,2127.43,
+A011,cust-7,APAC,1565.90,"Rush, please"
+A012,cust-3,EU,1192.49,"He said ""ship it"""
+A013,cust-1,US,1638.49,"Leave at door
+side gate"
+A014,cust-9,APAC,2185.25,gift
+A015,cust-1,EU,170.58,
+A016,cust-4,US,98.46,"Rush, please"
+A017,cust-4,APAC,2310.72,"He said ""ship it"""
+A018,cust-1,EU,1576.86,"Leave at door
+side gate"
+A019,cust-8,US,2044.76,gift
+A020,cust-8,APAC,860.35,
+A021,cust-4,EU,1554.16,"Rush, please"
+A022,cust-4,US,1365.85,"He said ""ship it"""
+A023,cust-5,APAC,1683.48,"Leave at door
+side gate"
+A024,cust-1,EU,1315.12,gift
+A025,cust-2,US,1741.57,
+A026,cust-5,APAC,1203.86,"Rush, please"
+A027,cust-9,EU,1071.34,"He said ""ship it"""
+A028,cust-2,US,2447.35,"Leave at door
+side gate"
+A029,cust-5,APAC,1860.48,gift
+A030,cust-4,EU,831.48,
+A031,cust-5,US,1349.49,"Rush, please"
+A032,cust-2,APAC,82.99,"He said ""ship it"""
+A033,cust-2,EU,1481.24,"Leave at door
+side gate"
+A034,cust-2,US,1054.62,gift
+A035,cust-5,APAC,2224.26,
+A036,cust-2,EU,1018.22,"Rush, please"
+A037,cust-1,US,49.27,"He said ""ship it"""
+A038,cust-4,APAC,564.68,"Leave at door
+side gate"
+A039,cust-1,EU,2435.18,gift
+A040,cust-7,US,1237.04,

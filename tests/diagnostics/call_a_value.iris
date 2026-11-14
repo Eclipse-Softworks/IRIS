@@ -1,0 +1,7 @@
+// expect: E0118 at 6:12
+// message: not a function
+
+def main() -> i64 {
+    val x = 3
+    return x(1)
+}

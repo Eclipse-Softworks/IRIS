@@ -1,0 +1,7 @@
+// expect: E0119 at 5:13
+// message: `else`
+
+def main() -> i64 {
+    val x = if true { 1 }
+    return x
+}

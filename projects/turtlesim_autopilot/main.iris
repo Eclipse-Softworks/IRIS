@@ -1,0 +1,172 @@
+bring std.ros2
+bring std.math
+bring "autopilot.iris" /// Requires ROS 2, the IRIS ROS 2 bridge and a running `ros2 run turtlesim turtlesim_node`.
+
+// A turtlesim autopilot on the real ROS 2 stack:
+//   * services   -- clear the canvas, teleport turtle1, set pen colours, spawn a follower;
+//   * an action  -- turtle1/rotate_absolute turns it toward the first corner;
+//   * topics     -- each turtle's Pose in, geometry_msgs/Twist commands out;
+//   * parameters -- the gains, changeable mid-flight with `ros2 param set`;
+//   * tf2        -- world -> turtle1 and world -> iris_follower, for RViz2.
+// turtle1 flies a square, pen colour changing per side, while iris_follower
+// pursues it.
+
+def pose_of(m: ROS2Msg) -> Pose2 {
+    Pose2 { x: msg_f64(m, "x"), y: msg_f64(m, "y"), theta: msg_f64(m, "theta") }
+}
+
+def drive(p: ROS2Publisher, c: Command) -> bool {
+    publish_twist(p, make_twist(c.linear, 0.0, 0.0, 0.0, 0.0, c.angular))
+}
+
+// Calls a turtlesim service and returns its response (panics if it does not answer).
+def call(cli: ROS2Client, req: ROS2Msg, what: str) -> ROS2Msg {
+    val reply = client_call(cli, req, 5000)
+    msg_free(req);
+    if is_none(reply) { panic("turtlesim did not answer " + what); };
+    unwrap(reply)
+}
+
+def set_pen(pen: ROS2Client, r: i64, g: i64, b: i64, off: bool) -> bool {
+    val req = client_request(pen)
+    msg_set_i64(req, "r", r);
+    msg_set_i64(req, "g", g);
+    msg_set_i64(req, "b", b);
+    msg_set_i64(req, "width", 3);
+    msg_set_i64(req, "off", if off { 1 } else { 0 });
+    call(pen, req, "set_pen");
+    true
+}
+
+def broadcast(bc: TfBroadcaster, child: str, p: Pose2) -> bool {
+    tf_send(bc, "world", child, Transform {
+        translation: Vector3 { x: p.x, y: p.y, z: 0.0 },
+        rotation: Quaternion { x: 0.0, y: 0.0, z: yaw_z(p.theta), w: yaw_w(p.theta) }
+    })
+}
+
+def gains_of(node: ROS2Node) -> Gains {
+    Gains {
+        linear: param_f64(node, "linear_gain"),
+        angular: param_f64(node, "angular_gain"),
+        max_speed: param_f64(node, "max_speed"),
+        max_turn: 4.0
+    }
+}
+
+def main() -> i64 {
+    val ctx = context_create()
+    assert(ctx.handle != 0);
+    val node = node_create(ctx, "iris_turtle_autopilot", "")
+    assert(node.handle != 0);
+    param_declare_f64_range(node, "linear_gain", 1.5, 0.1, 5.0, "forward speed per unit of distance");
+    param_declare_f64_range(node, "angular_gain", 6.0, 0.5, 12.0, "turn rate per radian of heading error");
+    param_declare_f64_range(node, "max_speed", 2.0, 0.1, 5.0, "forward speed limit (units/s)");
+    val tolerance = param_declare_f64_range(node, "tolerance", 0.1, 0.02, 1.0, "how close counts as arrived")
+
+    // turtlesim's services. The first wait tells us turtlesim is running.
+    val clear = client_create(node, "/clear", "std_srvs/srv/Empty")
+    if !client_wait_service(clear, 10000) {
+        panic("no turtlesim: start it with `ros2 run turtlesim turtlesim_node`");
+    };
+    val spawner = client_create(node, "/spawn", "turtlesim/srv/Spawn")
+    val kill = client_create(node, "/kill", "turtlesim/srv/Kill")
+    val teleport = client_create(node, "/turtle1/teleport_absolute", "turtlesim/srv/TeleportAbsolute")
+    val pen = client_create(node, "/turtle1/set_pen", "turtlesim/srv/SetPen")
+    assert(client_wait_service(spawner, 5000) && client_wait_service(teleport, 5000) && client_wait_service(pen, 5000));
+
+    // Start at (2, 2) facing north-east, pen up, on a clean canvas.
+    assert(set_pen(pen, 255, 255, 255, true));
+    val jump = client_request(teleport)
+    msg_set_f64(jump, "x", 2.0);
+    msg_set_f64(jump, "y", 2.0);
+    msg_set_f64(jump, "theta", PI * 0.25);
+    call(teleport, jump, "teleport_absolute");
+    call(clear, client_request(clear), "clear");
+
+    // A follower, replacing one left by an earlier run.
+    if client_wait_service(kill, 1000) {
+        val old = client_request(kill)
+        msg_set_str(old, "name", "iris_follower");
+        client_call(kill, old, 2000);
+        msg_free(old);
+    };
+    val born = client_request(spawner)
+    msg_set_f64(born, "x", 9.0);
+    msg_set_f64(born, "y", 9.0);
+    msg_set_f64(born, "theta", PI);
+    msg_set_str(born, "name", "iris_follower");
+    assert(msg_str(call(spawner, born, "spawn"), "name") == "iris_follower");
+
+    // Face the first corner with turtlesim's own action.
+    val rotate = action_client_create(node, "/turtle1/rotate_absolute", "turtlesim/action/RotateAbsolute")
+    assert(action_wait_server(rotate, 5000));
+    val turn = action_goal_msg(rotate)
+    msg_set_f64(turn, "theta", 0.0);
+    val turn_token = action_send_goal(rotate, turn)
+    msg_free(turn);
+    val turned = action_wait_result(rotate, turn_token, 15000)
+    assert(is_some(turned) && action_status(rotate, turn_token) == GOAL_SUCCEEDED);
+    println("rotate_absolute: turned by " + to_str(msg_f64(unwrap(turned), "delta")) + " rad");
+
+    val leader_pose = subscription_create(node, "/turtle1/pose", "turtlesim/msg/Pose")
+    val follower_pose = subscription_create(node, "/iris_follower/pose", "turtlesim/msg/Pose")
+    val leader_cmd = publisher_create(node, "/turtle1/cmd_vel", "geometry_msgs/msg/Twist")
+    val follower_cmd = publisher_create(node, "/iris_follower/cmd_vel", "geometry_msgs/msg/Twist")
+    val frames = tf_broadcaster_create(node)
+    val tick = wall_timer_create(node, 20)
+
+    val route = square_route(2.0, 2.0, 7.0)
+    var leader = Pose2 { x: 2.0, y: 2.0, theta: 0.0 }
+    var follower = Pose2 { x: 9.0, y: 9.0, theta: PI }
+    var have_leader = false
+    var have_follower = false
+    var leg = 0
+    var pen_down = false
+    val started = ros2_now_ns()
+    val deadline = started + 90000000000
+    while leg < list_len(route) && ros2_now_ns() < deadline {
+        val ev = spin_once(ctx, 100)
+        if is_message(ev, leader_pose) {
+            leader = pose_of(ev.message);
+            have_leader = true
+        };
+        if is_message(ev, follower_pose) {
+            follower = pose_of(ev.message);
+            have_follower = true
+        };
+        if is_timer(ev, tick) && have_leader && have_follower {
+            if !pen_down {
+                assert(set_pen(pen, 255, 140, 0, false));
+                pen_down = true
+            };
+            val gains = gains_of(node)
+            val target = list_get(route, leg)
+            if arrived(leader, target, tolerance) {
+                log_info(node, "corner " + to_str(leg + 1) + " reached at (" + to_str(leader.x) + ", " + to_str(leader.y) + ")");
+                leg = leg + 1;
+                // A new colour for each side of the square.
+                if leg == 1 { set_pen(pen, 60, 180, 75, false); };
+                if leg == 2 { set_pen(pen, 0, 130, 200, false); };
+                if leg == 3 { set_pen(pen, 230, 25, 75, false); };
+            } else {
+                drive(leader_cmd, steer(leader, target.x, target.y, gains));
+            };
+            drive(follower_cmd, pursue(follower, leader, 1.0, gains));
+            broadcast(frames, "turtle1", leader);
+            broadcast(frames, "iris_follower", follower);
+        };
+    };
+    drive(leader_cmd, Command { linear: 0.0, angular: 0.0 });
+    drive(follower_cmd, Command { linear: 0.0, angular: 0.0 });
+
+    assert(leg == list_len(route));
+    assert(distance_to(leader, 2.0, 2.0) <= tolerance * 2.0);
+    val gap = distance_to(follower, leader.x, leader.y)
+    assert(gap < 2.5);
+    val seconds = ((ros2_now_ns() - started) to f64) / 1000000000.0
+    println("square flown in " + to_str(seconds) + " s; follower " + to_str(gap) + " behind");
+    assert(context_destroy(ctx));
+    println("turtlesim autopilot: square flown and followed");
+    return 0
+}

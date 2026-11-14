@@ -1,0 +1,16 @@
+// The LQR-optimal law from reference.iris, unsaturated. It matches the canary
+// exactly -- near the operating point it never needs more than 1.5 units/s --
+// but a long move asks for far more than the 2 units/s limit, and the field
+// check rolls it back.
+def policy(error: f64, velocity: f64) -> f64 effect pure { 2.40199920063936 * error }
+
+def test_policy() -> i64 effect throw { assert(policy(1.0, 0.0) == 2.40199920063936); 0 }
+
+def test_transaction_rollback() -> i64 effect alloc, transaction {
+    val state: list<i64> = list()
+    push(state, 10);
+    transaction_begin();
+    push(state, 99);
+    transaction_rollback();
+    if list_len(state) == 1 && list_get(state, 0) == 10 { 0 } else { 1 }
+}

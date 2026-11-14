@@ -1,0 +1,4 @@
+/// Baseline controller for nominal plant: negative feedback u = input * -3
+def policy(input: i64) -> i64 {
+    return input * -3
+}

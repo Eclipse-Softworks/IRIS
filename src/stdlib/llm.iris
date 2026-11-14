@@ -16,6 +16,18 @@ pub record LlmClient {
 pub record LlmMessage {
     role: str,
     content: str,
+    // An assistant turn that asked for tools: the provider's tool_calls array.
+    tool_calls_json: str,
+    // A tool result: the id of the call it answers.
+    tool_call_id: str,
+}
+
+/// One tool call the model asked for. `arguments_json` is the JSON object of
+/// arguments, as text: decode and validate it before acting on it.
+pub record LlmToolCall {
+    id: str,
+    name: str,
+    arguments_json: str,
 }
 
 pub record LlmTool {
@@ -53,11 +65,55 @@ pub def llm_client(chat_url: str, embeddings_url: str, model_name: str, api_key_
 }
 
 pub def llm_message(role: str, content: str) -> LlmMessage {
-    return LlmMessage { role: role, content: content }
+    return LlmMessage { role: role, content: content, tool_calls_json: "", tool_call_id: "" }
+}
+
+/// The result of tool call `call_id`, to send back to the model.
+pub def llm_tool_result(call_id: str, content: str) -> LlmMessage {
+    return LlmMessage { role: "tool", content: content, tool_calls_json: "", tool_call_id: call_id }
+}
+
+/// The model's own turn, kept in the conversation: its text and any tool
+/// calls it made (the provider expects to see them before their results).
+pub def llm_assistant_turn(response: LlmResponse) -> LlmMessage {
+    return LlmMessage { role: "assistant", content: response.content, tool_calls_json: response.tool_calls_json, tool_call_id: "" }
 }
 
 pub def llm_message_json(message: LlmMessage) -> str effect alloc, io {
-    return concat(concat(concat(concat("{\"role\":", json_stringify(message.role)), ",\"content\":"), json_stringify(message.content)), "}")
+    val content = if message.content == "" && message.tool_calls_json != "" { "null" } else { json_stringify(message.content) }
+    var out = concat(concat(concat("{\"role\":", json_stringify(message.role)), ",\"content\":"), content)
+    if message.tool_calls_json != "" {
+        out = concat(concat(out, ",\"tool_calls\":"), message.tool_calls_json)
+    }
+    if message.tool_call_id != "" {
+        out = concat(concat(out, ",\"tool_call_id\":"), json_stringify(message.tool_call_id))
+    }
+    return concat(out, "}")
+}
+
+/// The tool calls in a response, in order; empty when the model answered.
+pub def llm_tool_calls(response: LlmResponse) -> list<LlmToolCall> effect alloc {
+    val calls: list<LlmToolCall> = list()
+    if response.tool_calls_json == "" || response.tool_calls_json == "null" {
+        return calls
+    }
+    var i = 0
+    var more = true
+    while more {
+        val at = concat(to_str(i), ".")
+        val name = json_query(response.tool_calls_json, concat(at, "function.name"))
+        if name == "" {
+            more = false
+        } else {
+            list_push(calls, LlmToolCall {
+                id: json_query(response.tool_calls_json, concat(at, "id")),
+                name: name,
+                arguments_json: json_query(response.tool_calls_json, concat(at, "function.arguments")),
+            });
+            i = i + 1
+        }
+    }
+    return calls
 }
 
 pub def llm_messages_json(messages: list<LlmMessage>) -> str effect alloc, io {
@@ -112,9 +168,12 @@ pub def llm_response_from_json(status: i64, raw_json: str) -> result<LlmResponse
     if status < 200 || status >= 300 {
         return err(concat(concat("LLM provider returned HTTP ", to_str(status)), concat(": ", raw_json)))
     }
+    // A JSON null reads back as "null": a turn of tool calls has no content.
     val primary = json_query(raw_json, "choices.0.message.content")
-    val content = if primary == "" { json_query(raw_json, "content") } else { primary }
-    val tool_calls = json_query(raw_json, "choices.0.message.tool_calls")
+    val fallback = if primary == "" { json_query(raw_json, "content") } else { primary }
+    val content = if fallback == "null" { "" } else { fallback }
+    val calls = json_query(raw_json, "choices.0.message.tool_calls")
+    val tool_calls = if calls == "null" { "" } else { calls }
     if content == "" && tool_calls == "" {
         return err("LLM response contained neither message content nor tool calls")
     }

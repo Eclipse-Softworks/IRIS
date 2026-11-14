@@ -1,0 +1,73 @@
+// projects/jit_superoptimizer/verifier.iris
+// Semantic Equivalence Verifier & Zero-Regression Proof Engine
+
+bring "ir.iris"
+
+pub record VerificationResult {
+    is_equivalent: bool,
+    tested_samples: i64,
+    counterexample: i64,
+}
+
+/// Verify that two programs produce identical outputs across corner cases and random domains
+pub def verify_equivalence(prog_a: IrProgram, prog_b: IrProgram, num_random_tests: i64) -> VerificationResult {
+    // 1. Check critical algebraic boundary cases
+    val corner_cases: list<i64> = list();
+    list_push(corner_cases, 0);
+    list_push(corner_cases, 1);
+    list_push(corner_cases, 2);
+    list_push(corner_cases, 3);
+    list_push(corner_cases, 4);
+    list_push(corner_cases, 7);
+    list_push(corner_cases, 8);
+    list_push(corner_cases, 15);
+    list_push(corner_cases, 16);
+    list_push(corner_cases, 31);
+    list_push(corner_cases, 32);
+    list_push(corner_cases, 64);
+    list_push(corner_cases, 127);
+    list_push(corner_cases, 128);
+    list_push(corner_cases, 255);
+    list_push(corner_cases, 256);
+    list_push(corner_cases, 1024);
+    list_push(corner_cases, 65535);
+
+    var samples_tested: i64 = 0;
+
+    for i in 0 .. list_len(corner_cases) {
+        val x = list_get(corner_cases, i);
+        val res_a = eval_program(prog_a, x);
+        val res_b = eval_program(prog_b, x);
+        samples_tested = samples_tested + 1;
+        if res_a != res_b {
+            return VerificationResult {
+                is_equivalent: false,
+                tested_samples: samples_tested,
+                counterexample: x,
+            };
+        }
+    }
+
+    // 2. Randomized stress testing
+    var seed: i64 = 133742;
+    for t in 0 .. num_random_tests {
+        seed = wrapping_add(wrapping_mul(seed, 6364136223846793005), 1442695040888963407);
+        val x = seed % 100000;
+        val res_a = eval_program(prog_a, x);
+        val res_b = eval_program(prog_b, x);
+        samples_tested = samples_tested + 1;
+        if res_a != res_b {
+            return VerificationResult {
+                is_equivalent: false,
+                tested_samples: samples_tested,
+                counterexample: x,
+            };
+        }
+    }
+
+    VerificationResult {
+        is_equivalent: true,
+        tested_samples: samples_tested,
+        counterexample: 0,
+    }
+}

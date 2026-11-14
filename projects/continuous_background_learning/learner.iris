@@ -1,0 +1,138 @@
+// projects/continuous_background_learning/learner.iris
+// Asynchronous background learning engine executing continuous online identification.
+
+bring std.math.*
+bring "types.iris"
+
+/// Create initial nominal model prior (Generation 0)
+pub def model_create_nominal() -> ModelWeights {
+    val j_prior = 1.0;
+    val b_prior = 0.5;
+    val tau_prior = 0.0;
+    
+    // Pole placement: omega_n = 7.0 rad/s, zeta = 0.90
+    val kp = 49.0 * j_prior;
+    val kd = (12.6 * j_prior) - b_prior;
+
+    ModelWeights {
+        gen: 0,
+        est_inertia: j_prior,
+        est_damping: b_prior,
+        est_bias: tau_prior,
+        kp: kp,
+        kd: kd,
+        loss: 0.0,
+    }
+}
+
+/// Compute candidate controller gains from identified physical parameters
+pub def model_compute_gains(j: f64, b: f64, tau: f64, gen: i64, loss: f64) -> ModelWeights {
+    val omega_n = 7.0;
+    val zeta = 0.90;
+    val kp = (omega_n * omega_n) * j;
+    val kd = (2.0 * zeta * omega_n * j) - b;
+
+    ModelWeights {
+        gen: gen,
+        est_inertia: j,
+        est_damping: b,
+        est_bias: tau,
+        kp: kp,
+        kd: kd,
+        loss: loss,
+    }
+}
+
+/// Add transition into sliding window replay buffer
+pub def buffer_push(buf: list<Transition>, trans: Transition, max_capacity: i64) -> list<Transition> {
+    push(buf, trans);
+    if list_len(buf) > max_capacity {
+        list_remove(buf, 0);
+    }
+    buf
+}
+
+/// Calculate current mean squared prediction loss on the buffer
+pub def buffer_compute_loss(buf: list<Transition>, j: f64, b: f64, tau_bias: f64, dt: f64) -> f64 {
+    val n = list_len(buf);
+    if n == 0 { return 0.0 };
+    var total_sq_err = 0.0;
+    var i = 0;
+    while i < n {
+        val t = list_get(buf, i);
+        val alpha_meas = (t.next_omega - t.omega) / dt;
+        val net_t = t.torque - (b * t.omega) - tau_bias;
+        val alpha_pred = net_t / j;
+        val err = alpha_pred - alpha_meas;
+        total_sq_err = total_sq_err + (err * err);
+        i = i + 1;
+    }
+    total_sq_err / (n to f64)
+}
+
+/// Run an online Normalized LMS gradient descent adaptation step over the sliding window
+pub def learner_train_step(buf: list<Transition>, cur_model: ModelWeights, dt: f64, lr: f64) -> ModelWeights {
+    val n = list_len(buf);
+    if n < 8 { return cur_model };
+
+    var j = cur_model.est_inertia;
+    var b = cur_model.est_damping;
+    var tau = cur_model.est_bias;
+    var total_loss = 0.0;
+
+    // 1. Evaluate prediction loss across window
+    var i = 0;
+    while i < n {
+        val t = list_get(buf, i);
+        val alpha_meas = (t.next_omega - t.omega) / dt;
+        val net_t = t.torque - (b * t.omega) - tau;
+        val alpha_pred = net_t / j;
+        val res = alpha_pred - alpha_meas;
+        total_loss = total_loss + (res * res);
+        i = i + 1;
+    }
+
+    val loss = total_loss / (n to f64);
+
+    // Deadband check: if prediction loss is negligible, preserve weights
+    if loss < 0.04 {
+        return ModelWeights {
+            gen: cur_model.gen,
+            est_inertia: j,
+            est_damping: b,
+            est_bias: tau,
+            kp: cur_model.kp,
+            kd: cur_model.kd,
+            loss: loss,
+        };
+    }
+
+    // 2. Normalized LMS gradient step (scale invariant and unconditionally stable)
+    i = 0;
+    while i < n {
+        val t = list_get(buf, i);
+        val alpha_meas = (t.next_omega - t.omega) / dt;
+        val net_t = t.torque - (b * t.omega) - tau;
+        val alpha_pred = net_t / j;
+        val res = alpha_pred - alpha_meas;
+
+        val d_pred_dj = -net_t / (j * j);
+        val d_pred_db = -t.omega / j;
+        val d_pred_dtau = -1.0 / j;
+
+        val norm_sq = (d_pred_dj * d_pred_dj) + (d_pred_db * d_pred_db) + (d_pred_dtau * d_pred_dtau) + 1.0;
+        val step_scale = lr / norm_sq;
+
+        j = j - (step_scale * res * d_pred_dj);
+        b = b - (step_scale * res * d_pred_db);
+        tau = tau - (step_scale * res * d_pred_dtau);
+        i = i + 1;
+    }
+
+    // Physical stability projection bounds
+    j = clamp_f64(j, 0.5, 4.5);
+    b = clamp_f64(b, 0.2, 3.5);
+    tau = clamp_f64(tau, -2.5, 2.5);
+
+    model_compute_gains(j, b, tau, cur_model.gen, loss)
+}

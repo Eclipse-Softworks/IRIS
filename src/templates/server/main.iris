@@ -1,0 +1,85 @@
+// {{name}}: a TCP service.
+//
+//   iris run main.iris     serve on 127.0.0.1:7878 until a client sends "quit"
+//   iris test              the reply logic, and the server end to end
+//
+// Connections are accepted and read with `await`, so waiting for a client
+// never blocks the thread; `reply` holds the logic, and is what to change.
+
+bring std.net
+
+// The answer to one message.
+def reply(message: str) -> str {
+    if message == "ping" { "pong" } else { "echo " + message }
+}
+
+async def handle(conn: TcpStream) -> str {
+    val received = await tcp_read_async(conn, 4096)
+    val message = if is_ok(received) { unwrap(received) } else { "" }
+    unwrap(tcp_write_all_checked(conn, reply(message)))
+    tcp_close_checked(conn)
+    message
+}
+
+// Answer connections, one message each, until one says "quit". Returns how
+// many were answered.
+async def serve(listener: TcpListener) -> i64 {
+    var answered = 0
+    var running = true
+    while running {
+        val accepted = await tcp_accept_async(listener, 600000, 5000)
+        if is_ok(accepted) {
+            val message = await handle(unwrap(accepted))
+            answered = answered + 1
+            if message == "quit" { running = false }
+        }
+    }
+    answered
+}
+
+def main() -> i64 {
+    val listening = tcp_listen_local_checked(7878)
+    if is_ok(listening) == false {
+        println("{{name}}: port 7878 is in use")
+        return 1
+    }
+    println("{{name}}: listening on 127.0.0.1:7878 (a client sending \"quit\" stops it)")
+    val answered = await serve(unwrap(listening))
+    println("{{name}}: answered " + to_str(answered) + " messages")
+    return 0
+}
+
+def test_reply() -> i64 {
+    assert(reply("ping") == "pong")
+    assert(reply("hi") == "echo hi")
+    0
+}
+
+def client(port: i64, message: str, delay_ms: i64, replies: chan<str>) -> i64 {
+    sleep_ms(delay_ms)
+    val s = unwrap(tcp_connect_checked("127.0.0.1", port, 5000, 5000))
+    unwrap(tcp_write_all_checked(s, message))
+    send(replies, unwrap(tcp_read_bounded(s, 100)))
+    tcp_close_checked(s)
+    0
+}
+
+def test_serves_until_quit() -> i64 {
+    // The first free port from 47600, so two runs can overlap.
+    var port = 47600
+    var listening = tcp_listen_local_checked(port)
+    while is_ok(listening) == false && port < 47640 {
+        port = port + 1
+        listening = tcp_listen_local_checked(port)
+    }
+    val listener = unwrap(listening)
+    val replies: chan<str> = channel()
+    spawn { client(port, "ping", 0, replies) }
+    spawn { client(port, "quit", 300, replies) }
+    val answered = await serve(listener)
+    assert(answered == 2)
+    assert(recv(replies) == "pong")
+    assert(recv(replies) == "echo quit")
+    tcp_close_listener(listener)
+    0
+}

@@ -30,9 +30,11 @@ fn test_boxing_declares_present() {
         "expected 'declare ptr @iris_box_f64(double)':\n{}",
         ir
     );
+    // `int` in C: an `i32`, never an `i1`, whose upper bits are undefined
+    // (known-issues #106).
     assert!(
-        ir.contains("declare ptr @iris_box_bool(i1)"),
-        "expected 'declare ptr @iris_box_bool(i1)':\n{}",
+        ir.contains("declare ptr @iris_box_bool(i32)"),
+        "expected 'declare ptr @iris_box_bool(i32)':\n{}",
         ir
     );
 }

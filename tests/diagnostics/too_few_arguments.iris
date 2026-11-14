@@ -1,0 +1,10 @@
+// expect: E0109 at 8:13
+// message: takes 2 arguments but 1 was given
+
+def add(a: i64, b: i64) -> i64 { a + b }
+
+def main() -> i64 {
+    // the second argument is missing
+    val x = add(1)
+    return x
+}

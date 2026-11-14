@@ -1,0 +1,18 @@
+// A good law that keeps a history list: it allocates on every call, so the
+// allocation-free proof (--require-allocation-free) refuses it.
+def policy(error: f64, velocity: f64) -> f64 effect alloc {
+    val history: list<f64> = list()
+    push(history, error);
+    2.40199920063936 * error
+}
+
+def test_policy() -> i64 effect throw, alloc { assert(policy(1.0, 0.0) == 2.40199920063936); 0 }
+
+def test_transaction_rollback() -> i64 effect alloc, transaction {
+    val state: list<i64> = list()
+    push(state, 10);
+    transaction_begin();
+    push(state, 99);
+    transaction_rollback();
+    if list_len(state) == 1 && list_get(state, 0) == 10 { 0 } else { 1 }
+}

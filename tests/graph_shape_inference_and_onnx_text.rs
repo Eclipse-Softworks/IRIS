@@ -212,33 +212,26 @@ model Net {
 #[test]
 fn test_emit_onnx_basic() {
     let output = compile(NET_SRC, "net_module", EmitKind::Onnx).expect("compile onnx");
-
-    assert!(
-        output.contains("ir_version: 7"),
-        "missing ir_version\n{}",
-        output
-    );
-    assert!(output.contains("\"Net\""), "missing graph name\n{}", output);
-    assert!(
-        output.contains("Gemm"),
-        "Dense should map to Gemm\n{}",
-        output
-    );
-    assert!(
-        output.contains("Softmax"),
-        "Softmax should appear\n{}",
-        output
-    );
-    assert!(
-        output.contains("input"),
-        "missing input declaration\n{}",
-        output
-    );
-    assert!(
-        output.contains("output"),
-        "missing output declaration\n{}",
-        output
-    );
+    // The ModelProto in protobuf text format: the binary model's fields.
+    for want in [
+        "ir_version: 8",
+        "producer_name: \"iris\"",
+        "  name: \"Net\"",
+        // Dense is MatMul + Add with its parameters as initializers.
+        "op_type: \"MatMul\"",
+        "op_type: \"Add\"",
+        "op_type: \"Softmax\"",
+        "    name: \"h1.weight\"",
+        "    dims: 784",
+        "    dims: 128",
+        "    raw_data: \"",
+        "  input {",
+        "  output {",
+        "opset_import {",
+        "  version: 17",
+    ] {
+        assert!(output.contains(want), "missing `{want}`\n{output}");
+    }
 }
 
 // ---------------------------------------------------------------------------

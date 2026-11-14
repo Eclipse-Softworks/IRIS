@@ -1,0 +1,113 @@
+// projects/jit_superoptimizer/ir.iris
+// Micro-Op Intermediate Representation & Cost Modeling for JIT Superoptimization
+
+// OpCode identifiers:
+// 1 = CONST, 2 = VAR, 3 = ADD, 4 = SUB, 5 = MUL, 6 = SHL, 7 = SHR, 8 = XOR, 9 = AND, 10 = OR
+
+pub record IrNode {
+    id: i64,
+    op: i64,       // OpCode
+    val_const: i64,// Immediate value if CONST
+    var_idx: i64,  // Variable index if VAR (0 = x, 1 = y)
+    left_id: i64,  // Child 1 node index (-1 if leaf)
+    right_id: i64, // Child 2 node index (-1 if leaf)
+}
+
+pub record IrProgram {
+    nodes: list<IrNode>,
+    root_id: i64,
+}
+
+/// Compute instruction cycle latency cost on modern superscalar CPUs
+pub def compute_node_cost(op: i64) -> i64 {
+    if op == 1 || op == 2 {
+        0 // Register/Const leaf has 0 execution latency
+    } else if op == 3 || op == 4 {
+        1 // Add/Sub: 1 cycle
+    } else if op == 5 {
+        4 // Multiply: 4 cycles
+    } else if op == 6 || op == 7 {
+        1 // Shift: 1 cycle
+    } else if op == 8 || op == 9 || op == 10 {
+        1 // Bitwise logic: 1 cycle
+    } else {
+        2
+    }
+}
+
+/// Calculate total cumulative instruction cycle cost of an expression tree
+pub def calculate_program_cost(prog: IrProgram) -> i64 {
+    var total_cost: i64 = 0;
+    for i in 0 .. list_len(prog.nodes) {
+        val node = list_get(prog.nodes, i);
+        total_cost = total_cost + compute_node_cost(node.op);
+    }
+    total_cost
+}
+
+/// Evaluate expression tree recursively for input x
+pub def eval_ir_node(prog: IrProgram, node_id: i64, input_x: i64) -> i64 {
+    if node_id < 0 || node_id >= list_len(prog.nodes) {
+        return 0;
+    }
+    val node = list_get(prog.nodes, node_id);
+    if node.op == 1 {
+        return node.val_const; // CONST
+    } else if node.op == 2 {
+        return input_x;        // VAR x
+    }
+
+    val left_val = eval_ir_node(prog, node.left_id, input_x);
+    val right_val = eval_ir_node(prog, node.right_id, input_x);
+
+    if node.op == 3 {
+        left_val + right_val
+    } else if node.op == 4 {
+        left_val - right_val
+    } else if node.op == 5 {
+        left_val * right_val
+    } else if node.op == 6 {
+        shl(left_val, right_val)
+    } else if node.op == 7 {
+        shr(left_val, right_val)
+    } else if node.op == 8 {
+        bxor(left_val, right_val)
+    } else if node.op == 9 {
+        band(left_val, right_val)
+    } else if node.op == 10 {
+        bor(left_val, right_val)
+    } else {
+        0
+    }
+}
+
+/// Evaluate the entire IR program on input x
+pub def eval_program(prog: IrProgram, input_x: i64) -> i64 {
+    eval_ir_node(prog, prog.root_id, input_x)
+}
+
+/// Convert program to human-readable algebraic string
+pub def ir_to_str(prog: IrProgram, node_id: i64) -> str {
+    if node_id < 0 || node_id >= list_len(prog.nodes) {
+        return "?";
+    }
+    val node = list_get(prog.nodes, node_id);
+    if node.op == 1 {
+        return to_str(node.val_const);
+    } else if node.op == 2 {
+        return "x";
+    }
+
+    val l_str = ir_to_str(prog, node.left_id);
+    val r_str = ir_to_str(prog, node.right_id);
+
+    if node.op == 3 { "(" + l_str + " + " + r_str + ")" }
+    else if node.op == 4 { "(" + l_str + " - " + r_str + ")" }
+    else if node.op == 5 { "(" + l_str + " * " + r_str + ")" }
+    else if node.op == 6 { "(" + l_str + " << " + r_str + ")" }
+    else if node.op == 7 { "(" + l_str + " >> " + r_str + ")" }
+    else if node.op == 8 { "(" + l_str + " ^ " + r_str + ")" }
+    else if node.op == 9 { "(" + l_str + " & " + r_str + ")" }
+    else if node.op == 10 { "(" + l_str + " | " + r_str + ")" }
+    else { "?" }
+}

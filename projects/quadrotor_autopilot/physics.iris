@@ -1,0 +1,123 @@
+// projects/quadrotor_autopilot/physics.iris
+// 6-DOF Quadrotor Rigid-Body Dynamics & Aerodynamic Simulation
+
+bring "math_utils.iris"
+
+pub record QuadState {
+    pos: Vec3,    // Position (x, y, z) in meters (z up)
+    vel: Vec3,    // Velocity (vx, vy, vz) in m/s
+    angles: Vec3, // Euler angles (roll, pitch, yaw) in radians
+    omega: Vec3,  // Body angular velocity (p, q, r) in rad/s
+}
+
+pub record MotorCommands {
+    m1: f64, // Front motor thrust (N)
+    m2: f64, // Right motor thrust (N)
+    m3: f64, // Rear motor thrust (N)
+    m4: f64, // Left motor thrust (N)
+}
+
+pub record QuadParams {
+    mass: f64,      // kg
+    arm_length: f64,// m
+    ixx: f64,       // kg*m^2
+    iyy: f64,       // kg*m^2
+    izz: f64,       // kg*m^2
+    gravity: f64,   // m/s^2
+    drag_coeff: f64,// translational drag
+}
+
+pub def default_quad_params() -> QuadParams {
+    QuadParams {
+        mass: 1.0,
+        arm_length: 0.225,
+        ixx: 0.0081,
+        iyy: 0.0081,
+        izz: 0.0142,
+        gravity: 9.81,
+        drag_coeff: 0.1,
+    }
+}
+
+pub def initial_quad_state() -> QuadState {
+    QuadState {
+        pos: vec3_new(0.0, 0.0, 0.0),
+        vel: vec3_new(0.0, 0.0, 0.0),
+        angles: vec3_new(0.0, 0.0, 0.0),
+        omega: vec3_new(0.0, 0.0, 0.0),
+    }
+}
+
+/// Compute one numerical integration time-step of 6-DOF equations of motion
+pub def step_quad_physics(
+    state: QuadState,
+    cmd: MotorCommands,
+    params: QuadParams,
+    wind: Vec3,
+    dt: f64,
+) -> QuadState {
+    // Total thrust
+    val total_thrust = cmd.m1 + cmd.m2 + cmd.m3 + cmd.m4;
+
+    // Torques in body frame: +x front, +y right, +z down
+    val l = params.arm_length;
+    val tau_roll = l * (cmd.m4 - cmd.m2);       // Left vs Right
+    val tau_pitch = l * (cmd.m1 - cmd.m3);      // Front vs Rear
+    val tau_yaw = 0.02 * (cmd.m1 - cmd.m2 + cmd.m3 - cmd.m4); // Reactive drag torque
+
+    val phi = state.angles.x;   // roll
+    val theta = state.angles.y; // pitch
+    val psi = state.angles.z;   // yaw
+
+    // Rotation matrix elements for body Z thrust vector projected onto inertial frame
+    val r13 = sin(psi) * sin(phi) + cos(psi) * sin(theta) * cos(phi);
+    val r23 = -cos(psi) * sin(phi) + sin(psi) * sin(theta) * cos(phi);
+    val r33 = cos(theta) * cos(phi);
+
+    // Translational accelerations
+    val rel_vx = state.vel.x - wind.x;
+    val rel_vy = state.vel.y - wind.y;
+    val rel_vz = state.vel.z - wind.z;
+
+    val ax = (total_thrust * r13 - params.drag_coeff * rel_vx) / params.mass;
+    val ay = (total_thrust * r23 - params.drag_coeff * rel_vy) / params.mass;
+    val az = (total_thrust * r33 - params.drag_coeff * rel_vz) / params.mass - params.gravity;
+
+    // Rotational accelerations
+    val p = state.omega.x;
+    val q = state.omega.y;
+    val r = state.omega.z;
+
+    val p_dot = (tau_roll + (params.iyy - params.izz) * q * r) / params.ixx;
+    val q_dot = (tau_pitch + (params.izz - params.ixx) * p * r) / params.iyy;
+    val r_dot = (tau_yaw + (params.ixx - params.iyy) * p * q) / params.izz;
+
+    // Euler angle rates (small-angle approximation for fast attitude loop)
+    val phi_dot = p + q * sin(phi) * tan(theta) + r * cos(phi) * tan(theta);
+    val theta_dot = q * cos(phi) - r * sin(phi);
+    val psi_dot = (q * sin(phi) + r * cos(phi)) / cos(theta);
+
+    // Numerical integration (Euler-Cromer)
+    val next_vx = state.vel.x + ax * dt;
+    val next_vy = state.vel.y + ay * dt;
+    val next_vz = state.vel.z + az * dt;
+
+    val next_px = state.pos.x + next_vx * dt;
+    val next_py = state.pos.y + next_vy * dt;
+    val next_pz = state.pos.z + next_vz * dt;
+
+    val next_p = p + p_dot * dt;
+    val next_q = q + q_dot * dt;
+    val next_r = r + r_dot * dt;
+
+    val next_phi = phi + phi_dot * dt;
+    val next_theta = theta + theta_dot * dt;
+    val next_psi = psi + psi_dot * dt;
+
+    QuadState {
+        pos: vec3_new(next_px, next_py, next_pz),
+        vel: vec3_new(next_vx, next_vy, next_vz),
+        angles: vec3_new(next_phi, next_theta, next_psi),
+        omega: vec3_new(next_p, next_q, next_r),
+    }
+}

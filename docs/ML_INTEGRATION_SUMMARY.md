@@ -1,5 +1,10 @@
 # Real Model Execution: Implementation Summary
 
+> ⚠️ **NOTICE: Dynamic Runtime Loading (`dlopen`) Architecture**
+>
+> Compile-time SDK linking (`IRIS_NATIVE_ML_BACKENDS=1`, `cargo clean && cargo build`) has been superseded by the **dynamic runtime `dlopen` loading architecture** (see `docs/ml-backends.md` and `src/runtime/iris_ml_dynload.h`).
+> External ML frameworks (ONNX Runtime, TensorFlow, LibTorch) are resolved dynamically on first use. No build-time SDK linking or IRIS rebuild is required.
+
 ## Status: ✅ Bridge Architecture Complete & Validated
 
 The ML integration bridge architecture is implemented for real model execution.
@@ -95,18 +100,16 @@ Expand-Archive -Path $outFile -DestinationPath C:\
 Rename-Item -Path "C:\onnxruntime-win-x64-1.17.0" -NewName "onnxruntime"
 ```
 
-### Step 2: Set Environment Variable
+### Step 2: Configure Library Search Path
 
 ```powershell
-$env:ONNXRUNTIME_DIR = "C:\onnxruntime"
+# Place onnxruntime.dll on PATH or in your binary directory
+$env:PATH = "C:\onnxruntime\lib;$env:PATH"
 ```
 
-### Step 3: Rebuild IRIS
+### Step 3: Dynamic Runtime Resolution (No Rebuild Required)
 
-```bash
-cargo clean
-cargo build
-```
+IRIS resolves ONNX Runtime entry points on demand via `dlopen`/`LoadLibrary` (`src/runtime/iris_ml_dynload.h`). You do **not** need to run `cargo clean && cargo build`.
 
 ### Step 4: Generate Test Models
 

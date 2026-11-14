@@ -171,3 +171,57 @@ fn test_bring_file_from_disk() {
     let result = iris::compile_file(&main_path, EmitKind::Eval).unwrap();
     assert_eq!(result.trim(), "70");
 }
+
+// ── Locals shadow a brought module's own functions ──────────────────────────
+//
+// Merging a module renames its items to `module__name`. That rename used to
+// reach every identifier with an item's name, so inside `labels.iris` the
+// parameter `label: str` became a reference to the function `label`
+// (E0101 "expected 'str' but found 'fn(...) -> str'"). Parameters, `val`s,
+// loop variables and pattern bindings now shadow the module's items there,
+// as they do everywhere else.
+
+#[test]
+fn test_bring_file_locals_shadow_module_functions() {
+    let labels_src = r#"
+pub def label(code: i64) -> str { if code == 1 { "one" } else { "many" } }
+pub def count(xs: list<i64>) -> i64 { list_len(xs) }
+pub def tag(label: str) -> str { label + "!" }
+pub def total(n: i64) -> i64 {
+    val count = n * 2
+    var acc = 0
+    for label in 0..count { acc = acc + label };
+    acc + count
+}
+pub def pick(o: option<i64>) -> i64 {
+    when o {
+        some(count) => count + 1,
+        none => 0,
+    }
+}
+pub def describe(code: i64) -> str { tag(label(code)) }
+// A local that is not a function does not stop a call reaching the module's
+// function; a local closure does.
+pub def both(label: str) -> str { label + label(1) }
+pub def twice(count: (i64) -> i64, x: i64) -> i64 { count(count(x)) }
+"#;
+    let main_src = r#"
+bring "labels.iris"
+def f() -> i64 {
+    assert(tag("hi") == "hi!");
+    assert(describe(1) == "one!");
+    assert(total(3) == 21);
+    assert(pick(some(4)) == 5);
+    assert(both("a") == "aone");
+    assert(twice(|v: i64| v * 2, 3) == 12);
+    0
+}
+"#;
+    let result = compile_multi(
+        &[("labels", labels_src), ("main", main_src)],
+        "main",
+        EmitKind::Eval,
+    )
+    .unwrap();
+    assert_eq!(result.trim(), "0");
+}

@@ -1,0 +1,133 @@
+// The command-line tools' logic on the samples, checked against the answers
+// an independent implementation (samples/make_samples.py) computed for them.
+// Run from the repository root, or set IRIS_CLI_SAMPLES to the samples.
+
+bring std.json
+bring "csvkit.iris"
+bring "logs.iris"
+bring "packets.iris"
+
+def samples() -> str {
+    val dir = env_get("IRIS_CLI_SAMPLES");
+    if len(dir) > 0 { dir } else { "projects/cli_tools/samples" }
+}
+
+def read(name: str) -> str {
+    val text = file_read_all(samples() + "/" + name);
+    if is_ok(text) == false {
+        println("cannot read " + samples() + "/" + name);
+    };
+    assert(is_ok(text));
+    unwrap(text)
+}
+
+def check_csv(expected: str) -> i64 {
+    val rows = csv_records(read("orders.csv"));
+    assert(list_len(rows) - 1 == unwrap(parse_i64(json_query(expected, "orders.rows"))));
+    // A quoted field with doubled quotes, and one holding a line break.
+    assert(list_get(list_get(rows, 2), 4) == json_query(expected, "orders.quoted_note"));
+    assert(list_get(list_get(rows, 3), 4) == "Leave at door\nside gate");
+    val grouped = group_sum(rows, "region", "amount");
+    var g = 0;
+    while g < list_len(grouped) {
+        assert(csv_line(list_get(grouped, g)) == json_query(expected, "orders.group_by_region_sum_amount." + to_str(g)));
+        g = g + 1
+    };
+    val conditions: list<str> = list();
+    push(conditions, "region=EU");
+    val eu = filter_rows(rows, conditions);
+    assert(list_len(eu) - 1 == unwrap(parse_i64(json_query(expected, "orders.eu_rows"))));
+    val picked = select_columns(eu, split("order_id,amount", ","));
+    assert(csv_line(list_get(picked, 1)) == json_query(expected, "orders.eu_first"));
+    // CSV out and back in is the same table; JSON out reads back field by field.
+    val again = csv_records(to_csv(rows));
+    assert(list_len(again) == list_len(rows));
+    assert(list_get(list_get(again, 3), 4) == list_get(list_get(rows, 3), 4));
+    val json = to_json(rows);
+    assert(json_query(json, "0.note") == list_get(list_get(rows, 1), 4));
+    assert(json_query(json, "2.note") == "Leave at door\nside gate");
+    println("csv: 40 rows, quoting, exact sums by region, filter, select, CSV and JSON out");
+
+    val fields = split("user,action,ms,meta.ok", ",");
+    val slow_only: list<str> = list();
+    push(slow_only, "ms>=500");
+    val slow = filter_rows(jsonl_rows(read("events.jsonl"), fields), slow_only);
+    assert(list_len(slow) - 1 == unwrap(parse_i64(json_query(expected, "events.slow"))));
+    val first = list_get(slow, 1);
+    assert(list_get(first, 0) + "," + list_get(first, 1) + "," + list_get(first, 2) == json_query(expected, "events.first_slow"));
+    val failed: list<str> = list();
+    push(failed, "meta.ok=false");
+    val failures = filter_rows(jsonl_rows(read("events.jsonl"), fields), failed);
+    assert(list_len(failures) - 1 == unwrap(parse_i64(json_query(expected, "events.failed"))));
+    println("jsonl: nested fields, numeric filter");
+    0
+}
+
+def number(expected: str, path: str) -> i64 {
+    unwrap(parse_i64(json_query(expected, path)))
+}
+
+def check_log(expected: str) -> i64 {
+    val stats = analyze(read("access.log"), 20);
+    print(report(stats));
+    assert(stats.lines == number(expected, "log.lines"));
+    assert(stats.parsed == number(expected, "log.parsed"));
+    assert(stats.unparsed == number(expected, "log.unparsed"));
+    assert(list_get(stats.by_class, 2) == number(expected, "log.2xx"));
+    assert(list_get(stats.by_class, 3) == number(expected, "log.3xx"));
+    assert(list_get(stats.by_class, 4) == number(expected, "log.4xx"));
+    assert(list_get(stats.by_class, 5) == number(expected, "log.5xx"));
+    assert(stats.bytes == number(expected, "log.bytes"));
+    assert(stats.top_path == json_query(expected, "log.top_path"));
+    assert(stats.top_path_hits == number(expected, "log.top_path_hits"));
+    assert(list_len(stats.scanners) == 1);
+    assert(list_get(stats.scanners, 0) == json_query(expected, "log.scanners.0"));
+    assert(stats.worst_minute == json_query(expected, "log.worst_minute"));
+    assert(stats.worst_minute_5xx == number(expected, "log.worst_minute_5xx"));
+    0
+}
+
+def check_capture(expected: str) -> i64 {
+    val capture = load_capture(samples() + "/capture.pcap");
+    assert(is_ok(capture));
+    val summary = summarize(unwrap(capture), 10);
+    assert(is_ok(summary));
+    val s = unwrap(summary);
+    print(capture_report(s));
+    assert(s.packets == number(expected, "capture.packets"));
+    assert(s.bytes == number(expected, "capture.bytes"));
+    assert(s.ipv4 == number(expected, "capture.ipv4"));
+    assert(s.tcp == number(expected, "capture.tcp"));
+    assert(s.udp == number(expected, "capture.udp"));
+    assert(s.icmp == number(expected, "capture.icmp"));
+    assert(s.other == number(expected, "capture.other"));
+    assert(s.flows == number(expected, "capture.flows"));
+    assert(s.top_talker == json_query(expected, "capture.top_talker"));
+    assert(s.top_talker_bytes == number(expected, "capture.top_talker_bytes"));
+    assert(list_len(s.scans) == 1);
+    assert(list_get(s.scans, 0) == json_query(expected, "capture.scans.0"));
+    assert(list_len(s.problems) == 0);
+
+    assert(list_len(s.hellos) == 5);
+    var h = 0;
+    while h < list_len(s.hellos) {
+        val hello = list_get(s.hellos, h);
+        val at = "hellos." + to_str(h) + ".";
+        println(json_query(expected, at + "name") + ": " + hello.ja4 + " " + hello.ja3_md5);
+        assert(hello.sni == json_query(expected, at + "sni"));
+        assert(hello.ja3 == json_query(expected, at + "ja3"));
+        assert(hello.ja3_md5 == json_query(expected, at + "ja3_md5"));
+        assert(hello.ja4 == json_query(expected, at + "ja4"));
+        h = h + 1
+    };
+    0
+}
+
+def main() -> i64 {
+    val expected = read("expected.json");
+    check_csv(expected);
+    check_log(expected);
+    check_capture(expected);
+    println("cli tools: csv, json lines, logs, pcap and TLS fingerprints match the reference");
+    return 0
+}

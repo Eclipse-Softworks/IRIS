@@ -115,14 +115,9 @@ Parses and is accepted; arguments never reach the callee. Silent wrong answers
 are the worst failure class. Without a type annotation it instead fails codegen
 (`use of undefined value '%v0'`).
 
-### 1.2 🟠 104 of 122 `.iris` tests assert nothing — **systemic root cause**
+### 1.2 🟢 Non-asserting tests in `tests/*.iris` — **RESOLVED (Issue #4)**
 
-They pass whenever the program compiles and exits 0. This is *why* 1.1 reached a
-release candidate: `test_named_args.iris` prints "All named arg tests passed!"
-while printing `t1=0 t2=0 t6=0 t7=0`.
-
-**Action:** every `.iris` test must `assert(...)` or return non-zero on mismatch.
-Expect this to surface more defects of the same class — that is the point.
+Historically, 104 of 122 `.iris` tests asserted nothing, allowing silent bugs to pass CI. This was systematically resolved under Issue #4: all 104 test files were retrofitted with concrete `assert(...)` statements, and `tests/iris_corpus.rs` gates every test with `NEEDS_ASSERTIONS = []`. Note: 17 `projects/` and 5 `benchmarks/` files still retain unasserted `main()` entry points and remain on the ecosystem hardening backlog.
 
 ### 1.3 🟠 `str` field in a record inside `result<T, E>`
 
@@ -158,13 +153,18 @@ message. No perception, no closed loop. Blocks every robotics claim.
 # PART 2 — REBUILD (architecture)
 
 From the rustc comparison. rustc types the program on HIR — a source-shaped tree —
-then lowers to its CFG. Types flow downhill. **IRIS lowers first and infers types
-on the CFG afterwards**, so type information must be re-derived after the source
-structure is gone. That ordering is the root cause of the 1.3/1.6 class.
+then lowers to its CFG. Types flow downhill. IRIS used to lower first and infer
+types on the CFG afterwards, so type information had to be re-derived after the
+source structure was gone. That ordering was the root cause of the 1.3/1.6
+class. As of 2026-10-25 the source checker runs on HIR before lowering and THIR is
+built and audited; lowering consumes THIR's type hints, field indices, map
+types, and tuple-destructuring shape, but still walks the AST for control flow
+and the remaining forms, so the stage-6 → CFG edge is only partly migrated.
 
 | # | Change | Effort |
 |---|---|---|
-| 2.1 | **Typed HIR between AST and lowering** — name-resolved, desugared, fully typed. Move HM inference onto it. `IrType::Infer` then becomes unrepresentable in lowering's output rather than something later passes clean up. | Weeks — highest payoff |
+| 2.1 | **Typed HIR between AST and lowering** — name-resolved, typed. The checker runs on it and its report is absorbed; lowering reads solved `-> Infer` returns from it and type hints through THIR. | Done (2026-10-24) |
+| 2.1b | **THIR between HIR and the CFG** - owned, typed, desugared (resolved values/calls, method targets, field indices, map key/value types, tuple destructuring). Lowering consumes its type hints, field indices, map types, tuple-destructuring shape, and lowers value forms, binary operators, indexing, casts, if-expressions, and expression blocks from THIR first; control flow, calls, when-expressions, and statements remain AST. | In progress (2026-10-25) |
 | 2.2 | **Borrow check on the IR CFG, not the AST.** A tree cannot be path-sensitive; rustc uses MIR dataflow, which is what makes NLL possible. The CFG already exists and is simply unused for this. | Weeks |
 | 2.3 | **Split monomorphisation out of the lowerer.** `src/lower/mod.rs` is 17,262 lines doing desugaring, generic resolution, substitution and SSA construction at once. | Weeks |
 | 2.4 | **Spans on all diagnostics**, and continue past the first error in the type and lowering stages as the parser already does. | Days |
@@ -288,10 +288,12 @@ PART 0  (ship-stoppers)          ──►  external testing becomes possible at
 ## What this does not limit
 
 None of the above narrows the ambition. The differentiated assets are real and
-untouched by this list: 61 functions of research-grade autonomy in `std.ais`
+untouched by this list: auditable autonomy primitives in `std.ais`
 (active inference, EWC, homeostasis, intrinsic motivation, MAPE-K, safety
-constitution), pause-free deterministic memory, native + CUDA + SIMD + WASM
-backends, native tensors with tape autodiff, a static effect system, and borrow
+constitution — with `projects/gridworld_inference` as the worked active-inference
+example), pause-free deterministic memory, native + SIMD + WASM + CUDA (PTX
+device code tested on CPU, not yet run on an NVIDIA GPU) backends, native
+tensors with tape autodiff, a static effect system, and IR-level CFG borrow
 checking.
 
 The effect system in particular is the long-term differentiator: being able to

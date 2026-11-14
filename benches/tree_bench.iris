@@ -28,6 +28,8 @@ def main() -> i64 {
         d = d + 1
     }
     val depth_total = tree_depth_sum(10, 0);
-    print(total + depth_total);
+    val result = total + depth_total;
+    print(result);
+    assert(result == 122862);
     0
 }

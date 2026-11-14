@@ -8,6 +8,16 @@ def safe_divide(a: i64, b: i64) -> result<i64, str> {
     }
 }
 
+def quarter_of(n: i64) -> result<i64, str> {
+    val q = safe_divide(n, 4)?;
+    ok(q)
+}
+
+def quarter_of_zero() -> result<i64, str> {
+    val q = safe_divide(4, 0)?;
+    ok(q)
+}
+
 // A failing `check` must fail the run rather than returning a code the caller
 // discards -- see known-issues #53.
 def check(b: bool) -> i64 {
@@ -52,10 +62,13 @@ def main() -> i64 {
     val t3: i64 = check(r3 == 0);
     println("nested try/catch: " + to_str(r3));
 
-    // Test 4: no catch (normal ? early return behavior)
-    val r4 = safe_divide(20, 4)?;
+    // Test 4: no catch: `?` returns the error from a function that returns
+    // a result (in `main`, which returns `i64`, it is a compile error).
+    val r4 = when quarter_of(20) { ok(v) => v, err(_) => -1 };
     val t4: i64 = check(r4 == 5);
     println("normal ? works: " + to_str(r4));
+    val failed = when quarter_of_zero() { ok(_) => "no error", err(e) => e };
+    assert(failed == "division by zero");
 
     println("t1=" + to_str(t1) + " t2=" + to_str(t2) + " t3=" + to_str(t3) + " t4=" + to_str(t4));
     t1 + t2 + t3 + t4

@@ -1,0 +1,179 @@
+// projects/cyber_operations_center/server.iris
+//
+// Aegis-IRIS Real-Time Cyber Operations Center (SOC) Engine
+// Dual-protocol server: HTTP Dashboard & Bidirectional RFC 6455 WebSocket Telemetry Stream
+
+bring std.buffer
+bring std.crypto
+bring std.net
+
+pub record SocPacketEvent {
+    id: i64,
+    timestamp: i64,
+    src_ip: str,
+    dst_ip: str,
+    dst_port: i64,
+    protocol: str,
+    entropy: str,
+    ja4: str,
+    threat: str,
+    verdict: str,
+}
+
+pub record SocMetrics {
+    total_packets: i64,
+    benign_count: i64,
+    threats_blocked: i64,
+    quarantined_hosts: i64,
+}
+
+/// Serialize a packet event into JSON format
+pub def event_to_json(ev: SocPacketEvent) -> str {
+    "{\"type\":\"packet\",\"id\":" + to_str(ev.id) +
+    ",\"timestamp\":" + to_str(ev.timestamp) +
+    ",\"src\":\"" + ev.src_ip + "\"" +
+    ",\"dst\":\"" + ev.dst_ip + "\"" +
+    ",\"port\":" + to_str(ev.dst_port) +
+    ",\"proto\":\"" + ev.protocol + "\"" +
+    ",\"entropy\":\"" + ev.entropy + "\"" +
+    ",\"ja4\":\"" + ev.ja4 + "\"" +
+    ",\"threat\":\"" + ev.threat + "\"" +
+    ",\"verdict\":\"" + ev.verdict + "\"}"
+}
+
+/// Serialize metrics into JSON format
+pub def metrics_to_json(m: SocMetrics) -> str {
+    "{\"type\":\"metrics\",\"total\":" + to_str(m.total_packets) +
+    ",\"benign\":" + to_str(m.benign_count) +
+    ",\"blocked\":" + to_str(m.threats_blocked) +
+    ",\"quarantined\":" + to_str(m.quarantined_hosts) + "}"
+}
+
+/// Build the embedded HTML5/CSS3/JS Cyber Operations Center Dashboard
+pub def get_dashboard_html() -> str {
+    val h1 = "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"UTF-8\">" +
+             "<title>AEGIS-IRIS // Cyber Operations Center</title>" +
+             "<style>" +
+             "body{margin:0;padding:0;background:#080b10;color:#00ffcc;font-family:'Segoe UI',monospace;overflow-x:hidden;}" +
+             ".header{background:linear-gradient(90deg,#0d1520,#162436);border-bottom:2px solid #00ffcc;padding:15px 30px;display:flex;justify-content:space-between;align-items:center;box-shadow:0 0 20px rgba(0,255,204,0.2);}" +
+             ".title{font-size:24px;font-weight:bold;letter-spacing:2px;text-transform:uppercase;color:#fff;text-shadow:0 0 10px #00ffcc;}" +
+             ".grid{display:grid;grid-template-columns:300px 1fr 340px;gap:20px;padding:25px;height:calc(100vh - 120px);}" +
+             ".panel{background:rgba(13,21,32,0.85);border:1px solid #1a3045;border-radius:8px;padding:18px;backdrop-filter:blur(10px);box-shadow:0 8px 32px rgba(0,0,0,0.5);display:flex;flex-direction:column;}" +
+             ".panel h3{margin-top:0;font-size:14px;color:#8ba3c7;letter-spacing:1.5px;border-bottom:1px solid #1f3752;padding-bottom:8px;}" +
+             ".stat-box{background:#091018;border-left:4px solid #00ffcc;padding:12px;margin-bottom:12px;border-radius:4px;}" +
+             ".stat-val{font-size:26px;font-weight:bold;color:#fff;}" +
+             ".stat-lbl{font-size:11px;color:#5c7899;text-transform:uppercase;}" +
+             "#feed{flex:1;overflow-y:auto;font-size:12px;display:flex;flex-direction:column;gap:8px;}" +
+             ".feed-item{background:#09121c;border:1px solid #1c3247;padding:10px;border-radius:4px;display:flex;justify-content:space-between;animation:fadeIn 0.3s;}" +
+             ".feed-item.DROP{border-color:#ff3366;background:rgba(255,51,102,0.08);}" +
+             ".feed-item.PASS{border-color:#00ffcc;background:rgba(0,255,204,0.05);}" +
+             ".badge{padding:2px 8px;border-radius:3px;font-weight:bold;font-size:11px;}" +
+             ".badge.DROP{background:#ff3366;color:#fff;}" +
+             ".badge.PASS{background:#00ffcc;color:#051119;}" +
+             "@keyframes fadeIn{from{opacity:0;transform:translateY(-5px)}to{opacity:1;transform:translateY(0)}}" +
+             "</style></head><body>";
+
+    val h2 = "<div class=\"header\">" +
+             "<div class=\"title\">🛡️ AEGIS-IRIS // Threat Defense SOC</div>" +
+             "<div id=\"ws-status\" style=\"color:#00ffcc;font-size:13px;\">● WS CONNECTED (PORT 18090)</div>" +
+             "</div>" +
+             "<div class=\"grid\">" +
+             "<div class=\"panel\">" +
+             "<h3>MISSION METRICS</h3>" +
+             "<div class=\"stat-box\"><div class=\"stat-val\" id=\"m-total\">0</div><div class=\"stat-lbl\">Total Packets Ingested</div></div>" +
+             "<div class=\"stat-box\" style=\"border-left-color:#ff3366\"><div class=\"stat-val\" id=\"m-blocked\" style=\"color:#ff3366\">0</div><div class=\"stat-lbl\">Attacks & CVEs Neutralized</div></div>" +
+             "<div class=\"stat-box\" style=\"border-left-color:#ffbb00\"><div class=\"stat-val\" id=\"m-quarantine\" style=\"color:#ffbb00\">0</div><div class=\"stat-lbl\">Quarantined Zero-Trust Hosts</div></div>" +
+             "<div class=\"stat-box\" style=\"border-left-color:#00ffcc\"><div class=\"stat-val\" id=\"m-benign\" style=\"color:#00ffcc\">0</div><div class=\"stat-lbl\">Clean Traffic Flows Served</div></div>" +
+             "</div>" +
+             "<div class=\"panel\">" +
+             "<h3>REAL-TIME PACKET TELEMETRY & DPI STREAM</h3>" +
+             "<div id=\"feed\"></div>" +
+             "</div>" +
+             "<div class=\"panel\">" +
+             "<h3>ATTACK VECTOR MATRIX</h3>" +
+             "<div style=\"font-size:12px;color:#8ba3c7;line-height:1.6;\">" +
+             "<div>• CVE-2021-44228: <span style=\"color:#ff3366\">Log4Shell JNDI</span></div>" +
+             "<div>• CVE-2017-5638: <span style=\"color:#ff3366\">Struts2 OGNL</span></div>" +
+             "<div>• CVE-2014-6271: <span style=\"color:#ff3366\">Bash Shellshock</span></div>" +
+             "<div>• CVE-2022-22965: <span style=\"color:#ff3366\">Spring4Shell</span></div>" +
+             "<div>• MITRE T1046: <span style=\"color:#ffbb00\">SYN Reconnaissance</span></div>" +
+             "<div>• MITRE T1071: <span style=\"color:#ff3366\">JA4 C2 Beaconing</span></div>" +
+             "</div>" +
+             "</div></div>";
+
+    val h3 = "<script>" +
+             "const feed=document.getElementById('feed');" +
+             "const ws=new WebSocket('ws://' + window.location.host + '/ws');" +
+             "ws.onopen=()=>{document.getElementById('ws-status').innerText='● WS STREAMING LIVE';};" +
+             "ws.onmessage=(e)=>{" +
+             "  try{" +
+             "    const data=JSON.parse(e.data);" +
+             "    if(data.type==='metrics'){" +
+             "      document.getElementById('m-total').innerText=data.total;" +
+             "      document.getElementById('m-blocked').innerText=data.blocked;" +
+             "      document.getElementById('m-quarantine').innerText=data.quarantined;" +
+             "      document.getElementById('m-benign').innerText=data.benign;" +
+             "    } else if(data.type==='packet'){" +
+             "      const item=document.createElement('div');" +
+             "      item.className='feed-item ' + data.verdict;" +
+             "      item.innerHTML='<div><strong>' + data.src + '</strong> &rarr; Port ' + data.port + ' (' + data.proto + ')' +" +
+             "                     '<br><span style=\"color:#708da8;font-size:10px;\">H(X): ' + data.entropy + ' | JA4: ' + data.ja4 + '</span>' +" +
+             "                     (data.threat ? '<br><span style=\"color:#ff3366;\">💥 ' + data.threat + '</span>' : '') +" +
+             "                     '</div><div style=\"align-self:center;\"><span class=\"badge ' + data.verdict + '\">' + data.verdict + '</span></div>';" +
+             "      feed.prepend(item);" +
+             "      if(feed.children.length>50) feed.removeChild(feed.lastChild);" +
+             "    }" +
+             "  }catch(err){}" +
+             "};" +
+             "</script></body></html>";
+
+    h1 + h2 + h3
+}
+
+/// Handle a single incoming HTTP or WebSocket connection
+pub def handle_soc_client(s_handle: i64, is_loopback_test: bool) -> i64 {
+    val stream = TcpStream { handle: s_handle };
+    val req_res = tcp_read_with_timeout(stream, 100, 4096);
+    val req = when req_res {
+        ok(data) => data,
+        err(e) => "",
+    };
+    if len(req) == 0 {
+        return 0;
+    }
+
+    // Check if client is requesting a WebSocket upgrade
+    val is_upgrade = contains(req, "Upgrade: websocket") || contains(req, "upgrade: websocket");
+    if is_upgrade == true {
+        val handshake_res = ws_server_handshake(req);
+        match handshake_res {
+            ok(response) => {
+                tcp_write(stream.handle, response);
+                print("  * [SOC GATEWAY] Upgraded connection to RFC 6455 WebSocket stream!");
+                return 0;
+            },
+            err(e) => {
+                print("  * [SOC GATEWAY] WebSocket handshake failed: " + e);
+                tcp_write(stream.handle, "HTTP/1.1 400 Bad Request\r\n\r\n" + e);
+                return 0;
+            },
+        };
+        return 0;
+    }
+
+    // Standard HTTP GET routes
+    if contains(req, "GET /health") {
+        val body = "{\"status\":\"HEALTHY\",\"engine\":\"AEGIS-IRIS-SOC-CORE\",\"version\":\"1.0.0\"}";
+        val resp = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: " +
+                   to_str(len(body)) + "\r\nConnection: close\r\n\r\n" + body;
+        tcp_write(stream.handle, resp);
+        return 0;
+    }
+
+    // Default: Serve the SOC Web Dashboard
+    val html = get_dashboard_html();
+    val resp = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: " +
+               to_str(len(html)) + "\r\nConnection: close\r\n\r\n" + html;
+    tcp_write(stream.handle, resp);
+    0
+}

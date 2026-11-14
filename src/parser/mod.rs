@@ -1,4 +1,5 @@
 pub mod ast;
+pub mod hints;
 pub mod lexer;
 pub mod parse;
 

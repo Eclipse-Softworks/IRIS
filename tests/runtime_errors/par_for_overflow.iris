@@ -1,0 +1,13 @@
+// expect: E0409 at 10:19
+// message: integer overflow in addition (9223372036854775797 + 11)
+// Only the last iteration overflows; vectorised (`--simd`) the vector
+// holding it runs its iterations one by one and stops at that one.
+bring std.tensor
+def main() -> i64 {
+    val out = tensor_ad_from_data(list(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0), list(12))
+    val big: i64 = 9223372036854775797
+    par for i in 0..12 {
+        out[i] = (big + i) to f32
+    }
+    return 0
+}

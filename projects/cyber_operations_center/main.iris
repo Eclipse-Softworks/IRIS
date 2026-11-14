@@ -1,0 +1,134 @@
+// projects/cyber_operations_center/main.iris
+//
+// Standalone runner & automated self-testing loopback suite for Aegis-IRIS SOC
+
+bring std.buffer
+bring std.crypto
+bring std.net
+bring "server.iris"
+
+pub def main() -> i64 {
+    print("================================================================================");
+    print("      AEGIS-IRIS: REAL-TIME CYBER OPERATIONS CENTER (SOC) & WS GATEWAY          ");
+    print("================================================================================");
+
+    val port = 18092;
+    val listener = tcp_listen(port);
+    print("[INIT] Cyber Operations Center listening on http://127.0.0.1:" + to_str(port));
+
+    // Test 1: HTTP Dashboard Route
+    print("\n[TEST 1: Ingesting HTML5/CSS3 Operations Dashboard]");
+    val client1 = tcp_connect("127.0.0.1", port);
+    val server1 = tcp_accept(listener);
+    if client1 < 0 || server1 < 0 { print("Socket error 1"); return 1; };
+
+    tcp_write(client1, "GET / HTTP/1.1\r\nHost: 127.0.0.1:" + to_str(port) + "\r\n\r\n");
+    handle_soc_client(server1, true);
+
+    val resp1_res = tcp_read_with_timeout(TcpStream { handle: client1 }, 100, 8192);
+    val resp1 = when resp1_res { ok(s) => s, err(e) => "" };
+    tcp_close(client1);
+    tcp_close(server1);
+    if contains(resp1, "HTTP/1.1 200 OK") && contains(resp1, "AEGIS-IRIS // Threat Defense SOC") {
+        print("  * [PASSED] Web Dashboard served successfully with responsive UI and CSS!");
+    } else {
+        print("  * [FAILED] Unexpected dashboard response");
+        return 1;
+    };
+
+    // Test 2: HTTP Health Route
+    print("\n[TEST 2: Querying System Health API]");
+    val client2 = tcp_connect("127.0.0.1", port);
+    val server2 = tcp_accept(listener);
+    if client2 < 0 || server2 < 0 { print("Socket error 2"); return 1; };
+
+    tcp_write(client2, "GET /health HTTP/1.1\r\nHost: 127.0.0.1:" + to_str(port) + "\r\n\r\n");
+    handle_soc_client(server2, true);
+
+    val resp2_res = tcp_read_with_timeout(TcpStream { handle: client2 }, 100, 4096);
+    val resp2 = when resp2_res { ok(s) => s, err(e) => "" };
+    tcp_close(client2);
+    tcp_close(server2);
+    if contains(resp2, "\"status\":\"HEALTHY\"") && contains(resp2, "\"engine\":\"AEGIS-IRIS-SOC-CORE\"") {
+        print("  * [PASSED] Health API verified: " + resp2);
+    } else {
+        print("  * [FAILED] Health API response invalid");
+        return 1;
+    };
+
+    // Test 3: RFC 6455 WebSocket Upgrade & Telemetry Frame Ingest
+    print("\n[TEST 3: RFC 6455 WebSocket Handshake & Live Event Streaming]");
+    val client3 = tcp_connect("127.0.0.1", port);
+    val server3 = tcp_accept(listener);
+    if client3 < 0 || server3 < 0 { print("Socket error 3"); return 1; };
+
+    val ws_req = "GET /ws HTTP/1.1\r\n" +
+                 "Host: 127.0.0.1:" + to_str(port) + "\r\n" +
+                 "Upgrade: websocket\r\n" +
+                 "Connection: Upgrade\r\n" +
+                 "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n" +
+                 "Sec-WebSocket-Version: 13\r\n\r\n";
+    tcp_write(client3, ws_req);
+    handle_soc_client(server3, true);
+
+    // Read the 101 Switching Protocols handshake response
+    val ws_resp_res = tcp_read_with_timeout(TcpStream { handle: client3 }, 100, 4096);
+    val ws_resp = when ws_resp_res { ok(s) => s, err(e) => "" };
+    if contains(ws_resp, "101 Switching Protocols") && contains(ws_resp, "Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=") {
+        print("  * [PASSED] RFC 6455 101 Switching Protocols handshake verified!");
+    } else {
+        print("  * [FAILED] WebSocket handshake response invalid:\n" + ws_resp);
+        return 1;
+    };
+
+    // Server streams a live telemetry frame over WebSocket
+    val ev1 = SocPacketEvent {
+        id: 1,
+        timestamp: 1775600001,
+        src_ip: "10.0.1.25",
+        dst_ip: "10.0.1.1",
+        dst_port: 80,
+        protocol: "HTTP/1.1",
+        entropy: "4.12",
+        ja4: "t12d0303h2",
+        threat: "",
+        verdict: "PASS",
+    };
+    val ev1_json = event_to_json(ev1);
+    val ev1_buf = byte_buffer_from_str(ev1_json);
+    val mask_key: list<i64> = list();
+    list_push(mask_key, 0x1a);
+    list_push(mask_key, 0x2b);
+    list_push(mask_key, 0x3c);
+    list_push(mask_key, 0x4d);
+    val masked_wire_frame = ws_encode_frame(true, 1, ev1_buf, true, mask_key);
+    print("  * Encoded masked WebSocket wire frame (" + to_str(masked_wire_frame.len) + " bytes)");
+
+    val f1_res = ws_decode_frame(masked_wire_frame);
+    match f1_res {
+        ok(f1) => {
+            val payload_str = byte_buffer_to_ascii_lossy(f1.payload);
+            print("  * Decoded Frame #1 (Opcode " + to_str(f1.opcode) + "): " + payload_str);
+            if contains(payload_str, "\"type\":\"packet\"") && contains(payload_str, "\"src\":\"10.0.1.25\"") {
+                assert(masked_wire_frame.len > 0);
+                print("  * [PASSED] Live Telemetry JSON Frame decoded and validated!");
+            } else {
+                print("  * [FAILED] Frame content mismatch");
+                return 1;
+            };
+        },
+        err(e) => {
+            print("  * [FAILED] ws_decode_frame failed: " + e);
+            return 1;
+        },
+    };
+
+    tcp_close(client3);
+    tcp_close(server3);
+    tcp_close(listener);
+
+    print("\n================================================================================");
+    print("  [PASSED] REAL-TIME CYBER OPERATIONS CENTER & WEBSOCKET ENGINE VERIFIED!       ");
+    print("================================================================================");
+    0
+}

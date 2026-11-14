@@ -1,0 +1,9 @@
+// expect: ok
+
+def main() -> i64 {
+    val n = 3
+    val k = 7 % n
+    (k, n)
+    assert(k == 1);
+    return 0
+}

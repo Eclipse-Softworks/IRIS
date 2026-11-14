@@ -1,0 +1,76 @@
+/// Derives the optimal turtle controller and the canary cases the gates score against.
+
+// turtlesim moves the turtle at the speed it is commanded, so over one
+// control period the distance still to go shrinks by speed * dt:
+// e' = e - dt * u. The reference behaviour candidates are judged by is the
+// LQR-optimal law for that model, u = k * e, from the discrete Riccati
+// equation with cost q * e^2 + r * u^2 (dt = 0.032 s, q = 4, r = 0.64).
+// Prints the gain, checks the law saturated at the 2 units/s rating settles
+// every step the live run commands, and -- with IRIS_WRITE_CASES set to a
+// path -- writes the canary cases there: distances near the operating point,
+// where the optimal speed stays inside the rating.
+
+pub const DT: f64 = 0.032
+pub const RATING: f64 = 2.0
+
+def lqr_gain(dt: f64, q: f64, r: f64) -> f64 {
+    // P = q + P - (P dt)^2 / (r + P dt^2), iterated to its fixed point.
+    var p = q
+    var k = 0.0
+    for i in 0..20000 {
+        val s = r + p * dt * dt
+        k = p * dt / s;
+        p = q + p - p * dt * p * dt / s
+    };
+    k
+}
+
+def saturate(u: f64) -> f64 { max(0.0 - RATING, min(RATING, u)) }
+
+def main() -> i64 {
+    val k = lqr_gain(DT, 4.0, 0.64)
+    println("LQR gain: " + to_str(k) + " (units/s per unit of distance)");
+    assert(k > 2.0 && k < 3.0);
+
+    // The saturated optimal law settles every step the live run commands.
+    val targets: list<f64> = list()
+    list_push(targets, 2.0);
+    list_push(targets, 8.0);
+    list_push(targets, 3.0);
+    list_push(targets, 6.0);
+    var x = 0.0
+    for t in 0..list_len(targets) {
+        val target = list_get(targets, t)
+        for step in 0..250 {
+            x = x + DT * saturate(k * (target - x))
+        };
+        println("step to " + to_str(target) + ": final error " + to_str(target - x));
+        assert(abs(target - x) < 0.02);
+    };
+
+    // Canary cases: a grid near the operating point, all inside the rating.
+    var json = "["
+    var count = 0
+    var biggest = 0.0
+    for i in 0..7 {
+        val error = 0.2 * (i to f64) - 0.6
+        for j in 0..3 {
+            val velocity = 0.5 * (j to f64) - 0.5
+            val u = k * error
+            biggest = max(biggest, abs(u));
+            if count > 0 { json = json + ", " };
+            json = json + "{\"inputs\": [" + to_str(error) + ", " + to_str(velocity) + "], \"expected\": " + to_str(u) + "}";
+            count = count + 1
+        };
+    };
+    json = json + "]"
+    assert(count == 21 && biggest < RATING);
+    println("canary: " + to_str(count) + " cases, largest speed " + to_str(biggest) + " units/s");
+    val out = env_get("IRIS_WRITE_CASES")
+    if len(out) > 0 {
+        assert(is_ok(file_write_all(out, json)));
+        println("wrote " + out);
+    };
+    println("evolving turtle: reference controller derived");
+    return 0
+}

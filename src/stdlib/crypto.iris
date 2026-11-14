@@ -2,6 +2,9 @@
 //
 // Provides hashing, encoding, and authentication helpers for ML services and secure communication.
 
+bring std.buffer
+
+
 /// Generate a UUID v4 string (random).
 pub def generate_uuid() -> str {
     uuid()
@@ -65,3 +68,674 @@ pub def bearer_token(token: str) -> str {
 pub def basic_auth(user: str, pass: str) -> str {
     concat("Basic ", to_base64(concat(concat(user, ":"), pass)))
 }
+
+/// Constant-time byte list comparison to prevent side-channel timing attacks.
+pub def bytes_timing_safe_equal(a: list<i64>, b: list<i64>) -> bool {
+    if list_len(a) != list_len(b) {
+        return false
+    }
+    var diff: i64 = 0;
+    for i in 0 .. list_len(a) {
+        diff = bor(diff, bxor(list_get(a, i), list_get(b, i)));
+    }
+    diff == 0
+}
+
+/// Constant-time string comparison to prevent side-channel timing attacks.
+pub def timing_safe_equal(a: str, b: str) -> bool {
+    if len(a) != len(b) {
+        return false
+    }
+    val ba = str_bytes(a);
+    val bb = str_bytes(b);
+    bytes_timing_safe_equal(ba, bb)
+}
+
+/// RC4 Key Scheduling Algorithm (KSA) and Pseudo-Random Generation Algorithm (PRGA).
+/// Encrypts or decrypts a byte list using a symmetric key.
+/// Since RC4 is an involution under XOR, encrypting ciphertext with the same key restores plaintext.
+pub def rc4_crypt_bytes(key: list<i64>, data: list<i64>) -> list<i64> {
+    val key_len = list_len(key);
+    if key_len == 0 {
+        return data
+    }
+    // S-box initialization 0..255
+    val s: list<i64> = list();
+    for i in 0 .. 256 {
+        list_push(s, i);
+    }
+    // Key-scheduling (KSA)
+    var j: i64 = 0;
+    for i in 0 .. 256 {
+        val k_byte = list_get(key, i % key_len);
+        j = (j + list_get(s, i) + k_byte) % 256;
+        val tmp = list_get(s, i);
+        list_set(s, i, list_get(s, j));
+        list_set(s, j, tmp);
+    }
+    // Keystream generation & XOR (PRGA)
+    val out: list<i64> = list();
+    var pi: i64 = 0;
+    var pj: i64 = 0;
+    val data_len = list_len(data);
+    for k in 0 .. data_len {
+        pi = (pi + 1) % 256;
+        pj = (pj + list_get(s, pi)) % 256;
+        val tmp = list_get(s, pi);
+        list_set(s, pi, list_get(s, pj));
+        list_set(s, pj, tmp);
+        val t = (list_get(s, pi) + list_get(s, pj)) % 256;
+        val keystream_byte = list_get(s, t);
+        val cipher_byte = bxor(list_get(data, k), keystream_byte);
+        list_push(out, cipher_byte);
+    }
+    out
+}
+
+/// Encrypt or decrypt a ByteBuffer using RC4 stream cipher.
+pub def rc4_crypt_buffer(key: ByteBuffer, data: ByteBuffer) -> ByteBuffer {
+    val res_bytes = rc4_crypt_bytes(key.data, data.data);
+    ByteBuffer {
+        data: res_bytes,
+        len: list_len(res_bytes),
+    }
+}
+
+/// Encrypt or decrypt string using RC4 with a string key, returning a byte list.
+pub def rc4_crypt_str(key: str, data: str) -> list<i64> {
+    rc4_crypt_bytes(str_bytes(key), str_bytes(data))
+}
+
+/// 32-bit bitwise left rotation helper.
+pub def rotl32(v: i64, n: i64) -> i64 {
+    val mask = 0xffff_ffff;
+    val v32 = band(v, mask);
+    val left = band(shl(v32, n), mask);
+    val right = shr(v32, 32 - n);
+    bor(left, right)
+}
+
+/// ChaCha20 Quarter-Round transformation on four 32-bit words: (a, b, c, d).
+/// Operates on 32-bit unsigned integers via modular addition, XOR, and bitwise rotation.
+pub def chacha20_quarter_round(a: i64, b: i64, c: i64, d: i64) -> (i64, i64, i64, i64) {
+    val mask = 0xffff_ffff;
+    var wa = band(a + b, mask);
+    var wd = rotl32(bxor(d, wa), 16);
+    var wc = band(c + wd, mask);
+    var wb = rotl32(bxor(b, wc), 12);
+    wa = band(wa + wb, mask);
+    wd = rotl32(bxor(wd, wa), 8);
+    wc = band(wc + wd, mask);
+    wb = rotl32(bxor(wb, wc), 7);
+    (wa, wb, wc, wd)
+}
+
+/// Encode arbitrary binary bytes (including embedded nulls) to Base64.
+pub def bytes_to_base64(bytes: list<i64>) -> str {
+    val b64_table = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    val n = list_len(bytes);
+    var out = "";
+    var i = 0;
+    while i < n {
+        val b0 = list_get(bytes, i);
+        val has_b1 = (i + 1 < n);
+        val b1 = if has_b1 { list_get(bytes, i + 1) } else { 0 };
+        val has_b2 = (i + 2 < n);
+        val b2 = if has_b2 { list_get(bytes, i + 2) } else { 0 };
+
+        val triple = bor(shl(b0, 16), bor(shl(b1, 8), b2));
+        val c0 = band(shr(triple, 18), 0x3f);
+        val c1 = band(shr(triple, 12), 0x3f);
+        val c2 = band(shr(triple, 6), 0x3f);
+        val c3 = band(triple, 0x3f);
+
+        out = out + slice(b64_table, c0, c0 + 1);
+        out = out + slice(b64_table, c1, c1 + 1);
+        out = if has_b1 { out + slice(b64_table, c2, c2 + 1) } else { out + "=" };
+        out = if has_b2 { out + slice(b64_table, c3, c3 + 1) } else { out + "=" };
+
+        i = i + 3;
+    }
+    out
+}
+
+/// Compute SHA-1 digest of raw byte list, returning a 20-byte list.
+pub def sha1_bytes(data: list<i64>) -> list<i64> {
+    val orig_len = list_len(data);
+    val orig_bits = orig_len * 8;
+    val padded: list<i64> = list();
+    for i in 0 .. orig_len {
+        list_push(padded, list_get(data, i));
+    }
+    list_push(padded, 0x80);
+    while (list_len(padded) % 64) != 56 {
+        list_push(padded, 0);
+    }
+    // 64-bit length big-endian
+    list_push(padded, band(shr(orig_bits, 56), 0xff));
+    list_push(padded, band(shr(orig_bits, 48), 0xff));
+    list_push(padded, band(shr(orig_bits, 40), 0xff));
+    list_push(padded, band(shr(orig_bits, 32), 0xff));
+    list_push(padded, band(shr(orig_bits, 24), 0xff));
+    list_push(padded, band(shr(orig_bits, 16), 0xff));
+    list_push(padded, band(shr(orig_bits, 8), 0xff));
+    list_push(padded, band(orig_bits, 0xff));
+
+    val mask32 = 0xffff_ffff;
+    var h0: i64 = 0x67452301;
+    var h1: i64 = 0xefcdab89;
+    var h2: i64 = 0x98badcfe;
+    var h3: i64 = 0x10325476;
+    var h4: i64 = 0xc3d2e1f0;
+
+    val total_len = list_len(padded);
+    val num_blocks = total_len / 64;
+
+    for blk in 0 .. num_blocks {
+        val blk_offset = blk * 64;
+        val w: list<i64> = list();
+        for t in 0 .. 16 {
+            val b0 = list_get(padded, blk_offset + t * 4);
+            val b1 = list_get(padded, blk_offset + t * 4 + 1);
+            val b2 = list_get(padded, blk_offset + t * 4 + 2);
+            val b3 = list_get(padded, blk_offset + t * 4 + 3);
+            val word = bor(shl(b0, 24), bor(shl(b1, 16), bor(shl(b2, 8), b3)));
+            list_push(w, band(word, mask32));
+        }
+        for t in 16 .. 80 {
+            val x = bxor(bxor(bxor(list_get(w, t - 3), list_get(w, t - 8)), list_get(w, t - 14)), list_get(w, t - 16));
+            list_push(w, rotl32(x, 1));
+        }
+
+        var a = h0;
+        var b = h1;
+        var c = h2;
+        var d = h3;
+        var e = h4;
+
+        for t in 0 .. 80 {
+            var f: i64 = 0;
+            var k: i64 = 0;
+            if t < 20 {
+                f = bor(band(b, c), band(bxor(b, mask32), d));
+                k = 0x5a827999;
+            } else if t < 40 {
+                f = bxor(b, bxor(c, d));
+                k = 0x6ed9eba1;
+            } else if t < 60 {
+                f = bor(band(b, c), bor(band(b, d), band(c, d)));
+                k = 0x8f1bbcdc;
+            } else {
+                f = bxor(b, bxor(c, d));
+                k = 0xca62c1d6;
+            };
+
+            val temp = band(rotl32(a, 5) + f + e + k + list_get(w, t), mask32);
+            e = d;
+            d = c;
+            c = rotl32(b, 30);
+            b = a;
+            a = temp;
+        }
+
+        h0 = band(h0 + a, mask32);
+        h1 = band(h1 + b, mask32);
+        h2 = band(h2 + c, mask32);
+        h3 = band(h3 + d, mask32);
+        h4 = band(h4 + e, mask32);
+    }
+
+    val out: list<i64> = list();
+    val words: list<i64> = list();
+    list_push(words, h0);
+    list_push(words, h1);
+    list_push(words, h2);
+    list_push(words, h3);
+    list_push(words, h4);
+    for i in 0 .. 5 {
+        val word = list_get(words, i);
+        list_push(out, band(shr(word, 24), 0xff));
+        list_push(out, band(shr(word, 16), 0xff));
+        list_push(out, band(shr(word, 8), 0xff));
+        list_push(out, band(word, 0xff));
+    }
+    out
+}
+
+/// Compute SHA-1 digest of ByteBuffer, returning 20-byte list.
+pub def sha1_buffer(buf: ByteBuffer) -> list<i64> {
+    sha1_bytes(buf.data)
+}
+
+/// Compute SHA-1 digest of a string, returning 40-character hex string.
+pub def sha1_str(data: str) -> str {
+    val h = sha1_bytes(str_bytes(data));
+    byte_buffer_to_hex(ByteBuffer { data: h, len: 20 })
+}
+
+/// MD5 (RFC 1321) of raw bytes: 16 bytes. MD5 is broken as a security hash;
+/// it is here for identifiers defined with it, such as JA3 TLS fingerprints.
+pub def md5_bytes(data: list<i64>) -> list<i64> {
+    val k = [
+        0xd76aa478, 0xe8c7b756, 0x242070db, 0xc1bdceee,
+        0xf57c0faf, 0x4787c62a, 0xa8304613, 0xfd469501,
+        0x698098d8, 0x8b44f7af, 0xffff5bb1, 0x895cd7be,
+        0x6b901122, 0xfd987193, 0xa679438e, 0x49b40821,
+        0xf61e2562, 0xc040b340, 0x265e5a51, 0xe9b6c7aa,
+        0xd62f105d, 0x02441453, 0xd8a1e681, 0xe7d3fbc8,
+        0x21e1cde6, 0xc33707d6, 0xf4d50d87, 0x455a14ed,
+        0xa9e3e905, 0xfcefa3f8, 0x676f02d9, 0x8d2a4c8a,
+        0xfffa3942, 0x8771f681, 0x6d9d6122, 0xfde5380c,
+        0xa4beea44, 0x4bdecfa9, 0xf6bb4b60, 0xbebfbc70,
+        0x289b7ec6, 0xeaa127fa, 0xd4ef3085, 0x04881d05,
+        0xd9d4d039, 0xe6db99e5, 0x1fa27cf8, 0xc4ac5665,
+        0xf4292244, 0x432aff97, 0xab9423a7, 0xfc93a039,
+        0x655b59c3, 0x8f0ccc92, 0xffeff47d, 0x85845dd1,
+        0x6fa87e4f, 0xfe2ce6e0, 0xa3014314, 0x4e0811a1,
+        0xf7537e82, 0xbd3af235, 0x2ad7d2bb, 0xeb86d391,
+    ];
+    val shifts = [7, 12, 17, 22, 5, 9, 14, 20, 4, 11, 16, 23, 6, 10, 15, 21];
+    val mask32 = 0xffff_ffff;
+    val orig_len = list_len(data);
+    val orig_bits = orig_len * 8;
+    val padded: list<i64> = list();
+    for i in 0 .. orig_len {
+        list_push(padded, list_get(data, i));
+    }
+    list_push(padded, 0x80);
+    while (list_len(padded) % 64) != 56 {
+        list_push(padded, 0);
+    }
+    // 64-bit length, little-endian
+    for i in 0 .. 8 {
+        list_push(padded, band(shr(orig_bits, i * 8), 0xff));
+    }
+
+    var a0: i64 = 0x67452301;
+    var b0: i64 = 0xefcdab89;
+    var c0: i64 = 0x98badcfe;
+    var d0: i64 = 0x10325476;
+    val num_blocks = list_len(padded) / 64;
+    for blk in 0 .. num_blocks {
+        val base = blk * 64;
+        val m: list<i64> = list();
+        for t in 0 .. 16 {
+            val o = base + t * 4;
+            val lo = bor(list_get(padded, o), shl(list_get(padded, o + 1), 8));
+            val hi = bor(shl(list_get(padded, o + 2), 16), shl(list_get(padded, o + 3), 24));
+            list_push(m, bor(lo, hi));
+        }
+        var a = a0;
+        var b = b0;
+        var c = c0;
+        var d = d0;
+        for i in 0 .. 64 {
+            var f: i64 = 0;
+            var g: i64 = 0;
+            if i < 16 {
+                f = bor(band(b, c), band(bxor(b, mask32), d));
+                g = i;
+            } else if i < 32 {
+                f = bor(band(d, b), band(bxor(d, mask32), c));
+                g = (5 * i + 1) % 16;
+            } else if i < 48 {
+                f = bxor(b, bxor(c, d));
+                g = (3 * i + 5) % 16;
+            } else {
+                f = bxor(c, bor(b, bxor(d, mask32)));
+                g = (7 * i) % 16;
+            };
+            val shift = shifts[(i / 16) * 4 + i % 4];
+            val rotated = rotl32(band(a + f + k[i] + list_get(m, g), mask32), shift);
+            a = d;
+            d = c;
+            c = b;
+            b = band(b + rotated, mask32);
+        }
+        a0 = band(a0 + a, mask32);
+        b0 = band(b0 + b, mask32);
+        c0 = band(c0 + c, mask32);
+        d0 = band(d0 + d, mask32);
+    }
+
+    val out: list<i64> = list();
+    val words: list<i64> = list();
+    list_push(words, a0);
+    list_push(words, b0);
+    list_push(words, c0);
+    list_push(words, d0);
+    for w in 0 .. 4 {
+        val word = list_get(words, w);
+        for byte in 0 .. 4 {
+            list_push(out, band(shr(word, byte * 8), 0xff));
+        }
+    }
+    out
+}
+
+/// MD5 of a string's bytes, as 32 lowercase hex characters.
+pub def md5_str(data: str) -> str {
+    md5_hex(str_bytes(data))
+}
+
+/// MD5 of raw bytes, as 32 lowercase hex characters.
+pub def md5_hex(data: list<i64>) -> str {
+    byte_buffer_to_hex(ByteBuffer { data: md5_bytes(data), len: 16 })
+}
+
+/// Calculate RFC 6455 Sec-WebSocket-Accept key from client key.
+pub def websocket_accept_key(sec_ws_key: str) -> str {
+    val guid = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+    val combined = concat(sec_ws_key, guid);
+    val hash20 = sha1_bytes(str_bytes(combined));
+    bytes_to_base64(hash20)
+}
+
+// ── AES-128 Block Cipher (FIPS 197) ──────────────────────────────────────────
+
+const AES_SBOX_HEX: str = "637c777bf26b6fc53001672bfed7ab76ca82c97dfa5947f0add4a2af9ca472c0b7fd9326363ff7cc34a5e5f171d8311504c723c31896059a071280e2eb27b27509832c1a1b6e5aa0523bd6b329e32f8453d100ed20fcb15b6acbbe394a4c58cfd0efaafb434d338545f9027f503c9fa851a3408f929d38f5bcb6da2110fff3d2cd0c13ec5f974417c4a77e3d645d197360814fdc222a908846eeb814de5e0bdbe0323a0a4906245cc2d3ac629195e479e7c8376d8dd54ea96c56f4ea657aae08ba78252e1ca6b4c6e8dd741f4bbd8b8a703eb5664803f60e613557b986c11d9ee1f8981169d98e949b1e87e9ce5528df8ca1890dbfe6426841992d0fb054bb16"
+const AES_INV_SBOX_HEX: str = "52096ad53036a538bf40a39e81f3d7fb7ce339829b2fff87348e4344c4dee9cb547b9432a6c2233dee4c950b42fac34e082ea16628d924b2765ba2496d8bd12572f8f66486689816d4a45ccc5d65b6926c704850fdedb9da5e154657a78d9d8490d8ab008cbcd30af7e45805b8b34506d02c1e8fca3f0f02c1afbd0301138a6b3a9111414f67dcea97f2cfcef0b4e67396ac7422e7ad3585e2f937e81c75df6e47f11a711d29c5896fb7620eaa18be1bfc563e4bc6d279209adbc0fe78cd5af41fdda8338807c731b11210592780ec5f60517fa919b54a0d2de57a9f93c99cefa0e03b4dae2af5b0c8ebbb3c83539961172b047eba77d626e169146355210c7d"
+
+def aes_xtime(b: i64) -> i64 {
+    val hi = band(b, 0x80);
+    val shifted = band(shl(b, 1), 0xff);
+    if hi != 0 {
+        bxor(shifted, 0x1b)
+    } else {
+        shifted
+    }
+}
+
+def aes_gf_mul(a: i64, b: i64) -> i64 {
+    var res = 0;
+    var temp_a = a;
+    var temp_b = b;
+    for i in 0 .. 8 {
+        if band(temp_b, 1) != 0 {
+            res = bxor(res, temp_a);
+        }
+        temp_a = aes_xtime(temp_a);
+        temp_b = shr(temp_b, 1);
+    }
+    res
+}
+
+/// AES-128 Key Expansion producing 44 32-bit words (176 bytes) of round keys.
+pub def aes128_key_expansion(key: list<i64>) -> list<i64> {
+    val sbox = byte_buffer_from_hex(AES_SBOX_HEX);
+    val rcon: list<i64> = list();
+    list_push(rcon, 0x00);
+    list_push(rcon, 0x01);
+    list_push(rcon, 0x02);
+    list_push(rcon, 0x04);
+    list_push(rcon, 0x08);
+    list_push(rcon, 0x10);
+    list_push(rcon, 0x20);
+    list_push(rcon, 0x40);
+    list_push(rcon, 0x80);
+    list_push(rcon, 0x1b);
+    list_push(rcon, 0x36);
+
+    val w: list<i64> = list();
+    for i in 0 .. 16 {
+        list_push(w, list_get(key, i));
+    }
+
+    for i in 4 .. 44 {
+        val t0 = list_get(w, (i - 1) * 4);
+        val t1 = list_get(w, (i - 1) * 4 + 1);
+        val t2 = list_get(w, (i - 1) * 4 + 2);
+        val t3 = list_get(w, (i - 1) * 4 + 3);
+
+        var cur0 = t0;
+        var cur1 = t1;
+        var cur2 = t2;
+        var cur3 = t3;
+
+        if (i % 4) == 0 {
+            val round_idx = i / 4;
+            val rcon_val = list_get(rcon, round_idx);
+            cur0 = bxor(byte_buffer_get(sbox, t1), rcon_val);
+            cur1 = byte_buffer_get(sbox, t2);
+            cur2 = byte_buffer_get(sbox, t3);
+            cur3 = byte_buffer_get(sbox, t0);
+        }
+
+        val p0 = list_get(w, (i - 4) * 4);
+        val p1 = list_get(w, (i - 4) * 4 + 1);
+        val p2 = list_get(w, (i - 4) * 4 + 2);
+        val p3 = list_get(w, (i - 4) * 4 + 3);
+
+        list_push(w, bxor(p0, cur0));
+        list_push(w, bxor(p1, cur1));
+        list_push(w, bxor(p2, cur2));
+        list_push(w, bxor(p3, cur3));
+    }
+    w
+}
+
+def aes_add_round_key(state: list<i64>, w: list<i64>, round_offset: i64) -> list<i64> {
+    val res: list<i64> = list();
+    for i in 0 .. 16 {
+        list_push(res, bxor(list_get(state, i), list_get(w, round_offset + i)));
+    }
+    res
+}
+
+def aes_sub_bytes(state: list<i64>, sbox: ByteBuffer) -> list<i64> {
+    val res: list<i64> = list();
+    for i in 0 .. 16 {
+        list_push(res, byte_buffer_get(sbox, list_get(state, i)));
+    }
+    res
+}
+
+def aes_inv_sub_bytes(state: list<i64>, inv_sbox: ByteBuffer) -> list<i64> {
+    val res: list<i64> = list();
+    for i in 0 .. 16 {
+        list_push(res, byte_buffer_get(inv_sbox, list_get(state, i)));
+    }
+    res
+}
+
+def aes_shift_rows(s: list<i64>) -> list<i64> {
+    val p: list<i64> = list();
+    list_push(p, list_get(s, 0));
+    list_push(p, list_get(s, 5));
+    list_push(p, list_get(s, 10));
+    list_push(p, list_get(s, 15));
+    list_push(p, list_get(s, 4));
+    list_push(p, list_get(s, 9));
+    list_push(p, list_get(s, 14));
+    list_push(p, list_get(s, 3));
+    list_push(p, list_get(s, 8));
+    list_push(p, list_get(s, 13));
+    list_push(p, list_get(s, 2));
+    list_push(p, list_get(s, 7));
+    list_push(p, list_get(s, 12));
+    list_push(p, list_get(s, 1));
+    list_push(p, list_get(s, 6));
+    list_push(p, list_get(s, 11));
+    p
+}
+
+def aes_inv_shift_rows(s: list<i64>) -> list<i64> {
+    val p: list<i64> = list();
+    list_push(p, list_get(s, 0));
+    list_push(p, list_get(s, 13));
+    list_push(p, list_get(s, 10));
+    list_push(p, list_get(s, 7));
+    list_push(p, list_get(s, 4));
+    list_push(p, list_get(s, 1));
+    list_push(p, list_get(s, 14));
+    list_push(p, list_get(s, 11));
+    list_push(p, list_get(s, 8));
+    list_push(p, list_get(s, 5));
+    list_push(p, list_get(s, 2));
+    list_push(p, list_get(s, 15));
+    list_push(p, list_get(s, 12));
+    list_push(p, list_get(s, 9));
+    list_push(p, list_get(s, 6));
+    list_push(p, list_get(s, 3));
+    p
+}
+
+def aes_mix_columns(s: list<i64>) -> list<i64> {
+    val res: list<i64> = list();
+    for c in 0 .. 4 {
+        val i = c * 4;
+        val s0 = list_get(s, i);
+        val s1 = list_get(s, i + 1);
+        val s2 = list_get(s, i + 2);
+        val s3 = list_get(s, i + 3);
+        list_push(res, bxor(bxor(bxor(aes_xtime(s0), bxor(aes_xtime(s1), s1)), s2), s3));
+        list_push(res, bxor(bxor(bxor(s0, aes_xtime(s1)), bxor(aes_xtime(s2), s2)), s3));
+        list_push(res, bxor(bxor(bxor(s0, s1), aes_xtime(s2)), bxor(aes_xtime(s3), s3)));
+        list_push(res, bxor(bxor(bxor(bxor(aes_xtime(s0), s0), s1), s2), aes_xtime(s3)));
+    }
+    res
+}
+
+def aes_inv_mix_columns(s: list<i64>) -> list<i64> {
+    val res: list<i64> = list();
+    for c in 0 .. 4 {
+        val i = c * 4;
+        val s0 = list_get(s, i);
+        val s1 = list_get(s, i + 1);
+        val s2 = list_get(s, i + 2);
+        val s3 = list_get(s, i + 3);
+        list_push(res, bxor(bxor(bxor(aes_gf_mul(s0, 0x0e), aes_gf_mul(s1, 0x0b)), aes_gf_mul(s2, 0x0d)), aes_gf_mul(s3, 0x09)));
+        list_push(res, bxor(bxor(bxor(aes_gf_mul(s0, 0x09), aes_gf_mul(s1, 0x0e)), aes_gf_mul(s2, 0x0b)), aes_gf_mul(s3, 0x0d)));
+        list_push(res, bxor(bxor(bxor(aes_gf_mul(s0, 0x0d), aes_gf_mul(s1, 0x09)), aes_gf_mul(s2, 0x0e)), aes_gf_mul(s3, 0x0b)));
+        list_push(res, bxor(bxor(bxor(aes_gf_mul(s0, 0x0b), aes_gf_mul(s1, 0x0d)), aes_gf_mul(s2, 0x09)), aes_gf_mul(s3, 0x0e)));
+    }
+    res
+}
+
+/// Encrypt a single 16-byte block using AES-128 and pre-expanded round keys.
+pub def aes128_encrypt_block(state: list<i64>, w: list<i64>) -> list<i64> {
+    val sbox = byte_buffer_from_hex(AES_SBOX_HEX);
+    var s = aes_add_round_key(state, w, 0);
+    for r in 1 .. 10 {
+        s = aes_sub_bytes(s, sbox);
+        s = aes_shift_rows(s);
+        s = aes_mix_columns(s);
+        s = aes_add_round_key(s, w, r * 16);
+    }
+    s = aes_sub_bytes(s, sbox);
+    s = aes_shift_rows(s);
+    aes_add_round_key(s, w, 160)
+}
+
+/// Decrypt a single 16-byte block using AES-128 and pre-expanded round keys.
+pub def aes128_decrypt_block(state: list<i64>, w: list<i64>) -> list<i64> {
+    val inv_sbox = byte_buffer_from_hex(AES_INV_SBOX_HEX);
+    var s = aes_add_round_key(state, w, 160);
+    s = aes_inv_shift_rows(s);
+    s = aes_inv_sub_bytes(s, inv_sbox);
+    for r in 0 .. 9 {
+        val round_idx = 9 - r;
+        s = aes_add_round_key(s, w, round_idx * 16);
+        s = aes_inv_mix_columns(s);
+        s = aes_inv_shift_rows(s);
+        s = aes_inv_sub_bytes(s, inv_sbox);
+    }
+    aes_add_round_key(s, w, 0)
+}
+
+/// Apply standard PKCS#7 padding to a ByteBuffer so its length is a multiple of 16.
+pub def aes_pad_pkcs7(buf: ByteBuffer) -> ByteBuffer {
+    val rem = buf.len % 16;
+    val pad_len = 16 - rem;
+    val out_bytes: list<i64> = list();
+    for i in 0 .. buf.len {
+        list_push(out_bytes, list_get(buf.data, i));
+    }
+    for j in 0 .. pad_len {
+        list_push(out_bytes, pad_len);
+    }
+    ByteBuffer {
+        data: out_bytes,
+        len: buf.len + pad_len,
+    }
+}
+
+/// Validate and remove PKCS#7 padding from a decrypted buffer.
+pub def aes_unpad_pkcs7(buf: ByteBuffer) -> result<ByteBuffer, str> {
+    if buf.len == 0 || (buf.len % 16) != 0 {
+        return err("invalid block size for pkcs7 unpad")
+    }
+    val pad_val = byte_buffer_get(buf, buf.len - 1);
+    if pad_val < 1 || pad_val > 16 {
+        return err("invalid pkcs7 pad value")
+    }
+    for i in 0 .. pad_val {
+        val b = byte_buffer_get(buf, buf.len - 1 - i);
+        if b != pad_val {
+            return err("pkcs7 padding corrupted")
+        }
+    }
+    val unpadded_len = buf.len - pad_val;
+    ok(byte_buffer_slice(buf, 0, unpadded_len))
+}
+
+/// Encrypt arbitrary-length buffer using AES-128 in CBC mode with PKCS#7 padding.
+pub def aes128_encrypt_cbc(key: ByteBuffer, iv: ByteBuffer, pt: ByteBuffer) -> ByteBuffer {
+    val w = aes128_key_expansion(key.data);
+    val padded = aes_pad_pkcs7(pt);
+    val num_blocks = padded.len / 16;
+    val out_bytes: list<i64> = list();
+    var prev = iv.data;
+
+    for b in 0 .. num_blocks {
+        val block_offset = b * 16;
+        val block_in: list<i64> = list();
+        for i in 0 .. 16 {
+            val pt_byte = list_get(padded.data, block_offset + i);
+            val iv_byte = list_get(prev, i);
+            list_push(block_in, bxor(pt_byte, iv_byte));
+        }
+        val ct_block = aes128_encrypt_block(block_in, w);
+        for j in 0 .. 16 {
+            list_push(out_bytes, list_get(ct_block, j));
+        }
+        prev = ct_block;
+    }
+
+    ByteBuffer {
+        data: out_bytes,
+        len: list_len(out_bytes),
+    }
+}
+
+/// Decrypt ciphertext using AES-128 in CBC mode and strip PKCS#7 padding.
+pub def aes128_decrypt_cbc(key: ByteBuffer, iv: ByteBuffer, ct: ByteBuffer) -> result<ByteBuffer, str> {
+    if ct.len == 0 || (ct.len % 16) != 0 {
+        return err("ciphertext length must be a multiple of 16")
+    }
+    val w = aes128_key_expansion(key.data);
+    val num_blocks = ct.len / 16;
+    val dec_bytes: list<i64> = list();
+    var prev = iv.data;
+
+    for b in 0 .. num_blocks {
+        val block_offset = b * 16;
+        val block_in: list<i64> = list();
+        for i in 0 .. 16 {
+            list_push(block_in, list_get(ct.data, block_offset + i));
+        }
+        val dec_block = aes128_decrypt_block(block_in, w);
+        for j in 0 .. 16 {
+            val pt_byte = bxor(list_get(dec_block, j), list_get(prev, j));
+            list_push(dec_bytes, pt_byte);
+        }
+        prev = block_in;
+    }
+
+    val padded_res = ByteBuffer {
+        data: dec_bytes,
+        len: list_len(dec_bytes),
+    };
+    aes_unpad_pkcs7(padded_res)
+}
+

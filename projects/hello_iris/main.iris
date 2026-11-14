@@ -1,0 +1,53 @@
+// projects/hello_iris/main.iris
+// Starter entry point demonstrating idiomatic IRIS records, math, and flow control.
+
+bring std.math
+bring std.time
+
+record ProjectInfo {
+    name: str,
+    version: str,
+    author: str,
+    tasks_completed: i64,
+    
+}
+
+def describe_project(info: ProjectInfo) -> str {
+    val banner = concat("=== ", concat(info.name, f" (v{info.version}) ==="));
+    banner
+}
+
+pub def main() -> i64 {
+    val project = ProjectInfo {
+        name: "hello_iris",
+        version: "0.1.0",
+        author: "IRIS Developer",
+        tasks_completed: 42,
+        
+    }
+   ;
+
+    println(describe_project(project));
+    println(f"Author: {project.author}");
+    println(f"Tasks Completed: {project.tasks_completed}");
+    // Standard library math demonstration
+    val radius = 5.0;
+    val area = PI * radius * radius;
+    val rounded_area = round_to_decimals(area, 4);
+    println(f"Circle (r={radius}): Area = {rounded_area}");
+    // Time elapsed calculation demonstration
+    val start_ms = now_ms();
+    var count = 0;
+    while count < 1000 {
+        count = count + 1;
+
+        
+    }
+   ;
+    val elapsed_ms = now_ms() - start_ms;
+    println(f"Loop iterations: {count} in {elapsed_ms} ms");
+    assert(count == 1000);
+
+    println("\nProject initialized and running successfully with the IRIS CLI!");
+    return 0
+}

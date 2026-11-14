@@ -1,0 +1,14 @@
+// Generation 1: a sluggish proportional controller -- it gets there, slowly,
+// and never asks for more than 1.6 units/s on this track.
+def policy(error: f64, velocity: f64) -> f64 effect pure { 0.2 * error }
+
+def test_policy() -> i64 effect throw { assert(policy(1.0, 0.0) == 0.2); 0 }
+
+def test_transaction_rollback() -> i64 effect alloc, transaction {
+    val state: list<i64> = list()
+    push(state, 10);
+    transaction_begin();
+    push(state, 99);
+    transaction_rollback();
+    if list_len(state) == 1 && list_get(state, 0) == 10 { 0 } else { 1 }
+}

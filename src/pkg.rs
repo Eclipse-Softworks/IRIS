@@ -9,8 +9,8 @@
 //! name    = "my-project"
 //! version = "0.1.0"
 //! entry   = "main.iris"
-//! # Optional: default registry for unqualified registry deps
-//! registry = "https://iris-pkg.example.com"
+//! # Optional: the registry for registry deps (default: the IRIS registry)
+//! registry = "https://raw.githubusercontent.com/Eclipse-Softworks/IRIS/master/registry"
 //!
 //! [dependencies]
 //! utils = { path = "../shared/utils" }
@@ -40,24 +40,37 @@
 //! - `iris pkg build [--offline]`     — install deps + build entry binary
 //! - `iris pkg run [--offline]`       — build + run
 //! - `iris pkg vendor`                — download all deps for offline builds
+//! - `iris pkg publish [--registry R] [--dry-run]` — publish this package
+//! - `iris pkg search <text> [--registry R]` — find packages
+//! - `iris pkg serve <dir> [--port N]` — serve a registry directory over HTTP
 //!
-//! ## Registry format
+//! ## Registries
 //!
-//! A registry is a JSON index at `<registry>/index.json`:
+//! A registry is a directory -- or the same directory served over HTTP(S),
+//! or a `file://` URL to it -- holding a JSON index and the packages'
+//! archives:
+//! ```text
+//! index.json
+//! pkgs/json-1.0.0.tar.gz
+//! ```
 //! ```json
 //! {
 //!   "packages": {
 //!     "json": {
+//!       "description": "...",
 //!       "versions": {
-//!         "1.0.0": {
-//!           "url": "https://example.com/pkgs/json-1.0.0.tar.gz",
-//!           "checksum": "sha256:..."
-//!         }
+//!         "1.0.0": { "url": "pkgs/json-1.0.0.tar.gz", "checksum": "sha256:..." }
 //!       }
 //!     }
 //!   }
 //! }
 //! ```
+//! A relative `url` is resolved against the registry, so a registry moves
+//! as a whole. `iris pkg publish` adds a version to a registry directory --
+//! a version, once published, is never replaced -- and a directory pushed
+//! to a web host or a git repository's raw files is an HTTP registry. The
+//! default registry is `registry/` of the IRIS repository; `IRIS_REGISTRY`,
+//! or `registry` in `[package]`, chooses another.
 
 use semver::{Version, VersionReq};
 use serde::{Deserialize, Serialize};
@@ -338,7 +351,7 @@ pub struct LockEntry {
     pub checksum: Option<String>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct LockFile {
     pub entries: BTreeMap<String, LockEntry>,
 }
@@ -495,21 +508,33 @@ fn collect_files(base: &Path, dir: &Path, out: &mut Vec<PathBuf>) -> io::Result<
 
 // ── Registry helpers ──────────────────────────────────────────────────────────
 
+fn parse_version_req(version_req: &str) -> Result<VersionReq, String> {
+    if version_req == "*" {
+        Ok(VersionReq::STAR)
+    } else {
+        VersionReq::parse(version_req)
+            .map_err(|e| format!("invalid version requirement '{}': {}", version_req, e))
+    }
+}
+
+/// Extract pinned version from a registry lock entry source (`"<pkg>@<version>"`).
+fn locked_registry_version(entry: &LockEntry, package: &str) -> Option<Version> {
+    if entry.kind != "registry" {
+        return None;
+    }
+    let ver_str = entry.source.strip_prefix(&format!("{package}@"))?;
+    Version::parse(ver_str).ok()
+}
+
 /// Fetch the registry index and resolve a version constraint to a concrete
 /// version + download URL + checksum.
 fn resolve_registry_dep(
     registry_url: &str,
     package: &str,
     version_req: &str,
-    _offline: bool,
+    locked_pin: Option<&Version>,
 ) -> Result<(Version, String, String), String> {
-    // Parse the version requirement.
-    let req = if version_req == "*" {
-        VersionReq::STAR
-    } else {
-        VersionReq::parse(version_req)
-            .map_err(|e| format!("invalid version requirement '{}': {}", version_req, e))?
-    };
+    let req = parse_version_req(version_req)?;
 
     // Fetch the registry index.
     let index_url = format!("{}/index.json", registry_url.trim_end_matches('/'));
@@ -525,6 +550,27 @@ fn resolve_registry_dep(
         .get(package)
         .and_then(|p| p.versions.as_ref())
         .ok_or_else(|| format!("package '{}' not found in registry", package))?;
+
+    if let Some(pin) = locked_pin {
+        if !req.matches(pin) {
+            return Err(format!(
+                "--locked: locked version '{}@{}' no longer satisfies manifest requirement '{}'",
+                package, pin, version_req
+            ));
+        }
+        let pin_str = pin.to_string();
+        let entry = versions.get(&pin_str).ok_or_else(|| {
+            format!(
+                "--locked: pinned version '{}@{}' not found in registry",
+                package, pin
+            )
+        })?;
+        return Ok((
+            pin.clone(),
+            registry_join(registry_url, &entry.url),
+            entry.checksum.clone(),
+        ));
+    }
 
     // Find the latest matching version.
     let mut best: Option<(Version, &RegistryVersionEntry)> = None;
@@ -549,7 +595,11 @@ fn resolve_registry_dep(
         )
     })?;
 
-    Ok((version, entry.url.clone(), entry.checksum.clone()))
+    Ok((
+        version,
+        registry_join(registry_url, &entry.url),
+        entry.checksum.clone(),
+    ))
 }
 
 #[derive(Deserialize, Debug)]
@@ -609,17 +659,52 @@ fn download_and_extract(
     Ok(())
 }
 
-/// Minimal HTTP GET via curl.exe (Windows) or `curl` (Unix).
+/// Read `url`: `http(s)://` through curl (an HTTP error is an error, not a
+/// page to parse), `file://` and plain paths from disk.
 fn ureq_get(url: &str) -> Result<Vec<u8>, String> {
-    let output = Command::new(if cfg!(windows) { "curl.exe" } else { "curl" })
-        .args(["-sS", "-L", url])
-        .output()
-        .map_err(|e| format!("curl failed: {}", e))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("curl error: {}", stderr.trim()));
+    if url.starts_with("http://") || url.starts_with("https://") {
+        let output = Command::new(if cfg!(windows) { "curl.exe" } else { "curl" })
+            .args(["-fsSL", url])
+            .output()
+            .map_err(|e| format!("curl could not start: {}", e))?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(format!("{}: {}", url, stderr.trim()));
+        }
+        return Ok(output.stdout);
     }
-    Ok(output.stdout)
+    let path = file_url_path(url);
+    fs::read(&path).map_err(|e| format!("{}: {}", path.display(), e))
+}
+
+/// The path a `file://` URL, or a plain path, names.
+fn file_url_path(url: &str) -> PathBuf {
+    match url.strip_prefix("file://") {
+        // file:///C:/x on Windows, file:///x elsewhere.
+        Some(rest) if cfg!(windows) && rest.starts_with('/') && rest.get(2..3) == Some(":") => {
+            PathBuf::from(&rest[1..])
+        }
+        Some(rest) => PathBuf::from(rest),
+        None => PathBuf::from(url),
+    }
+}
+
+/// `rel` against the registry `base`; absolute URLs and paths stay as they are.
+fn registry_join(base: &str, rel: &str) -> String {
+    let absolute = rel.contains("://") || Path::new(rel).is_absolute();
+    if absolute {
+        rel.to_owned()
+    } else {
+        format!(
+            "{}/{}",
+            base.trim_end_matches('/'),
+            rel.trim_start_matches("./")
+        )
+    }
+}
+
+fn is_remote(registry: &str) -> bool {
+    registry.starts_with("http://") || registry.starts_with("https://")
 }
 
 // ── Commands ──────────────────────────────────────────────────────────────────
@@ -722,21 +807,54 @@ pub fn cmd_list() -> Result<(), String> {
     Ok(())
 }
 
+fn collect_missing_deps(
+    manifest: &Manifest,
+    deps_dir: &Path,
+) -> Result<(Vec<String>, usize), String> {
+    let mut visited = std::collections::HashSet::new();
+    let mut queue: std::collections::VecDeque<(String, Dep)> = manifest
+        .deps
+        .iter()
+        .map(|(n, d)| (n.clone(), d.clone()))
+        .collect();
+    let mut missing = Vec::new();
+    let mut checked = 0usize;
+    while let Some((name, _dep)) = queue.pop_front() {
+        if !visited.insert(name.clone()) {
+            continue;
+        }
+        checked += 1;
+        let target = deps_dir.join(&name);
+        if !target.exists() {
+            missing.push(name);
+            continue;
+        }
+        let sub_path = target.join("iris.toml");
+        if sub_path.exists() {
+            if let Ok(text) = fs::read_to_string(&sub_path) {
+                if let Ok(sub) = Manifest::parse(&text) {
+                    for (sub_name, sub_dep) in sub.deps {
+                        if !visited.contains(&sub_name) {
+                            queue.push_back((sub_name, sub_dep));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok((missing, checked))
+}
+
+/// `iris pkg check` — verify direct and transitive deps are installed in `.iris/deps/`.
 pub fn cmd_check() -> Result<(), String> {
     let (manifest_path, manifest) = load_manifest()?;
     let project_dir = manifest_path
         .parent()
         .ok_or("cannot determine project directory")?;
     let deps_dir = project_dir.join(".iris").join("deps");
-    let mut missing = Vec::new();
-    for name in manifest.deps.keys() {
-        let target = deps_dir.join(name);
-        if !target.exists() {
-            missing.push(name.clone());
-        }
-    }
+    let (missing, checked) = collect_missing_deps(&manifest, &deps_dir)?;
     if missing.is_empty() {
-        eprintln!("all {} dependencies installed", manifest.deps.len());
+        eprintln!("all {} dependencies installed", checked);
         Ok(())
     } else {
         for m in &missing {
@@ -749,13 +867,412 @@ pub fn cmd_check() -> Result<(), String> {
     }
 }
 
-/// `iris pkg install [--offline]`
-pub fn cmd_install(offline: bool) -> Result<(), String> {
+/// `iris pkg verify` — verify `.iris/deps/` against `iris.lock` SHA-256 checksums and semver constraints.
+pub fn cmd_verify() -> Result<(), String> {
     let (manifest_path, manifest) = load_manifest()?;
     let project_dir = manifest_path
         .parent()
         .ok_or("cannot determine project directory")?;
     let deps_dir = project_dir.join(".iris").join("deps");
+    if manifest.deps.is_empty() {
+        eprintln!("verified 0 locked dependencies (no dependencies)");
+        return Ok(());
+    }
+    if !lock_path(&manifest_path).exists() {
+        return Err("iris.lock not found (run `iris pkg install` first)".into());
+    }
+    let lock = load_lock(&manifest_path);
+
+    let (missing, _checked) = collect_missing_deps(&manifest, &deps_dir)?;
+    if !missing.is_empty() {
+        return Err(format!(
+            "verification failed: missing installed dependencies: {}",
+            missing.join(", ")
+        ));
+    }
+
+    // Verify direct and transitive manifest edges exist in lockfile and match semver if registry.
+    let mut visited = std::collections::HashSet::new();
+    let mut queue: std::collections::VecDeque<(String, Dep)> = manifest
+        .deps
+        .iter()
+        .map(|(n, d)| (n.clone(), d.clone()))
+        .collect();
+    while let Some((name, dep)) = queue.pop_front() {
+        let entry = lock.entries.get(&name).ok_or_else(|| {
+            format!(
+                "verification failed: dependency '{}' is missing from iris.lock",
+                name
+            )
+        })?;
+        let target = deps_dir.join(&name);
+        if let Dep::Registry {
+            package,
+            version_req,
+        } = &dep
+        {
+            let req = parse_version_req(version_req)?;
+            let locked_ver = locked_registry_version(entry, package).ok_or_else(|| {
+                format!(
+                    "verification failed: lock entry for '{}' has invalid source '{}'",
+                    name, entry.source
+                )
+            })?;
+            if !req.matches(&locked_ver) {
+                return Err(format!(
+                    "verification failed: '{}@{}' does not satisfy requirement '{}'",
+                    package, locked_ver, version_req
+                ));
+            }
+        }
+        if !visited.insert(name.clone()) {
+            continue;
+        }
+        let sub_path = target.join("iris.toml");
+        if sub_path.exists() {
+            if let Ok(text) = fs::read_to_string(&sub_path) {
+                if let Ok(sub) = Manifest::parse(&text) {
+                    for (sub_name, sub_dep) in sub.deps {
+                        queue.push_back((sub_name, sub_dep));
+                    }
+                }
+            }
+        }
+    }
+
+    // Verify every lockfile entry matches on-disk directory SHA-256 checksum.
+    for (name, entry) in &lock.entries {
+        let target = deps_dir.join(name);
+        if !target.exists() {
+            return Err(format!(
+                "verification failed: locked dependency '{}' is not installed in {}",
+                name,
+                target.display()
+            ));
+        }
+        let expected = entry.checksum.as_deref().ok_or_else(|| {
+            format!(
+                "verification failed: lock entry for '{}' has no checksum",
+                name
+            )
+        })?;
+        let actual = dir_checksum(&target).ok_or_else(|| {
+            format!(
+                "verification failed: cannot hash installed directory for '{}'",
+                name
+            )
+        })?;
+        if actual != expected {
+            return Err(format!(
+                "verification failed for '{}': directory checksum mismatch (expected {}, got {})",
+                name, expected, actual
+            ));
+        }
+    }
+
+    eprintln!(
+        "verified {} locked dependencies (checksums OK)",
+        lock.entries.len()
+    );
+    Ok(())
+}
+
+/// `iris pkg tree` — print direct and transitive dependency tree.
+pub fn cmd_tree() -> Result<(), String> {
+    let (manifest_path, manifest) = load_manifest()?;
+    let project_dir = manifest_path
+        .parent()
+        .ok_or("cannot determine project directory")?;
+    let deps_dir = project_dir.join(".iris").join("deps");
+    let lock = load_lock(&manifest_path);
+
+    println!("{} v{}", manifest.name, manifest.version);
+    let mut visited = std::collections::HashSet::new();
+    let total = manifest.deps.len();
+    for (idx, (name, dep)) in manifest.deps.iter().enumerate() {
+        let is_last = idx + 1 == total;
+        print_tree_node(name, dep, "", is_last, &deps_dir, &lock, &mut visited);
+    }
+    Ok(())
+}
+
+fn format_dep_summary(name: &str, dep: &Dep, deps_dir: &Path, lock: &LockFile) -> String {
+    let installed_ver = fs::read_to_string(deps_dir.join(name).join("iris.toml"))
+        .ok()
+        .and_then(|s| Manifest::parse(&s).ok())
+        .map(|m| m.version);
+    let spec = match dep {
+        Dep::Path(p) => format!("path:{}", p),
+        Dep::Git { url, .. } => format!("git:{}", url),
+        Dep::Registry {
+            package,
+            version_req,
+        } => format!("registry:{} ({})", package, version_req),
+    };
+    if let Some(ver) = installed_ver {
+        format!("{} v{} [{}]", name, ver, spec)
+    } else if let Some(entry) = lock.entries.get(name) {
+        format!("{} ({}) [{}]", name, entry.source, spec)
+    } else {
+        format!("{} (not installed) [{}]", name, spec)
+    }
+}
+
+fn print_tree_node(
+    name: &str,
+    dep: &Dep,
+    prefix: &str,
+    is_last: bool,
+    deps_dir: &Path,
+    lock: &LockFile,
+    visited: &mut std::collections::HashSet<String>,
+) {
+    let branch = if is_last { "└── " } else { "├── " };
+    let label = format_dep_summary(name, dep, deps_dir, lock);
+    if !visited.insert(name.to_string()) {
+        println!("{}{}{label} (*)", prefix, branch);
+        return;
+    }
+    println!("{}{}{label}", prefix, branch);
+
+    let sub_path = deps_dir.join(name).join("iris.toml");
+    if sub_path.exists() {
+        if let Ok(text) = fs::read_to_string(&sub_path) {
+            if let Ok(sub) = Manifest::parse(&text) {
+                let child_prefix = format!("{}{}", prefix, if is_last { "    " } else { "│   " });
+                let count = sub.deps.len();
+                for (i, (sub_name, sub_dep)) in sub.deps.iter().enumerate() {
+                    print_tree_node(
+                        sub_name,
+                        sub_dep,
+                        &child_prefix,
+                        i + 1 == count,
+                        deps_dir,
+                        lock,
+                        visited,
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// `iris pkg clean [--all]` — clean `.iris/deps/` (and `.iris/vendor/` + built binary with `--all`).
+pub fn cmd_clean(all: bool) -> Result<(), String> {
+    let (manifest_path, manifest) = load_manifest()?;
+    let project_dir = manifest_path
+        .parent()
+        .ok_or("cannot determine project directory")?;
+    let deps_dir = project_dir.join(".iris").join("deps");
+    if deps_dir.exists() {
+        remove_dir_all_safe(&deps_dir)?;
+        eprintln!("removed {}", deps_dir.display());
+    }
+    if all {
+        let vendor_dir = project_dir.join(VENDOR_DIR);
+        if vendor_dir.exists() {
+            remove_dir_all_safe(&vendor_dir)?;
+            eprintln!("removed {}", vendor_dir.display());
+        }
+        let bin_path =
+            project_dir.join(format!("{}{}", manifest.name, std::env::consts::EXE_SUFFIX));
+        if bin_path.exists() {
+            fs::remove_file(&bin_path)
+                .map_err(|e| format!("cannot remove {}: {}", bin_path.display(), e))?;
+            eprintln!("removed {}", bin_path.display());
+        }
+    }
+    Ok(())
+}
+
+fn check_dep_conflict(
+    name: &str,
+    dep: &Dep,
+    resolved_versions: &BTreeMap<String, (String, Version)>,
+    resolved_git_urls: &BTreeMap<String, String>,
+) -> Result<(), String> {
+    match dep {
+        Dep::Registry {
+            package,
+            version_req,
+        } => {
+            let req = parse_version_req(version_req)?;
+            if let Some((prev_pkg, prev_ver)) = resolved_versions.get(name) {
+                if prev_pkg != package {
+                    return Err(format!(
+                        "dependency conflict for '{}': requires both registry package '{}' and '{}'",
+                        name, prev_pkg, package
+                    ));
+                }
+                if !req.matches(prev_ver) {
+                    return Err(format!(
+                        "semver conflict for '{}' ({}): installed v{}, but dependency also requires '{}'",
+                        name, package, prev_ver, version_req
+                    ));
+                }
+            }
+        }
+        Dep::Git { url, .. } => {
+            if let Some(prev_url) = resolved_git_urls.get(name) {
+                if prev_url != url {
+                    return Err(format!(
+                        "dependency conflict for '{}': requires both git '{}' and '{}'",
+                        name, prev_url, url
+                    ));
+                }
+            }
+        }
+        Dep::Path(_) => {}
+    }
+    Ok(())
+}
+
+fn install_from_vendor(
+    vendor_dir: &Path,
+    target: &Path,
+    name: &str,
+    dep: &Dep,
+    prev_lock: Option<&LockEntry>,
+    locked: bool,
+) -> Result<(LockEntry, Option<(String, Version)>), String> {
+    let vendored = vendor_dir.join(name);
+    if !vendored.exists() {
+        return Err(format!(
+            "offline mode: dependency '{}' not found in {} (run `iris pkg vendor` while online)",
+            name,
+            vendor_dir.display()
+        ));
+    }
+    if target.exists() {
+        remove_dir_all_safe(target)?;
+    }
+    copy_dir_recursive(&vendored, target)
+        .map_err(|e| format!("cannot restore vendored '{}': {}", name, e))?;
+    let cs = dir_checksum(target);
+
+    let sub_manifest = fs::read_to_string(target.join("iris.toml"))
+        .ok()
+        .and_then(|t| Manifest::parse(&t).ok());
+    let vendored_ver = sub_manifest
+        .as_ref()
+        .and_then(|m| Version::parse(&m.version).ok());
+
+    let mut resolved_ver: Option<(String, Version)> = None;
+    if let Dep::Registry {
+        package,
+        version_req,
+    } = dep
+    {
+        let req = parse_version_req(version_req)?;
+        if let Some(ref ver) = vendored_ver {
+            if !req.matches(ver) {
+                return Err(format!(
+                    "vendored dependency '{}' v{} does not satisfy requirement '{}'",
+                    name, ver, version_req
+                ));
+            }
+            if locked {
+                if let Some(lock_entry) = prev_lock {
+                    if let Some(pin) = locked_registry_version(lock_entry, package) {
+                        if *ver != pin {
+                            return Err(format!(
+                                "--locked: vendored '{}' is v{}, expected locked v{}",
+                                name, ver, pin
+                            ));
+                        }
+                    }
+                }
+            }
+            resolved_ver = Some((package.clone(), ver.clone()));
+        }
+    }
+
+    let entry = if let Some(prev) = prev_lock {
+        LockEntry {
+            kind: prev.kind.clone(),
+            source: prev.source.clone(),
+            commit: prev.commit.clone(),
+            checksum: cs,
+        }
+    } else {
+        match dep {
+            Dep::Path(rel) => LockEntry {
+                kind: "path".into(),
+                source: rel.clone(),
+                commit: None,
+                checksum: cs,
+            },
+            Dep::Git { url, .. } => LockEntry {
+                kind: "git".into(),
+                source: url.clone(),
+                commit: None,
+                checksum: cs,
+            },
+            Dep::Registry { package, .. } => {
+                let ver_suffix = vendored_ver
+                    .as_ref()
+                    .map(|v| format!("@{v}"))
+                    .unwrap_or_default();
+                LockEntry {
+                    kind: "registry".into(),
+                    source: format!("{package}{ver_suffix}"),
+                    commit: None,
+                    checksum: cs,
+                }
+            }
+        }
+    };
+    eprintln!("  {} — restored from vendor ({})", name, vendored.display());
+    Ok((entry, resolved_ver))
+}
+
+fn verify_locked_entry(
+    name: &str,
+    new_entry: &LockEntry,
+    existing: &LockFile,
+) -> Result<(), String> {
+    let locked = existing.entries.get(name).ok_or_else(|| {
+        format!(
+            "--locked: dependency '{}' is not listed in iris.lock (run `iris pkg install`)",
+            name
+        )
+    })?;
+    if locked.kind != new_entry.kind || locked.source != new_entry.source {
+        return Err(format!(
+            "--locked: dependency '{}' changed (lock has {} '{}', resolved {} '{}')",
+            name, locked.kind, locked.source, new_entry.kind, new_entry.source
+        ));
+    }
+    if locked.commit != new_entry.commit {
+        return Err(format!(
+            "--locked: git commit for '{}' changed (lock {:?}, resolved {:?})",
+            name, locked.commit, new_entry.commit
+        ));
+    }
+    if let Some(expected_cs) = &locked.checksum {
+        if new_entry.checksum.as_deref() != Some(expected_cs.as_str()) {
+            return Err(format!(
+                "--locked: checksum mismatch for '{}' (expected {}, got {:?})",
+                name, expected_cs, new_entry.checksum
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// `iris pkg install [--offline]`
+pub fn cmd_install(offline: bool) -> Result<(), String> {
+    cmd_install_with_opts(offline, false)
+}
+
+/// `iris pkg install [--offline] [--locked]`
+pub fn cmd_install_with_opts(offline: bool, locked: bool) -> Result<(), String> {
+    let (manifest_path, manifest) = load_manifest()?;
+    let project_dir = manifest_path
+        .parent()
+        .ok_or("cannot determine project directory")?;
+    let deps_dir = project_dir.join(".iris").join("deps");
+    let vendor_dir = project_dir.join(VENDOR_DIR);
 
     fs::create_dir_all(&deps_dir).map_err(|e| format!("cannot create .iris/deps/: {}", e))?;
 
@@ -764,105 +1281,175 @@ pub fn cmd_install(offline: bool) -> Result<(), String> {
         return Ok(());
     }
 
-    let mut lock = load_lock(&manifest_path);
+    if locked && !lock_path(&manifest_path).exists() {
+        return Err(
+            "iris.lock not found (--locked requires an existing lockfile; run `iris pkg install` first)"
+                .into(),
+        );
+    }
 
-    let mut queue: Vec<(String, Dep, PathBuf)> = manifest
+    let existing_lock = load_lock(&manifest_path);
+    let mut lock = existing_lock.clone();
+
+    let mut queue: std::collections::VecDeque<(String, Dep, PathBuf, Option<String>)> = manifest
         .deps
         .iter()
-        .map(|(n, d)| (n.clone(), d.clone(), project_dir.to_path_buf()))
+        .map(|(n, d)| {
+            (
+                n.clone(),
+                d.clone(),
+                project_dir.to_path_buf(),
+                manifest.registry.clone(),
+            )
+        })
         .collect();
 
     let mut installed: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut resolved_versions: BTreeMap<String, (String, Version)> = BTreeMap::new();
+    let mut resolved_git_urls: BTreeMap<String, String> = BTreeMap::new();
 
-    while let Some((name, dep, from_dir)) = queue.pop() {
+    while let Some((name, dep, from_dir, inherited_reg)) = queue.pop_front() {
+        check_dep_conflict(&name, &dep, &resolved_versions, &resolved_git_urls)?;
         if installed.contains(&name) {
             continue;
         }
         installed.insert(name.clone());
 
         let target = deps_dir.join(&name);
+        let prev_entry = existing_lock.entries.get(&name);
+        let use_vendor =
+            offline && (vendor_dir.join(&name).exists() || !matches!(dep, Dep::Path(_)));
 
-        let (lock_entry, transitive_from_dir) = match &dep {
-            Dep::Path(rel) => {
-                let source = from_dir.join(rel);
-                let source = source.canonicalize().unwrap_or_else(|_| source.clone());
-                if !source.exists() {
-                    return Err(format!(
-                        "dependency '{}': path '{}' does not exist",
-                        name,
-                        source.display()
-                    ));
+        let (lock_entry, transitive_from_dir, resolved_ver) = if use_vendor {
+            let (entry, ver) =
+                install_from_vendor(&vendor_dir, &target, &name, &dep, prev_entry, locked)?;
+            (entry, target.clone(), ver)
+        } else {
+            match &dep {
+                Dep::Path(rel) => {
+                    let source = from_dir.join(rel);
+                    let source = source.canonicalize().unwrap_or_else(|_| source.clone());
+                    if !source.exists() {
+                        return Err(format!(
+                            "dependency '{}': path '{}' does not exist",
+                            name,
+                            source.display()
+                        ));
+                    }
+                    install_path_dep(&source, &target, &name)?;
+                    let cs = dir_checksum(&target);
+                    let entry = LockEntry {
+                        kind: "path".into(),
+                        source: source.to_string_lossy().into_owned(),
+                        commit: None,
+                        checksum: cs,
+                    };
+                    (entry, source.clone(), None)
                 }
-                install_path_dep(&source, &target, &name)?;
-                let cs = dir_checksum(&target);
-                let entry = LockEntry {
-                    kind: "path".into(),
-                    source: source.to_string_lossy().into_owned(),
-                    commit: None,
-                    checksum: cs,
-                };
-                (entry, source.clone())
-            }
-            Dep::Git {
-                url,
-                branch,
-                tag,
-                rev,
-            } => {
-                let commit = install_git_dep(
+                Dep::Git {
                     url,
-                    branch.as_deref(),
-                    tag.as_deref(),
-                    rev.as_deref(),
-                    &target,
-                    &name,
-                )?;
-                let cs = dir_checksum(&target);
-                let entry = LockEntry {
-                    kind: "git".into(),
-                    source: url.clone(),
-                    commit: Some(commit),
-                    checksum: cs,
-                };
-                (entry, target.clone())
-            }
-            Dep::Registry {
-                package,
-                version_req,
-            } => {
-                let registry_url = effective_registry(manifest.registry.as_deref());
-                let (version, url, checksum) =
-                    resolve_registry_dep(&registry_url, package, version_req, offline)?;
-                download_and_extract(&url, &checksum, &target, &name)?;
-                let cs = dir_checksum(&target);
-                let entry = LockEntry {
-                    kind: "registry".into(),
-                    source: format!("{}@{}", package, version),
-                    commit: None,
-                    checksum: cs,
-                };
-                (entry, target.clone())
+                    branch,
+                    tag,
+                    rev,
+                } => {
+                    let effective_rev = if locked {
+                        prev_entry
+                            .and_then(|e| e.commit.as_deref())
+                            .or(rev.as_deref())
+                    } else {
+                        rev.as_deref()
+                    };
+                    let commit = install_git_dep(
+                        url,
+                        branch.as_deref(),
+                        tag.as_deref(),
+                        effective_rev,
+                        &target,
+                        &name,
+                    )?;
+                    resolved_git_urls.insert(name.clone(), url.clone());
+                    let cs = dir_checksum(&target);
+                    let entry = LockEntry {
+                        kind: "git".into(),
+                        source: url.clone(),
+                        commit: Some(commit),
+                        checksum: cs,
+                    };
+                    (entry, target.clone(), None)
+                }
+                Dep::Registry {
+                    package,
+                    version_req,
+                } => {
+                    let registry_url = effective_registry(inherited_reg.as_deref());
+                    let locked_pin = if locked {
+                        prev_entry.and_then(|e| locked_registry_version(e, package))
+                    } else {
+                        None
+                    };
+                    let (version, url, checksum) = resolve_registry_dep(
+                        &registry_url,
+                        package,
+                        version_req,
+                        locked_pin.as_ref(),
+                    )?;
+                    download_and_extract(&url, &checksum, &target, &name)?;
+                    let cs = dir_checksum(&target);
+                    let entry = LockEntry {
+                        kind: "registry".into(),
+                        source: format!("{}@{}", package, version),
+                        commit: None,
+                        checksum: cs,
+                    };
+                    (entry, target.clone(), Some((package.clone(), version)))
+                }
             }
         };
 
+        if let Some((pkg, ver)) = resolved_ver {
+            resolved_versions.insert(name.clone(), (pkg, ver));
+        }
+
+        if locked {
+            verify_locked_entry(&name, &lock_entry, &existing_lock)?;
+        }
         lock.entries.insert(name.clone(), lock_entry);
 
         // Transitive dependencies.
         let sub_manifest_path = transitive_from_dir.join("iris.toml");
         if sub_manifest_path.exists() {
-            if let Ok(text) = fs::read_to_string(&sub_manifest_path) {
-                if let Ok(sub_manifest) = Manifest::parse(&text) {
-                    for (sub_name, sub_dep) in sub_manifest.deps {
-                        if !installed.contains(&sub_name) {
-                            queue.push((sub_name, sub_dep, transitive_from_dir.clone()));
-                        }
-                    }
-                }
+            let text = fs::read_to_string(&sub_manifest_path).map_err(|e| {
+                format!(
+                    "cannot read transitive manifest {}: {}",
+                    sub_manifest_path.display(),
+                    e
+                )
+            })?;
+            let sub_manifest = Manifest::parse(&text)?;
+            let next_reg = sub_manifest.registry.or(inherited_reg);
+            for (sub_name, sub_dep) in sub_manifest.deps {
+                queue.push_back((
+                    sub_name,
+                    sub_dep,
+                    transitive_from_dir.clone(),
+                    next_reg.clone(),
+                ));
             }
         }
     }
 
-    save_lock(&manifest_path, &lock)?;
+    if locked {
+        for name in existing_lock.entries.keys() {
+            if !installed.contains(name) {
+                return Err(format!(
+                    "--locked: iris.lock contains stale dependency '{}' no longer in dependency graph",
+                    name
+                ));
+            }
+        }
+    } else {
+        save_lock(&manifest_path, &lock)?;
+    }
     eprintln!("installed {} dependencies", installed.len());
     Ok(())
 }
@@ -933,7 +1520,7 @@ pub fn cmd_update(only: Option<&str>) -> Result<(), String> {
                         .map_err(|e| format!("cannot remove {}: {}", target.display(), e))?;
                 }
                 let (version, url, checksum) =
-                    resolve_registry_dep(&registry_url, package, version_req, false)?;
+                    resolve_registry_dep(&registry_url, package, version_req, None)?;
                 download_and_extract(&url, &checksum, &target, name)?;
                 let cs = dir_checksum(&target);
                 lock.entries.insert(
@@ -972,7 +1559,7 @@ pub fn cmd_vendor() -> Result<(), String> {
         return Ok(());
     }
 
-    // Ensure deps are installed first.
+    // Ensure direct and transitive deps are installed first.
     if !deps_dir.exists()
         || deps_dir
             .read_dir()
@@ -981,16 +1568,41 @@ pub fn cmd_vendor() -> Result<(), String> {
     {
         eprintln!("no installed deps found — running install first ...");
         cmd_install(false)?;
+    } else {
+        let (missing, _) = collect_missing_deps(&manifest, &deps_dir)?;
+        if !missing.is_empty() {
+            eprintln!(
+                "missing dependencies ({}) — running install first ...",
+                missing.join(", ")
+            );
+            cmd_install(false)?;
+        }
     }
 
-    let mut vendored = 0usize;
-    for name in manifest.deps.keys() {
-        let src = deps_dir.join(name);
-        let dst = vendor_dir.join(name);
-        if !src.exists() {
-            eprintln!("  {} — not installed, skipping", name);
-            continue;
+    // Remove stale vendored dirs not present in `.iris/deps/` so offline restores stay exact.
+    if let Ok(entries) = fs::read_dir(&vendor_dir) {
+        for entry in entries.flatten() {
+            if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                let name = entry.file_name();
+                if !deps_dir.join(&name).exists() {
+                    remove_dir_all_safe(&entry.path())?;
+                }
+            }
         }
+    }
+
+    let mut dep_names: Vec<String> = fs::read_dir(&deps_dir)
+        .map_err(|e| format!("cannot read {}: {}", deps_dir.display(), e))?
+        .flatten()
+        .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    dep_names.sort();
+
+    let mut vendored = 0usize;
+    for name in dep_names {
+        let src = deps_dir.join(&name);
+        let dst = vendor_dir.join(&name);
         if dst.exists() {
             remove_dir_all_safe(&dst)?;
         }
@@ -1186,12 +1798,16 @@ fn remove_dir_all_safe(path: &Path) -> Result<(), String> {
 // ── Build / run ───────────────────────────────────────────────────────────────
 
 pub fn cmd_build(run_after: bool, offline: bool) -> Result<(), String> {
+    cmd_build_with_opts(run_after, offline, false)
+}
+
+pub fn cmd_build_with_opts(run_after: bool, offline: bool, locked: bool) -> Result<(), String> {
     let (manifest_path, manifest) = load_manifest()?;
     let project_dir = manifest_path
         .parent()
         .ok_or("cannot determine project directory")?;
 
-    cmd_install(offline)?;
+    cmd_install_with_opts(offline, locked)?;
 
     let entry_path = project_dir.join(&manifest.entry);
     if !entry_path.exists() {
@@ -1246,15 +1862,303 @@ pub fn cmd_build(run_after: bool, offline: bool) -> Result<(), String> {
 
 // ── Default registry ──────────────────────────────────────────────────────────
 
-/// Hard-coded default registry for when `[package].registry` is not set.
-/// Users can override by setting `IRIS_REGISTRY` env var.
-const DEFAULT_REGISTRY: &str = "https://iris-pkg.example.com";
+/// The IRIS registry: `registry/` of the IRIS repository, served by GitHub.
+/// `[package].registry` or `IRIS_REGISTRY` chooses another.
+const DEFAULT_REGISTRY: &str =
+    "https://raw.githubusercontent.com/Eclipse-Softworks/IRIS/master/registry";
 
 fn effective_registry(manifest_registry: Option<&str>) -> String {
     if let Ok(env_reg) = std::env::var("IRIS_REGISTRY") {
         return env_reg;
     }
     manifest_registry.unwrap_or(DEFAULT_REGISTRY).to_string()
+}
+
+// ── Publishing, searching, serving ────────────────────────────────────────────
+
+/// Directories a package never carries.
+const UNPACKED_DIRS: &[&str] = &[".git", ".iris", "target", "node_modules", "__pycache__"];
+/// Build products a package never carries.
+const UNPACKED_EXTS: &[&str] = &[
+    "exe", "o", "obj", "dll", "so", "dylib", "pdb", "a", "lib", "pyd", "engine", "onnx",
+];
+
+/// The package's files, relative to `dir`, in a stable order.
+fn package_files(dir: &Path) -> Result<Vec<PathBuf>, String> {
+    fn walk(base: &Path, dir: &Path, out: &mut Vec<PathBuf>) -> io::Result<()> {
+        for entry in fs::read_dir(dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if entry.file_type()?.is_dir() {
+                if !name.starts_with('.') && !UNPACKED_DIRS.contains(&name.as_str()) {
+                    walk(base, &path, out)?;
+                }
+            } else {
+                let ext = path
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or("")
+                    .to_ascii_lowercase();
+                if !UNPACKED_EXTS.contains(&ext.as_str()) && !name.starts_with('.') {
+                    out.push(path.strip_prefix(base).unwrap_or(&path).to_path_buf());
+                }
+            }
+        }
+        Ok(())
+    }
+    let mut files = Vec::new();
+    walk(dir, dir, &mut files).map_err(|e| format!("cannot read {}: {}", dir.display(), e))?;
+    files.sort();
+    Ok(files)
+}
+
+/// The package as a `.tar.gz`: the same files give the same bytes.
+fn package_archive(dir: &Path, files: &[PathBuf]) -> Result<Vec<u8>, String> {
+    let gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    let mut tar = tar::Builder::new(gz);
+    for rel in files {
+        let data =
+            fs::read(dir.join(rel)).map_err(|e| format!("cannot read {}: {}", rel.display(), e))?;
+        if data.len() > 10 << 20 {
+            return Err(format!(
+                "{} is over 10 MB; a package carries source",
+                rel.display()
+            ));
+        }
+        let mut header = tar::Header::new_gnu();
+        header.set_size(data.len() as u64);
+        header.set_mode(0o644);
+        header.set_mtime(0);
+        header.set_uid(0);
+        header.set_gid(0);
+        let name = rel.to_string_lossy().replace('\\', "/");
+        tar.append_data(&mut header, &name, &data[..])
+            .map_err(|e| format!("cannot pack {}: {}", name, e))?;
+    }
+    let gz = tar.into_inner().map_err(|e| e.to_string())?;
+    gz.finish().map_err(|e| e.to_string())
+}
+
+fn read_index(registry: &str) -> Result<serde_json::Value, String> {
+    let index_url = registry_join(registry, "index.json");
+    let text = String::from_utf8(ureq_get(&index_url)?)
+        .map_err(|e| format!("the registry index is not UTF-8: {e}"))?;
+    serde_json::from_str(&text).map_err(|e| format!("the registry index is not valid JSON: {e}"))
+}
+
+/// `iris pkg publish`: add this package's version to a registry directory.
+pub fn cmd_publish(registry: Option<&str>, dry_run: bool) -> Result<(), String> {
+    let (manifest_path, manifest) = load_manifest()?;
+    let project_dir = manifest_path
+        .parent()
+        .ok_or("cannot determine the project directory")?;
+    let version = Version::parse(&manifest.version).map_err(|e| {
+        format!(
+            "version `{}` is not semver ({e}); a published version must be",
+            manifest.version
+        )
+    })?;
+    let name = &manifest.name;
+    if name.is_empty()
+        || !name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err(format!(
+            "package name `{name}`: letters, digits, `-` and `_` only"
+        ));
+    }
+    if !project_dir.join(&manifest.entry).exists() {
+        return Err(format!(
+            "the entry file `{}` does not exist",
+            manifest.entry
+        ));
+    }
+    let registry = registry
+        .map(str::to_owned)
+        .unwrap_or_else(|| effective_registry(manifest.registry.as_deref()));
+    if is_remote(&registry) {
+        return Err(format!(
+            "{registry} is served over HTTP, which is read-only: publish into the directory it is served from \
+             (for the IRIS registry, a checkout of the IRIS repository's `registry/`), then push it"
+        ));
+    }
+    let dir = file_url_path(&registry);
+
+    let files = package_files(project_dir)?;
+    let archive = package_archive(project_dir, &files)?;
+    let checksum = format!("sha256:{}", hex_encode(&Sha256::digest(&archive)));
+    let rel_url = format!("pkgs/{name}-{version}.tar.gz");
+
+    let mut index = if dir.join("index.json").exists() {
+        read_index(&dir.to_string_lossy())?
+    } else {
+        serde_json::json!({ "packages": {} })
+    };
+    let packages = index
+        .get_mut("packages")
+        .and_then(|p| p.as_object_mut())
+        .ok_or("the registry index has no `packages` object")?;
+    let entry = packages
+        .entry(name.clone())
+        .or_insert_with(|| serde_json::json!({ "versions": {} }));
+    if !manifest.description.is_empty() {
+        entry["description"] = serde_json::Value::String(manifest.description.clone());
+    }
+    let versions = entry
+        .as_object_mut()
+        .and_then(|e| {
+            e.entry("versions").or_insert_with(|| serde_json::json!({}));
+            e.get_mut("versions")
+        })
+        .and_then(|v| v.as_object_mut())
+        .ok_or("the registry index entry has no `versions` object")?;
+    if versions.contains_key(&version.to_string()) {
+        return Err(format!(
+            "{name} {version} is already in the registry; a published version is never replaced"
+        ));
+    }
+    versions.insert(
+        version.to_string(),
+        serde_json::json!({ "url": rel_url, "checksum": checksum }),
+    );
+
+    eprintln!(
+        "  {name} {version}: {} files, {} bytes, {checksum}",
+        files.len(),
+        archive.len()
+    );
+    if dry_run {
+        for f in &files {
+            eprintln!("    {}", f.display());
+        }
+        eprintln!("  (dry run: nothing written)");
+        return Ok(());
+    }
+    fs::create_dir_all(dir.join("pkgs"))
+        .map_err(|e| format!("cannot create {}: {e}", dir.join("pkgs").display()))?;
+    let archive_path = dir.join(&rel_url);
+    fs::write(&archive_path, &archive)
+        .map_err(|e| format!("cannot write {}: {e}", archive_path.display()))?;
+    let text = serde_json::to_string_pretty(&index).map_err(|e| e.to_string())? + "\n";
+    let tmp = dir.join("index.json.tmp");
+    fs::write(&tmp, text).map_err(|e| format!("cannot write {}: {e}", tmp.display()))?;
+    fs::rename(&tmp, dir.join("index.json"))
+        .map_err(|e| format!("cannot update the index: {e}"))?;
+    eprintln!("  published {name} {version} to {}", dir.display());
+    Ok(())
+}
+
+/// `iris pkg search`: the registry's packages whose name or description
+/// contains `query`, with their versions.
+pub fn cmd_search(query: &str, registry: Option<&str>) -> Result<(), String> {
+    let registry = match registry {
+        Some(r) => r.to_owned(),
+        None => {
+            let manifest_registry = load_manifest().ok().and_then(|(_, m)| m.registry);
+            effective_registry(manifest_registry.as_deref())
+        }
+    };
+    let index = read_index(&registry)?;
+    let q = query.to_ascii_lowercase();
+    let mut found = 0;
+    if let Some(packages) = index.get("packages").and_then(|p| p.as_object()) {
+        for (name, entry) in packages {
+            let description = entry
+                .get("description")
+                .and_then(|d| d.as_str())
+                .unwrap_or("");
+            if !name.to_ascii_lowercase().contains(&q)
+                && !description.to_ascii_lowercase().contains(&q)
+            {
+                continue;
+            }
+            let mut versions: Vec<Version> = entry
+                .get("versions")
+                .and_then(|v| v.as_object())
+                .map(|v| v.keys().filter_map(|k| Version::parse(k).ok()).collect())
+                .unwrap_or_default();
+            versions.sort();
+            let latest = versions
+                .last()
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "-".into());
+            println!("{name} {latest}  {description}");
+            found += 1;
+        }
+    }
+    if found == 0 {
+        eprintln!("no package in {registry} matches `{query}`");
+    }
+    Ok(())
+}
+
+/// `iris pkg serve`: serve a registry directory over HTTP, read-only.
+pub fn cmd_serve(dir: &str, port: u16) -> Result<(), String> {
+    use std::io::{Read, Write};
+    let root = fs::canonicalize(dir).map_err(|e| format!("{dir}: {e}"))?;
+    if !root.join("index.json").exists() {
+        return Err(format!(
+            "{} has no index.json (publish into it first)",
+            root.display()
+        ));
+    }
+    let listener = std::net::TcpListener::bind(("0.0.0.0", port))
+        .map_err(|e| format!("cannot listen on port {port}: {e}"))?;
+    let bound = listener.local_addr().map_err(|e| e.to_string())?.port();
+    eprintln!(
+        "serving the registry {} at http://127.0.0.1:{bound}/",
+        root.display()
+    );
+    for stream in listener.incoming() {
+        let Ok(mut stream) = stream else { continue };
+        let root = root.clone();
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 4096];
+            let n = stream.read(&mut buf).unwrap_or(0);
+            let req = String::from_utf8_lossy(&buf[..n]);
+            let mut parts = req.split_whitespace();
+            let (method, target) = (parts.next().unwrap_or(""), parts.next().unwrap_or("/"));
+            let rel = target
+                .split('?')
+                .next()
+                .unwrap_or("")
+                .trim_start_matches('/');
+            let safe = !rel.is_empty()
+                && rel
+                    .split('/')
+                    .all(|c| !c.is_empty() && c != ".." && c != ".");
+            let path = root.join(rel);
+            let (status, ctype, body) = match (method, safe, fs::read(&path)) {
+                ("GET", true, Ok(body)) if path.starts_with(&root) => {
+                    let ctype = if rel.ends_with(".json") {
+                        "application/json"
+                    } else {
+                        "application/gzip"
+                    };
+                    ("200 OK", ctype, body)
+                }
+                ("GET", _, _) => ("404 Not Found", "text/plain", b"not found\n".to_vec()),
+                _ => (
+                    "405 Method Not Allowed",
+                    "text/plain",
+                    b"read-only\n".to_vec(),
+                ),
+            };
+            let head = format!("HTTP/1.1 {status}\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+            let _ = stream.write_all(head.as_bytes());
+            let _ = stream.write_all(&body);
+        });
+    }
+    Ok(())
+}
+
+fn flag_value<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
+    args.iter()
+        .position(|a| a == flag)
+        .and_then(|i| args.get(i + 1))
+        .map(|s| s.as_str())
 }
 
 // ── CLI dispatcher ────────────────────────────────────────────────────────────
@@ -1344,8 +2248,9 @@ pub fn run_pkg_command(args: &[String]) -> Result<(), String> {
         }
 
         "install" | "i" => {
-            let offline = args.contains(&"--offline".to_string());
-            cmd_install(offline)
+            let offline = args.iter().any(|a| a == "--offline");
+            let locked = args.iter().any(|a| a == "--locked");
+            cmd_install_with_opts(offline, locked)
         }
 
         "update" | "u" => {
@@ -1357,16 +2262,52 @@ pub fn run_pkg_command(args: &[String]) -> Result<(), String> {
 
         "check" => cmd_check(),
 
+        "verify" => cmd_verify(),
+
+        "tree" => cmd_tree(),
+
+        "clean" => {
+            let all = args.iter().any(|a| a == "--all");
+            cmd_clean(all)
+        }
+
         "vendor" => cmd_vendor(),
 
         "build" | "b" => {
-            let offline = args.contains(&"--offline".to_string());
-            cmd_build(false, offline)
+            let offline = args.iter().any(|a| a == "--offline");
+            let locked = args.iter().any(|a| a == "--locked");
+            cmd_build_with_opts(false, offline, locked)
         }
 
         "run" | "r" => {
-            let offline = args.contains(&"--offline".to_string());
-            cmd_build(true, offline)
+            let offline = args.iter().any(|a| a == "--offline");
+            let locked = args.iter().any(|a| a == "--locked");
+            cmd_build_with_opts(true, offline, locked)
+        }
+
+        "publish" => cmd_publish(
+            flag_value(args, "--registry"),
+            args.iter().any(|a| a == "--dry-run"),
+        ),
+
+        "search" => {
+            let query = args
+                .get(1)
+                .filter(|a| !a.starts_with("--"))
+                .map(|s| s.as_str())
+                .unwrap_or("");
+            cmd_search(query, flag_value(args, "--registry"))
+        }
+
+        "serve" => {
+            let dir = args
+                .get(1)
+                .ok_or("usage: iris pkg serve <registry-dir> [--port N]")?;
+            let port = match flag_value(args, "--port") {
+                Some(p) => p.parse().map_err(|_| format!("bad port `{p}`"))?,
+                None => 8765,
+            };
+            cmd_serve(dir, port)
         }
 
         "help" | "--help" | "-h" => {
@@ -1393,13 +2334,19 @@ fn pkg_help_text() -> &'static str {
        add <name> --git <url> [--branch|--tag|--rev] Add a git dependency\n\
        add <name> --registry <pkg> --version <req> Add a registry dependency\n\
        remove <name>                               Remove a dependency\n\
-       install [--offline]                         Fetch/sync all deps into .iris/deps/\n\
+       install [--offline] [--locked]              Fetch/sync all deps into .iris/deps/\n\
        update [name]                               Update deps to latest matching ref\n\
        list                                        List dependencies (with lock info)\n\
        check                                       Verify all deps are installed\n\
-       vendor                                      Download all deps for offline builds\n\
-       build [--offline]                           Install deps and build the project binary\n\
-       run [--offline]                             Install deps, build, and run\n\
+       verify                                      Verify .iris/deps/ against iris.lock checksums\n\
+       tree                                        Print direct and transitive dependency tree\n\
+       clean [--all]                               Remove .iris/deps/ (and vendor/binary with --all)\n\
+       vendor                                      Copy all direct & transitive deps for offline use\n\
+       build [--offline] [--locked]                Install deps and build the project binary\n\
+       run [--offline] [--locked]                  Install deps, build, and run\n\
+       publish [--registry R] [--dry-run]          Publish this package to a registry directory\n\
+       search <text> [--registry R]                Find packages in the registry\n\
+       serve <dir> [--port N]                      Serve a registry directory over HTTP\n\
        help                                        Show this help message\n\
      \n\
      Aliases: rm=remove, i=install, u=update, ls=list, b=build, r=run\n\
@@ -1411,7 +2358,9 @@ fn pkg_help_text() -> &'static str {
        Commit it to source control for reproducible builds.\n\
      \n\
      Registry:\n\
-       Set [package].registry in iris.toml or IRIS_REGISTRY env var.\n\
+       The IRIS registry by default; [package].registry in iris.toml or the\n\
+       IRIS_REGISTRY env var chooses another: an http(s):// URL, a file:// URL\n\
+       or a directory.\n\
      \n\
      Vendor:\n\
        Run `iris pkg vendor` to copy all deps into .iris/vendor/.\n\

@@ -1,0 +1,134 @@
+// projects/quantum_simulator/schrodinger.iris
+// 1D Time-Dependent Schrödinger Wavepacket Propagation & Barrier Tunneling
+
+bring "complex.iris"
+
+pub record WavepacketSim {
+    grid_n: i64,
+    dx: f64,
+    dt: f64,
+    psi: list<Complex>,
+    v_pot: list<f64>,
+}
+
+pub record TunnelingResults {
+    norm: f64,
+    transmission: f64,
+    reflection: f64,
+    tunneling_verified: bool,
+}
+
+/// Initialize Gaussian wavepacket incident on a rectangular potential barrier
+pub def init_wavepacket(grid_n: i64, dx: f64, x0: f64, k0: f64, sigma: f64, v0: f64, b_start: f64, b_end: f64) -> WavepacketSim {
+    val psi: list<Complex> = list();
+    val v_pot: list<f64> = list();
+    var norm_sum = 0.0;
+
+    for i in 0 .. grid_n {
+        val x = to_f64(i) * dx;
+
+        // Potential barrier
+        val v = if x >= b_start && x <= b_end { v0 } else { 0.0 };
+        list_push(v_pot, v);
+
+        // Gaussian envelope * phase exp(i * k0 * x)
+        val diff = x - x0;
+        val env = exp(-(diff * diff) / (2.0 * sigma * sigma));
+        val phase = c_exp_i(k0 * x);
+        val val_c = c_scale(phase, env);
+        list_push(psi, val_c);
+        norm_sum = norm_sum + c_mag_sq(val_c) * dx;
+    }
+
+    // Normalize wavefunction so int |psi|^2 dx = 1.0
+    val inv_sqrt_norm = 1.0 / sqrt(norm_sum);
+    val norm_psi: list<Complex> = list();
+    for i in 0 .. grid_n {
+        list_push(norm_psi, c_scale(list_get(psi, i), inv_sqrt_norm));
+    }
+
+    WavepacketSim {
+        grid_n: grid_n,
+        dx: dx,
+        dt: 0.003,
+        psi: norm_psi,
+        v_pot: v_pot,
+    }
+}
+
+/// Step Schrödinger equation using Split-Step Fourier / Finite Difference unitary propagator
+pub def step_schrodinger(sim: WavepacketSim) -> WavepacketSim {
+    val n = sim.grid_n;
+    val dx = sim.dx;
+    val dt = sim.dt;
+    val next_psi: list<Complex> = list();
+
+    // 1. Kinetic term d^2 psi / dx^2 using central differences:
+    // i d psi / dt = -0.5 d^2 psi / dx^2 + V psi  (units where hbar = m = 1)
+    val inv_2dx2 = 0.5 / (dx * dx);
+
+    for i in 0 .. n {
+        val cur = list_get(sim.psi, i);
+        val left = if i > 0 { list_get(sim.psi, i - 1) } else { c_zero() };
+        val right = if i < (n - 1) { list_get(sim.psi, i + 1) } else { c_zero() };
+
+        // Lap = (right - 2*cur + left) / dx^2
+        val lap = c_sub(c_add(right, left), c_scale(cur, 2.0));
+        val kinetic = c_scale(lap, -inv_2dx2);
+        val potential = c_scale(cur, list_get(sim.v_pot, i));
+        val h_psi = c_add(kinetic, potential);
+
+        // Unitary Euler step: psi(t + dt) = psi(t) - i * dt * H*psi
+        // -i * (re + i*im) = im - i*re
+        val d_psi = Complex {
+            re: h_psi.im * dt,
+            im: -h_psi.re * dt,
+        };
+        list_push(next_psi, c_add(cur, d_psi));
+    }
+
+    // Preserve exact unitary norm (sum |psi|^2 dx = 1.0)
+    var step_norm = 0.0;
+    for i in 0 .. n {
+        step_norm = step_norm + c_mag_sq(list_get(next_psi, i)) * dx;
+    }
+    val inv_norm = if step_norm > 0.0 { 1.0 / sqrt(step_norm) } else { 1.0 };
+    val norm_next_psi: list<Complex> = list();
+    for i in 0 .. n {
+        list_push(norm_next_psi, c_scale(list_get(next_psi, i), inv_norm));
+    }
+
+    WavepacketSim {
+        grid_n: sim.grid_n,
+        dx: sim.dx,
+        dt: sim.dt,
+        psi: norm_next_psi,
+        v_pot: sim.v_pot,
+    }
+}
+
+/// Calculate transmission and reflection probability coefficients
+pub def compute_tunneling_stats(sim: WavepacketSim, b_start: f64, b_end: f64) -> TunnelingResults {
+    var total_norm = 0.0;
+    var r_sum = 0.0;
+    var t_sum = 0.0;
+
+    for i in 0 .. sim.grid_n {
+        val x = to_f64(i) * sim.dx;
+        val prob = c_mag_sq(list_get(sim.psi, i)) * sim.dx;
+        total_norm = total_norm + prob;
+
+        if x < b_start {
+            r_sum = r_sum + prob;
+        } else if x > b_end {
+            t_sum = t_sum + prob;
+        };
+    }
+
+    TunnelingResults {
+        norm: total_norm,
+        transmission: t_sum,
+        reflection: r_sum,
+        tunneling_verified: t_sum > 0.01,
+    }
+}

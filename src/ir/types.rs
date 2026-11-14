@@ -118,8 +118,10 @@ impl std::fmt::Display for Shape {
 ///
 /// Invariant: `Fn` types appear only in function signatures, not in value
 /// positions within a function body (IRIS v0 has no first-class functions).
-/// `Infer` is a placeholder valid only before `TypeInferPass` completes;
-/// `ValidatePass` rejects any module containing `Infer` values.
+///
+/// There is no "not yet known" type: the source type checker types the
+/// program before lowering, so every IR value has a type when it is made
+/// (docs/architecture-vs-rustc.md §4.2).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum IrType {
     /// A primitive scalar value.
@@ -131,8 +133,16 @@ pub enum IrType {
         params: Vec<IrType>,
         ret: Box<IrType>,
     },
-    /// An unresolved type — valid only before type inference completes.
+    /// An unresolved type; valid only until type inference completes. The
+    /// source checker has finished by the time lowering runs, so no value
+    /// remains with this type when lowering is done.
     Infer,
+    /// A polymorphic type parameter (e.g., `T`) in a generic IR template before
+    /// lazy post-IR monomorphisation (`MonoPass`). Must not survive into codegen.
+    TypeParam(String),
+    /// A higher-kinded type constructor application (e.g., `F<T>`) in a generic
+    /// IR template before `MonoPass` resolves `F`. Must not survive into codegen.
+    HktApp { ctor: String, args: Vec<IrType> },
     /// A named struct type with ordered fields.
     Struct {
         name: String,
@@ -154,6 +164,9 @@ pub enum IrType {
     ResultType(Box<IrType>, Box<IrType>),
     /// Channel type: `chan<T>` — a FIFO communication channel.
     Chan(Box<IrType>),
+    /// Task type: `task<T>` — an asynchronous computation producing `T`,
+    /// run by the cooperative executor (the result of calling `async def`).
+    Task(Box<IrType>),
     /// Atomic type: `atomic<T>` — an atomically-accessible value.
     Atomic(Box<IrType>),
     /// Mutex type: `mutex<T>` — a mutex-protected value.
@@ -179,6 +192,8 @@ pub enum IrType {
     /// lowered tape handle", which is why a loop-accumulated loss could not be
     /// expressed at all (known-issues #49).
     TapeRef,
+    /// Compile-time integer constant for const-generic arguments (e.g. `5` in `Array<i64, 5>`).
+    ConstInt(i64),
     /// `dyn Trait` — fat pointer { data_ptr, vtable_ptr }.
     /// At the IR level, we store the trait name and the method signatures
     /// (param types + return type) so the codegen can lay out the vtable
@@ -203,6 +218,7 @@ impl std::fmt::Display for IrType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             IrType::Scalar(d) => write!(f, "{}", d),
+            IrType::ConstInt(n) => write!(f, "{}", n),
             IrType::TapeRef => f.write_str("tape_ref"),
             IrType::Tensor { dtype, shape } => write!(f, "tensor<{}, {}>", dtype, shape),
             IrType::Fn { params, ret } => {
@@ -216,6 +232,17 @@ impl std::fmt::Display for IrType {
                 write!(f, ") -> {}", ret)
             }
             IrType::Infer => f.write_str("_"),
+            IrType::TypeParam(name) => f.write_str(name),
+            IrType::HktApp { ctor, args } => {
+                write!(f, "{}<", ctor)?;
+                for (i, a) in args.iter().enumerate() {
+                    if i > 0 {
+                        f.write_str(", ")?;
+                    }
+                    write!(f, "{}", a)?;
+                }
+                f.write_str(">")
+            }
             IrType::Struct { name, .. } => write!(f, "%{}", name),
             IrType::Enum { name, .. } => write!(f, "enum.{}", name),
             IrType::Tuple(elems) => {
@@ -240,6 +267,7 @@ impl std::fmt::Display for IrType {
             IrType::Option(inner) => write!(f, "option<{}>", inner),
             IrType::ResultType(ok, err) => write!(f, "result<{},{}>", ok, err),
             IrType::Chan(elem) => write!(f, "chan<{}>", elem),
+            IrType::Task(elem) => write!(f, "task<{}>", elem),
             IrType::Atomic(inner) => write!(f, "atomic<{}>", inner),
             IrType::Mutex(inner) => write!(f, "mutex<{}>", inner),
             IrType::Grad(inner) => write!(f, "grad<{}>", inner),
@@ -270,6 +298,163 @@ impl std::fmt::Display for IrType {
                 Ok(())
             }
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Type Interning Arena (IrTypeId + TypeArena)
+// ---------------------------------------------------------------------------
+
+/// Compact 32-bit handle into a [`TypeArena`], avoiding recursive `IrType` clones.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct IrTypeId(pub u32);
+
+impl std::fmt::Display for IrTypeId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "t{}", self.0)
+    }
+}
+
+/// Statistics for a [`TypeArena`] instance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct TypeArenaStats {
+    pub unique_types: usize,
+    pub intern_requests: u64,
+    pub dedup_hits: u64,
+}
+
+/// Deduplicating arena for [`IrType`] values.
+///
+/// Pre-populates common primitive types at fixed [`IrTypeId`] slots so scalar
+/// lookups are O(1) without allocating or hashing.
+#[derive(Debug, Clone)]
+pub struct TypeArena {
+    types: Vec<IrType>,
+    intern_map: std::collections::HashMap<IrType, IrTypeId>,
+    intern_requests: u64,
+    dedup_hits: u64,
+}
+
+impl TypeArena {
+    pub const I64: IrTypeId = IrTypeId(0);
+    pub const I32: IrTypeId = IrTypeId(1);
+    pub const F64: IrTypeId = IrTypeId(2);
+    pub const F32: IrTypeId = IrTypeId(3);
+    pub const BOOL: IrTypeId = IrTypeId(4);
+    pub const STR: IrTypeId = IrTypeId(5);
+    pub const UNIT: IrTypeId = IrTypeId(6);
+    pub const TAPE_REF: IrTypeId = IrTypeId(7);
+    pub const INFER: IrTypeId = IrTypeId(8);
+
+    /// Creates a new `TypeArena` pre-populated with common primitive types.
+    pub fn new() -> Self {
+        let mut arena = Self {
+            types: Vec::with_capacity(32),
+            intern_map: std::collections::HashMap::with_capacity(32),
+            intern_requests: 0,
+            dedup_hits: 0,
+        };
+        let builtins = [
+            IrType::Scalar(DType::I64),
+            IrType::Scalar(DType::I32),
+            IrType::Scalar(DType::F64),
+            IrType::Scalar(DType::F32),
+            IrType::Scalar(DType::Bool),
+            IrType::Str,
+            IrType::Tuple(Vec::new()),
+            IrType::TapeRef,
+            IrType::Infer,
+        ];
+        for ty in builtins {
+            let id = IrTypeId(arena.types.len() as u32);
+            arena.intern_map.insert(ty.clone(), id);
+            arena.types.push(ty);
+        }
+        arena
+    }
+
+    /// Interns `ty`, returning an existing [`IrTypeId`] if structurally equal.
+    pub fn intern(&mut self, ty: IrType) -> IrTypeId {
+        self.intern_requests += 1;
+        if let Some(id) = Self::builtin_fast_id(&ty) {
+            self.dedup_hits += 1;
+            return id;
+        }
+        if let Some(&id) = self.intern_map.get(&ty) {
+            self.dedup_hits += 1;
+            return id;
+        }
+        let id = IrTypeId(self.types.len() as u32);
+        self.intern_map.insert(ty.clone(), id);
+        self.types.push(ty);
+        id
+    }
+
+    /// Interns a borrowed `IrType`, cloning only on a cache miss.
+    pub fn intern_ref(&mut self, ty: &IrType) -> IrTypeId {
+        self.intern_requests += 1;
+        if let Some(id) = Self::builtin_fast_id(ty) {
+            self.dedup_hits += 1;
+            return id;
+        }
+        if let Some(&id) = self.intern_map.get(ty) {
+            self.dedup_hits += 1;
+            return id;
+        }
+        let id = IrTypeId(self.types.len() as u32);
+        self.intern_map.insert(ty.clone(), id);
+        self.types.push(ty.clone());
+        id
+    }
+
+    fn builtin_fast_id(ty: &IrType) -> Option<IrTypeId> {
+        match ty {
+            IrType::Scalar(DType::I64) => Some(Self::I64),
+            IrType::Scalar(DType::I32) => Some(Self::I32),
+            IrType::Scalar(DType::F64) => Some(Self::F64),
+            IrType::Scalar(DType::F32) => Some(Self::F32),
+            IrType::Scalar(DType::Bool) => Some(Self::BOOL),
+            IrType::Str => Some(Self::STR),
+            IrType::Tuple(v) if v.is_empty() => Some(Self::UNIT),
+            IrType::TapeRef => Some(Self::TAPE_REF),
+            IrType::Infer => Some(Self::INFER),
+            _ => None,
+        }
+    }
+
+    /// Looks up the `IrType` for `id`.
+    pub fn get(&self, id: IrTypeId) -> Option<&IrType> {
+        self.types.get(id.0 as usize)
+    }
+
+    /// Resolves `id` to `&IrType`, panicking if `id` is out of bounds.
+    pub fn resolve(&self, id: IrTypeId) -> &IrType {
+        &self.types[id.0 as usize]
+    }
+
+    /// Number of unique interned types in the arena.
+    pub fn len(&self) -> usize {
+        self.types.len()
+    }
+
+    /// Returns `true` if no types are stored (always `false` after `new()`).
+    pub fn is_empty(&self) -> bool {
+        self.types.is_empty()
+    }
+
+    /// Returns deduplication statistics for this arena.
+    pub fn stats(&self) -> TypeArenaStats {
+        TypeArenaStats {
+            unique_types: self.types.len(),
+            intern_requests: self.intern_requests,
+            dedup_hits: self.dedup_hits,
+        }
+    }
+}
+
+impl Default for TypeArena {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -373,7 +558,6 @@ mod tests {
 
     #[test]
     fn irtype_compound_display() {
-        assert_eq!(format!("{}", IrType::Infer), "_");
         assert_eq!(format!("{}", IrType::Str), "str");
         assert_eq!(
             format!(
@@ -466,6 +650,30 @@ mod tests {
     fn irtype_equality() {
         assert_eq!(IrType::Scalar(DType::I64), IrType::Scalar(DType::I64));
         assert_ne!(IrType::Scalar(DType::I64), IrType::Scalar(DType::F64));
-        assert_ne!(IrType::Infer, IrType::Str);
+        assert_ne!(IrType::Str, IrType::TaskGroup);
+    }
+
+    #[test]
+    fn type_arena_interning_and_dedup() {
+        let mut arena = TypeArena::new();
+        assert_eq!(arena.resolve(TypeArena::I64), &IrType::Scalar(DType::I64));
+        assert_eq!(arena.resolve(TypeArena::UNIT), &IrType::Tuple(vec![]));
+
+        let complex1 = IrType::List(Box::new(IrType::Tuple(vec![
+            IrType::Scalar(DType::I64),
+            IrType::Str,
+        ])));
+        let complex2 = complex1.clone();
+        let id1 = arena.intern(complex1);
+        let id2 = arena.intern_ref(&complex2);
+        assert_eq!(id1, id2);
+        assert_eq!(arena.get(id1), Some(&complex2));
+
+        let id_i64 = arena.intern(IrType::Scalar(DType::I64));
+        assert_eq!(id_i64, TypeArena::I64);
+
+        let stats = arena.stats();
+        assert_eq!(stats.intern_requests, 3);
+        assert_eq!(stats.dedup_hits, 2);
     }
 }

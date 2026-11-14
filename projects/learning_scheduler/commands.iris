@@ -1,0 +1,43 @@
+bring std.string
+
+pub choice Command {
+    Help, Status, Compare, Train, Auto, Execute, Fault, Recover, Save, Load,
+    Regime(i64), Count(i64), Seed(i64), Inspect(i64), Quit
+}
+
+pub def parse_command(input: str) -> result<Command, str> {
+    val text = trim_end(trim_start(input));
+    if text == "" || text == "quit" || text == "exit" { return ok(Command.Quit) };
+    if text == "help" { return ok(Command.Help) };
+    if text == "status" { return ok(Command.Status) };
+    if text == "compare" { return ok(Command.Compare) };
+    if text == "train" { return ok(Command.Train) };
+    if text == "auto" { return ok(Command.Auto) };
+    if text == "execute" { return ok(Command.Execute) };
+    if text == "fault" { return ok(Command.Fault) };
+    if text == "recover" { return ok(Command.Recover) };
+    if text == "save" { return ok(Command.Save) };
+    if text == "load" { return ok(Command.Load) };
+    if text == "normal" { return ok(Command.Regime(0)) };
+    if text == "shift" { return ok(Command.Regime(1)) };
+    if text == "mixed" { return ok(Command.Regime(2)) };
+    val parts = split_n(text, " ", 2);
+    if list_len(parts) == 2 {
+        val number = parse_i64(trim_start(list_get(parts, 1)));
+        if !is_some(number) { return err("expected an integer") };
+        val value = unwrap(number);
+        if list_get(parts, 0) == "inspect" {
+            if value < 0 || value > 127 { return err("job index must be between 0 and 127") };
+            return ok(Command.Inspect(value))
+        };
+        if list_get(parts, 0) == "jobs" {
+            if value < 8 || value > 128 { return err("jobs must be between 8 and 128") };
+            return ok(Command.Count(value))
+        };
+        if list_get(parts, 0) == "seed" {
+            if value < 1 || value > 999000 { return err("seed must be between 1 and 999000") };
+            return ok(Command.Seed(value))
+        };
+    };
+    return err("unknown command; type help")
+}

@@ -2,7 +2,7 @@
   "name": "iris-lang",
   "displayName": "IRIS Language",
   "description": "Complete IRIS RC2 developer experience: language server, formatter, Test Explorer, debugger, safety diagnostics, and REPL",
-  "version": "1.0.6",
+  "version": "1.0.8",
   "publisher": "iris-lang",
   "engines": {
     "vscode": "^1.85.0"
@@ -88,6 +88,49 @@
               "entryFunction": {
                 "type": "string",
                 "description": "Optional zero-argument function to debug instead of main (used by Test Explorer)."
+              },
+              "native": {
+                "type": "boolean",
+                "description": "Debug the compiled native binary instead of replaying the interpreter: builds with debug info (iris build -g) and runs it under GDB 14+ (or the adapter named by IRIS_NATIVE_DAP). Supports line breakpoints, stepping, call stacks, scalar and composite DWARF locals (str, record, enum, arrays, option, result, tuple, list, map), native attach, and reverse stepping when the adapter reports supportsStepBack.",
+                "default": false
+              },
+              "args": {
+                "type": "array",
+                "items": { "type": "string" },
+                "description": "Command-line arguments for a native session."
+              },
+              "cwd": {
+                "type": "string",
+                "description": "Working directory for a native session (defaults to the program's directory)."
+              }
+            }
+          },
+          "attach": {
+            "properties": {
+              "native": {
+                "type": "boolean",
+                "description": "Attach through the native DAP bridge (`gdb -i dap` / `IRIS_NATIVE_DAP`). Required for attach requests.",
+                "default": true
+              },
+              "processId": {
+                "type": ["integer", "string"],
+                "description": "Process ID of the running native IRIS binary to attach to."
+              },
+              "pid": {
+                "type": ["integer", "string"],
+                "description": "Alias for processId."
+              },
+              "target": {
+                "type": "string",
+                "description": "Remote native debug target (for example \"localhost:3333\")."
+              },
+              "program": {
+                "type": "string",
+                "description": "Optional path to the native executable for symbol lookup."
+              },
+              "cwd": {
+                "type": "string",
+                "description": "Optional working directory for the native adapter."
               }
             }
           }
@@ -111,6 +154,28 @@
               "name": "Debug ${1:File}",
               "program": "${file}",
               "stopOnEntry": false
+            }
+          },
+          {
+            "label": "IRIS: Debug Native Binary",
+            "description": "Build with debug info and debug the native executable under GDB",
+            "body": {
+              "type": "iris",
+              "request": "launch",
+              "name": "Debug ${1:File} (native)",
+              "program": "${file}",
+              "native": true
+            }
+          },
+          {
+            "label": "IRIS: Attach Native Process",
+            "description": "Attach GDB/LLDB DAP to a running native IRIS executable or remote target",
+            "body": {
+              "type": "iris",
+              "request": "attach",
+              "name": "Attach ${1:IRIS Process}",
+              "native": true,
+              "processId": "${2:0}"
             }
           }
         ]
@@ -150,7 +215,8 @@
         "properties": {
           "task": {
             "type": "string",
-            "description": "The IRIS command to run (run, build, test)."
+            "enum": ["run", "build", "build-debug", "test"],
+            "description": "The IRIS command to run: run, build, build-debug (native binary with DWARF debug info), or test."
           }
         }
       }
@@ -178,6 +244,11 @@
         "command": "iris.debugFile",
         "title": "IRIS: Debug File",
         "icon": "$(debug-alt)"
+      },
+      {
+        "command": "iris.debugFileNative",
+        "title": "IRIS: Debug Native Binary",
+        "icon": "$(debug-alt-small)"
       },
       {
         "command": "iris.openRepl",
@@ -299,6 +370,10 @@
         },
         {
           "command": "iris.debugFile",
+          "when": "resourceExtname == .iris"
+        },
+        {
+          "command": "iris.debugFileNative",
           "when": "resourceExtname == .iris"
         },
         {
@@ -439,6 +514,27 @@
           "type": "boolean",
           "default": false,
           "description": "Stop at the first executable trace point when debugging an IRIS file."
+        },
+        "iris.debug.native": {
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "Make **IRIS: Debug File** debug the compiled native binary (built with `iris build -g`, run under GDB 14+) instead of replaying the interpreter. Native sessions support line breakpoints, stepping, call stacks, local `val`/`var` inspection (scalars, `str`, `record`, `enum`, arrays, `option`, `result`, `tuple`, `list`, `map`), native `attach`, and reverse stepping when the underlying adapter reports `supportsStepBack`."
+        },
+        "iris.debug.nativeAdapter": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Command line of the native DAP adapter for native debug sessions (sets `IRIS_NATIVE_DAP`), e.g. `C:/msys64/ucrt64/bin/gdb.exe -i dap` or `lldb-dap`. Empty: use GDB 14+ from PATH or MSYS2, then `lldb-dap`.",
+          "scope": "machine-overridable"
+        },
+        "iris.build.debugInfo": {
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "Make **IRIS: Build Binary** emit DWARF debug information (`-g`, compiled at `-O0`) so the binary can be debugged or attached with gdb/lldb. Ignored when `iris.target` is set."
+        },
+        "iris.strictEffects": {
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "Pass `--strict-effects` when running or building: every effectful function must declare an `effect` clause that covers what it does."
         },
         "iris.showTimingOnRun": {
           "type": "boolean",

@@ -1,0 +1,2 @@
+Cart controller constitution.
+The commanded force must be finite and within the motor's rating of +/-10 N.

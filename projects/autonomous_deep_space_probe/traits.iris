@@ -1,0 +1,118 @@
+bring "types.iris"
+bring "physics.iris"
+
+/// traits.iris — Idiomatic Flight Control Kernels & Trait Contracts
+/// Defines the FlightKernel trait, concrete controller records,
+/// and implementations for Nominal, Inverted Adaptive, and Survival flight modes.
+
+pub trait FlightKernel {
+    def compute_actuators(self : Self, state : VesselState, lease : GenerationLease) -> ActuatorCommand
+    def kernel_name(self : Self) -> str
+}
+
+pub record NominalPDController {
+    id : i64
+}
+
+impl FlightKernel for NominalPDController {
+    def compute_actuators(self : Self, state : VesselState, lease : GenerationLease) -> ActuatorCommand {
+        // Standard negative feedback PD attitude control
+        val torque_p = 0.0 - (state.pitch_deg * lease.kp_pitch + state.pitch_rate * lease.kd_pitch);
+        val torque_y = 0.0 - (state.yaw_deg * lease.kp_yaw + state.yaw_rate * lease.kd_yaw);
+
+        // Louver thermal regulation
+        val temp_delta = state.bus_temp_c - lease.target_temp_c;
+        val louver = clamp_f(0.35 + temp_delta * lease.louver_gain, 0.0, 1.0);
+
+        ActuatorCommand {
+            pitch_torque_nm : clamp_f(torque_p, -35.0, 35.0),
+            yaw_torque_nm : clamp_f(torque_y, -35.0, 35.0),
+            radiator_louver_pos : louver,
+            payload_power_watts : lease.science_power_target,
+            survival_heater_watts : 0.0
+        }
+    }
+
+    def kernel_name(self : Self) -> str {
+        return "NominalPDController-Gen0"
+    }
+}
+
+pub record AdaptiveInvertingController {
+    id : i64
+}
+
+impl FlightKernel for AdaptiveInvertingController {
+    def compute_actuators(self : Self, state : VesselState, lease : GenerationLease) -> ActuatorCommand {
+        // Compensates for actuator polarity inversion using lease.polarity_compensation (-1.0)
+        // Multiplies the control vector by polarity compensation to invert applied torque
+        val torque_raw_p = 0.0 - (state.pitch_deg * lease.kp_pitch + state.pitch_rate * lease.kd_pitch);
+        val torque_p = torque_raw_p * lease.polarity_compensation;
+
+        val torque_y = 0.0 - (state.yaw_deg * lease.kp_yaw + state.yaw_rate * lease.kd_yaw);
+
+        // Compensated thermal regulation for perforated thermal blanket
+        val temp_delta = state.bus_temp_c - lease.target_temp_c;
+        val louver = clamp_f(0.55 + temp_delta * lease.louver_gain, 0.0, 1.0);
+
+        ActuatorCommand {
+            pitch_torque_nm : clamp_f(torque_p, -42.0, 42.0),
+            yaw_torque_nm : clamp_f(torque_y, -35.0, 35.0),
+            radiator_louver_pos : louver,
+            payload_power_watts : lease.science_power_target,
+            survival_heater_watts : 0.0
+        }
+    }
+
+    def kernel_name(self : Self) -> str {
+        return "AdaptiveInvertingController-Gen1"
+    }
+}
+
+pub record DeepSpaceSurvivalController {
+    id : i64
+}
+
+impl FlightKernel for DeepSpaceSurvivalController {
+    def compute_actuators(self : Self, state : VesselState, lease : GenerationLease) -> ActuatorCommand {
+        // High-stress survival configuration: aggressive thermal rejection, power preservation
+        val torque_raw_p = 0.0 - (state.pitch_deg * lease.kp_pitch + state.pitch_rate * lease.kd_pitch);
+        val torque_p = torque_raw_p * lease.polarity_compensation;
+        val torque_y = 0.0 - (state.yaw_deg * lease.kp_yaw + state.yaw_rate * lease.kd_yaw);
+
+        // Maximum heat rejection louvers under high flux
+        val louver = clamp_f(0.85 + (state.bus_temp_c - 20.0) * 0.04, 0.0, 1.0);
+
+        // Safe science power throttle to prevent brownout
+        val pwr = min_f(lease.science_power_target, 25.0);
+
+        ActuatorCommand {
+            pitch_torque_nm : clamp_f(torque_p, -45.0, 45.0),
+            yaw_torque_nm : clamp_f(torque_y, -35.0, 35.0),
+            radiator_louver_pos : louver,
+            payload_power_watts : pwr,
+            survival_heater_watts : 0.0
+        }
+    }
+
+    def kernel_name(self : Self) -> str {
+        return "DeepSpaceSurvivalController-Gen2"
+    }
+}
+
+pub def make_gen0_lease() -> GenerationLease {
+    GenerationLease {
+        generation_id : 0,
+        name : "Nominal-DeepSpace-Cruise-v1",
+        kp_pitch : 1.8,
+        kd_pitch : 2.2,
+        kp_yaw : 1.8,
+        kd_yaw : 2.2,
+        target_temp_c : 22.0,
+        louver_gain : 0.05,
+        science_power_target : 40.0,
+        polarity_compensation : 1.0,
+        lease_duration_cycles : 100,
+        verification_signature : 10001
+    }
+}

@@ -1,0 +1,43 @@
+bring std.math
+bring "autopilot.iris" /// Flies the autopilot against turtlesim's kinematics, offline.
+
+// The same square and pursuit as main.iris, on a simulated turtlesim
+// (62.5 Hz updates, as turtlesim_node runs), so the controller is checked
+// without ROS 2.
+def main() -> i64 {
+    val gains = Gains { linear: 1.5, angular: 6.0, max_speed: 2.0, max_turn: 4.0 }
+    val route = square_route(2.0, 2.0, 7.0)
+    val tolerance = 0.1
+    val dt = 0.016
+    var leader = Pose2 { x: 2.0, y: 2.0, theta: 0.0 }
+    var follower = Pose2 { x: 9.0, y: 9.0, theta: PI }
+    var leg = 0
+    var steps = 0
+    var worst_turn = 0.0
+    while leg < list_len(route) && steps < 20000 {
+        val target = list_get(route, leg)
+        if arrived(leader, target, tolerance) {
+            leg = leg + 1
+        } else {
+            val c = steer(leader, target.x, target.y, gains)
+            assert(c.linear >= 0.0 && c.linear <= gains.max_speed);
+            assert(abs_f64(c.angular) <= gains.max_turn);
+            worst_turn = max(worst_turn, abs_f64(c.angular));
+            leader = unicycle_step(leader, c, dt)
+        };
+        follower = unicycle_step(follower, pursue(follower, leader, 1.0, gains), dt);
+        steps = steps + 1
+    };
+    assert(leg == 4);
+    assert(distance_to(leader, 2.0, 2.0) <= tolerance);
+    // The follower closes in and holds about one unit behind.
+    val gap = distance_to(follower, leader.x, leader.y)
+    assert(gap < 1.5);
+    // Seconds of simulated flight: 4 legs of 7 units at <= 2 units/s, plus turns.
+    val seconds = (steps to f64) * dt
+    assert(seconds > 14.0 && seconds < 40.0);
+    assert(worst_turn == gains.max_turn);
+    println("simulated square: " + to_str(steps) + " steps, follower gap " + to_str(gap));
+    println("turtlesim autopilot: simulated square flown");
+    return 0
+}

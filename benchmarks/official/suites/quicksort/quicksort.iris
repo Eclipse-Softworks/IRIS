@@ -46,5 +46,8 @@ def main() -> i64 {
     val last = list_get(arr, n - 1);
     print(first);
     print(last);
+    assert(first <= list_get(arr, 1));
+    assert(list_get(arr, n - 2) <= last);
+    assert(first <= last);
     0
 }

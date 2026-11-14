@@ -98,7 +98,11 @@ def main() -> i64 {
     val a = tensor_from_data(build_data(batch * m * k, 0.5), a_shape)
     val b = tensor_from_data(build_data(batch * k * n, 0.25), b_shape)
     val out = tensor_batch_matmul(a, b, batch, m, k, n)
-    print(list_get(tensor_data(out), 0));
-    print(list_get(tensor_data(out), (batch * m * n) - 1));
+    val v0 = list_get(tensor_data(out), 0);
+    val v1 = list_get(tensor_data(out), (batch * m * n) - 1);
+    print(v0);
+    print(v1);
+    assert(v0 == 145.125);
+    assert(v1 == 158.875);
     0
 }

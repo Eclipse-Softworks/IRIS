@@ -1,0 +1,40 @@
+// The warehouse agent against a chat model that speaks the OpenAI
+// chat-completions protocol with tool calling.
+//
+//   IRIS_CHAT_URL     the endpoint, e.g. http://127.0.0.1:11434/v1/chat/completions
+//                     for a local Ollama, or https://api.openai.com/v1/chat/completions
+//   IRIS_MODEL        the model name
+//   IRIS_LLM_KEY_ENV  the name of the variable holding the API key (unset: no key)
+//   IRIS_LLM_TIMEOUT_MS  per request (default 60000)
+//   IRIS_AGENT_NO_SYSTEM=1  send no system prompt (needed for Mistral 7B v0.3)
+//
+//   iris run projects/llm_agent/main.iris -- "Check A-100 and reorder if we have fewer than 20 on hand."
+//
+// The model only proposes calls; every argument goes through the tools'
+// typed decoders before anything runs, and at most six turns are spent.
+
+bring std.llm
+bring "agent.iris"
+
+def main() -> i64 {
+    val url = env_get("IRIS_CHAT_URL");
+    val model_name = env_get("IRIS_MODEL");
+    if len(url) == 0 || len(model_name) == 0 {
+        println("set IRIS_CHAT_URL and IRIS_MODEL (and IRIS_LLM_KEY_ENV if the endpoint needs a key)");
+        return 2
+    };
+    val argv = args();
+    val question = if list_len(argv) > 1 { list_get(argv, 1) } else { "Check A-100 and reorder if we have fewer than 20 on hand." };
+    println(question);
+    // A local model on a CPU can take minutes per turn.
+    val timeout = parse_i64(env_get("IRIS_LLM_TIMEOUT_MS"));
+    val timeout_ms = if is_some(timeout) { unwrap(timeout) } else { 60000 };
+    val system = if env_get("IRIS_AGENT_NO_SYSTEM") == "1" { "" } else { SYSTEM_PROMPT };
+    val run = run_agent_with(llm_client(url, "", model_name, env_get("IRIS_LLM_KEY_ENV"), timeout_ms), system, question, 6);
+    print_run(run);
+    assert(run.steps <= 6);
+    if run.stopped != "answered" {
+        return 1
+    };
+    return 0
+}

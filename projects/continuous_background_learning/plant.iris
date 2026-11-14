@@ -1,0 +1,62 @@
+// projects/continuous_background_learning/plant.iris
+// Dynamic second-order cyber-physical continuous plant with sudden drift injection.
+
+bring "types.iris"
+
+/// Initialize nominal plant parameters: J = 1.0 kg*m^2, b = 0.5 N*m*s/rad, bias = 0.0 N*m
+pub def plant_create_nominal() -> PlantParams {
+    PlantParams {
+        inertia: 1.0,
+        damping: 0.5,
+        bias_torque: 0.0,
+    }
+}
+
+/// Induce a sudden physical drift: 2.8x mass surge, 3.6x viscous friction, and external constant bias torque.
+pub def plant_apply_drift(p: PlantParams) -> PlantParams {
+    PlantParams {
+        inertia: 2.8,
+        damping: 1.8,
+        bias_torque: 0.85,
+    }
+}
+
+/// Create an initial resting state for the plant.
+pub def plant_initial_state() -> PlantState {
+    PlantState {
+        theta: 0.0,
+        omega: 0.0,
+        time_s: 0.0,
+    }
+}
+
+/// Integrate continuous plant dynamics forward by dt seconds:
+///   d(omega)/dt = (tau - b * omega - tau_bias) / J
+///   d(theta)/dt = omega
+pub def plant_step(p: PlantParams, state: PlantState, torque: f64, dt: f64) -> (PlantState, Transition) {
+    // Angular acceleration alpha from rigid body dynamics
+    val net_torque = torque - (p.damping * state.omega) - p.bias_torque;
+    val alpha = net_torque / p.inertia;
+
+    // Semi-implicit symplectic integration step
+    val new_omega = state.omega + (alpha * dt);
+    val new_theta = state.theta + (new_omega * dt);
+    val new_time = state.time_s + dt;
+
+    val next_state = PlantState {
+        theta: new_theta,
+        omega: new_omega,
+        time_s: new_time,
+    };
+
+    val transition = Transition {
+        theta: state.theta,
+        omega: state.omega,
+        torque: torque,
+        next_theta: new_theta,
+        next_omega: new_omega,
+        time_s: state.time_s,
+    };
+
+    (next_state, transition)
+}

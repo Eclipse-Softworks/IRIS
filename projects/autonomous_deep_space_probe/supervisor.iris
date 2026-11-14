@@ -1,0 +1,202 @@
+bring "types.iris"
+bring "physics.iris"
+bring "traits.iris"
+
+/// supervisor.iris — Cybernetic Homeostasis & 7-Gate Safety Verification
+/// Implements homeostatic viability envelope monitoring and transactional forward-rollout
+/// safety gating before any candidate control lease can be promoted to the live vessel.
+
+pub def assess_homeostasis(vessel : VesselState, env : ViabilityEnvelope) -> AlertSeverity {
+    val pitch_err = abs_f(vessel.pitch_deg);
+    val yaw_err = abs_f(vessel.yaw_deg);
+    val max_att = max_f(pitch_err, yaw_err);
+
+    // 1. Loss of Signal / Catastrophic pointing breach
+    if max_att >= env.max_attitude_error_deg {
+        return AlertSeverity.RedEmergency(f"Attitude breach: {max_att} deg >= limit", 501);
+    };
+
+    // 2. Viability risk warning (approaching limit)
+    if max_att >= (env.max_attitude_error_deg * 0.55) {
+        return AlertSeverity.OrangeViabilityRisk(f"Attitude divergence alert: {pitch_err} deg");
+    };
+
+    // 3. Thermal envelope check
+    if vessel.bus_temp_c >= (env.max_temp_c - 8.0) {
+        return AlertSeverity.OrangeViabilityRisk(f"Thermal overheat alert: {vessel.bus_temp_c} C");
+    };
+    if vessel.bus_temp_c <= (env.min_temp_c + 8.0) {
+        return AlertSeverity.OrangeViabilityRisk(f"Thermal freezing alert: {vessel.bus_temp_c} C");
+    };
+
+    // 4. Power reserve check
+    if vessel.battery_soc <= (env.min_battery_soc + 8.0) {
+        return AlertSeverity.OrangeViabilityRisk(f"Battery low reserve alert: {vessel.battery_soc} %");
+    };
+
+    // 5. Minor advisory check
+    if max_att >= 4.0 {
+        return AlertSeverity.YellowAdvisory("Pointing error degrading science collection");
+    };
+
+    return AlertSeverity.GreenNominal;
+}
+
+pub def is_gate_passed(decision : GateDecision) -> bool {
+    when decision {
+        GateDecision.GatePassed => true,
+        GateDecision.GateRejected(reason) => false,
+    }
+}
+
+pub def gate_rejection_reason(decision : GateDecision) -> str {
+    when decision {
+        GateDecision.GatePassed => "none",
+        GateDecision.GateRejected(reason) => reason,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 7-Gate Safety Verification Pipeline
+// ---------------------------------------------------------------------------
+
+// Gate 1: Finite Numeric Bounds Gate
+pub def gate_1_numeric_bounds(lease : GenerationLease) -> GateDecision {
+    val kp = abs_f(lease.kp_pitch);
+    val kd = abs_f(lease.kd_pitch);
+    if kp < 0.5 || kp > 40.0 {
+        return GateDecision.GateRejected("Gate 1 FAIL: Kp gain out of numerical bounds [0.5, 40.0]");
+    };
+    if kd < 0.2 || kd > 25.0 {
+        return GateDecision.GateRejected("Gate 1 FAIL: Kd gain out of numerical bounds [0.2, 25.0]");
+    };
+    return GateDecision.GatePassed;
+}
+
+// Gate 2: Actuator Saturation Margin Gate
+pub def gate_2_actuator_saturation(lease : GenerationLease) -> GateDecision {
+    // Under max expected perturbation (15 deg), torque must not saturate valve authority
+    val max_commanded_torque = (15.0 * abs_f(lease.kp_pitch)) + (4.0 * abs_f(lease.kd_pitch));
+    if max_commanded_torque > 160.0 {
+        return GateDecision.GateRejected("Gate 2 FAIL: Controller demands torque exceeding thruster valve threshold");
+    };
+    return GateDecision.GatePassed;
+}
+
+// Gate 3: Thermal Setpoint Feasibility Gate
+pub def gate_3_thermal_feasibility(lease : GenerationLease) -> GateDecision {
+    if lease.target_temp_c < 12.0 || lease.target_temp_c > 32.0 {
+        return GateDecision.GateRejected("Gate 3 FAIL: Thermal target outside electronics comfort band [12, 32] C");
+    };
+    if lease.louver_gain < 0.01 || lease.louver_gain > 0.30 {
+        return GateDecision.GateRejected("Gate 3 FAIL: Louver gain outside stable thermal envelope");
+    };
+    return GateDecision.GatePassed;
+}
+
+// Gate 4: Energy Reserve Gate
+pub def gate_4_energy_reserve(lease : GenerationLease) -> GateDecision {
+    if lease.science_power_target > 55.0 {
+        return GateDecision.GateRejected("Gate 4 FAIL: Science draw exceeds deep-space power budget");
+    };
+    return GateDecision.GatePassed;
+}
+
+// Gate 5: Monotonic Convergence Lookahead Rollout Gate (Speculative Forward Simulation)
+pub def gate_5_convergence_rollout(lease : GenerationLease, state : VesselState) -> GateDecision {
+    // Transactional sandbox rollout: simulate 12 steps forward with candidate lease on damaged plant
+    var sim_state = state;
+    val initial_error = abs_f(state.pitch_deg);
+
+    for step_idx in 0 .. 12 {
+        // Evaluate candidate control law in sandbox
+        val torque_raw = 0.0 - (sim_state.pitch_deg * lease.kp_pitch + sim_state.pitch_rate * lease.kd_pitch);
+        val torque_p = torque_raw * lease.polarity_compensation;
+        val torque_y = 0.0 - (sim_state.yaw_deg * lease.kp_yaw + sim_state.yaw_rate * lease.kd_yaw);
+
+        val louver = clamp_f(0.55 + (sim_state.bus_temp_c - lease.target_temp_c) * lease.louver_gain, 0.0, 1.0);
+
+        val cmd = ActuatorCommand {
+            pitch_torque_nm : clamp_f(torque_p, -40.0, 40.0),
+            yaw_torque_nm : clamp_f(torque_y, -35.0, 35.0),
+            radiator_louver_pos : louver,
+            payload_power_watts : lease.science_power_target,
+            survival_heater_watts : 0.0
+        };
+
+        sim_state = step_vessel(sim_state, cmd, 0.0);
+
+        // Invariant check: attitude error must never exceed 22.0 deg during rollout
+        if abs_f(sim_state.pitch_deg) > 22.0 {
+            return GateDecision.GateRejected(f"Gate 5 FAIL: Rollout divergent! Angle reached {sim_state.pitch_deg} deg");
+        };
+    };
+
+    val final_error = abs_f(sim_state.pitch_deg);
+    // Candidate must demonstrate clear convergence trajectory
+    if final_error >= initial_error {
+        return GateDecision.GateRejected(f"Gate 5 FAIL: Non-convergent policy (init={initial_error}, final={final_error})");
+    };
+
+    return GateDecision.GatePassed;
+}
+
+// Gate 6: Damping Stability Margin Gate
+pub def gate_6_damping_margin(lease : GenerationLease) -> GateDecision {
+    val ratio = abs_f(lease.kd_pitch) / abs_f(lease.kp_pitch);
+    if ratio < 0.30 {
+        return GateDecision.GateRejected("Gate 6 FAIL: Damping ratio underdamped; risk of high-frequency resonance");
+    };
+    return GateDecision.GatePassed;
+}
+
+// Gate 7: Rollback Signature & Lease Expiry Gate
+pub def gate_7_reversion_lease(lease : GenerationLease) -> GateDecision {
+    if lease.lease_duration_cycles < 20 || lease.lease_duration_cycles > 300 {
+        return GateDecision.GateRejected("Gate 7 FAIL: Lease duration outside autonomous safety bounds [20, 300]");
+    };
+    if lease.verification_signature == 0 {
+        return GateDecision.GateRejected("Gate 7 FAIL: Missing cryptographic verification signature");
+    };
+    return GateDecision.GatePassed;
+}
+
+// Master 7-Gate Safety Verification Pipeline
+pub def verify_all_7_gates(candidate : GenerationLease, state : VesselState) -> GateDecision {
+    val g1 = gate_1_numeric_bounds(candidate);
+    if !is_gate_passed(g1) {
+        return g1;
+    };
+
+    val g2 = gate_2_actuator_saturation(candidate);
+    if !is_gate_passed(g2) {
+        return g2;
+    };
+
+    val g3 = gate_3_thermal_feasibility(candidate);
+    if !is_gate_passed(g3) {
+        return g3;
+    };
+
+    val g4 = gate_4_energy_reserve(candidate);
+    if !is_gate_passed(g4) {
+        return g4;
+    };
+
+    val g5 = gate_5_convergence_rollout(candidate, state);
+    if !is_gate_passed(g5) {
+        return g5;
+    };
+
+    val g6 = gate_6_damping_margin(candidate);
+    if !is_gate_passed(g6) {
+        return g6;
+    };
+
+    val g7 = gate_7_reversion_lease(candidate);
+    if !is_gate_passed(g7) {
+        return g7;
+    };
+
+    return GateDecision.GatePassed;
+}

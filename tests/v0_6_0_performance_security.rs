@@ -730,7 +730,7 @@ fn test_pass_manager_with_all_v060_passes() {
 
 #[test]
 fn test_benchmark_files_exist() {
-    // Verify that the new benchmark files were created.
+    // Verify that the benchmark files exist and execute cleanly with assertions.
     let bench_files = [
         "benches/binary_search_bench.iris",
         "benches/tree_bench.iris",
@@ -745,12 +745,26 @@ fn test_benchmark_files_exist() {
         "benches/matrix_bench.iris",
         "benches/sort_bench.iris",
         "benches/string_bench.iris",
+        "benches/tensor_batch_matmul_bench.iris",
     ];
     for file in &bench_files {
         assert!(
             std::path::Path::new(file).exists(),
             "Benchmark file should exist: {}",
             file
+        );
+
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_iris"))
+            .args(["--emit", "eval", file])
+            .output()
+            .unwrap_or_else(|e| panic!("failed to run iris on {}: {}", file, e));
+        assert!(
+            out.status.success(),
+            "Benchmark {} failed with exit code {:?}:\nstdout: {}\nstderr: {}",
+            file,
+            out.status.code(),
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
         );
     }
 }

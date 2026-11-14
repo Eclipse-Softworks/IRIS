@@ -48,7 +48,46 @@ and physically validated.
 
 Hardware access is supplied by the board support package through the bounded,
 allocation-free hooks declared in `iris_embedded.h` (GPIO, ADC, PWM, monotonic
-time, watchdog, and UART). Only those extern names are accepted by the proof.
+time, watchdog, and UART). Only those extern names are accepted by the proof,
+and on bare-metal targets they are plain declarations: the BSP must define
+every hook the program calls.
+
+### State between steps
+
+The board support package calls the entry again and again, so a program that
+must remember something between calls (a debouncer's count, a PID integral)
+keeps it in program state: `var` at the top level, of type `i64`, `f64` or
+`bool`. Each variable is a global in `.bss`. The entry initialises all of them
+on its first call, because bare-metal startup code runs no constructors, and
+the proof covers that initialiser too. A `var` of any other type (a list, a
+string, a record) is rejected: it would need the heap.
+
+```iris
+var presses: i64 = 0
+var last: i64 = 0
+
+def main() -> i64 effect io {
+    val now = iris_embedded_gpio_read(2);
+    if now == 1 && last == 0 { presses = presses + 1 };
+    last = now;
+    iris_embedded_gpio_write(13, presses % 2);
+    return 0
+}
+```
+
+[projects/uno_controls](../projects/uno_controls/README.md) has a toggle, a
+debounced state machine and a fixed-point PID built this way, with host
+simulations of each. The proof fingerprint is reproducible: rebuilding the
+same source gives the same fingerprint.
+
+### LLVM backends
+
+Object emission uses the LLVM-C library found first: `IRIS_LLVM_C_API`, the
+IRIS toolchain bundle, then system installations. The stock Windows LLVM
+packages omit some backends (LLVM 23.1.1 has no AVR). When the preferred
+library lacks the target's backend, IRIS uses the first other installed
+LLVM-C that has it, for example LLVM 17's for the Uno. If none has it, the
+error names the missing backend.
 
 ## Link and validate on hardware
 

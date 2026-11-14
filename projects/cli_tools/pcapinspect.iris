@@ -1,0 +1,52 @@
+// pcapinspect: what a packet capture holds.
+//
+//   iris run projects/cli_tools/pcapinspect.iris -- capture.pcap [--scan-ports 10]
+//
+// Reads classic libpcap (either byte order; not pcapng) of Ethernet frames
+// and prints packet and byte counts, protocols, the number of flows, the top
+// talker, sources that sent SYNs (without ACK) to at least --scan-ports
+// ports of one host, and how many TLS ClientHellos it saw (tlsfp.iris
+// fingerprints them).
+
+bring "packets.iris"
+
+def main() -> i64 {
+    val argv = args();
+    var file = "";
+    var threshold = 10;
+    var bad = false;
+    var i = 1;
+    while i < list_len(argv) {
+        val a = list_get(argv, i);
+        if a == "--scan-ports" && i + 1 < list_len(argv) {
+            val n = parse_i64(list_get(argv, i + 1));
+            if is_some(n) { threshold = unwrap(n) } else { bad = true };
+            i = i + 1
+        } else if starts_with(a, "--") || len(file) > 0 {
+            bad = true
+        } else {
+            file = a
+        };
+        i = i + 1
+    };
+    if bad || len(file) == 0 {
+        println("usage: pcapinspect FILE [--scan-ports N]");
+        return 2
+    };
+    val capture = load_capture(file);
+    if is_ok(capture) == false {
+        println("pcapinspect: " + unwrap_err(capture));
+        return 1
+    };
+    val summary = summarize(unwrap(capture), threshold);
+    if is_ok(summary) == false {
+        println("pcapinspect: " + file + ": " + unwrap_err(summary));
+        return 1
+    };
+    val s = unwrap(summary);
+    assert(s.ipv4 + s.other == s.packets);
+    // Each report line ends in a newline, and print adds one more.
+    val text = capture_report(s);
+    print(slice(text, 0, len(text) - 1));
+    return 0
+}

@@ -1,0 +1,40 @@
+bring "system.iris" bring std.time
+
+// Coarse wall-clock batches: not a real-time or per-tick jitter benchmark.
+def main() -> i64 {
+    val plant = Plant { dynamics: Dynamics { retention: 0.8, gain: 0.25 }, drag: 0.0, noise: 0.0 };
+    val samples = collect(plant, 96, 43);
+    val training_start = now_ms();
+    val trained = train(samples, Dynamics { retention: 0.1, gain: 0.5 });
+    val training_ms = now_ms() - training_start;
+    assert(valid(trained));
+    // Warm up the control path before sampling. Training stays outside timing.
+    assert(episode(plant, trained, 1, false).mse > 0.0);
+    var total = 0;
+    var minimum = 1000000000;
+    var maximum = 0;
+    var checksum = 0.0;
+    for batch in 0 .. 20 {
+        var position = 0.0;
+        var velocity = 0.0;
+        val started = now_ms();
+        for tick in 0 .. 200000 {
+            val target = if (tick / 40) % 2 == 0 { 2.0 } else { -1.0 };
+            val command = clamp(requested(trained, position, velocity, target, false), -1.0, 1.0);
+            velocity = step(plant, velocity, command);
+            position = position + velocity;
+            checksum = checksum + position;
+        };
+        val duration = now_ms() - started;
+        assert(duration >= 0);
+        total = total + duration;
+        if duration < minimum { minimum = duration };
+        if duration > maximum { maximum = duration };
+    };
+    assert(checksum > 0.0);
+    println(f"training_ms={training_ms}");
+    println(f"20 batches of 200000 control+simulation steps: total_ms={total} min_ms={minimum} max_ms={maximum}");
+    println(f"mean_batch_ms={to_f64(total) / 20.0} checksum={checksum}");
+    println("learning robot: coarse timing complete");
+    return 0
+}

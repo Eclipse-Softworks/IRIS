@@ -1,207 +1,276 @@
-//! IRIS self-upgrade subcommand implementation.
-//! Queries GitHub Release API for latest compiler version, downloads corresponding
-//! platform executable, and performs safe, atomic self-replacement.
+//! `iris upgrade`: replace this compiler with the latest release.
+//!
+//! Asks GitHub for the latest release of the IRIS repository, takes the
+//! archive built for this machine's target triple -- the lightweight one,
+//! which holds the compiler alone, when there is one -- checks it against
+//! the SHA-256 digest GitHub publishes for it, takes the `iris` executable
+//! out of it (`.zip` or `.tar.gz`), and swaps it in for the running one,
+//! keeping the old one until the swap has succeeded.
 
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
+use std::cmp::Ordering;
 use std::env;
 use std::fs;
-use std::io::{self, Write};
-use std::path::{Path, PathBuf};
+use std::io::{self, Read, Write};
+use std::path::Path;
 use std::process::{Command, Stdio};
 
-#[derive(Deserialize, Debug)]
-struct GitHubRelease {
-    tag_name: String,
-    assets: Vec<GitHubAsset>,
+/// The repository whose releases are IRIS's.
+pub const RELEASE_REPO: &str = "Eclipse-Softworks/IRIS";
+
+#[derive(Deserialize, Debug, Clone)]
+pub struct GitHubRelease {
+    pub tag_name: String,
+    pub assets: Vec<GitHubAsset>,
 }
 
-#[derive(Deserialize, Debug)]
-struct GitHubAsset {
-    name: String,
-    browser_download_url: String,
+#[derive(Deserialize, Debug, Clone)]
+pub struct GitHubAsset {
+    pub name: String,
+    pub browser_download_url: String,
+    /// `sha256:<hex>`, which GitHub computes for every asset.
+    #[serde(default)]
+    pub digest: Option<String>,
 }
 
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+/// A release version: semver, pre-releases ordered before their release
+/// (`1.0.0-rc1 < 1.0.0-rc2 < 1.0.0`). A leading `v` is accepted, and
+/// `MAJOR.MINOR` means `MAJOR.MINOR.0`.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SemVer {
-    pub major: u32,
-    pub minor: u32,
-    pub patch: u32,
+    pub major: u64,
+    pub minor: u64,
+    pub patch: u64,
+    version: semver::Version,
 }
 
 impl SemVer {
     pub fn parse(s: &str) -> Option<Self> {
         let clean = s.trim().trim_start_matches('v');
-        let parts: Vec<&str> = clean.split('.').collect();
-        if parts.len() < 2 {
-            return None;
-        }
-        let major = parts[0].parse().ok()?;
-        let minor = parts[1].parse().ok()?;
-        let patch = if parts.len() >= 3 {
-            let clean_patch: String = parts[2]
-                .chars()
-                .take_while(|c| c.is_ascii_digit())
-                .collect();
-            clean_patch.parse().unwrap_or(0)
-        } else {
-            0
+        let core_end = clean.find(['-', '+']).unwrap_or(clean.len());
+        let full = match clean[..core_end].split('.').count() {
+            2 => format!("{}.0{}", &clean[..core_end], &clean[core_end..]),
+            _ => clean.to_owned(),
         };
-        Some(SemVer {
-            major,
-            minor,
-            patch,
+        let version = semver::Version::parse(&full).ok()?;
+        Some(Self {
+            major: version.major,
+            minor: version.minor,
+            patch: version.patch,
+            version,
         })
     }
 }
 
-fn fetch_latest_release_json() -> Result<String, String> {
-    let output = if cfg!(target_os = "windows") {
-        Command::new("powershell")
-            .args([
-                "-NoProfile",
-                "-Command",
-                "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; Invoke-RestMethod -Uri 'https://api.github.com/repos/moon9t/iris/releases/latest' | ConvertTo-Json -Depth 10"
-            ])
-            .output()
-    } else {
-        Command::new("curl")
-            .args([
-                "-s",
-                "-H",
-                "User-Agent: iris-updater",
-                "https://api.github.com/repos/moon9t/iris/releases/latest",
-            ])
-            .output()
-    };
+impl PartialOrd for SemVer {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
 
-    let output = output.map_err(|e| format!("Failed to execute download command: {}", e))?;
-    if !output.status.success() {
+impl Ord for SemVer {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.version.cmp(&other.version)
+    }
+}
+
+impl std::fmt::Display for SemVer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.version)
+    }
+}
+
+/// The target triple this machine's release archives are built for.
+pub fn release_triple() -> Option<&'static str> {
+    Some(match (env::consts::ARCH, env::consts::OS) {
+        ("x86_64", "windows") => "x86_64-pc-windows-msvc",
+        ("aarch64", "windows") => "aarch64-pc-windows-msvc",
+        ("x86_64", "linux") => "x86_64-unknown-linux-gnu",
+        ("aarch64", "linux") => "aarch64-unknown-linux-gnu",
+        ("x86_64", "macos") => "x86_64-apple-darwin",
+        ("aarch64", "macos") => "aarch64-apple-darwin",
+        _ => return None,
+    })
+}
+
+/// The archive for `triple`: `iris-vX-TRIPLE-lightweight.{zip,tar.gz}` (the
+/// compiler alone) first, else the full `iris-vX-TRIPLE.{zip,tar.gz}`.
+pub fn select_asset<'a>(assets: &'a [GitHubAsset], triple: &str) -> Option<&'a GitHubAsset> {
+    let archive = |n: &str| n.ends_with(".zip") || n.ends_with(".tar.gz");
+    let light = format!("-{triple}-lightweight.");
+    let full = format!("-{triple}.");
+    assets
+        .iter()
+        .find(|a| a.name.contains(&light) && archive(&a.name))
+        .or_else(|| {
+            assets
+                .iter()
+                .find(|a| a.name.contains(&full) && archive(&a.name))
+        })
+}
+
+/// Check `bytes` against `digest` (`sha256:<hex>`).
+pub fn verify_digest(bytes: &[u8], digest: &str) -> Result<(), String> {
+    let want = digest
+        .strip_prefix("sha256:")
+        .ok_or_else(|| format!("unsupported digest `{digest}`"))?;
+    let got: String = Sha256::digest(bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    if got.eq_ignore_ascii_case(want) {
+        Ok(())
+    } else {
+        Err(format!("the download does not match its published digest (expected sha256:{want}, got sha256:{got})"))
+    }
+}
+
+fn curl(url: &str, api: bool) -> Result<Vec<u8>, String> {
+    let mut cmd = Command::new(if cfg!(windows) { "curl.exe" } else { "curl" });
+    cmd.args(["-fsSL", "-H", "User-Agent: iris-upgrade"]);
+    if api {
+        cmd.args(["-H", "Accept: application/vnd.github+json"]);
+    }
+    let out = cmd
+        .arg(url)
+        .output()
+        .map_err(|e| format!("curl could not start: {e}"))?;
+    if !out.status.success() {
         return Err(format!(
-            "Download process exited with error status: {}",
-            String::from_utf8_lossy(&output.stderr)
+            "{url}: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
         ));
     }
-    String::from_utf8(output.stdout).map_err(|e| format!("Invalid UTF-8 in output: {}", e))
+    Ok(out.stdout)
 }
 
-fn download_and_extract(url: &str, target_path: &Path) -> Result<(), String> {
-    let tmp_dir = env::temp_dir();
-    let tmp_zip = tmp_dir.join("iris_update.zip");
+pub fn fetch_latest_release() -> Result<GitHubRelease, String> {
+    let json = curl(
+        &format!("https://api.github.com/repos/{RELEASE_REPO}/releases/latest"),
+        true,
+    )?;
+    serde_json::from_slice(&json).map_err(|e| format!("unexpected GitHub release JSON: {e}"))
+}
 
-    let download_status = if cfg!(target_os = "windows") {
-        Command::new("powershell")
-            .args([
-                "-NoProfile",
-                "-Command",
-                &format!(
-                    "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -Uri '{}' -OutFile '{}'",
-                    url,
-                    tmp_zip.to_string_lossy()
-                )
-            ])
-            .status()
-    } else {
-        Command::new("curl")
-            .args(["-sL", url, "-o", tmp_zip.to_str().unwrap_or("")])
-            .status()
+/// The file `name` (by its last path component) inside a `.tar.gz`.
+fn from_tar_gz(archive: &[u8], name: &str) -> Result<Vec<u8>, String> {
+    let mut tar = tar::Archive::new(flate2::read::GzDecoder::new(archive));
+    for entry in tar.entries().map_err(|e| e.to_string())? {
+        let mut entry = entry.map_err(|e| e.to_string())?;
+        let path = entry.path().map_err(|e| e.to_string())?.into_owned();
+        if path.file_name().and_then(|f| f.to_str()) == Some(name)
+            && entry.header().entry_type().is_file()
+        {
+            let mut data = Vec::new();
+            entry.read_to_end(&mut data).map_err(|e| e.to_string())?;
+            return Ok(data);
+        }
+    }
+    Err(format!("no `{name}` in the archive"))
+}
+
+/// The file `name` (by its last path component) inside a `.zip`: the
+/// central directory names it, its local header precedes its data, stored
+/// or deflated.
+pub fn from_zip(archive: &[u8], name: &str) -> Result<Vec<u8>, String> {
+    let u16_at = |at: usize| {
+        archive
+            .get(at..at + 2)
+            .map(|b| u16::from_le_bytes([b[0], b[1]]) as usize)
     };
-
-    let status = download_status.map_err(|e| format!("Failed to run download command: {}", e))?;
-    if !status.success() {
-        return Err("Download failed".to_owned());
-    }
-
-    if url.ends_with(".zip") {
-        let extract_dir = tmp_dir.join("iris_extracted");
-        if extract_dir.exists() {
-            let _ = fs::remove_dir_all(&extract_dir);
+    let u32_at = |at: usize| {
+        archive
+            .get(at..at + 4)
+            .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as usize)
+    };
+    let bad = || "not a readable zip archive".to_string();
+    // End of central directory: signature 0x06054b50, within the last 64 KiB.
+    let eocd = (0..archive.len().saturating_sub(21))
+        .rev()
+        .take(65_557)
+        .find(|&i| archive[i..i + 4] == [0x50, 0x4b, 0x05, 0x06])
+        .ok_or_else(bad)?;
+    let entries = u16_at(eocd + 10).ok_or_else(bad)?;
+    let mut at = u32_at(eocd + 16).ok_or_else(bad)?;
+    for _ in 0..entries {
+        if u32_at(at) != Some(0x0201_4b50) {
+            return Err(bad());
         }
-        fs::create_dir_all(&extract_dir)
-            .map_err(|e| format!("Failed to create extract dir: {}", e))?;
-
-        let extract_status = if cfg!(target_os = "windows") {
-            Command::new("powershell")
-                .args([
-                    "-NoProfile",
-                    "-Command",
-                    &format!(
-                        "Expand-Archive -Path '{}' -DestinationPath '{}' -Force",
-                        tmp_zip.to_string_lossy(),
-                        extract_dir.to_string_lossy()
-                    ),
-                ])
-                .status()
-        } else {
-            Command::new("unzip")
-                .args([
-                    "-o",
-                    tmp_zip.to_str().unwrap_or(""),
-                    "-d",
-                    extract_dir.to_str().unwrap_or(""),
-                ])
-                .status()
-        };
-
-        let estatus = extract_status.map_err(|e| format!("Failed to extract archive: {}", e))?;
-        if !estatus.success() {
-            return Err("Extraction failed".to_owned());
+        let method = u16_at(at + 10).ok_or_else(bad)?;
+        let compressed = u32_at(at + 20).ok_or_else(bad)?;
+        let size = u32_at(at + 24).ok_or_else(bad)?;
+        let name_len = u16_at(at + 28).ok_or_else(bad)?;
+        let extra_len = u16_at(at + 30).ok_or_else(bad)?;
+        let comment_len = u16_at(at + 32).ok_or_else(bad)?;
+        let local = u32_at(at + 42).ok_or_else(bad)?;
+        let entry_name =
+            String::from_utf8_lossy(archive.get(at + 46..at + 46 + name_len).ok_or_else(bad)?)
+                .into_owned();
+        at += 46 + name_len + extra_len + comment_len;
+        if entry_name.rsplit(['/', '\\']).next() != Some(name) {
+            continue;
         }
-
-        let mut new_binary: Option<PathBuf> = None;
-        let exe_name = if cfg!(target_os = "windows") {
-            "iris.exe"
-        } else {
-            "iris"
-        };
-
-        fn find_exe(dir: &Path, name: &str) -> Option<PathBuf> {
-            if let Ok(entries) = fs::read_dir(dir) {
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    if path.is_dir() {
-                        if let Some(p) = find_exe(&path, name) {
-                            return Some(p);
-                        }
-                    } else if path.file_name().and_then(|f| f.to_str()) == Some(name) {
-                        return Some(path);
-                    }
-                }
+        if compressed == 0xFFFF_FFFF || size == 0xFFFF_FFFF {
+            return Err(format!("`{entry_name}` is a zip64 entry"));
+        }
+        if u32_at(local) != Some(0x0403_4b50) {
+            return Err(bad());
+        }
+        let data_at = local
+            + 30
+            + u16_at(local + 26).ok_or_else(bad)?
+            + u16_at(local + 28).ok_or_else(bad)?;
+        let raw = archive.get(data_at..data_at + compressed).ok_or_else(bad)?;
+        let data = match method {
+            0 => raw.to_vec(),
+            8 => {
+                let mut out = Vec::with_capacity(size);
+                flate2::read::DeflateDecoder::new(raw)
+                    .read_to_end(&mut out)
+                    .map_err(|e| e.to_string())?;
+                out
             }
-            None
+            m => return Err(format!("`{entry_name}` uses zip compression method {m}")),
+        };
+        if data.len() != size {
+            return Err(format!(
+                "`{entry_name}` unpacked to {} bytes, not {size}",
+                data.len()
+            ));
         }
-
-        if let Some(exe_path) = find_exe(&extract_dir, exe_name) {
-            new_binary = Some(exe_path);
-        }
-
-        let new_bin_path = new_binary
-            .ok_or_else(|| "Could not find iris binary in the downloaded archive".to_owned())?;
-        fs::copy(&new_bin_path, target_path)
-            .map_err(|e| format!("Failed to copy new binary: {}", e))?;
-
-        let _ = fs::remove_dir_all(&extract_dir);
-    } else {
-        fs::copy(&tmp_zip, target_path).map_err(|e| format!("Failed to copy new binary: {}", e))?;
+        return Ok(data);
     }
-
-    let _ = fs::remove_file(&tmp_zip);
-    Ok(())
+    Err(format!("no `{name}` in the archive"))
 }
 
+/// The `iris` executable inside a release archive called `asset_name`.
+pub fn extract_executable(archive: &[u8], asset_name: &str) -> Result<Vec<u8>, String> {
+    let exe = if cfg!(windows) { "iris.exe" } else { "iris" };
+    if asset_name.ends_with(".zip") {
+        from_zip(archive, exe)
+    } else {
+        from_tar_gz(archive, exe)
+    }
+}
+
+/// Put `new_bin_path` where `current_exe_path` is, keeping the old one
+/// until the new one is in place.
 fn perform_swap(new_bin_path: &Path, current_exe_path: &Path) -> Result<(), String> {
-    let old_exe_path = current_exe_path.with_extension("exe.old");
+    let old_exe_path = current_exe_path.with_extension("old");
     if old_exe_path.exists() {
         let _ = fs::remove_file(&old_exe_path);
     }
 
     fs::rename(current_exe_path, &old_exe_path)
-        .map_err(|e| format!("Failed to rename running executable: {}", e))?;
+        .map_err(|e| format!("cannot move the running executable aside: {e}"))?;
 
     if let Err(e) = fs::rename(new_bin_path, current_exe_path) {
         let _ = fs::rename(&old_exe_path, current_exe_path);
-        return Err(format!("Failed to place new executable: {}", e));
+        return Err(format!("cannot put the new executable in place: {e}"));
     }
 
+    // The old one may still be running (it is, on Windows): delete it after exit.
     if cfg!(target_os = "windows") {
         let cmd = format!(
             "Start-Sleep -Seconds 1; Remove-Item -LiteralPath '{}' -Force",
@@ -213,109 +282,84 @@ fn perform_swap(new_bin_path: &Path, current_exe_path: &Path) -> Result<(), Stri
             .stderr(Stdio::null())
             .spawn();
     } else {
-        let _ = Command::new("sh")
-            .args([
-                "-c",
-                &format!("sleep 1; rm -f '{}'", old_exe_path.to_string_lossy()),
-            ])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn();
+        let _ = fs::remove_file(&old_exe_path);
     }
-
     Ok(())
 }
 
 pub fn run_upgrade_command(check: bool, yes: bool, force: bool) -> Result<(), String> {
     let current_ver_str = env!("CARGO_PKG_VERSION");
-    let current_semver = SemVer::parse(current_ver_str)
-        .ok_or_else(|| format!("Invalid current version syntax: {}", current_ver_str))?;
+    let current = SemVer::parse(current_ver_str)
+        .ok_or_else(|| format!("invalid current version: {current_ver_str}"))?;
 
-    println!("Current IRIS version: v{}", current_ver_str);
-    println!("Checking for latest release on GitHub...");
+    println!("Current IRIS version: v{current}");
+    println!("Checking for the latest release of {RELEASE_REPO}...");
+    let release = fetch_latest_release()?;
+    let latest = SemVer::parse(&release.tag_name)
+        .ok_or_else(|| format!("invalid release tag: {}", release.tag_name))?;
 
-    let json = fetch_latest_release_json()?;
-    let release: GitHubRelease = serde_json::from_str(&json)
-        .map_err(|e| format!("Failed to parse GitHub release JSON: {}", e))?;
-
-    let latest_semver = SemVer::parse(&release.tag_name)
-        .ok_or_else(|| format!("Invalid remote version tag: {}", release.tag_name))?;
-
-    if !force && latest_semver <= current_semver {
-        println!("IRIS is already up to date: v{}", current_ver_str);
+    if !force && latest <= current {
+        println!("IRIS is up to date: v{current}");
         return Ok(());
     }
-
-    println!(
-        "New version found: v{} (current: v{})",
-        release.tag_name, current_ver_str
-    );
+    println!("New version: v{latest} (current: v{current})");
     if check {
         return Ok(());
     }
 
+    let triple = release_triple().ok_or_else(|| {
+        format!(
+            "no IRIS release is built for {}-{}",
+            env::consts::ARCH,
+            env::consts::OS
+        )
+    })?;
+    let asset = select_asset(&release.assets, triple)
+        .ok_or_else(|| format!("release {} has no archive for {triple}", release.tag_name))?;
+
     if !yes {
-        print!("Do you want to upgrade? [y/N]: ");
+        print!("Upgrade to v{latest} from {}? [y/N]: ", asset.name);
         io::stdout().flush().map_err(|e| e.to_string())?;
         let mut response = String::new();
         io::stdin()
             .read_line(&mut response)
             .map_err(|e| e.to_string())?;
-        let response = response.trim().to_lowercase();
-        if !response.starts_with('y') {
+        if !response.trim().to_lowercase().starts_with('y') {
             println!("Upgrade cancelled.");
             return Ok(());
         }
     }
 
-    let platform_tag = if cfg!(target_os = "windows") {
-        "windows"
-    } else if cfg!(target_os = "macos") {
-        "apple-darwin"
-    } else {
-        "unknown-linux-gnu"
-    };
-
-    let mut asset_url = None;
-    for asset in &release.assets {
-        let name_lower = asset.name.to_lowercase();
-        if name_lower.contains(platform_tag)
-            && (name_lower.contains(".zip")
-                || name_lower.contains(".tar.gz")
-                || name_lower.contains(".exe")
-                || !name_lower.contains("setup"))
-        {
-            asset_url = Some(&asset.browser_download_url);
-            break;
+    println!("Downloading {} ...", asset.browser_download_url);
+    let archive = curl(&asset.browser_download_url, false)?;
+    match &asset.digest {
+        Some(d) => {
+            verify_digest(&archive, d)?;
+            println!("Verified {d}");
+        }
+        None => {
+            return Err(format!(
+                "{} has no published digest to verify it against",
+                asset.name
+            ))
         }
     }
-
-    if asset_url.is_none() {
-        for asset in &release.assets {
-            let name_lower = asset.name.to_lowercase();
-            if name_lower.contains(".zip") || name_lower.contains(".tar.gz") {
-                asset_url = Some(&asset.browser_download_url);
-                break;
-            }
-        }
-    }
-
-    let download_url = asset_url
-        .ok_or_else(|| "Could not find a suitable release asset for this platform".to_owned())?;
-    println!("Downloading new binary from: {}", download_url);
+    let binary = extract_executable(&archive, &asset.name)?;
 
     let current_exe =
-        env::current_exe().map_err(|e| format!("Failed to get current executable path: {}", e))?;
-    let tmp_bin = current_exe.with_extension("tmp_new");
-
-    download_and_extract(download_url, &tmp_bin)?;
-
+        env::current_exe().map_err(|e| format!("cannot find the running executable: {e}"))?;
+    let staged = current_exe.with_extension("new");
+    fs::write(&staged, &binary).map_err(|e| format!("cannot write {}: {e}", staged.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&staged, fs::Permissions::from_mode(0o755));
+    }
     println!("Applying update...");
-    perform_swap(&tmp_bin, &current_exe)?;
-    println!(
-        "Upgrade complete! IRIS has been updated to v{}",
-        release.tag_name
-    );
-
+    if let Err(e) = perform_swap(&staged, &current_exe) {
+        let _ = fs::remove_file(&staged);
+        return Err(e);
+    }
+    println!("Upgraded IRIS to v{latest}.");
     Ok(())
 }

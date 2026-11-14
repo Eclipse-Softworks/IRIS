@@ -1,0 +1,224 @@
+// Packet-capture inspection for pcapinspect.iris and tlsfp.iris: a classic
+// libpcap file (either byte order) of Ethernet frames. Each TCP segment is
+// looked at on its own; streams are not reassembled, so a ClientHello split
+// across segments is not seen.
+
+bring std.buffer
+bring std.pcap
+bring std.tls
+
+pub record CaptureSummary {
+    packets: i64,
+    bytes: i64,
+    ipv4: i64,
+    tcp: i64,
+    udp: i64,
+    icmp: i64,
+    // Not IPv4, or an IPv4 protocol other than TCP, UDP and ICMP
+    other: i64,
+    // Distinct (protocol, source, source port, destination, destination port)
+    flows: i64,
+    top_talker: str,
+    top_talker_bytes: i64,
+    // "src -> dst: N ports": SYNs without ACK to at least the threshold of ports
+    scans: list<str>,
+    hellos: list<HelloSeen>,
+    // Packets that could not be dissected, as "packet N: reason"
+    problems: list<str>,
+}
+
+pub record HelloSeen {
+    packet: i64,
+    src: str,
+    dst: str,
+    dst_port: i64,
+    sni: str,
+    ja3: str,
+    ja3_md5: str,
+    ja4: str,
+}
+
+// The whole file; an error if it is missing or empty.
+pub def load_capture(path: str) -> result<ByteBuffer, str> {
+    val bytes = file_read_bytes(path);
+    if list_len(bytes) == 0 {
+        return err("cannot read " + path + " (missing or empty)")
+    };
+    ok(ByteBuffer { data: bytes, len: list_len(bytes) })
+}
+
+def add_to(counts: map<str, i64>, order: list<str>, key: str, amount: i64) -> i64 {
+    val now = map_get(counts, key).unwrap_or(0);
+    if now == 0 && map_contains(counts, key) == false {
+        push(order, key)
+    };
+    map_set(counts, key, now + amount);
+    now + amount
+}
+
+// A ClientHello at the start of a TCP payload, fingerprinted.
+def hello_in(payload: ByteBuffer) -> option<TlsClientHello> {
+    if payload.len < 6 || byte_buffer_get(payload, 0) != 22 || byte_buffer_get(payload, 5) != 1 {
+        return none()
+    };
+    val tls_record = tls_parse_record(payload);
+    if is_ok(tls_record) == false {
+        return none()
+    };
+    val hello = tls_parse_client_hello(unwrap(tls_record).payload);
+    if is_ok(hello) { some(unwrap(hello)) } else { none() }
+}
+
+pub def summarize(buf: ByteBuffer, scan_threshold: i64) -> result<CaptureSummary, str> {
+    val parsed_header = pcap_parse_global_header(buf);
+    if is_ok(parsed_header) == false {
+        return err(unwrap_err(parsed_header))
+    };
+    val header = unwrap(parsed_header);
+    if header.network != 1 {
+        return err("link type " + to_str(header.network) + " is not Ethernet (1)")
+    };
+    val talkers: map<str, i64> = map();
+    val talker_order: list<str> = list();
+    val flows: map<str, i64> = map();
+    val flow_order: list<str> = list();
+    // "src -> dst" to the number of distinct ports SYNed, and the pairs seen
+    val scan_ports: map<str, i64> = map();
+    val scan_order: list<str> = list();
+    val syn_seen: map<str, i64> = map();
+    val hellos: list<HelloSeen> = list();
+    val problems: list<str> = list();
+    var packets = 0;
+    var bytes = 0;
+    var ipv4 = 0;
+    var tcp = 0;
+    var udp = 0;
+    var icmp = 0;
+    var other = 0;
+    var offset = 24;
+    var reading = true;
+    while reading && offset < buf.len {
+        val read = pcap_read_packet(buf, offset, header);
+        if is_ok(read) == false {
+            push(problems, "at byte " + to_str(offset) + ": " + unwrap_err(read));
+            reading = false
+        } else {
+            val packet = unwrap(read);
+            offset = offset + 16 + packet.incl_len;
+            packets = packets + 1;
+            bytes = bytes + packet.incl_len;
+            val frame = dissect_ethernet(packet.data);
+            val ip = if is_ok(frame) && unwrap(frame).ethertype == 0x0800 { dissect_ipv4(unwrap(frame).payload) } else { err("not IPv4") };
+            if is_ok(ip) == false {
+                other = other + 1
+            } else {
+                val p = unwrap(ip);
+                ipv4 = ipv4 + 1;
+                add_to(talkers, talker_order, p.src_ip, packet.incl_len);
+                if p.protocol == 6 {
+                    tcp = tcp + 1;
+                    val seg = dissect_tcp(p.payload);
+                    if is_ok(seg) {
+                        val s = unwrap(seg);
+                        add_to(flows, flow_order, "tcp " + p.src_ip + ":" + to_str(s.src_port) + " " + p.dst_ip + ":" + to_str(s.dst_port), 1);
+                        if s.syn && s.ack_flag == false {
+                            val pair = p.src_ip + " -> " + p.dst_ip;
+                            val seen = pair + " " + to_str(s.dst_port);
+                            if map_contains(syn_seen, seen) == false {
+                                map_set(syn_seen, seen, 1);
+                                add_to(scan_ports, scan_order, pair, 1)
+                            }
+                        };
+                        val hello = hello_in(s.payload);
+                        if is_some(hello) {
+                            val h = unwrap(hello);
+                            val ja3 = tls_calculate_ja3(h);
+                            val ja4 = tls_calculate_ja4(h, false);
+                            push(hellos, HelloSeen {
+                                packet: packets,
+                                src: p.src_ip,
+                                dst: p.dst_ip,
+                                dst_port: s.dst_port,
+                                sni: h.sni,
+                                ja3: ja3.ja3_str,
+                                ja3_md5: ja3.ja3_hash,
+                                ja4: ja4.ja4,
+                            })
+                        }
+                    } else {
+                        push(problems, "packet " + to_str(packets) + ": " + unwrap_err(seg))
+                    }
+                } else if p.protocol == 17 {
+                    udp = udp + 1;
+                    val d = dissect_udp(p.payload);
+                    if is_ok(d) {
+                        val u = unwrap(d);
+                        add_to(flows, flow_order, "udp " + p.src_ip + ":" + to_str(u.src_port) + " " + p.dst_ip + ":" + to_str(u.dst_port), 1)
+                    }
+                } else if p.protocol == 1 {
+                    icmp = icmp + 1
+                } else {
+                    other = other + 1
+                }
+            }
+        }
+    };
+    val scans: list<str> = list();
+    var i = 0;
+    while i < list_len(scan_order) {
+        val pair = list_get(scan_order, i);
+        val ports = map_get(scan_ports, pair).unwrap_or(0);
+        if ports >= scan_threshold {
+            push(scans, pair + ": " + to_str(ports) + " ports")
+        };
+        i = i + 1
+    };
+    list_sort(scans);
+    var top = "";
+    var top_bytes = -1;
+    var t = 0;
+    while t < list_len(talker_order) {
+        val ip = list_get(talker_order, t);
+        val n = map_get(talkers, ip).unwrap_or(0);
+        if n > top_bytes {
+            top = ip;
+            top_bytes = n
+        };
+        t = t + 1
+    };
+    ok(CaptureSummary {
+        packets: packets,
+        bytes: bytes,
+        ipv4: ipv4,
+        tcp: tcp,
+        udp: udp,
+        icmp: icmp,
+        other: other,
+        flows: list_len(flow_order),
+        top_talker: top,
+        top_talker_bytes: if top_bytes < 0 { 0 } else { top_bytes },
+        scans: scans,
+        hellos: hellos,
+        problems: problems,
+    })
+}
+
+// The report pcapinspect prints.
+pub def capture_report(s: CaptureSummary) -> str {
+    var out = "packets " + to_str(s.packets) + ", bytes " + to_str(s.bytes) + "\n";
+    out = out + "ipv4 " + to_str(s.ipv4) + ": tcp " + to_str(s.tcp) + ", udp " + to_str(s.udp) + ", icmp " + to_str(s.icmp) + "; other " + to_str(s.other) + "\n";
+    out = out + "flows " + to_str(s.flows) + "\n";
+    out = out + "top talker " + s.top_talker + " (" + to_str(s.top_talker_bytes) + " bytes)\n";
+    var i = 0;
+    while i < list_len(s.scans) {
+        out = out + "syn scan " + list_get(s.scans, i) + "\n";
+        i = i + 1
+    };
+    out = out + "tls client hellos " + to_str(list_len(s.hellos)) + "\n";
+    var j = 0;
+    while j < list_len(s.problems) {
+        out = out + "problem " + list_get(s.problems, j) + "\n";
+        j = j + 1
+    };
+    out
+}

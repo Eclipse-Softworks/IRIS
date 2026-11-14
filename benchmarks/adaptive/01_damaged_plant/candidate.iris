@@ -1,0 +1,22 @@
+/// Adapted candidate policy for damaged/inverted plant: positive feedback compensation u = input * 4
+def policy(input: i64) -> i64 {
+    return input * 4
+}
+
+def test_policy() -> i64 effect throw {
+    assert(policy(-2) == -8);
+    assert(policy(0) == 0);
+    assert(policy(3) == 12);
+    return 0
+}
+
+def test_transaction_rollback() -> i64 effect alloc, transaction, throw {
+    val state : list<i64> = list(10);
+    transaction_begin();
+    list_push(state, 99);
+    transaction_rollback();
+    assert(transaction_depth() == 0);
+    assert(list_len(state) == 1);
+    assert(list_get(state, 0) == 10);
+    return 0
+}

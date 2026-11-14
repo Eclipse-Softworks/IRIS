@@ -1,0 +1,9 @@
+// expect: E0403 at 7:20
+// message: a tensor of rank 3 takes 3 indices, or one flat index, but 2 were given
+bring std.tensor
+def main() -> i64 {
+    val t = tensor_ad_from_data(list(1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0), list(2, 2, 2))
+    println("before")
+    println(to_str(t[1, 0]))
+    return 0
+}

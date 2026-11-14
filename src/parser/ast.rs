@@ -649,6 +649,9 @@ pub enum AstExpr {
     StructLit {
         name: String,
         fields: Vec<(String, AstExpr)>,
+        /// Where each field's name is written, parallel to `fields`. Empty for
+        /// literals the compiler builds itself.
+        field_spans: Vec<Span>,
         spread: Option<Box<AstExpr>>,
         span: Span,
     },
@@ -984,6 +987,19 @@ pub struct AstModel {
     pub doc_comment: Option<String>,
 }
 
+/// Program state: `var NAME: Type = value` at the top level of the program.
+/// One instance exists per running program; `__iris_state_init` sets every
+/// variable to its initial value, in declaration order.
+#[derive(Debug, Clone)]
+pub struct AstStateVar {
+    pub name: Ident,
+    pub ty: AstType,
+    pub init: AstExpr,
+    pub span: Span,
+    /// Doc comment (`/// ...`) preceding this item, if any.
+    pub doc_comment: Option<String>,
+}
+
 /// A global constant declaration: `const NAME: type = value` or `const NAME = value`.
 #[derive(Debug, Clone)]
 pub struct AstConst {
@@ -1168,6 +1184,8 @@ pub struct AstModule {
     pub modules: Vec<AstModuleDef>,
     /// Macro definitions: `defmacro name(params) => body`.
     pub macros: Vec<AstMacroDef>,
+    /// Program state: top-level `var` declarations.
+    pub state_vars: Vec<AstStateVar>,
 }
 
 /// An inline module definition: `mod name { ... }`.

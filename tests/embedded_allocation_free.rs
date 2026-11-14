@@ -188,3 +188,86 @@ fn proof_fingerprint_changes_when_reachable_code_changes() {
         .expect("prove second image");
     assert_ne!(first.fingerprint, second.fingerprint);
 }
+
+fn uno_control(name: &str) -> iris::IrModule {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("projects/uno_controls")
+        .join(format!("uno_{name}.iris"));
+    iris::compile_file_to_module(&path).unwrap_or_else(|error| panic!("{name}: {error}"))
+}
+
+#[test]
+fn uno_programs_keep_scalar_state_between_steps() {
+    for name in ["toggle", "pid", "modes"] {
+        let proof =
+            validate_embedded_module(&uno_control(name), EmbeddedTarget::ArduinoUno, "main")
+                .unwrap_or_else(|error| panic!("{name}: {error}"));
+        assert!(
+            proof
+                .reachable_functions
+                .iter()
+                .any(|f| f == "__iris_state_init"),
+            "{name}"
+        );
+        assert_eq!(proof.fixed_array_bytes, 0);
+        // Constants are lowered in name order, so a rebuild proves the same image.
+        let again =
+            validate_embedded_module(&uno_control(name), EmbeddedTarget::ArduinoUno, "main")
+                .expect("prove again");
+        assert_eq!(proof.fingerprint, again.fingerprint, "{name}");
+    }
+    if !is_llvm_target_available(EmbeddedTarget::ArduinoUno.triple()) {
+        eprintln!("no installed LLVM-C has an AVR backend; Uno state emission skipped");
+        return;
+    }
+    for name in ["toggle", "pid", "modes"] {
+        let output =
+            std::env::temp_dir().join(format!("iris_uno_state_{name}_{}", std::process::id()));
+        let bundle = build_embedded_bundle(
+            &uno_control(name),
+            &output,
+            EmbeddedTarget::ArduinoUno,
+            "main",
+        )
+        .unwrap_or_else(|error| panic!("{name}: {error}"));
+        let ir = std::fs::read_to_string(&bundle.module_ir).expect("read module IR");
+        // The entry initialises state on its first call: bare-metal startup
+        // code runs no constructors.
+        assert!(
+            ir.contains("define i64 @iris_embedded_entry_main()"),
+            "{name}"
+        );
+        assert!(ir.contains("call i64 @__iris_state_init()"), "{name}");
+        assert!(!ir.contains("@llvm.global_ctors"), "{name}");
+        // Board hooks come from the BSP; no hosted fallback is linked in.
+        let object = std::fs::read(&bundle.module_object).expect("read module object");
+        let abort = b"iris_unhandled_effect_abort";
+        assert!(
+            !object.windows(abort.len()).any(|window| window == abort),
+            "{name}"
+        );
+        std::fs::remove_dir_all(output).expect("remove Uno state test output");
+    }
+}
+
+#[test]
+fn embedded_state_must_be_scalar_and_stays_out_of_the_hosted_proof() {
+    let module = compile_to_module(
+        "var history: list<i64> = list()\ndef main() -> i64 { push(history, 1); 0 }",
+        "embedded_list_state",
+    )
+    .expect("compile list state");
+    let error = validate_embedded_module(&module, EmbeddedTarget::CortexM4F, "main")
+        .expect_err("list state needs the heap");
+    assert!(error.to_string().contains("scalar state only"), "{error}");
+
+    // The target-free proof that the evolution gate relies on still refuses
+    // program state.
+    let counter = compile_to_module(
+        "var count: i64 = 0\ndef step() -> i64 { count = count + 1; count }\ndef main() -> i64 { step() }",
+        "hosted_scalar_state",
+    )
+    .expect("compile scalar state");
+    assert!(iris::codegen::embedded::prove_allocation_free(&counter, "step").is_err());
+    assert!(validate_embedded_module(&counter, EmbeddedTarget::CortexM4F, "main").is_ok());
+}

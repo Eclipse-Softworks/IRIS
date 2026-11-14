@@ -1,20 +1,58 @@
 // src/stdlib/async.iris -- IRIS standard async/concurrency library
 //
-// Provides non-blocking channel operations, thread utilities, and timing functions.
+// Provides task helpers (timeouts, joining, cancelling), non-blocking channel
+// operations, thread utilities, and timing functions.
+//
+// `async def` tasks run cooperatively on the thread that awaits them; the
+// language builtins for them are `async_sleep(ms)`, `async_yield()`,
+// `async_recv(ch)`, `async_any(...)`, `task_done(t)`, `task_cancel(t)` and
+// `task_cancelled(t)`.
 
 extern def iris_async_worker_count() -> i64 effect thread
 extern def iris_async_queued_tasks() -> i64 effect thread
 extern def iris_current_task_cancelled_i64() -> i64 effect thread
 extern def iris_task_group_is_cancelled_i64(group: task_group) -> i64 effect thread
 
-/// Number of fixed executor workers created by native async scheduling.
+/// Number of fixed worker threads that run `spawn` jobs. `async def` tasks do
+/// not use them: a task runs on the thread that created it.
 pub def async_worker_count() -> i64 effect thread {
     return iris_async_worker_count()
 }
 
-/// Tasks currently waiting in the native async executor queue.
+/// `spawn` jobs currently waiting for a worker thread.
 pub def async_queued_tasks() -> i64 effect thread {
     return iris_async_queued_tasks()
+}
+
+/// Wait for `t` for at most `ms` milliseconds: `some(result)` if it finished
+/// in time, `none` otherwise. The task keeps running; await it again later,
+/// or stop it with `task_cancel`.
+pub async def timeout_after[T](t: task<T>, ms: i64) -> option<T> effect time {
+    val which = await async_any(t, async_sleep(ms))
+    if which == 0 { some(await t) } else { none }
+}
+
+/// Await every task, in order, and collect the results. The tasks already
+/// run concurrently from the moment they were created; this only gathers them.
+pub async def join_all[T](tasks: list<task<T>>) -> list<T> {
+    val results: list<T> = list()
+    for i in 0..list_len(tasks) {
+        list_push(results, await list_get(tasks, i))
+    }
+    results
+}
+
+/// Cancel every unfinished task in `tasks`; returns how many were cancelled.
+pub def cancel_all[T](tasks: list<task<T>>) -> i64 effect thread {
+    var cancelled = 0
+    for i in 0..list_len(tasks) {
+        val t = list_get(tasks, i)
+        if !task_done(t) {
+            task_cancel(t);
+            cancelled = cancelled + 1
+        }
+    }
+    cancelled
 }
 
 /// True when cancellation has been requested for the current structured task.

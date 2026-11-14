@@ -180,3 +180,112 @@ pub def normalize_whitespace(s: str) -> str {
 pub def is_blank(s: str) -> bool {
     len(trim_start(s)) == 0
 }
+
+// Capitalizes the first character of a string.
+pub def capitalize(s: str) -> str {
+    val n = len(s);
+    if n == 0 { return s };
+    val first = to_upper(slice(s, 0, 1));
+    if n == 1 { first } else { concat(first, slice(s, 1, n)) }
+}
+
+// Truncates string to max_chars with a custom suffix/ellipsis.
+pub def truncate_with(s: str, max_chars: i64, ellipsis: str) -> str {
+    val n = len(s);
+    if n <= max_chars { return s };
+    val el_len = len(ellipsis);
+    val keep_len = if max_chars > el_len { max_chars - el_len } else { 0 };
+    concat(slice(s, 0, keep_len), ellipsis)
+}
+
+// Truncates string to max_chars, appending "..." if truncated.
+pub def truncate(s: str, max_chars: i64) -> str {
+    truncate_with(s, max_chars, "...")
+}
+
+// Reverses a string.
+pub def reverse_str(s: str) -> str {
+    val n = len(s);
+    if n <= 1 { return s };
+    val parts: list<str> = list();
+    var i = n - 1;
+    while i >= 0 {
+        push(parts, slice(s, i, i + 1));
+        i = i - 1;
+    };
+    join(parts, "")
+}
+
+// Returns true if byte is an ASCII decimal digit (0-9).
+pub def is_ascii_digit(b: i64) -> bool {
+    b >= 48 && b <= 57
+}
+
+// Returns true if byte is an ASCII uppercase letter (A-Z).
+pub def is_ascii_uppercase(b: i64) -> bool {
+    b >= 65 && b <= 90
+}
+
+// Returns true if byte is an ASCII lowercase letter (a-z).
+pub def is_ascii_lowercase(b: i64) -> bool {
+    b >= 97 && b <= 122
+}
+
+// Returns true if byte is an ASCII alphabetic character.
+pub def is_ascii_alphabetic(b: i64) -> bool {
+    is_ascii_uppercase(b) || is_ascii_lowercase(b)
+}
+
+// Returns true if byte is alphanumeric.
+pub def is_ascii_alphanumeric(b: i64) -> bool {
+    is_ascii_alphabetic(b) || is_ascii_digit(b)
+}
+
+// Computes the Levenshtein edit distance between two strings using dynamic programming.
+pub def levenshtein_distance(s1: str, s2: str) -> i64 {
+    val m = len(s1);
+    val n = len(s2);
+    if m == 0 { return n };
+    if n == 0 { return m };
+
+    var prev: list<i64> = list();
+    for j in 0 .. (n + 1) {
+        push(prev, j);
+    };
+
+    for i in 1 .. (m + 1) {
+        var curr: list<i64> = list();
+        push(curr, i);
+        val c1 = str_index(s1, i - 1);
+        for j in 1 .. (n + 1) {
+            val c2 = str_index(s2, j - 1);
+            val cost = if c1 == c2 { 0 } else { 1 };
+            val del_cost = list_get(prev, j) + 1;
+            val ins_cost = list_get(curr, j - 1) + 1;
+            val sub_cost = list_get(prev, j - 1) + cost;
+
+            var min_v = del_cost;
+            if ins_cost < min_v { min_v = ins_cost };
+            if sub_cost < min_v { min_v = sub_cost };
+            push(curr, min_v);
+        };
+        prev = curr;
+    };
+
+    list_get(prev, n)
+}
+
+// Computes Hamming distance between two equal-length strings (returns -1 if lengths differ).
+pub def hamming_distance(s1: str, s2: str) -> i64 {
+    val n1 = len(s1);
+    val n2 = len(s2);
+    if n1 != n2 { return 0 - 1 };
+    var dist = 0;
+    for i in 0 .. n1 {
+        if str_index(s1, i) != str_index(s2, i) {
+            dist = dist + 1;
+        };
+    };
+    dist
+}
+

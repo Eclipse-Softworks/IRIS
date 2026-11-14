@@ -37,5 +37,6 @@ def main() -> i64 {
     val squared = map_square(data)
     val total = sum_list(squared)
     print(total);
+    assert(total == 2646700);
     0
 }

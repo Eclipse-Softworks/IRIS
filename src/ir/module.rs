@@ -1,11 +1,14 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::ir::block::{BlockId, IrBlock};
-use crate::ir::function::{FunctionId, IrFunction, Param, SpanTable};
+use crate::ir::function::{
+    DropBinding, DropScope, FunctionId, IrFunction, Param, PlaceEvent, PlaceEventKind, PlaceMeta,
+    PlaceSlot, PlaceSpan, ScopeId, SpanTable,
+};
 use crate::ir::instr::{InstrId, IrInstr};
-use crate::ir::types::{IrType, TraitMethodSig};
+use crate::ir::types::{IrType, IrTypeId, TraitMethodSig, TypeArena};
 use crate::ir::value::{BlockParam, ValueDef, ValueId};
-use crate::parser::ast::AstExpr;
+use crate::parser::ast::{AstExpr, AstStructDef};
 
 /// The top-level IR container.
 ///
@@ -25,11 +28,30 @@ pub struct IrExternFn {
     pub link_lib: Option<String>, // e.g. Some("m") for -lm
 }
 
+/// A polymorphic IR function template awaiting lazy post-IR monomorphisation.
+#[derive(Debug, Clone)]
+pub struct GenericIrFn {
+    pub type_params: Vec<String>,
+    pub hkt_params: Vec<String>,
+    pub func: IrFunction,
+}
+
+/// A generic trait declaration (`trait Container[T]`, `trait Mappable[F[_]]`).
+#[derive(Debug, Clone)]
+pub struct GenericTraitDef {
+    pub type_params: Vec<String>,
+    pub hkt_params: Vec<String>,
+    pub methods: Vec<TraitMethodSig>,
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct IrModule {
     pub name: String,
     pub(crate) functions: Vec<IrFunction>,
     pub(crate) function_index: HashMap<String, FunctionId>,
+    /// Polymorphic IR function templates keyed by template name, instantiated
+    /// lazily by [`crate::pass::mono::MonoPass`].
+    pub(crate) generic_templates: HashMap<String, GenericIrFn>,
     /// Struct type definitions: name → ordered list of (field_name, field_type).
     pub(crate) struct_defs: HashMap<String, Vec<(String, IrType)>>,
     /// Enum type definitions: name → (variant_names, variant_field_types).
@@ -42,6 +64,8 @@ pub struct IrModule {
     /// Trait definitions: trait_name → list of method signatures (no `self`).
     /// Used to resolve `dyn Trait` IR types and to lay out vtables at codegen.
     pub(crate) trait_defs: HashMap<String, Vec<TraitMethodSig>>,
+    /// Generic trait declarations: trait_name → type/HKT params and method signatures.
+    pub(crate) generic_trait_defs: HashMap<String, GenericTraitDef>,
     /// Impl method mangled names: trait_name → (concrete_struct_name, method_name, mangled_fn).
     /// Populated when `impl Trait for Type` is processed so codegen can build
     /// the per-concrete-type vtable global.
@@ -51,7 +75,101 @@ pub struct IrModule {
     pub(crate) struct_defaults: HashMap<String, Vec<Option<AstExpr>>>,
     /// Names of generic struct templates that require monomorphization.
     pub(crate) generic_struct_names: HashSet<String>,
+    /// AST definitions for generic structs so dependent array lengths can be
+    /// re-evaluated under concrete const-generic substitutions.
+    pub(crate) generic_struct_asts: HashMap<String, AstStructDef>,
+    /// Evaluated top-level integer constants (`const K: usize = 4`), used when resolving
+    /// array lengths and const-generic type arguments.
+    pub(crate) const_ints: HashMap<String, i64>,
+    /// Program state (`var` at the top level), in declaration order; a
+    /// variable's slot is its index.
+    pub(crate) state_vars: Vec<(String, IrType)>,
+    /// The file this module was compiled from, with the byte offset of each
+    /// line, so native code can report a runtime error at `file:line:col`.
+    pub source: Option<std::sync::Arc<SourceLines>>,
+    /// Module-level interned type arena for deduplicating `IrType`s.
+    pub types: TypeArena,
 }
+
+/// The program's source files, for reporting a native runtime error at
+/// `file:line:col`. Offsets are the compile's: each file at its own base
+/// (see `compiler::SourceMap`), the main file first, at 0.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceLines {
+    pub files: Vec<SourceFileLines>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceFileLines {
+    /// As messages show it: relative to the working directory.
+    pub name: String,
+    pub base: u32,
+    pub len: u32,
+    /// Offsets within the file of each line's first byte.
+    pub line_starts: Vec<u32>,
+    /// Errors inside this file are reported in it. Not the standard
+    /// library's: a failure there is reported at the line that called it.
+    pub reported: bool,
+}
+
+impl SourceFileLines {
+    pub fn new(name: impl Into<String>, base: u32, text: &str, reported: bool) -> Self {
+        let mut line_starts = vec![0u32];
+        for (i, b) in text.bytes().enumerate() {
+            if b == b'\n' {
+                line_starts.push(i as u32 + 1);
+            }
+        }
+        SourceFileLines {
+            name: name.into(),
+            base,
+            len: text.len() as u32,
+            line_starts,
+            reported,
+        }
+    }
+}
+
+impl SourceLines {
+    /// One file, at base 0.
+    pub fn new(name: impl Into<String>, text: &str) -> Self {
+        SourceLines {
+            files: vec![SourceFileLines::new(name, 0, text, true)],
+        }
+    }
+
+    pub fn from_files(files: Vec<SourceFileLines>) -> Self {
+        SourceLines { files }
+    }
+
+    /// The file holding `byte`, its index, line and column (1-based), if
+    /// errors there are reported.
+    pub fn locate(&self, byte: u32) -> Option<(usize, u32, u32)> {
+        let index = self.files.iter().rposition(|f| f.base <= byte)?;
+        let file = &self.files[index];
+        let offset = byte - file.base;
+        if offset > file.len || !file.reported {
+            return None;
+        }
+        let line = match file.line_starts.binary_search(&offset) {
+            Ok(i) => i,
+            Err(i) => i.saturating_sub(1),
+        };
+        Some((index, line as u32 + 1, offset - file.line_starts[line] + 1))
+    }
+
+    /// The byte offset of 1-based `line` and `col` in the file named `name`
+    /// -- the inverse of [`locate`](Self::locate).
+    pub fn offset(&self, name: &str, line: u32, col: u32) -> Option<u32> {
+        let file = self.files.iter().find(|f| f.name == name)?;
+        let start = *file.line_starts.get(line.checked_sub(1)? as usize)?;
+        Some(file.base + start + col.saturating_sub(1))
+    }
+}
+
+/// The generated function that gives every program state variable its
+/// initial value. Hosts call it once before calling into the program.
+pub const STATE_INIT_FN: &str = "__iris_state_init";
 
 impl IrModule {
     pub fn new(name: impl Into<String>) -> Self {
@@ -59,15 +177,45 @@ impl IrModule {
             name: name.into(),
             functions: Vec::new(),
             function_index: HashMap::new(),
+            generic_templates: HashMap::new(),
             struct_defs: HashMap::new(),
             enum_defs: HashMap::new(),
             type_aliases: HashMap::new(),
             extern_fns: Vec::new(),
             trait_defs: HashMap::new(),
+            generic_trait_defs: HashMap::new(),
             trait_impl_methods: HashMap::new(),
             struct_defaults: HashMap::new(),
             generic_struct_names: HashSet::new(),
+            generic_struct_asts: HashMap::new(),
+            const_ints: HashMap::new(),
+            state_vars: Vec::new(),
+            source: None,
+            types: TypeArena::new(),
         }
+    }
+
+    /// Interns `ty` in the module's [`TypeArena`], returning a compact [`IrTypeId`].
+    pub fn intern_type(&mut self, ty: IrType) -> IrTypeId {
+        self.types.intern(ty)
+    }
+
+    /// Resolves an [`IrTypeId`] from the module's [`TypeArena`].
+    pub fn resolve_type(&self, id: IrTypeId) -> Option<&IrType> {
+        self.types.get(id)
+    }
+
+    /// Program state variables, in declaration order (slot = index).
+    pub fn state_vars(&self) -> &[(String, IrType)] {
+        &self.state_vars
+    }
+
+    /// The slot and type of program state variable `name`.
+    pub fn state_slot(&self, name: &str) -> Option<(usize, &IrType)> {
+        self.state_vars
+            .iter()
+            .position(|(var, _)| var == name)
+            .map(|slot| (slot, &self.state_vars[slot].1))
     }
 
     /// Registers a struct definition. Returns `Err` if the name already exists.
@@ -213,6 +361,64 @@ impl IrModule {
         self.functions.push(func);
         Ok(id)
     }
+
+    /// Registers a polymorphic IR function template for lazy post-IR monomorphisation.
+    pub fn add_generic_template(
+        &mut self,
+        name: impl Into<String>,
+        type_params: Vec<String>,
+        func: IrFunction,
+    ) {
+        self.generic_templates.insert(
+            name.into(),
+            GenericIrFn {
+                type_params,
+                hkt_params: Vec::new(),
+                func,
+            },
+        );
+    }
+
+    /// Registers a polymorphic IR function template with HKT type-constructor parameters.
+    pub fn add_generic_template_with_hkt(
+        &mut self,
+        name: impl Into<String>,
+        type_params: Vec<String>,
+        hkt_params: Vec<String>,
+        func: IrFunction,
+    ) {
+        self.generic_templates.insert(
+            name.into(),
+            GenericIrFn {
+                type_params,
+                hkt_params,
+                func,
+            },
+        );
+    }
+
+    /// Registers a generic trait declaration (`trait Container[T]`, `trait Mappable[F[_]]`).
+    pub fn add_generic_trait_def(
+        &mut self,
+        name: impl Into<String>,
+        type_params: Vec<String>,
+        hkt_params: Vec<String>,
+        methods: Vec<TraitMethodSig>,
+    ) {
+        self.generic_trait_defs.insert(
+            name.into(),
+            GenericTraitDef {
+                type_params,
+                hkt_params,
+                methods,
+            },
+        );
+    }
+
+    /// Generic trait declarations keyed by trait name.
+    pub fn generic_trait_defs(&self) -> &HashMap<String, GenericTraitDef> {
+        &self.generic_trait_defs
+    }
 }
 
 /// Builder for constructing an `IrFunction` incrementally.
@@ -231,10 +437,21 @@ pub struct IrFunctionBuilder {
     /// Source byte offset of the current statement being lowered. Set by the
     /// lowerer before emitting instructions; recorded into `span_table`.
     current_span: Option<u32>,
+    /// Sticky counterpart of `current_span`: stays set until the next
+    /// statement, so every instruction gets a `line_spans` entry.
+    line_span: Option<u32>,
+    /// Made by `new_return_decided_by_body`: `build_returning` gives the
+    /// return type, and `build` is not allowed.
+    return_pending: bool,
 }
 
 impl IrFunctionBuilder {
     pub fn new(name: impl Into<String>, params: Vec<Param>, return_ty: IrType) -> Self {
+        let mut type_arena = TypeArena::new();
+        for p in &params {
+            type_arena.intern_ref(&p.ty);
+        }
+        type_arena.intern_ref(&return_ty);
         let func = IrFunction {
             id: FunctionId(0), // reassigned by IrModule::add_function
             name: name.into(),
@@ -243,21 +460,74 @@ impl IrFunctionBuilder {
             blocks: Vec::new(),
             value_defs: HashMap::new(),
             value_types: HashMap::new(),
+            type_arena,
+            value_type_ids: HashMap::new(),
             next_value: 0,
             attrs: Vec::new(),
             span_table: SpanTable::default(),
+            value_names: HashMap::new(),
             capture_count: 0,
             is_const: false,
+            place_meta: PlaceMeta::default(),
+            drop_scopes: Vec::new(),
+            mono_calls: HashMap::new(),
         };
         Self {
             func,
             current_block: None,
             current_span: None,
+            line_span: None,
+            return_pending: false,
         }
+    }
+
+    /// Allocates a new explicit [`DropScope`] with optional `parent`.
+    pub fn alloc_drop_scope(&mut self, parent: Option<ScopeId>) -> ScopeId {
+        let id = ScopeId(self.func.drop_scopes.len() as u32);
+        self.func.drop_scopes.push(DropScope {
+            id,
+            parent,
+            bindings: Vec::new(),
+        });
+        id
+    }
+
+    /// Registers a Drop-bearing binding inside `scope`.
+    pub fn register_drop_binding(&mut self, scope: ScopeId, binding: DropBinding) {
+        if let Some(s) = self.func.drop_scopes.get_mut(scope.0 as usize) {
+            s.bindings.push(binding);
+        }
+    }
+
+    /// A builder for a function whose body decides its return type (a
+    /// lambda, an effect handler): lower the body, then `build_returning`
+    /// with its type. IR types have no "not yet known" to start from.
+    pub fn new_return_decided_by_body(name: impl Into<String>, params: Vec<Param>) -> Self {
+        let mut b = Self::new(name, params, IrType::Tuple(Vec::new()));
+        b.return_pending = true;
+        b
+    }
+
+    /// `build`, giving the return type a `new_return_decided_by_body`
+    /// builder left open.
+    pub fn build_returning(mut self, return_ty: IrType) -> IrFunction {
+        self.func.return_ty = return_ty;
+        self.return_pending = false;
+        self.build()
     }
 
     pub fn func_name(&self) -> &str {
         &self.func.name
+    }
+
+    /// Records where `value` came from, unless a more specific (inner)
+    /// expression already did.
+    pub fn note_value_span(&mut self, value: ValueId, byte: u32) {
+        self.func
+            .span_table
+            .value_spans
+            .entry(value)
+            .or_insert(byte);
     }
 
     /// Records the source byte offset of the statement currently being lowered.
@@ -267,6 +537,66 @@ impl IrFunctionBuilder {
     /// the first instruction it is attached to.
     pub fn set_span_byte(&mut self, byte: u32) {
         self.current_span = Some(byte);
+        self.line_span = Some(byte);
+    }
+
+    /// Records that `value` holds the source variable `name` from here on.
+    pub fn name_value(&mut self, value: ValueId, name: &str) {
+        self.func.value_names.insert(value, name.to_owned());
+    }
+
+    /// Allocates a fresh source binding `PlaceSlot` for `name` and optionally
+    /// associates `val` with it when `val` does not already carry another slot.
+    pub fn alloc_place_slot(&mut self, name: &str, val: Option<ValueId>) -> PlaceSlot {
+        let slot = PlaceSlot(self.func.place_meta.next_slot);
+        self.func.place_meta.next_slot += 1;
+        self.func
+            .place_meta
+            .slot_names
+            .insert(slot, name.to_owned());
+        if let Some(v) = val {
+            self.func.place_meta.value_slots.entry(v).or_insert(slot);
+        }
+        slot
+    }
+
+    /// Associates `val` with `slot` if `val` has no slot yet (e.g. a newly created
+    /// `BlockParam` or assignment RHS result).
+    pub fn map_value_slot_if_unset(&mut self, val: ValueId, slot: PlaceSlot) {
+        self.func.place_meta.value_slots.entry(val).or_insert(slot);
+    }
+
+    /// Records a full `(start, end)` span for `val` when not already present.
+    pub fn note_value_full_span(&mut self, val: ValueId, start: u32, end: u32) {
+        self.func
+            .place_meta
+            .value_spans
+            .entry(val)
+            .or_insert(PlaceSpan { start, end });
+    }
+
+    /// Records a source place event at the current insertion point `(block_id, next_instr_idx)`.
+    pub fn record_place_event(&mut self, kind: PlaceEventKind, start: u32, end: u32) {
+        let Some(block_id) = self.current_block else {
+            return;
+        };
+        let instr_idx = self.func.blocks[block_id.0 as usize].instrs.len();
+        self.func
+            .place_meta
+            .events
+            .entry((block_id.0, instr_idx))
+            .or_default()
+            .push(PlaceEvent {
+                kind,
+                span: PlaceSpan { start, end },
+            });
+    }
+
+    /// Sets only the sticky line position (see `SpanTable::line_spans`), for
+    /// code such as a block's tail expression that is not a statement and so
+    /// does not create an interpreter stepping point.
+    pub fn set_line_span(&mut self, byte: u32) {
+        self.line_span = Some(byte);
     }
 
     /// Creates a new block and returns its `BlockId`.
@@ -290,6 +620,8 @@ impl IrFunctionBuilder {
         self.func
             .value_defs
             .insert(value_id, ValueDef::BlockParam { block });
+        let tid = self.func.type_arena.intern_ref(&ty);
+        self.func.value_type_ids.insert(value_id, tid);
         self.func.value_types.insert(value_id, ty);
         value_id
     }
@@ -303,6 +635,24 @@ impl IrFunctionBuilder {
     /// Sets the current insertion block.
     pub fn set_current_block(&mut self, block: BlockId) {
         self.current_block = Some(block);
+    }
+
+    /// Records a generic call specialization `(template_name, type_args)` at
+    /// `(current_block, next_instr_idx)` and appends the `IrInstr::Call`.
+    pub fn push_generic_call(
+        &mut self,
+        template_name: impl Into<String>,
+        type_args: Vec<IrType>,
+        instr: IrInstr,
+        result_ty: Option<IrType>,
+    ) -> Option<ValueId> {
+        let block_id = self.current_block();
+        let instr_idx = self.func.blocks[block_id.0 as usize].instrs.len();
+        self.func.mono_calls.insert(
+            (block_id.0 as usize, instr_idx),
+            (template_name.into(), type_args),
+        );
+        self.push_instr(instr, result_ty)
     }
 
     /// Appends an instruction to the current block.
@@ -336,7 +686,16 @@ impl IrFunctionBuilder {
                     instr: instr_id,
                 },
             );
+            let tid = self.func.type_arena.intern_ref(&ty);
+            self.func.value_type_ids.insert(result_id, tid);
             self.func.value_types.insert(result_id, ty);
+        }
+
+        if let Some(byte) = self.line_span {
+            self.func
+                .span_table
+                .line_spans
+                .insert((block_id.0, instr_idx), byte);
         }
 
         // Record the current span into the span table (first instruction per statement).
@@ -345,9 +704,9 @@ impl IrFunctionBuilder {
                 .span_table
                 .entries
                 .insert((block_id.0, instr_idx), byte);
-            if let Some(res_id) = result {
-                self.func.span_table.value_spans.insert(res_id, byte);
-            }
+            // A value's own position is its expression's, which the
+            // lowerer notes (`note_value_span`); the statement's would win
+            // here, and point every error at the statement's first word.
         }
 
         self.func.blocks[block_id.0 as usize].instrs.push(instr);
@@ -454,6 +813,10 @@ impl IrFunctionBuilder {
     ///
     /// Panics in debug builds if any block is not sealed (lacks a terminator).
     pub fn build(self) -> IrFunction {
+        assert!(
+            !self.return_pending,
+            "a builder whose body decides the return type is finished with build_returning"
+        );
         #[cfg(debug_assertions)]
         for block in &self.func.blocks {
             assert!(

@@ -1,0 +1,143 @@
+// projects/autonomous_drone_hunter/reporter.iris
+// Mission telemetry debriefing, ASCII tactical situation map, JSON export, and idiomatic Result packaging.
+
+bring "types.iris"
+bring "math_3d.iris"
+
+pub def status_to_str(status: MissionStatus) -> str {
+    when status {
+        MissionStatus.TargetNeutralized => "SUCCESS: TARGET_NEUTRALIZED",
+        MissionStatus.TargetEscaped => "FAILURE: TARGET_ESCAPED",
+        MissionStatus.BatteryDepleted => "ABORTED: BATTERY_DEPLETED",
+        MissionStatus.SensorFailure(err) => f"ERROR: SENSOR_FAILURE ({err})",
+    }
+}
+
+pub def phase_to_name(phase: HuntPhase) -> str {
+    when phase {
+        HuntPhase.AreaSearch(r, a) => f"AreaSearch (Radius {r}m)",
+        HuntPhase.SignalTriangulation(pos, conf) => f"SignalTriangulation (Conf {conf})",
+        HuntPhase.InterceptPursuit(pos, spd) => f"InterceptPursuit (Speed {spd}m/s)",
+        HuntPhase.TerminalLaserLock(id, pos) => f"TerminalLaserLock (Target #{id})",
+        HuntPhase.ReturnToBase(pos) => "ReturnToBase",
+        HuntPhase.MissionDebrief => "MissionDebrief",
+    }
+}
+
+/// Renders a 2D ASCII tactical situational display map representing the search theater.
+pub def render_tactical_ascii_map(
+    home_pos: Vector3,
+    target_pos: Vector3,
+    drone_path_x: list<f64>,
+    drone_path_y: list<f64>
+) -> i64 {
+    val width = 45;
+    val height = 18;
+    val min_x = -50.0;
+    val max_x = 550.0;
+    val min_y = -50.0;
+    val max_y = 450.0;
+
+    println("\n================================================================================");
+    println("          TACTICAL SITUATIONAL DISPLAY — 2D THEATER PROJECTION                  ");
+    println("================================================================================");
+    println("  Legend: [H] Home Base | [X] Target | [L] Laser Lock | [.] Flight Trajectory   ");
+    println("--------------------------------------------------------------------------------");
+
+    val path_len = list_len(drone_path_x);
+
+    for row in 0 .. height {
+        val grid_y = max_y - (to_f64(row) / to_f64(height - 1)) * (max_y - min_y);
+        var line = "  |";
+
+        for col in 0 .. width {
+            val grid_x = min_x + (to_f64(col) / to_f64(width - 1)) * (max_x - min_x);
+            val cell_dx = (max_x - min_x) / to_f64(width);
+            val cell_dy = (max_y - min_y) / to_f64(height);
+
+            // Check Home
+            val dist_h = sqrt((grid_x - home_pos.x) * (grid_x - home_pos.x) + (grid_y - home_pos.y) * (grid_y - home_pos.y));
+            // Check Target
+            val dist_t = sqrt((grid_x - target_pos.x) * (grid_x - target_pos.x) + (grid_y - target_pos.y) * (grid_y - target_pos.y));
+
+            if dist_h < cell_dx * 0.9 {
+                line = line + "H";
+            } else if dist_t < cell_dx * 0.9 {
+                line = line + "X";
+            } else {
+                // Check if drone path intersects cell
+                var on_path = false;
+                var is_lock_point = false;
+                for p in 0 .. path_len {
+                    val px = list_get(drone_path_x, p);
+                    val py = list_get(drone_path_y, p);
+                    val d_p = sqrt((grid_x - px) * (grid_x - px) + (grid_y - py) * (grid_y - py));
+                    if d_p < cell_dx * 0.6 {
+                        on_path = true;
+                        if p > (path_len * 2 / 3) && p < (path_len * 4 / 5) {
+                            is_lock_point = true;
+                        };
+                    };
+                };
+
+                if is_lock_point {
+                    line = line + "L";
+                } else if on_path {
+                    line = line + ".";
+                } else {
+                    line = line + " ";
+                };
+            };
+        };
+        line = line + "|";
+        println(line);
+    };
+    println("--------------------------------------------------------------------------------");
+    println(f"  Coordinates: X in [{min_x}m .. {max_x}m] | Y in [{min_y}m .. {max_y}m]");
+    println("================================================================================\n");
+
+    0
+}
+
+/// Generates and serializes the complete mission report in idiomatic JSON format.
+pub def serialize_mission_json(report: MissionReport) -> str {
+    val status_str = status_to_str(report.status);
+    val json = "{\n" +
+        "  \"mission_id\": \"" + report.mission_id + "\",\n" +
+        "  \"status\": \"" + status_str + "\",\n" +
+        "  \"elapsed_time_s\": " + to_str(report.elapsed_time_s) + ",\n" +
+        "  \"total_flight_dist_m\": " + to_str(report.total_flight_dist_m) + ",\n" +
+        "  \"battery_consumed_pct\": " + to_str(report.battery_consumed_pct) + ",\n" +
+        "  \"target_initial_loc\": {\"x\": " + to_str(report.target_initial_loc.x) + ", \"y\": " + to_str(report.target_initial_loc.y) + ", \"z\": " + to_str(report.target_initial_loc.z) + "},\n" +
+        "  \"target_locked_loc\": {\"x\": " + to_str(report.target_locked_loc.x) + ", \"y\": " + to_str(report.target_locked_loc.y) + ", \"z\": " + to_str(report.target_locked_loc.z) + "},\n" +
+        "  \"final_standoff_distance_m\": " + to_str(report.final_standoff_distance_m) + ",\n" +
+        "  \"peak_confidence\": " + to_str(report.peak_confidence) + ",\n" +
+        "  \"total_samples\": " + to_str(report.total_samples) + "\n" +
+        "}";
+    json
+}
+
+/// Prints a formatted mission scorecard debriefing to stdout.
+pub def print_mission_report(report: MissionReport) -> i64 {
+    println("================================================================================");
+    println(f"             MISSION DEBRIEFING REPORT: {report.mission_id}                    ");
+    println("================================================================================");
+    println(f" Mission Status            : {status_to_str(report.status)}");
+    println(f" Total Flight Time         : {report.elapsed_time_s} s");
+    println(f" Cumulative Flight Distance: {report.total_flight_dist_m} m");
+    println(f" Battery Consumed          : {report.battery_consumed_pct} %");
+    println(f" Target Initial Position   : ({report.target_initial_loc.x}, {report.target_initial_loc.y}, {report.target_initial_loc.z}) m");
+    println(f" Target Locked Position    : ({report.target_locked_loc.x}, {report.target_locked_loc.y}, {report.target_locked_loc.z}) m");
+    println(f" Final Standoff Distance   : {report.final_standoff_distance_m} m");
+    println(f" Peak Sensor Confidence    : {report.peak_confidence * 100.0} %");
+    println(f" Total Flight Steps Logged : {report.total_samples}");
+    println("--------------------------------------------------------------------------------");
+    println(" Tactical Event Timeline:");
+    val log_len = list_len(report.tactical_events);
+    for idx in 0 .. log_len {
+        val entry = list_get(report.tactical_events, idx);
+        println(f"   * {entry}");
+    };
+    println("================================================================================");
+    0
+}

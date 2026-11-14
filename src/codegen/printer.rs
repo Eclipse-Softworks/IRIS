@@ -414,6 +414,34 @@ fn emit_instr(out: &mut String, instr: &IrInstr) -> Result<(), CodegenError> {
             write!(out, "array_store {}[{}] = {}", array, index, value)?;
         }
 
+        IrInstr::Borrow {
+            result,
+            place,
+            is_mut,
+        } => {
+            if *is_mut {
+                write!(out, "{} = borrow_mut {}", result, place)?;
+            } else {
+                write!(out, "{} = borrow {}", result, place)?;
+            }
+        }
+
+        IrInstr::Move { result, place } => {
+            write!(out, "{} = move {}", result, place)?;
+        }
+
+        IrInstr::EnterScope { scope } => {
+            write!(out, "enter_scope s{}", scope.0)?;
+        }
+
+        IrInstr::ExitScope { scope } => {
+            write!(out, "exit_scope s{}", scope.0)?;
+        }
+
+        IrInstr::Drop { value, drop_fn, ty } => {
+            write!(out, "drop {} ({}) via @{}", value, ty, drop_fn)?;
+        }
+
         IrInstr::ParFor {
             var: _,
             start,

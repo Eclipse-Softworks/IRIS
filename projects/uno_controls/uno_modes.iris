@@ -1,0 +1,20 @@
+// Arduino Uno: a debounced button on D2 cycles the built-in L LED on D13
+// through off, on, slow blink and fast blink; a long press switches it off.
+// Wiring: D2 to 5V through the button, with a 10k pull-down to GND.
+// Build: iris embedded projects/uno_controls/uno_modes.iris --target arduino-uno
+//
+// Each step starts with one ADC conversion on A0 (13 ADC clocks, 104 us at
+// the board support package's 16 MHz / 128 prescaler), which paces the
+// step-counted timing in modes.iris. That rate comes from the datasheet; it
+// has not been measured on a board.
+bring "modes.iris"
+
+extern "C" def iris_embedded_adc_read(channel: i64) -> i64 effect io
+extern "C" def iris_embedded_gpio_read(pin: i64) -> i64 effect io
+extern "C" def iris_embedded_gpio_write(pin: i64, value: i64) -> i64 effect io
+
+def main() -> i64 effect io {
+    iris_embedded_adc_read(0);
+    iris_embedded_gpio_write(13, modes_step(iris_embedded_gpio_read(2)));
+    return 0
+}

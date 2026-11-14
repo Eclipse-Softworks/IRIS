@@ -1,7 +1,7 @@
 # IRIS Language Specification
 
-**Version 1.0.0-rc1**
-**Last updated: 2026-09-01**
+**Version 1.0.0-rc2**
+**Last updated: 2026-11-12**
 
 > This document defines the syntax, semantics, and type system of the IRIS
 > programming language. It serves as the authoritative reference for compiler
@@ -77,11 +77,29 @@ Block comments `/* ... */` are supported and may be nested.
 The following identifiers are reserved as keywords:
 
 ```
-def    val    var    return   if     else    while   loop
-break  continue  record  bring  when   choice  for    in
-spawn  par    async  await   const  type    trait   impl
-pub    extern  model  layer  input  output  to
+def     val     var     let      return  if      else    while
+break   continue bring  when     match   choice  for     in
+async   await   const   type     trait   impl    pub     extern
+with    dyn     resume  try      catch   raise   move    unsafe
+defmacro  true  false
 ```
+
+The following are **contextual keywords**: each introduces one construct
+and is an ordinary name everywhere else (a variable, parameter, field or
+function may be called `record`, `to` or `select`).
+
+| Word | Keyword when |
+|---|---|
+| `record`, `model`, `mod` | it begins an item at the top level (or in a `mod` body): `record Name {` |
+| `effect` | it begins an `effect` declaration, or follows a function's return type: `-> i64 effect alloc` |
+| `loop` | it begins a statement followed by `{` or by a label and `{` |
+| `spawn` | it begins a statement followed by `{`, or by `(group)` and `{` |
+| `par` | it begins a statement followed by `for` |
+| `defer`, `yield` | it begins a statement and the next token begins an expression (not `=`, `.`, `[`, an operator, `;`) |
+| `select` | it begins a statement followed by `{` or `!` |
+| `to` | it follows a complete expression: `x to f64` |
+| `by` | it follows the range of a `for`: `for i in 0..n by 2` |
+| `layer`, `input`, `output` | inside a `model { }` block |
 
 ### 2.4 Type Keywords
 
@@ -407,14 +425,19 @@ type Pair = (i64, i64)
 ### 4.1 Function Declaration
 
 ```
-[pub] [async] def NAME[TYPE_PARAMS](PARAMS) -> RETURN_TYPE BLOCK
+[pub] [async] def NAME[TYPE_PARAMS](PARAMS) [-> RETURN_TYPE] BLOCK
 ```
 
 ```iris
 def add(a: i64, b: i64) -> i64 { a + b }
 pub def square(x: f64) -> f64 { x * x }
 async def fetch(url: str) -> str { /* ... */ }
+def greet(name: str) { println("hello " + name); }   // returns unit
 ```
+
+Without `-> RETURN_TYPE` a function returns `unit`. A function with a return
+type must return a value on every path (E0116); a `return` without a value is
+an error there (E0209).
 
 Parameters may have default values:
 
@@ -768,6 +791,28 @@ From highest to lowest:
 ## 6. Statements
 
 Statements appear inside blocks. They are separated by `;` or newlines.
+
+A line break ends a statement wherever the expression before it is complete:
+
+```iris
+var xs: list<i64> = list()
+push(xs, 1)
+push(xs, 2)        // two statements; no `;` needed
+```
+
+An expression continues onto the next line only when the next line cannot
+start a statement on its own: a binary operator, `.`, or an open argument
+list. A `(` or `[` at the start of a line starts a new expression; it does
+not call or index the value on the line before:
+
+```iris
+val k = 7 % n
+(k, n)             // a tuple, not a call of `n`
+```
+
+`;` is still accepted everywhere and needed to put two statements on one
+line. The last expression of a block, with no `;` after it, is the block's
+value.
 
 ### 6.1 Immutable Binding (val)
 
@@ -1506,9 +1551,12 @@ Source (.iris)
     ├── LLVM IR        (--emit llvm)
     ├── ORC JIT        (--emit jit; in-process LLVM ORC)
     ├── Native Binary  (--emit binary, LLVM-C object + linker)
-    ├── ONNX           (--emit onnx)
-    ├── CUDA           (--emit cuda)
-    └── SIMD           (--emit simd)
+    ├── ONNX           (--emit onnx, --emit onnx-binary [--weights FILE])
+    ├── TensorRT       (--emit tensorrt; engine built with trtexec)
+    ├── CUDA           (--emit cuda / cuda-ptx; --gpu cuda runs par for on the GPU)
+    ├── SIMD           (--emit simd; --simd on a native build)
+    ├── PGO            (--pgo-generate, --pgo-use FILE)
+    └── Python module  (--emit python-ext -o NAME.pyd|.so)
 ```
 
 ### 18.2 SSA IR Design
@@ -1571,8 +1619,17 @@ types.
 
 ### 19.3 Integer Overflow
 
-Integer arithmetic (`i64`) wraps on overflow (two's complement). This
-matches the behavior of the underlying C runtime.
+Integer `+`, `-`, `*` and `/` on `i64` and `i32` are checked, on both
+backends: a result outside the type's range stops the program with E0409,
+naming the operation and its operands (`integer overflow in addition
+(9223372036854775807 + 1)`). `i64::MIN / -1` overflows the same way;
+`i64::MIN % -1` is 0. Constant folding follows the same rule: an expression
+that would overflow is left to fail at run time rather than folded to a
+wrapped value.
+
+Where wrap-around is intended -- hashes, random-number generators --
+`wrapping_add(a, b)`, `wrapping_sub(a, b)` and `wrapping_mul(a, b)` compute
+the two's-complement result.
 
 ### 19.4 Floating-Point Semantics
 
@@ -1584,11 +1641,32 @@ IEEE 754 double-precision (for `f64`) and single-precision (for `f32`).
 Strings are immutable UTF-8 byte sequences. String operations that produce
 new strings allocate fresh memory. Comparison is bytewise.
 
-### 19.6 Panic
+### 19.6 Runtime Errors
 
-Unrecoverable errors (division by zero with integers, index out of bounds)
-cause a runtime panic with a diagnostic message. The program terminates with
-a non-zero exit code.
+An error at run time stops the program with exit code 101 and one
+diagnostic, the same on both backends:
+
+```text
+error[E0403]: index 5 is out of bounds for length 3
+ --> main.iris:4:20
+    |
+ 4 |     println(to_str(list_get(xs, i)))
+    |                    ^^^^^^^^
+   = help: valid indices run from 0 to `len(xs) - 1`; ...
+```
+
+| Code | Error |
+|---|---|
+| E0402 | integer division or remainder by zero |
+| E0403 | index out of bounds (lists, arrays, strings) |
+| E0406 | `panic`, a failed `assert`, `unwrap` of `none` or an error |
+| E0408 | stack overflow: recursion too deep, or never ending |
+| E0409 | integer overflow |
+
+The position is the expression that failed, in the file it is in; a failure
+inside a standard-library function is reported at the line that called it.
+What the program printed before the error is kept. `iris explain E0409`
+describes any code.
 
 ---
 
@@ -1741,8 +1819,8 @@ dim         ::= INT_LIT | IDENT
 
 ## Appendix B: Reserved Words
 
-All keywords listed in §2.3 and §2.4 are reserved and may not be used as
-identifiers.
+The keywords listed in §2.3 (other than the contextual keywords) and §2.4
+are reserved and may not be used as identifiers.
 
 Additionally, the following words are reserved for future use:
 

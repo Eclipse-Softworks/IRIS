@@ -334,7 +334,7 @@ fn test_eval_tensor_load() {
     let func = b.build();
 
     // Tensor [10.0, 20.0, 30.0, 40.0], index 2 → 30.0
-    let tensor = IrValue::Tensor(vec![10.0, 20.0, 30.0, 40.0], vec![4]);
+    let tensor = IrValue::tensor(vec![10.0, 20.0, 30.0, 40.0], vec![4]);
     let result = eval_function(&func, &[tensor, IrValue::I64(2)]).expect("should eval");
     assert_eq!(result, vec![IrValue::F32(30.0)]);
 }

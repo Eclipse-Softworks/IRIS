@@ -1,0 +1,2 @@
+Turtle controller constitution.
+The commanded speed must be finite and within the track's limit of +/-2 units/s.

@@ -2,6 +2,72 @@
   "version": "1.0.0-rc2",
   "entries": [
     {
+      "path": "projects/learning_scheduler/main.iris",
+      "mode": "native",
+      "env": { "IRIS_SCHEDULER_DEMO": "1" },
+      "expected": "learning scheduler: session complete"
+    },
+    {
+      "path": "projects/learning_scheduler/tests.iris",
+      "mode": "dual",
+      "expected": "learning scheduler: training, policies, aging, recovery, persistence verified"
+    },
+    { "path": "projects/learning_scheduler/domain.iris", "mode": "module", "expected": "" },
+    { "path": "projects/learning_scheduler/learning.iris", "mode": "module", "expected": "" },
+    { "path": "projects/learning_scheduler/checkpoint.iris", "mode": "module", "expected": "" },
+    { "path": "projects/learning_scheduler/commands.iris", "mode": "module", "expected": "" },
+    { "path": "projects/learning_scheduler/worker.iris", "mode": "module", "expected": "" },
+    {
+      "path": "projects/learning_robot/uno_control.iris",
+      "mode": "module",
+      "expected": ""
+    },
+    {
+      "path": "projects/learning_robot/export.iris",
+      "mode": "dual",
+      "expected": "learning robot: learned policy exported and quantization checked"
+    },
+    {
+      "path": "projects/learning_robot/noisy.iris",
+      "mode": "dual",
+      "expected": "learning robot: noisy trajectory training verified"
+    },
+    {
+      "path": "projects/learning_robot/uno_policy.iris",
+      "mode": "embedded",
+      "expected": ""
+    },
+    {
+      "path": "projects/learning_robot/checkpoint.iris",
+      "mode": "module",
+      "expected": ""
+    },
+    {
+      "path": "projects/learning_robot/persistence.iris",
+      "mode": "dual",
+      "expected": "learning robot: checkpoint roundtrip and rejection verified"
+    },
+    {
+      "path": "projects/learning_robot/benchmark.iris",
+      "mode": "native",
+      "expected": "learning robot: coarse timing complete"
+    },
+    {
+      "path": "projects/learning_robot/trajectories.iris",
+      "mode": "dual",
+      "expected": "learning robot: trajectories, drift, evaluation, recovery verified"
+    },
+    {
+      "path": "projects/learning_robot/system.iris",
+      "mode": "module",
+      "expected": ""
+    },
+    {
+      "path": "projects/learning_robot/main.iris",
+      "mode": "dual",
+      "expected": "learning robot: trained, adapted, rejected, restored"
+    },
+    {
       "path": "examples/01_basics/hello.iris",
       "mode": "dual",
       "expected": "Hello, IRIS! answer = 42"
@@ -120,6 +186,16 @@
       "path": "examples/08_ais/lifecycle.iris",
       "mode": "dual",
       "expected": "lifecycle: ok"
+    },
+    {
+      "path": "examples/08_ais/active_inference.iris",
+      "mode": "dual",
+      "expected": "active inference: ok"
+    },
+    {
+      "path": "examples/08_ais/autopilot.iris",
+      "mode": "dual",
+      "expected": "autopilot: ok"
     },
     {
       "path": "examples/09_evolution/transactions.iris",
@@ -295,6 +371,176 @@
       "path": "examples/10_integration/ros2_topics.iris",
       "mode": "manual",
       "expected": "ros2 topics: vector payload verified"
+    },
+    {
+      "path": "examples/10_integration/ros2_node.iris",
+      "mode": "manual",
+      "expected": "ros2 node: commands follow clearance"
+    },
+    {
+      "path": "projects/turtlesim_autopilot/autopilot.iris",
+      "mode": "module",
+      "expected": ""
+    },
+    {
+      "path": "projects/turtlesim_autopilot/simulate.iris",
+      "mode": "dual",
+      "expected": "turtlesim autopilot: simulated square flown"
+    },
+    {
+      "path": "projects/turtlesim_autopilot/main.iris",
+      "mode": "manual",
+      "expected": "turtlesim autopilot: square flown and followed"
+    },
+    {
+      "path": "projects/lifecycle_sensor_fusion/fusion.iris",
+      "mode": "module",
+      "expected": ""
+    },
+    {
+      "path": "projects/lifecycle_sensor_fusion/simulate.iris",
+      "mode": "dual",
+      "expected": "lifecycle sensor fusion: simulated sensors fused"
+    },
+    {
+      "path": "projects/lifecycle_sensor_fusion/main.iris",
+      "mode": "manual",
+      "expected": "lifecycle sensor fusion: every phase checked"
+    },
+    {
+      "path": "projects/evolving_cart_controller/plant.iris",
+      "mode": "module",
+      "expected": ""
+    },
+    {
+      "path": "projects/evolving_cart_controller/reference.iris",
+      "mode": "dual",
+      "expected": "evolving cart: reference controller derived"
+    },
+    {
+      "path": "projects/evolving_cart_controller/baseline.iris",
+      "mode": "module",
+      "expected": ""
+    },
+    {
+      "path": "projects/evolving_cart_controller/candidates/pd_with_history.iris",
+      "mode": "module",
+      "expected": ""
+    },
+    {
+      "path": "projects/evolving_cart_controller/candidates/lqr_unclamped.iris",
+      "mode": "module",
+      "expected": ""
+    },
+    {
+      "path": "projects/evolving_cart_controller/candidates/lqr_saturated.iris",
+      "mode": "module",
+      "expected": ""
+    },
+    {
+      "path": "projects/evolving_turtle/ros2_plant.iris",
+      "mode": "module",
+      "expected": ""
+    },
+    {
+      "path": "projects/evolving_turtle/reference.iris",
+      "mode": "dual",
+      "expected": "evolving turtle: reference controller derived"
+    },
+    {
+      "path": "projects/evolving_turtle/baseline.iris",
+      "mode": "module",
+      "expected": ""
+    },
+    {
+      "path": "projects/evolving_turtle/candidates/with_history.iris",
+      "mode": "module",
+      "expected": ""
+    },
+    {
+      "path": "projects/evolving_turtle/candidates/lqr_unclamped.iris",
+      "mode": "module",
+      "expected": ""
+    },
+    {
+      "path": "projects/evolving_turtle/candidates/lqr_saturated.iris",
+      "mode": "module",
+      "expected": ""
+    },
+    {
+      "path": "projects/self_upgrading_service/v1.iris",
+      "mode": "module",
+      "expected": ""
+    },
+    {
+      "path": "projects/self_upgrading_service/v2.iris",
+      "mode": "module",
+      "expected": ""
+    },
+    {
+      "path": "projects/self_upgrading_service/candidates/debug_logging.iris",
+      "mode": "module",
+      "expected": ""
+    },
+    {
+      "path": "projects/self_upgrading_service/candidates/fractional_stock.iris",
+      "mode": "module",
+      "expected": ""
+    },
+    {
+      "path": "projects/self_upgrading_service/client.iris",
+      "mode": "manual",
+      "expected": "self-upgrading service: upgraded, refused, rolled back, upgraded again"
+    },
+    { "path": "projects/uno_controls/toggle.iris", "mode": "module", "expected": "" },
+    { "path": "projects/uno_controls/pid.iris", "mode": "module", "expected": "" },
+    { "path": "projects/uno_controls/modes.iris", "mode": "module", "expected": "" },
+    {
+      "path": "projects/uno_controls/simulate.iris",
+      "mode": "dual",
+      "expected": "uno controls: toggle, debounced modes and fixed-point PID checked"
+    },
+    { "path": "projects/uno_controls/uno_toggle.iris", "mode": "embedded", "expected": "" },
+    { "path": "projects/uno_controls/uno_pid.iris", "mode": "embedded", "expected": "" },
+    { "path": "projects/uno_controls/uno_modes.iris", "mode": "embedded", "expected": "" },
+    { "path": "projects/async_gateway/gateway.iris", "mode": "module", "expected": "" },
+    {
+      "path": "projects/async_gateway/selftest.iris",
+      "mode": "dual",
+      "expected": "async gateway: deadlines, cancellation and 300 concurrent requests checked"
+    },
+    {
+      "path": "projects/async_gateway/main.iris",
+      "mode": "manual",
+      "expected": "async gateway: stopped after"
+    },
+    { "path": "projects/cli_tools/csvkit.iris", "mode": "module", "expected": "" },
+    { "path": "projects/cli_tools/logs.iris", "mode": "module", "expected": "" },
+    { "path": "projects/cli_tools/packets.iris", "mode": "module", "expected": "" },
+    {
+      "path": "projects/cli_tools/selftest.iris",
+      "mode": "manual",
+      "expected": "cli tools: csv, json lines, logs, pcap and TLS fingerprints match the reference"
+    },
+    { "path": "projects/cli_tools/csvq.iris", "mode": "manual", "expected": "" },
+    { "path": "projects/cli_tools/logstat.iris", "mode": "manual", "expected": "" },
+    { "path": "projects/cli_tools/pcapinspect.iris", "mode": "manual", "expected": "" },
+    { "path": "projects/cli_tools/tlsfp.iris", "mode": "manual", "expected": "" },
+    { "path": "projects/llm_agent/tools.iris", "mode": "module", "expected": "" },
+    { "path": "projects/llm_agent/scripted.iris", "mode": "module", "expected": "" },
+    { "path": "projects/llm_agent/agent.iris", "mode": "module", "expected": "" },
+    {
+      "path": "projects/llm_agent/selftest.iris",
+      "mode": "dual",
+      "expected": "llm agent: tool chain, typed results, refused calls and the step limit checked"
+    },
+    { "path": "projects/llm_agent/main.iris", "mode": "manual", "expected": "" },
+    { "path": "projects/gridworld_inference/world.iris", "mode": "module", "expected": "" },
+    { "path": "projects/gridworld_inference/agent.iris", "mode": "module", "expected": "" },
+    {
+      "path": "projects/gridworld_inference/run.iris",
+      "mode": "dual",
+      "expected": "gridworld inference: learned online, adapted to a change, compared with random and the best policy"
     },
     {
       "path": "projects/autonomous_organism/main.iris",

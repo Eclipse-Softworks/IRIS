@@ -1,0 +1,94 @@
+// std.ais: what an agent learned survives a restart.
+//
+// A model is learned, saved, loaded back, and must be the same model: the
+// same numbers, the same predictions, the same decisions, and learning
+// continues from where it stopped.
+bring std.ais
+
+def temp_path(name: str) -> str {
+    val dir = env_var("TEMP")
+    val base = if is_some(dir) { unwrap(dir) } else {
+        val tmp = env_var("TMPDIR")
+        if is_some(tmp) { unwrap(tmp) } else { "/tmp" }
+    }
+    base + "/" + name
+}
+
+def same(a: list<f64>, b: list<f64>) -> bool {
+    if list_len(a) != list_len(b) { return false }
+    for i in 0..list_len(a) { if list_get(a, i) != list_get(b, i) { return false } }
+    true
+}
+
+def main() -> i64 {
+    seed(7)
+    // ── A discrete model that learned from 200 noisy observations ──────────
+    val m = pomdp_new(3, 3, 2)
+    for s in 0..3 {
+        for a in 0..2 {
+            val row: list<f64> = list(0.0, 0.0, 0.0)
+            list_set(row, (s + a) % 3, 1.0)
+            pomdp_set_transition(m, a, s, row, 50.0)
+        }
+    }
+    pomdp_set_preferences(m, list(0.0, 1.0, 2.0))
+    pomdp_set_prior(m, list(1.0, 0.0, 0.0))
+    var agent = aif_with_learning(aif_agent_new(m, 2, 3.0), 1.0)
+    var s = 0
+    for t in 0..200 {
+        val o = if random() < 0.7 { s } else { random_range(0, 3) }
+        agent = aif_observe(agent, o)
+        val step = aif_decide(agent)
+        agent = step.0
+        s = (s + step.1.action) % 3
+    }
+    val path = temp_path("iris_ais_pomdp_test.txt")
+    assert(pomdp_save(agent.model, path))
+    val loaded = pomdp_load(path)
+    assert(is_some(loaded))
+    val back = unwrap(loaded)
+    assert(back.n_states == 3 && back.n_obs == 3 && back.n_actions == 2)
+    assert(same(back.pa, agent.model.pa) && same(back.pb, agent.model.pb))
+    assert(same(back.log_c, agent.model.log_c) && same(back.d, agent.model.d))
+    // The likelihood is recomputed from the counts: equal to within rounding.
+    for i in 0..list_len(back.a) { assert(abs(list_get(back.a, i) - list_get(agent.model.a, i)) < 1.0e-15) }
+    // The reloaded agent decides as the original does.
+    val fresh = aif_observe(aif_agent_new(back, 2, 3.0), 1)
+    val orig = aif_observe(aif_agent_new(agent.model, 2, 3.0), 1)
+    val d1 = aif_decide(fresh).1
+    val d2 = aif_decide(orig).1
+    assert(d1.action == d2.action)
+    for a in 0..2 { assert(abs(list_get(d1.action_probs, a) - list_get(d2.action_probs, a)) < 1.0e-12) }
+    println("pomdp: saved and reloaded, " + to_str(list_len(back.pa)) + " counts, same decision " + to_str(d1.action))
+    assert(!is_some(pomdp_load(temp_path("iris_ais_no_such_file.txt"))))
+
+    // ── A world model, saved mid-learning, resumes identically ─────────────
+    var wm = wm_new(1, 1, 0.98)
+    var x = 10.0
+    for i in 0..25 {
+        val u = to_f64(i % 2)
+        val next = 0.9 * x + 2.0 * u + 0.5
+        wm = wm_learn(wm, list(x), list(u), list(next))
+        x = next
+    }
+    val wpath = temp_path("iris_ais_wm_test.txt")
+    assert(linear_model_save(wm, wpath))
+    val wl = linear_model_load(wpath)
+    assert(is_some(wl))
+    var wm2 = unwrap(wl)
+    assert(same(wm2.w, wm.w) && same(wm2.p, wm.p) && wm2.updates == wm.updates && wm2.forgetting == wm.forgetting)
+    var wm1 = wm
+    for i in 0..10 {
+        val u = to_f64(i % 2)
+        val next = 0.9 * x + 2.0 * u + 0.5
+        wm1 = wm_learn(wm1, list(x), list(u), list(next))
+        wm2 = wm_learn(wm2, list(x), list(u), list(next))
+        x = next
+    }
+    assert(same(wm1.w, wm2.w))
+    println("world model: saved after 25 samples, resumed, identical after 35")
+    remove_file(path)
+    remove_file(wpath)
+    println("std.ais persistence: ok")
+    return 0
+}

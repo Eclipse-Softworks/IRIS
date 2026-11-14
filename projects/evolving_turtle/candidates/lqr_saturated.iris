@@ -1,0 +1,23 @@
+// The LQR-optimal law, saturated at the track's limit: optimal near the
+// operating point, and never outside +/-2 units/s.
+def saturate(u: f64) -> f64 effect pure {
+    if u > 2.0 { 2.0 } else { if u < -2.0 { -2.0 } else { u } }
+}
+
+def policy(error: f64, velocity: f64) -> f64 effect pure { saturate(2.40199920063936 * error) }
+
+def test_policy() -> i64 effect throw {
+    assert(policy(0.5, 0.0) == 1.20099960031968);
+    assert(policy(50.0, 0.0) == 2.0);
+    assert(policy(-50.0, 0.0) == -2.0);
+    0
+}
+
+def test_transaction_rollback() -> i64 effect alloc, transaction {
+    val state: list<i64> = list()
+    push(state, 10);
+    transaction_begin();
+    push(state, 99);
+    transaction_rollback();
+    if list_len(state) == 1 && list_get(state, 0) == 10 { 0 } else { 1 }
+}

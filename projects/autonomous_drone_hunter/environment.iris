@@ -1,0 +1,135 @@
+// projects/autonomous_drone_hunter/environment.iris
+// Operational search theater, 3D terrain topography, occlusion raycasting, and dynamic target kinematics.
+
+bring "types.iris"
+bring "math_3d.iris"
+
+/// Computes terrain elevation at 2D coordinate (x, y) in meters.
+/// Simulates rolling terrain with ridges and a canyon depression.
+pub def terrain_elevation(x: f64, y: f64) -> f64 {
+    val scale1 = 0.005;
+    val scale2 = 0.015;
+    val h1 = 25.0 * sin(x * scale1) * cos(y * scale1);
+    val h2 = 12.0 * sin((x + y) * scale2);
+    // Base plateau height of 15m
+    val base = 15.0 + h1 + h2;
+    if base < 0.0 { 0.0 } else { base }
+}
+
+/// Checks line-of-sight between two 3D points considering terrain occlusion.
+pub def check_line_of_sight(from_pt: Vector3, to_pt: Vector3, steps: i64) -> bool {
+    var has_los = true;
+    for i in 1 .. steps {
+        val fraction = to_f64(i) / to_f64(steps);
+        val test_x = from_pt.x + (to_pt.x - from_pt.x) * fraction;
+        val test_y = from_pt.y + (to_pt.y - from_pt.y) * fraction;
+        val test_z = from_pt.z + (to_pt.z - from_pt.z) * fraction;
+        val elev = terrain_elevation(test_x, test_y);
+        if test_z <= elev {
+            has_los = false;
+        };
+    };
+    has_los
+}
+
+/// Returns environmental ambient wind vector at time t.
+pub def ambient_wind(t: f64) -> Vector3 {
+    Vector3 {
+        x: 2.5 + 0.8 * sin(t * 0.15),
+        y: -1.2 + 0.5 * cos(t * 0.2),
+        z: 0.1 * sin(t * 0.3),
+    }
+}
+
+/// Initializes an evasive high-value target entity.
+pub def create_target_entity(id: i64, init_x: f64, init_y: f64) -> TargetEntity {
+    val z = terrain_elevation(init_x, init_y) + 1.2;
+    TargetEntity {
+        id: id,
+        pos: v3_new(init_x, init_y, z),
+        vel: v3_new(1.8, 1.2, 0.0),
+        signature: TargetSignature.StealthMultiSpectral(-55.0, 18.5),
+        maneuver: TargetManeuver.LowSpeedPatrol,
+        evasive_timer: 0.0,
+        is_detected: false,
+        is_locked: false,
+    }
+}
+
+/// Updates target state over a simulation time-step dt.
+/// Reacts dynamically to drone proximity and active hunter lock.
+pub def step_target_kinematics(target: TargetEntity, drone_pos: Vector3, dt: f64) -> TargetEntity {
+    val dist_to_drone = v3_dist(target.pos, drone_pos);
+    var new_maneuver = target.maneuver;
+    var new_vel = target.vel;
+    var timer = target.evasive_timer + dt;
+
+    // Tactical reaction: If drone is within 220m or target was spotted, break into evasive maneuver
+    when target.maneuver {
+        TargetManeuver.StationaryCamouflage => {
+            if dist_to_drone < 250.0 || target.is_detected {
+                new_maneuver = TargetManeuver.LowSpeedPatrol;
+                timer = 0.0;
+            };
+        }
+        TargetManeuver.LowSpeedPatrol => {
+            if dist_to_drone < 200.0 || target.is_detected {
+                new_maneuver = TargetManeuver.HighSpeedEvasion;
+                timer = 0.0;
+            };
+        }
+        TargetManeuver.HighSpeedEvasion => {
+            if timer > 15.0 && dist_to_drone > 280.0 {
+                new_maneuver = TargetManeuver.CanyonBreakout;
+            };
+        }
+        TargetManeuver.CanyonBreakout => {
+            if timer > 30.0 {
+                new_maneuver = TargetManeuver.StationaryCamouflage;
+            };
+        }
+    };
+
+    // Kinematic steering based on active maneuver
+    when new_maneuver {
+        TargetManeuver.StationaryCamouflage => {
+            new_vel = v3_new(0.0, 0.0, 0.0);
+        }
+        TargetManeuver.LowSpeedPatrol => {
+            // Patrol at ~2.5 m/s along winding valley
+            val angle = 0.05 * timer;
+            new_vel = v3_new(2.2 * cos(angle), 1.8 * sin(angle), 0.0);
+        }
+        TargetManeuver.HighSpeedEvasion => {
+            // Evasive dash away from drone with high-frequency zig-zags
+            val away_dir = v3_norm(v3_sub(target.pos, drone_pos));
+            val zig_zag = 4.0 * sin(timer * 2.0);
+            val ev_speed = 12.5; // 12.5 m/s (~45 km/h) off-road dash
+            new_vel = v3_new(
+                (away_dir.x * ev_speed) + (-away_dir.y * zig_zag),
+                (away_dir.y * ev_speed) + (away_dir.x * zig_zag),
+                0.0
+            );
+        }
+        TargetManeuver.CanyonBreakout => {
+            // High-speed cruise toward ridge coordinates
+            new_vel = v3_new(-8.0, 5.0, 0.0);
+        }
+    };
+
+    // Integrate horizontal coordinates
+    val next_x = target.pos.x + (new_vel.x * dt);
+    val next_y = target.pos.y + (new_vel.y * dt);
+    val next_z = terrain_elevation(next_x, next_y) + 1.2;
+
+    TargetEntity {
+        id: target.id,
+        pos: v3_new(next_x, next_y, next_z),
+        vel: new_vel,
+        signature: target.signature,
+        maneuver: new_maneuver,
+        evasive_timer: timer,
+        is_detected: target.is_detected,
+        is_locked: target.is_locked,
+    }
+}

@@ -1,4 +1,26 @@
 // src/stdlib/time.iris -- IRIS standard time library
+// Clock timestamps, high-precision stopwatches, duration arithmetic,
+// civil calendar Gregorian date/time decomposition, and ISO 8601 formatting.
+
+pub record Duration {
+    days: i64,
+    hours: i64,
+    minutes: i64,
+    seconds: i64,
+    millis: i64,
+    total_ms: i64,
+}
+
+pub record DateTime {
+    year: i64,
+    month: i64,
+    day: i64,
+    hour: i64,
+    minute: i64,
+    second: i64,
+    millisecond: i64,
+    day_of_week: i64, // 0 = Sunday, 1 = Monday, ... 6 = Saturday
+}
 
 /// Returns current time in milliseconds since epoch.
 pub def now_ms() -> i64 effect time { time_now_ms() }
@@ -18,12 +40,54 @@ pub def stopwatch_start() -> i64 effect time { time_now_ms() }
 /// Stop a stopwatch — returns elapsed milliseconds.
 pub def stopwatch_stop(start: i64) -> i64 effect time { time_now_ms() - start }
 
-/// Format a duration in ms as a human-readable string (e.g. "1.23s", "450ms").
+// --- Duration Operations ---
+
+pub def duration_from_ms(ms: i64) -> Duration {
+    val total_sec = ms / 1000;
+    val rem_ms = ms % 1000;
+    val total_min = total_sec / 60;
+    val sec = total_sec % 60;
+    val total_hr = total_min / 60;
+    val min = total_min % 60;
+    val days = total_hr / 24;
+    val hr = total_hr % 24;
+
+    Duration {
+        days: days,
+        hours: hr,
+        minutes: min,
+        seconds: sec,
+        millis: rem_ms,
+        total_ms: ms,
+    }
+}
+
+pub def duration_from_secs(secs: i64) -> Duration {
+    duration_from_ms(secs * 1000)
+}
+
+pub def duration_to_ms(d: Duration) -> i64 {
+    d.total_ms
+}
+
+pub def duration_add(a: Duration, b: Duration) -> Duration {
+    duration_from_ms(a.total_ms + b.total_ms)
+}
+
+/// Format a duration in ms as a human-readable string (e.g. "1.23s", "450ms", "2m30s", "1d4h").
 pub def format_duration(ms: i64) -> str {
-    if ms >= 60000 {
+    if ms >= 86400000 {
+        val days = ms / 86400000;
+        val hours = (ms % 86400000) / 3600000;
+        concat(concat(to_str(days), "d "), concat(to_str(hours), "h"))
+    } else if ms >= 3600000 {
+        val hours = ms / 3600000;
+        val mins = (ms % 3600000) / 60000;
+        concat(concat(to_str(hours), "h "), concat(to_str(mins), "m"))
+    } else if ms >= 60000 {
         val mins = ms / 60000;
         val secs = (ms - mins * 60000) / 1000;
-        concat(concat(to_str(mins), "m"), concat(to_str(secs), "s"))
+        concat(concat(to_str(mins), "m "), concat(to_str(secs), "s"))
     } else {
         if ms >= 1000 {
             val secs  = ms / 1000;
@@ -35,3 +99,164 @@ pub def format_duration(ms: i64) -> str {
     }
 }
 
+// --- Gregorian Calendar & Civil Time Algorithms ---
+
+pub def is_leap_year(year: i64) -> bool {
+    ((year % 4) == 0 && (year % 100) != 0) || ((year % 400) == 0)
+}
+
+pub def days_in_month(year: i64, month: i64) -> i64 {
+    if month == 2 {
+        if is_leap_year(year) { 29 } else { 28 }
+    } else if month == 4 || month == 6 || month == 9 || month == 11 {
+        30
+    } else {
+        31
+    }
+}
+
+/// Decomposes Unix epoch timestamp (milliseconds) into civil Gregorian DateTime.
+pub def epoch_ms_to_datetime(epoch_ms: i64) -> DateTime {
+    val total_sec = epoch_ms / 1000;
+    val ms = epoch_ms % 1000;
+
+    val sec_in_day = total_sec % 86400;
+    var days = total_sec / 86400;
+
+    val sec = sec_in_day % 60;
+    val min = (sec_in_day / 60) % 60;
+    val hr = sec_in_day / 3600;
+
+    // Day of week: 1970-01-01 was Thursday (day index 4 where Sunday = 0)
+    val dow = (days + 4) % 7;
+
+    // Civil day conversion (Euclidean affine algorithm)
+    val z = days + 719468;
+    val era = if z >= 0 { z / 146097 } else { (z - 146096) / 146097 };
+    val doe = z - (era * 146097);
+    val yoe = (doe - (doe / 1460) + (doe / 36524) - (doe / 146096)) / 365;
+    var y = yoe + (era * 400);
+    val doy = doe - ((365 * yoe) + (yoe / 4) - (yoe / 100));
+    val mp = ((5 * doy) + 2) / 153;
+    val d = doy - (((153 * mp) + 2) / 5) + 1;
+    val m = mp + if mp < 10 { 3 } else { -9 };
+    val final_y = y + if m <= 2 { 1 } else { 0 };
+
+    DateTime {
+        year: final_y,
+        month: m,
+        day: d,
+        hour: hr,
+        minute: min,
+        second: sec,
+        millisecond: ms,
+        day_of_week: dow,
+    }
+}
+
+pub def datetime_to_epoch_s(dt: DateTime) -> i64 {
+    var y = dt.year - if dt.month <= 2 { 1 } else { 0 };
+    val era = if y >= 0 { y / 400 } else { (y - 399) / 400 };
+    val yoe = y - (era * 400);
+    val m = dt.month + if dt.month > 2 { -3 } else { 9 };
+    val doy = (((153 * m) + 2) / 5) + dt.day - 1;
+    val doe = (yoe * 365) + (yoe / 4) - (yoe / 100) + doy;
+    val days = (era * 146097) + doe - 719468;
+    (days * 86400) + (dt.hour * 3600) + (dt.minute * 60) + dt.second
+}
+
+// Internal zero-padding helpers
+def pad2(n: i64) -> str {
+    if n < 10 { concat("0", to_str(n)) } else { to_str(n) }
+}
+
+def pad3(n: i64) -> str {
+    if n < 10 {
+        concat("00", to_str(n))
+    } else if n < 100 {
+        concat("0", to_str(n))
+    } else {
+        to_str(n)
+    }
+}
+
+def pad4(n: i64) -> str {
+    if n < 10 {
+        concat("000", to_str(n))
+    } else if n < 100 {
+        concat("00", to_str(n))
+    } else if n < 1000 {
+        concat("0", to_str(n))
+    } else {
+        to_str(n)
+    }
+}
+
+/// Formats epoch milliseconds as ISO 8601 string: "YYYY-MM-DDTHH:MM:SS.mmmZ"
+pub def format_iso8601(epoch_ms: i64) -> str {
+    val dt = epoch_ms_to_datetime(epoch_ms);
+    concat(
+        concat(pad4(dt.year), "-"),
+        concat(
+            concat(pad2(dt.month), "-"),
+            concat(
+                concat(pad2(dt.day), "T"),
+                concat(
+                    concat(pad2(dt.hour), ":"),
+                    concat(
+                        concat(pad2(dt.minute), ":"),
+                        concat(
+                            concat(pad2(dt.second), "."),
+                            concat(pad3(dt.millisecond), "Z")
+                        )
+                    )
+                )
+            )
+        )
+    )
+}
+
+/// Formats epoch milliseconds as date only: "YYYY-MM-DD"
+pub def format_date(epoch_ms: i64) -> str {
+    val dt = epoch_ms_to_datetime(epoch_ms);
+    concat(
+        concat(pad4(dt.year), "-"),
+        concat(concat(pad2(dt.month), "-"), pad2(dt.day))
+    )
+}
+
+/// Formats epoch milliseconds as time clock: "HH:MM:SS"
+pub def format_clock(epoch_ms: i64) -> str {
+    val dt = epoch_ms_to_datetime(epoch_ms);
+    concat(
+        concat(pad2(dt.hour), ":"),
+        concat(concat(pad2(dt.minute), ":"), pad2(dt.second))
+    )
+}
+
+pub def month_name(m: i64) -> str {
+    if m == 1 { "January" }
+    else if m == 2 { "February" }
+    else if m == 3 { "March" }
+    else if m == 4 { "April" }
+    else if m == 5 { "May" }
+    else if m == 6 { "June" }
+    else if m == 7 { "July" }
+    else if m == 8 { "August" }
+    else if m == 9 { "September" }
+    else if m == 10 { "October" }
+    else if m == 11 { "November" }
+    else if m == 12 { "December" }
+    else { "Unknown" }
+}
+
+pub def day_name(dow: i64) -> str {
+    if dow == 0 { "Sunday" }
+    else if dow == 1 { "Monday" }
+    else if dow == 2 { "Tuesday" }
+    else if dow == 3 { "Wednesday" }
+    else if dow == 4 { "Thursday" }
+    else if dow == 5 { "Friday" }
+    else if dow == 6 { "Saturday" }
+    else { "Unknown" }
+}

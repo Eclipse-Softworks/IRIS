@@ -1,0 +1,68 @@
+// Words that introduce a construct (`record`, `model`, `mod`, `effect`,
+// `loop`, `spawn`, `par`, `defer`, `yield`, `select`, `to`, `by`) are names
+// everywhere else. Each is used below as a variable, parameter, field or
+// function name, next to the construct it introduces.
+
+record Shipment { record: i64, model: str, to: str, by: i64 }
+
+def select(xs: list<i64>, by: i64) -> i64 {
+    var total = 0;
+    for i in 0..list_len(xs) by by { total = total + list_get(xs, i) };
+    total
+}
+
+def spawn(n: i64) -> i64 { n * 2 }
+
+def evens(n: i64) -> list<i64> {
+    var i = 0;
+    while i < n {
+        yield i;
+        i = i + 2;
+    }
+}
+
+def main() -> i64 {
+    // As variables, in expressions and assignments.
+    var record = 3;
+    record = record + 1;
+    val model = "m-" + to_str(record);
+    var loop = 0;
+    loop {
+        loop = loop + 1;
+        if loop >= 5 { break };
+    };
+    val to = 7;
+    val effect = to to f64;
+    var defer = 10;
+    defer = defer - 1;
+    var yield = 1;
+    yield = yield * 6;
+    val par = [1, 2, 3];
+    val mod = par[2] % 2;
+
+    // As record fields.
+    val s = Shipment { record: record, model: model, to: "dock", by: 2 };
+    assert(s.record == 4 && s.model == "m-4" && s.to == "dock" && s.by == 2);
+
+    // As functions, including a call named like the statement keyword.
+    val xs = [10, 20, 30, 40];
+    val l: list<i64> = list();
+    for i in 0..4 { push(l, xs[i]) };
+    assert(select(l, 2) == 40);
+    assert(spawn(21) == 42);
+
+    // The constructs themselves still work.
+    val ch = channel();
+    spawn { send(ch, 5) };
+    assert(recv(ch) == 5);
+    assert(list_len(evens(7)) == 4);
+
+    assert(record == 4);
+    assert(loop == 5);
+    assert(effect == 7.0);
+    assert(defer == 9);
+    assert(yield == 6);
+    assert(mod == 1);
+    println("contextual keywords ok");
+    return 0
+}

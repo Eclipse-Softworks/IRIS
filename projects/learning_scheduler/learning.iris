@@ -1,0 +1,60 @@
+bring "domain.iris"
+
+pub def prediction_mse(jobs: list<Job>, weights: CostModel) -> f64 {
+    var sum = 0.0;
+    for index in 0 .. list_len(jobs) {
+        val job = list_get(jobs, index);
+        val error = estimate(weights, job) - to_f64(job.work);
+        sum = sum + error * error;
+    };
+    return sum / to_f64(list_len(jobs))
+}
+
+def batch_update(jobs: list<Job>, start: i64, weights: CostModel) -> CostModel {
+    val a = tape(weights.first);
+    val b = tape(weights.second);
+    val bias = tape(weights.bias);
+    var loss = tape(0.0);
+    for index in start .. (start + 4) {
+        val job = list_get(jobs, index);
+        val size = to_f64(job.size) / 12.0;
+        val predicted = (if job.kind == 0 { a } else { b }) * size + bias;
+        val error = predicted - to_f64(job.work) / 100.0;
+        loss = loss + error * error;
+    };
+    backward(loss);
+    return CostModel {
+        first: weights.first - 0.08 * grad(a),
+        second: weights.second - 0.08 * grad(b),
+        bias: weights.bias - 0.08 * grad(bias)
+    }
+}
+
+pub def fit(jobs: list<Job>, initial: CostModel) -> CostModel {
+    assert(list_len(jobs) >= 8 && list_len(jobs) % 4 == 0);
+    var weights = initial;
+    for epoch in 0 .. 50 {
+        for batch in 0 .. (list_len(jobs) / 4) { weights = batch_update(jobs, batch * 4, weights) };
+    };
+    return weights
+}
+
+pub def promote(selection: list<Job>, active: CostModel, candidate: CostModel) -> result<CostModel, str> {
+    if !valid_model(candidate) { return err("candidate parameters outside bounds") };
+    if prediction_mse(selection, candidate) >= prediction_mse(selection, active) * 0.9 {
+        return err("prediction improvement below 10%")
+    };
+    val before = replay(selection, active, Policy.Learned);
+    val after = replay(selection, candidate, Policy.Learned);
+    if after.mean_turnaround > before.mean_turnaround || to_f64(after.p99) > to_f64(before.p99) * 1.1 {
+        return err("selection queue metrics regressed")
+    };
+    return ok(candidate)
+}
+
+pub def restore_if_worse(recent: list<Job>, active: CostModel, previous: CostModel) -> CostModel {
+    if !valid_model(active) || prediction_mse(recent, active) > prediction_mse(recent, previous) + 25.0 {
+        return previous
+    };
+    return active
+}

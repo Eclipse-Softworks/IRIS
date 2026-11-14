@@ -89,6 +89,8 @@ pub enum ConstEvalError {
         len: usize,
     },
     Custom(String),
+    /// Checked integer arithmetic overflowed, e.g. `multiplication (a * b)`.
+    Overflow(String),
 }
 
 impl std::fmt::Display for ConstEvalError {
@@ -132,6 +134,9 @@ impl std::fmt::Display for ConstEvalError {
                 )
             }
             ConstEvalError::Custom(msg) => write!(f, "const evaluation error: {}", msg),
+            ConstEvalError::Overflow(what) => {
+                write!(f, "integer overflow in {} in a constant expression", what)
+            }
         }
     }
 }
@@ -260,20 +265,27 @@ impl ConstEvaluator {
 
                 match (op, left, right) {
                     // Int arithmetic
-                    (AstBinOp::Add, ConstValue::Int(a), ConstValue::Int(b)) => {
-                        Ok(ConstValue::Int(a.wrapping_add(b)))
-                    }
+                    (AstBinOp::Add, ConstValue::Int(a), ConstValue::Int(b)) => a
+                        .checked_add(b)
+                        .map(ConstValue::Int)
+                        .ok_or_else(|| ConstEvalError::Overflow(format!("addition ({a} + {b})"))),
                     (AstBinOp::Sub, ConstValue::Int(a), ConstValue::Int(b)) => {
-                        Ok(ConstValue::Int(a.wrapping_sub(b)))
+                        a.checked_sub(b).map(ConstValue::Int).ok_or_else(|| {
+                            ConstEvalError::Overflow(format!("subtraction ({a} - {b})"))
+                        })
                     }
                     (AstBinOp::Mul, ConstValue::Int(a), ConstValue::Int(b)) => {
-                        Ok(ConstValue::Int(a.wrapping_mul(b)))
+                        a.checked_mul(b).map(ConstValue::Int).ok_or_else(|| {
+                            ConstEvalError::Overflow(format!("multiplication ({a} * {b})"))
+                        })
                     }
                     (AstBinOp::Div, ConstValue::Int(a), ConstValue::Int(b)) => {
                         if b == 0 {
                             Err(ConstEvalError::DivisionByZero)
                         } else {
-                            Ok(ConstValue::Int(a.wrapping_div(b)))
+                            a.checked_div(b).map(ConstValue::Int).ok_or_else(|| {
+                                ConstEvalError::Overflow(format!("division ({a} / {b})"))
+                            })
                         }
                     }
                     (AstBinOp::Mod, ConstValue::Int(a), ConstValue::Int(b)) => {
@@ -563,17 +575,23 @@ impl ConstEvaluator {
                                     crate::ir::instr::BinOp::Add,
                                     ConstValue::Int(a),
                                     ConstValue::Int(b),
-                                ) => ConstValue::Int(a.wrapping_add(b)),
+                                ) => ConstValue::Int(a.checked_add(b).ok_or_else(|| {
+                                    ConstEvalError::Overflow(format!("addition ({a} + {b})"))
+                                })?),
                                 (
                                     crate::ir::instr::BinOp::Sub,
                                     ConstValue::Int(a),
                                     ConstValue::Int(b),
-                                ) => ConstValue::Int(a.wrapping_sub(b)),
+                                ) => ConstValue::Int(a.checked_sub(b).ok_or_else(|| {
+                                    ConstEvalError::Overflow(format!("subtraction ({a} - {b})"))
+                                })?),
                                 (
                                     crate::ir::instr::BinOp::Mul,
                                     ConstValue::Int(a),
                                     ConstValue::Int(b),
-                                ) => ConstValue::Int(a.wrapping_mul(b)),
+                                ) => ConstValue::Int(a.checked_mul(b).ok_or_else(|| {
+                                    ConstEvalError::Overflow(format!("multiplication ({a} * {b})"))
+                                })?),
                                 _ => {
                                     return Err(ConstEvalError::NonConstExpr(
                                         "unsupported assignment op in CTFE".into(),

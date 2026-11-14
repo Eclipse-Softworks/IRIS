@@ -109,6 +109,72 @@ pub def strip_json_quotes(s: str) -> str {
     }
 }
 
+/// Escapes a string for safe embedding in JSON according to RFC 8259.
+pub def json_escape(s: str) -> str {
+    val n = len(s);
+    val parts: list<str> = list();
+    for i in 0 .. n {
+        val b = str_index(s, i);
+        if b == 34 { // double quote "
+            push(parts, "\\\"");
+        } else if b == 92 { // backslash \
+            push(parts, "\\\\");
+        } else if b == 10 { // newline \n
+            push(parts, "\\n");
+        } else if b == 13 { // carriage return \r
+            push(parts, "\\r");
+        } else if b == 9 { // tab \t
+            push(parts, "\\t");
+        } else {
+            push(parts, slice(s, i, i + 1));
+        };
+    };
+    join(parts, "")
+}
+
+/// Formats boolean as JSON literal.
+pub def json_bool(b: bool) -> str {
+    if b { "true" } else { "false" }
+}
+
+/// Formats integer as JSON literal.
+pub def json_num_i64(n: i64) -> str {
+    to_str(n)
+}
+
+/// Formats float as JSON literal.
+pub def json_num_f64(x: f64) -> str {
+    to_str(x)
+}
+
+/// Formats null JSON literal.
+pub def json_null() -> str {
+    "null"
+}
+
+/// Adds or updates a boolean field.
+pub def json_set_bool(pairs: list<str>, key: str, val_b: bool) -> list<str> effect alloc, throw {
+    json_set(pairs, key, json_bool(val_b))
+}
+
+/// Adds or updates an integer field.
+pub def json_set_i64(pairs: list<str>, key: str, val_i: i64) -> list<str> effect alloc, throw {
+    json_set(pairs, key, to_str(val_i))
+}
+
+/// Adds or updates a float field.
+pub def json_set_f64(pairs: list<str>, key: str, val_f: f64) -> list<str> effect alloc, throw {
+    json_set(pairs, key, to_str(val_f))
+}
+
+/// Gets boolean field, returning default_val if missing or invalid.
+pub def json_get_bool(pairs: list<str>, key: str, default_val: bool) -> bool effect alloc {
+    val s = json_get(pairs, key);
+    if s == "true" { true }
+    else if s == "false" { false }
+    else { default_val }
+}
+
 /// Parse {"k":"v",...} into flat pairs list<str>.
 /// Supports simple flat JSON objects with string keys and values.
 pub def json_parse(text: str) -> list<str> effect alloc, throw {

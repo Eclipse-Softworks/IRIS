@@ -1,0 +1,271 @@
+// src/stdlib/pcap.iris -- IRIS Native PCAP Forensics & Packet Dissection Library
+//
+// Provides binary decoding and synthesis of libpcap (.pcap) capture files,
+// Ethernet II frames, IPv4 network packets, and TCP and UDP segments.
+// Captures are read in either byte order, with microsecond or nanosecond
+// timestamps; `pcap_create_*` writes big-endian microsecond files.
+
+bring std.buffer
+
+pub record PcapGlobalHeader {
+    magic: i64,
+    version_major: i64,
+    version_minor: i64,
+    snaplen: i64,
+    network: i64,
+    // Byte order of the file's headers (tcpdump on x86 writes little-endian).
+    little_endian: bool,
+    // `ts_usec` of each packet holds nanoseconds (magic a1b23c4d).
+    nanosecond: bool,
+}
+
+pub record PcapPacket {
+    ts_sec: i64,
+    ts_usec: i64,
+    incl_len: i64,
+    orig_len: i64,
+    data: ByteBuffer,
+}
+
+pub record EthernetFrame {
+    dst_mac: str,
+    src_mac: str,
+    ethertype: i64,
+    payload: ByteBuffer,
+}
+
+pub record Ipv4Packet {
+    version: i64,
+    ihl: i64,
+    total_len: i64,
+    ttl: i64,
+    protocol: i64,
+    src_ip: str,
+    dst_ip: str,
+    payload: ByteBuffer,
+}
+
+pub record UdpDatagram {
+    src_port: i64,
+    dst_port: i64,
+    length: i64,
+    payload: ByteBuffer,
+}
+
+pub record TcpSegment {
+    src_port: i64,
+    dst_port: i64,
+    seq: i64,
+    ack: i64,
+    data_offset: i64,
+    flags: i64,
+    syn: bool,
+    ack_flag: bool,
+    fin: bool,
+    rst: bool,
+    psh: bool,
+    payload: ByteBuffer,
+}
+
+/// Format 6 MAC address bytes into standard colon-delimited string (e.g. 00:1a:2b:3c:4d:5e)
+pub def pcap_format_mac(buf: ByteBuffer, offset: i64) -> str {
+    val hex_chars = "0123456789abcdef";
+    var out = "";
+    for i in 0 .. 6 {
+        val b = byte_buffer_get(buf, offset + i);
+        val hi = (b / 16) % 16;
+        val lo = b % 16;
+        val s = slice(hex_chars, hi, hi + 1) + slice(hex_chars, lo, lo + 1);
+        out = if i == 0 { s } else { out + ":" + s };
+    }
+    out
+}
+
+/// Format 4 IPv4 bytes into dot-decimal string (e.g. 192.168.1.1)
+pub def pcap_format_ip(buf: ByteBuffer, offset: i64) -> str {
+    val b0 = to_str(byte_buffer_get(buf, offset));
+    val b1 = to_str(byte_buffer_get(buf, offset + 1));
+    val b2 = to_str(byte_buffer_get(buf, offset + 2));
+    val b3 = to_str(byte_buffer_get(buf, offset + 3));
+    b0 + "." + b1 + "." + b2 + "." + b3
+}
+
+/// Create a standard PCAP 2.4 global header (big-endian magic 0xa1b2c3d4, snaplen 65535, Ethernet network=1)
+pub def pcap_create_global_header(snaplen: i64) -> ByteBuffer {
+    var buf = byte_buffer_new();
+    buf = byte_buffer_write_u32_be(buf, 0xa1b2_c3d4); // magic
+    buf = byte_buffer_write_u16_be(buf, 2);           // version major
+    buf = byte_buffer_write_u16_be(buf, 4);           // version minor
+    buf = byte_buffer_write_u32_be(buf, 0);           // thiszone (GMT)
+    buf = byte_buffer_write_u32_be(buf, 0);           // sigfigs
+    buf = byte_buffer_write_u32_be(buf, snaplen);     // snaplen
+    buf = byte_buffer_write_u32_be(buf, 1);           // network (Ethernet)
+    buf
+}
+
+/// Create a PCAP packet record with header and payload
+pub def pcap_create_packet_record(frame: ByteBuffer, ts_sec: i64, ts_usec: i64) -> ByteBuffer {
+    var buf = byte_buffer_new();
+    buf = byte_buffer_write_u32_be(buf, ts_sec);
+    buf = byte_buffer_write_u32_be(buf, ts_usec);
+    buf = byte_buffer_write_u32_be(buf, frame.len); // incl_len
+    buf = byte_buffer_write_u32_be(buf, frame.len); // orig_len
+    buf = byte_buffer_concat(buf, frame);
+    buf
+}
+
+/// Parse PCAP global header from start of buffer: classic libpcap in either
+/// byte order, microsecond or nanosecond timestamps (not pcapng).
+pub def pcap_parse_global_header(buf: ByteBuffer) -> result<PcapGlobalHeader, str> {
+    if buf.len < 24 {
+        return err("pcap buffer too small for global header (< 24 bytes)")
+    }
+    val as_le = byte_buffer_read_u32_le(buf, 0);
+    val little = as_le == 0xa1b2_c3d4 || as_le == 0xa1b2_3c4d;
+    val magic = if little { as_le } else { byte_buffer_read_u32_be(buf, 0) };
+    if magic != 0xa1b2_c3d4 && magic != 0xa1b2_3c4d {
+        return err("not a libpcap capture (magic " + to_str(magic) + "); pcapng is not supported")
+    }
+    val major = if little { byte_buffer_read_u16_le(buf, 4) } else { byte_buffer_read_u16_be(buf, 4) };
+    val minor = if little { byte_buffer_read_u16_le(buf, 6) } else { byte_buffer_read_u16_be(buf, 6) };
+    val snaplen = if little { byte_buffer_read_u32_le(buf, 16) } else { byte_buffer_read_u32_be(buf, 16) };
+    val network = if little { byte_buffer_read_u32_le(buf, 20) } else { byte_buffer_read_u32_be(buf, 20) };
+    ok(PcapGlobalHeader {
+        magic: magic,
+        version_major: major,
+        version_minor: minor,
+        snaplen: snaplen,
+        network: network,
+        little_endian: little,
+        nanosecond: magic == 0xa1b2_3c4d,
+    })
+}
+
+/// The packet record starting at `offset` (24 for the first), read in the
+/// capture's byte order. The next record starts at `offset + 16 + incl_len`.
+pub def pcap_read_packet(buf: ByteBuffer, offset: i64, header: PcapGlobalHeader) -> result<PcapPacket, str> {
+    if offset + 16 > buf.len {
+        return err("pcap packet header truncated at byte " + to_str(offset))
+    }
+    val little = header.little_endian;
+    val ts_sec = if little { byte_buffer_read_u32_le(buf, offset) } else { byte_buffer_read_u32_be(buf, offset) };
+    val ts_frac = if little { byte_buffer_read_u32_le(buf, offset + 4) } else { byte_buffer_read_u32_be(buf, offset + 4) };
+    val incl_len = if little { byte_buffer_read_u32_le(buf, offset + 8) } else { byte_buffer_read_u32_be(buf, offset + 8) };
+    val orig_len = if little { byte_buffer_read_u32_le(buf, offset + 12) } else { byte_buffer_read_u32_be(buf, offset + 12) };
+    if incl_len > 262144 || offset + 16 + incl_len > buf.len {
+        return err("pcap packet at byte " + to_str(offset) + " is truncated or corrupt")
+    }
+    ok(PcapPacket {
+        ts_sec: ts_sec,
+        ts_usec: ts_frac,
+        incl_len: incl_len,
+        orig_len: orig_len,
+        data: byte_buffer_slice(buf, offset + 16, offset + 16 + incl_len),
+    })
+}
+
+/// Dissect Ethernet II frame
+pub def dissect_ethernet(frame: ByteBuffer) -> result<EthernetFrame, str> {
+    if frame.len < 14 {
+        return err("ethernet frame too short (< 14 bytes)")
+    }
+    val dst = pcap_format_mac(frame, 0);
+    val src = pcap_format_mac(frame, 6);
+    val ethertype = byte_buffer_read_u16_be(frame, 12);
+    val payload = byte_buffer_slice(frame, 14, frame.len);
+    ok(EthernetFrame {
+        dst_mac: dst,
+        src_mac: src,
+        ethertype: ethertype,
+        payload: payload,
+    })
+}
+
+/// Dissect IPv4 packet
+pub def dissect_ipv4(buf: ByteBuffer) -> result<Ipv4Packet, str> {
+    if buf.len < 20 {
+        return err("ipv4 packet too short (< 20 bytes)")
+    }
+    val b0 = byte_buffer_get(buf, 0);
+    val ver = shr(b0, 4);
+    val ihl = band(b0, 0x0f);
+    if ver != 4 {
+        return err("not an IPv4 packet: version=" + to_str(ver))
+    }
+    val total_len = byte_buffer_read_u16_be(buf, 2);
+    val ttl = byte_buffer_get(buf, 8);
+    val proto = byte_buffer_get(buf, 9);
+    val src_ip = pcap_format_ip(buf, 12);
+    val dst_ip = pcap_format_ip(buf, 16);
+    val header_bytes = ihl * 4;
+    if header_bytes < 20 || header_bytes > buf.len {
+        return err("ipv4 header length " + to_str(header_bytes) + " is invalid")
+    }
+    // The datagram ends at its total length: short Ethernet frames are
+    // padded, and the padding is not payload.
+    val end = if total_len >= header_bytes && total_len <= buf.len { total_len } else { buf.len };
+    val payload = byte_buffer_slice(buf, header_bytes, end);
+    ok(Ipv4Packet {
+        version: ver,
+        ihl: ihl,
+        total_len: total_len,
+        ttl: ttl,
+        protocol: proto,
+        src_ip: src_ip,
+        dst_ip: dst_ip,
+        payload: payload,
+    })
+}
+
+/// Dissect TCP segment
+pub def dissect_tcp(buf: ByteBuffer) -> result<TcpSegment, str> {
+    if buf.len < 20 {
+        return err("tcp segment too short (< 20 bytes)")
+    }
+    val src_port = byte_buffer_read_u16_be(buf, 0);
+    val dst_port = byte_buffer_read_u16_be(buf, 2);
+    val seq = byte_buffer_read_u32_be(buf, 4);
+    val ack = byte_buffer_read_u32_be(buf, 8);
+    val b12 = byte_buffer_get(buf, 12);
+    val data_offset = shr(b12, 4);
+    val flags = byte_buffer_get(buf, 13);
+    val syn = band(flags, 0x02) != 0;
+    val ack_flag = band(flags, 0x10) != 0;
+    val fin = band(flags, 0x01) != 0;
+    val rst = band(flags, 0x04) != 0;
+    val psh = band(flags, 0x08) != 0;
+    val header_bytes = data_offset * 4;
+    if header_bytes < 20 || header_bytes > buf.len {
+        return err("tcp header length " + to_str(header_bytes) + " is invalid")
+    }
+    val payload = byte_buffer_slice(buf, header_bytes, buf.len);
+    ok(TcpSegment {
+        src_port: src_port,
+        dst_port: dst_port,
+        seq: seq,
+        ack: ack,
+        data_offset: data_offset,
+        flags: flags,
+        syn: syn,
+        ack_flag: ack_flag,
+        fin: fin,
+        rst: rst,
+        psh: psh,
+        payload: payload,
+    })
+}
+
+/// Dissect UDP datagram
+pub def dissect_udp(buf: ByteBuffer) -> result<UdpDatagram, str> {
+    if buf.len < 8 {
+        return err("udp datagram too short (< 8 bytes)")
+    }
+    val length = byte_buffer_read_u16_be(buf, 4);
+    val end = if length >= 8 && length <= buf.len { length } else { buf.len };
+    ok(UdpDatagram {
+        src_port: byte_buffer_read_u16_be(buf, 0),
+        dst_port: byte_buffer_read_u16_be(buf, 2),
+        length: length,
+        payload: byte_buffer_slice(buf, 8, end),
+    })
+}

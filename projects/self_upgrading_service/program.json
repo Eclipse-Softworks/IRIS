@@ -1,0 +1,9 @@
+{
+  "schema": "iris-evolution-program/2",
+  "program_id": "inventory",
+  "entrypoints": [
+    { "gateway": "restock", "symbol": "restock", "abi": "json_v1" },
+    { "gateway": "reserve", "symbol": "reserve", "abi": "json_v1" },
+    { "gateway": "stats", "symbol": "stats", "abi": "json_v1" }
+  ]
+}

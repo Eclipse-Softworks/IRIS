@@ -1,0 +1,174 @@
+bring std.ais
+
+pub record Dynamics { retention: f64, gain: f64 }
+pub record Observation { velocity: f64, command: f64, next_velocity: f64 }
+pub record Plant { dynamics: Dynamics, drag: f64, noise: f64 }
+pub record Episode { mse: f64, saturated: i64 }
+pub record Adaptation { active: Dynamics, triggers: i64, accepted: i64 }
+
+pub def predict(dynamics: Dynamics, velocity: f64, command: f64) -> f64 {
+    return dynamics.retention * velocity + dynamics.gain * command
+}
+
+pub def valid(dynamics: Dynamics) -> bool {
+    // Positive comparisons also reject NaN and infinities.
+    return dynamics.retention >= 0.0 && dynamics.retention < 0.99
+        && dynamics.gain >= 0.05 && dynamics.gain <= 2.0
+}
+
+// Only the simulator accesses plant parameters. Training receives observations.
+pub def step(plant: Plant, velocity: f64, command: f64) -> f64 {
+    return predict(plant.dynamics, velocity, command) - plant.drag * velocity * velocity * velocity
+}
+
+pub def sensor(velocity: f64, noise: f64, tick: i64) -> f64 {
+    return velocity + noise * to_f64((tick * 17 + 3) % 11 - 5) / 5.0
+}
+
+// Continuous velocity trajectory: no independent state probes or resets.
+pub def collect(plant: Plant, count: i64, seed: i64) -> list<Observation> {
+    val samples: list<Observation> = list();
+    var velocity = 0.0;
+    var rng = seed;
+    for tick in 0 .. count {
+        rng = (rng * 48271) % 2147483647;
+        val command = to_f64(rng % 2001 - 1000) / 1000.0;
+        assert(command >= -1.0 && command <= 1.0);
+        val next_velocity = step(plant, velocity, command);
+        list_push(samples, Observation {
+            velocity: sensor(velocity, plant.noise, tick), command: command,
+            next_velocity: sensor(next_velocity, plant.noise, tick + 1)
+        });
+        velocity = next_velocity;
+    };
+    return samples
+}
+
+pub def prediction_loss(samples: list<Observation>, dynamics: Dynamics, start: i64, count: i64) -> f64 {
+    assert(count > 0 && start >= 0 && start + count <= list_len(samples));
+    var loss = 0.0;
+    for index in start .. (start + count) {
+        val sample = list_get(samples, index);
+        val error = predict(dynamics, sample.velocity, sample.command) - sample.next_velocity;
+        loss = loss + error * error;
+    };
+    return loss / to_f64(count)
+}
+
+def train_batch(samples: list<Observation>, initial: Dynamics, start: i64) -> Dynamics {
+    val a = tape(initial.retention);
+    val b = tape(initial.gain);
+    var loss = tape(0.0);
+    for index in start .. (start + 8) {
+        val sample = list_get(samples, index);
+        val error = a * sample.velocity + b * sample.command - sample.next_velocity;
+        loss = loss + error * error;
+    };
+    loss = loss / 8.0;
+    backward(loss);
+    return Dynamics { retention: initial.retention - 0.3 * grad(a), gain: initial.gain - 0.3 * grad(b) }
+}
+
+pub def train(samples: list<Observation>, initial: Dynamics) -> Dynamics {
+    assert(list_len(samples) >= 32 && list_len(samples) % 8 == 0);
+    var current = initial;
+    for epoch in 0 .. 30 {
+        for batch in 0 .. (list_len(samples) / 8) {
+            current = train_batch(samples, current, batch * 8);
+        };
+    };
+    return current
+}
+
+pub def requested(dynamics: Dynamics, position: f64, velocity: f64, target: f64, conventional: bool) -> f64 {
+    if conventional { return 0.4 * (target - position) - 0.8 * velocity };
+    return (0.5 * (target - position) - dynamics.retention * velocity) / dynamics.gain
+}
+
+pub def episode(plant: Plant, dynamics: Dynamics, scenario: i64, conventional: bool) -> Episode {
+    assert(valid(dynamics));
+    var position = 0.0;
+    var velocity = 0.0;
+    var loss = 0.0;
+    var saturated = 0;
+    for tick in 0 .. 120 {
+        val magnitude = if scenario == 0 { 2.0 } else { if scenario == 1 { 1.3 } else { 3.2 } };
+        val period = if scenario == 0 { 30 } else { if scenario == 1 { 20 } else { 40 } };
+        val target = if (tick / period) % 2 == 0 { magnitude } else { -0.5 * magnitude };
+        val observed = sensor(velocity, plant.noise, tick);
+        val raw = requested(dynamics, position, observed, target, conventional);
+        val command = clamp(raw, -1.0, 1.0);
+        assert(command >= -1.0 && command <= 1.0);
+        if raw >= 1.0 || raw <= -1.0 { saturated = saturated + 1 };
+        velocity = step(plant, velocity, command);
+        position = position + velocity;
+        val error = target - position;
+        loss = loss + error * error;
+    };
+    return Episode { mse: loss / 120.0, saturated: saturated }
+}
+
+pub def acceptable(selection: list<Observation>, validation_plant: Plant, active: Dynamics, candidate: Dynamics) -> bool {
+    if !valid(candidate) { return false };
+    val old_loss = prediction_loss(selection, active, 0, list_len(selection));
+    val new_loss = prediction_loss(selection, candidate, 0, list_len(selection));
+    if !(new_loss < old_loss * 0.9) { return false };
+    return episode(validation_plant, candidate, 0, false).mse < episode(validation_plant, active, 0, false).mse
+}
+
+// Three consecutive disjoint windows request one training job. Training and
+// selection use separate trajectories. Jobs run between control episodes.
+pub def adapt(observations: list<Observation>, selection: list<Observation>, validation_plant: Plant, active: Dynamics) -> Adaptation {
+    assert(list_len(observations) == 96);
+    var consecutive = 0;
+    var triggered = false;
+    for window in 0 .. 6 {
+        val loss = prediction_loss(observations, active, window * 16, 16);
+        if loss > 0.002 { consecutive = consecutive + 1 } else { consecutive = 0 };
+        if consecutive >= 3 { triggered = true };
+    };
+    if !triggered { return Adaptation { active: active, triggers: 0, accepted: 0 } };
+    val candidate = train(observations, active);
+    if acceptable(selection, validation_plant, active, candidate) {
+        return Adaptation { active: candidate, triggers: 1, accepted: 1 }
+    };
+    return Adaptation { active: active, triggers: 1, accepted: 0 }
+}
+
+// Compare both models on the same recent observations; restore parameters only.
+pub def recover(recent: list<Observation>, active: Dynamics, previous: Dynamics) -> Dynamics {
+    if !valid(active) { return previous };
+    val old_loss = prediction_loss(recent, previous, 0, list_len(recent));
+    val new_loss = prediction_loss(recent, active, 0, list_len(recent));
+    if new_loss > old_loss + 0.002 { return previous };
+    return active
+}
+
+// Fault at a target transition (tick 30), watchdog after eight observations.
+// Continue the physical trajectory and include the fault interval in the error.
+pub def fault_episode(plant: Plant, previous: Dynamics, watchdog: bool) -> f64 {
+    var active = previous;
+    var position = 0.0;
+    var velocity = 0.0;
+    var loss = 0.0;
+    val recent: list<Observation> = list();
+    for tick in 0 .. 120 {
+        if tick == 30 { active = Dynamics { retention: 0.1, gain: 0.5 } };
+        val target = if (tick / 30) % 2 == 0 { 2.0 } else { -1.0 };
+        val command = clamp(requested(active, position, velocity, target, false), -1.0, 1.0);
+        assert(command >= -1.0 && command <= 1.0);
+        val next_velocity = step(plant, velocity, command);
+        if tick >= 30 && tick < 38 {
+            list_push(recent, Observation { velocity: velocity, command: command, next_velocity: next_velocity });
+        };
+        velocity = next_velocity;
+        position = position + velocity;
+        if tick == 37 && watchdog {
+            active = recover(recent, active, previous);
+            assert(active.gain == previous.gain && active.retention == previous.retention);
+        };
+        val error = target - position;
+        loss = loss + error * error;
+    };
+    return loss / 120.0
+}

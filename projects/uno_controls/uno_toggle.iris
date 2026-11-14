@@ -1,0 +1,14 @@
+// Arduino Uno: press the button on D2 to toggle the built-in L LED on D13.
+// Wiring: D2 to 5V through the button, with a 10k pull-down to GND.
+// Build: iris embedded projects/uno_controls/uno_toggle.iris --target arduino-uno
+// The board support package calls `main` repeatedly; state persists between
+// calls.
+bring "toggle.iris"
+
+extern "C" def iris_embedded_gpio_read(pin: i64) -> i64 effect io
+extern "C" def iris_embedded_gpio_write(pin: i64, value: i64) -> i64 effect io
+
+def main() -> i64 effect io {
+    iris_embedded_gpio_write(13, toggle_step(iris_embedded_gpio_read(2)));
+    return 0
+}

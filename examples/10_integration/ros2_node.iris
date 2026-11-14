@@ -1,0 +1,95 @@
+bring std.ros2 /// Requires a ROS 2 environment and the IRIS ROS 2 bridge (`python build_ros2_bridge.py`).
+
+// A reactive controller on the real ROS 2 stack. One event loop serves:
+//   * a sensor_msgs/LaserScan subscription (any installed type works),
+//   * a geometry_msgs/Twist publisher whose speed follows the closest obstacle,
+//   * a `gain` ROS parameter with a range -- while this runs, try
+//     `ros2 param set /iris_example_controller gain 0.5`,
+//   * a static laser transform on /tf_static, read back through tf2,
+//   * a timer that stands in for the laser driver, publishing scans of an
+//     obstacle drawing closer.
+// From another shell, `ros2 topic echo /iris_example/cmd_vel` shows the commands.
+
+def closest(ranges: list<f64>) -> f64 {
+    var best = 1.0e9
+    for i in 0..list_len(ranges) {
+        val r = list_get(ranges, i)
+        if r < best { best = r };
+    };
+    best
+}
+
+def main() -> i64 {
+    val ctx = context_create()
+    assert(ctx.handle != 0);
+    val node = node_create(ctx, "iris_example_controller", "")
+    assert(node.handle != 0);
+
+    val gain = param_declare_f64_range(node, "gain", 0.25, 0.0, 1.0, "speed per metre of clearance")
+    assert(gain >= 0.0 && gain <= 1.0);
+    val scan_pub = publisher_create(node, "/iris_example/scan", "sensor_msgs/msg/LaserScan")
+    val scan_sub = subscription_create(node, "/iris_example/scan", "sensor_msgs/msg/LaserScan")
+    val cmd_pub = publisher_create(node, "/iris_example/cmd_vel", "geometry_msgs/msg/Twist")
+    val cmd_sub = subscription_create(node, "/iris_example/cmd_vel", "geometry_msgs/msg/Twist")
+    assert(scan_pub.handle != 0 && scan_sub.handle != 0 && cmd_pub.handle != 0 && cmd_sub.handle != 0);
+
+    val laser_mount = Transform {
+        translation: Vector3 { x: 0.2, y: 0.0, z: 0.1 },
+        rotation: Quaternion { x: 0.0, y: 0.0, z: 0.0, w: 1.0 }
+    }
+    val static_tf = tf_static_broadcaster_create(node)
+    assert(tf_send(static_tf, "base_link", "laser", laser_mount));
+    val tf = tf_buffer_create(node)
+
+    val sensor = timer_create(node, 50)
+    val sent: list<f64> = list()
+    var scans = 0
+    var commands = 0
+    var rounds = 0
+    while commands < 4 && rounds < 600 {
+        val ev = spin_once(ctx, 100)
+        if is_timer(ev, sensor) {
+            // The obstacle is 3 m away and closes by 0.5 m per scan.
+            val scan = publisher_msg(scan_pub)
+            msg_set_str(scan, "header.frame_id", "laser");
+            msg_set_stamp(scan, "header.stamp", node_now_ns(node));
+            val ranges: list<f64> = list()
+            list_push(ranges, 5.0);
+            list_push(ranges, 3.0 - 0.5 * (scans to f64));
+            list_push(ranges, 4.0);
+            msg_set_f64s(scan, "ranges", ranges);
+            assert(publish_msg(scan_pub, scan));
+            msg_free(scan);
+            scans = scans + 1
+        };
+        if is_message(ev, scan_sub) {
+            val clearance = closest(msg_f64s(ev.message, "ranges"))
+            val speed = param_f64(node, "gain") * clearance
+            list_push(sent, speed);
+            assert(publish_twist(cmd_pub, make_twist(speed, 0.0, 0.0, 0.0, 0.0, 0.0)))
+        };
+        if is_message(ev, cmd_sub) {
+            val speed = msg_f64(ev.message, "linear.x")
+            assert(speed == list_get(sent, commands));
+            println("cmd_vel " + to_str(commands) + ": linear.x = " + to_str(speed));
+            commands = commands + 1
+        };
+        rounds = rounds + 1
+    };
+    assert(commands == 4);
+    assert(list_get(sent, 1) < list_get(sent, 0));
+
+    var mounted = tf_lookup(tf, "base_link", "laser")
+    var waits = 0
+    while is_none(mounted) && waits < 100 {
+        spin_once(ctx, 20);
+        mounted = tf_lookup(tf, "base_link", "laser");
+        waits = waits + 1
+    };
+    assert(is_some(mounted) && unwrap(mounted).translation.x == 0.2);
+
+    assert(timer_destroy(sensor));
+    assert(context_destroy(ctx));
+    println("ros2 node: commands follow clearance");
+    return 0
+}

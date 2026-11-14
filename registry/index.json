@@ -1,0 +1,31 @@
+{
+  "packages": {
+    "math_extra": {
+      "description": "Integer and floating-point math utilities (clamp, gcd, lcm, primes, lerp)",
+      "versions": {
+        "0.1.0": {
+          "checksum": "sha256:1b9772ac41c2d4f66b8ab1c8ec7a8b4a101fb438c92fb351b812733ad7d3a31d",
+          "url": "pkgs/math_extra-0.1.0.tar.gz"
+        }
+      }
+    },
+    "stats": {
+      "description": "Descriptive statistics over lists (mean, variance, min/max, clamped mean)",
+      "versions": {
+        "0.1.0": {
+          "checksum": "sha256:11d741c0f7083f741832c2e6752a3e5d84a08615f5918847ed0fdfb4d06fc3cc",
+          "url": "pkgs/stats-0.1.0.tar.gz"
+        }
+      }
+    },
+    "str_ext": {
+      "description": "String formatting and padding utilities for IRIS",
+      "versions": {
+        "0.1.0": {
+          "checksum": "sha256:65828d804d72a9c2d34fb9345c18af245d345d32fc2a1b5763a65c92bf09acff",
+          "url": "pkgs/str_ext-0.1.0.tar.gz"
+        }
+      }
+    }
+  }
+}

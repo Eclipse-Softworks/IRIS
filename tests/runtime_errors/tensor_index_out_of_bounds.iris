@@ -1,0 +1,10 @@
+// expect: E0403 at 8:20
+// message: index 2 is out of bounds for dimension 0 of length 2
+// output: before
+bring std.tensor
+def main() -> i64 {
+    val t = tensor_ad_from_data(list(1.0, 2.0, 3.0, 4.0), list(2, 2))
+    println("before")
+    println(to_str(t[2, 0]))
+    return 0
+}

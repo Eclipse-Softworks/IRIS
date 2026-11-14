@@ -274,3 +274,68 @@ def test_string_concat() -> i64 {
     val s = concat("a", "bc")
     check(len(s) == 3)
 }
+
+def main() -> i64 {
+    test_add_1();
+    test_add_2();
+    test_sub_1();
+    test_sub_2();
+    test_mul_1();
+    test_mul_2();
+    test_div_1();
+    test_div_2();
+    test_mod_1();
+    test_mod_2();
+    test_precedence_1();
+    test_precedence_2();
+    test_negation_1();
+    test_negation_2();
+    test_cmp_lt();
+    test_cmp_le();
+    test_cmp_gt();
+    test_cmp_ge();
+    test_cmp_eq();
+    test_cmp_ne();
+    test_if_else();
+    test_if_else_nested();
+    test_while_sum();
+    test_while_break();
+    test_while_continue();
+    test_for_sum();
+    test_for_zero();
+    test_loop_break();
+    test_short_circuit_and();
+    test_short_circuit_or();
+    test_tuple_literal();
+    test_tuple_index();
+    test_tuple_destructure();
+    test_tuple_nested();
+    test_array_literal();
+    test_array_index();
+    test_array_store();
+    test_array_sum_loop();
+    test_array_sum_for();
+    test_array_reassign();
+    test_record_literal();
+    test_record_field();
+    test_record_return();
+    test_choice_variant();
+    test_choice_when();
+    test_choice_with_data();
+    test_choice_payload_sum();
+    test_option_when();
+    test_result_when();
+    test_option_unwrap();
+    test_function_call();
+    test_default_param();
+    test_generic_identity();
+    test_generic_first();
+    test_trait_double();
+    test_closure_basic();
+    test_closure_capture();
+    test_closure_two_params();
+    test_string_len();
+    test_string_concat();
+    0
+}
+

@@ -15,3 +15,9 @@ def test_pub_bring_types() -> i64 {
     assert(check_health(d2) == 1);
     0
 }
+
+def main() -> i64 {
+    test_pub_bring_types();
+    0
+}
+

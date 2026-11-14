@@ -1,0 +1,8 @@
+// expect: E0100 at 6:14
+// fix: val ok = true
+// fix-compiles
+
+def main() -> i64 {
+    val ok = True
+    if ok { return 1 } else { return 0 }
+}

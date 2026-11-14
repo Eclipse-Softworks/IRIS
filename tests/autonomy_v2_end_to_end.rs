@@ -54,16 +54,17 @@ def ais_v2_contract() -> i64 {
 }
 "#;
 
+// The parts of std.ros2 that need no ROS 2 install: QoS presets and rigid
+// transform arithmetic. Lifecycle nodes and tf2 buffers are the real
+// rclcpp_lifecycle and tf2 ones now, exercised by tests/ros2_live.rs against
+// a ROS 2 install.
 const ROS2_V2: &str = r#"
 bring std.ros2
 
 def ros2_v2_contract() -> i64 {
     val sensor_qos = qos_sensor_data()
     val control_qos = qos_control()
-    val node = ROS2Node { handle: 1, ctx: 2 }
-    val unconfigured = lifecycle_new(node)
-    val inactive = lifecycle_transition(unconfigured, 1)
-    val active = lifecycle_transition(inactive, 2)
+    val latched = qos_latched(1)
 
     val transform = Transform {
         translation: Vector3 { x: 1.0, y: 2.0, z: 3.0 },
@@ -71,19 +72,18 @@ def ros2_v2_contract() -> i64 {
     }
     val point = transform_point(transform, Point { x: 1.0, y: 1.0, z: 1.0 })
     val recovered = transform_point(transform_inverse(transform), point)
-    var buffer = transform_buffer_new()
-    buffer = transform_buffer_set(buffer, StampedTransform {
-        parent_frame: "map", child_frame: "base_link", stamp_ns: 10, transform: transform
-    })
-    val direct = transform_buffer_lookup(buffer, "map", "base_link")
-    val reverse = transform_buffer_lookup(buffer, "base_link", "map")
+    val turn = Transform {
+        translation: Vector3 { x: 0.0, y: 0.0, z: 0.0 },
+        rotation: Quaternion { x: 0.0, y: 0.0, z: 0.7071067811865476, w: 0.7071067811865476 }
+    }
+    val turned = transform_point(transform_compose(transform, turn), Point { x: 1.0, y: 0.0, z: 0.0 })
 
     if sensor_qos.reliability == 2 && sensor_qos.depth == 5 &&
        control_qos.reliability == 1 && control_qos.depth == 1 &&
-       lifecycle_can_publish(active) && active.transitions == 2 &&
+       latched.durability == 1 &&
        point.x == 2.0 && point.y == 3.0 && point.z == 4.0 &&
        recovered.x == 1.0 && recovered.y == 1.0 && recovered.z == 1.0 &&
-       is_some(direct) && is_some(reverse) {
+       abs(turned.x - 1.0) < 1.0e-12 && abs(turned.y - 3.0) < 1.0e-12 && turned.z == 3.0 {
         0
     } else { 1 }
 }
@@ -116,6 +116,6 @@ fn ais_v2_prioritizes_viability_then_minimizes_expected_free_energy() {
 }
 
 #[test]
-fn ros2_v2_qos_lifecycle_and_transform_semantics_match_backends() {
+fn ros2_v2_qos_and_transform_math_match_backends() {
     assert_eval_and_orc(ROS2_V2, "ros2_v2", "ros2_v2_contract");
 }

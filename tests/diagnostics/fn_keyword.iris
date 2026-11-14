@@ -1,0 +1,7 @@
+// expect: E0005 at 5:1
+// fix: def main
+// fix-compiles
+
+fn main() -> i64 {
+    return 0
+}

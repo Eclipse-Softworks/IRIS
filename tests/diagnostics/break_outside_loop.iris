@@ -1,0 +1,6 @@
+// expect: E0123 at 4:5
+// message: `break` outside a loop
+def main() -> i64 {
+    break
+    0
+}

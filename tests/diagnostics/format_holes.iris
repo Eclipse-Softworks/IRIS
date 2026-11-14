@@ -1,0 +1,8 @@
+// expect: E0126 at 5:13
+// message: 2 holes but 1 values
+def main() -> i64 {
+    val a = 1
+    val s = format("{} and {}", a)
+    println(s)
+    0
+}

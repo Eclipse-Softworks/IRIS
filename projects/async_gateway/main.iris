@@ -1,0 +1,126 @@
+// The gateway on the network: HTTP/1.1 on 127.0.0.1 (not reachable from
+// other machines). Port: IRIS_GATEWAY_PORT, default 8088.
+//
+// Everything runs on one thread. Accepting connections, reading requests
+// (2 s limit each), waiting on suppliers and writing replies are all tasks
+// on the main thread's executor: a task waiting for a connection or for data
+// (`tcp_accept_async`, `tcp_read_async`) leaves the thread to the others, so
+// hundreds of requests are in progress at once without a thread each.
+// `POST /shutdown` stops accepting, finishes the requests in flight and stops.
+
+bring std.net
+bring std.async
+bring "gateway.iris"
+
+def setting(name: str, fallback: i64) -> i64 {
+    val parsed = parse_i64(env_get(name));
+    if is_some(parsed) { unwrap(parsed) } else { fallback }
+}
+
+// The bytes of `raw` after its headers that Content-Length still promises.
+def body_missing(raw: str) -> i64 {
+    val end = find(raw, "\r\n\r\n");
+    if is_some(end) == false {
+        return 1
+    };
+    val head = to_lower(slice(raw, 0, unwrap(end)));
+    val at = find(head, "content-length:");
+    if is_some(at) == false {
+        return 0
+    };
+    val rest = slice(head, unwrap(at) + 15, len(head));
+    val line_end = find(rest, "\r\n");
+    val digits = trim(if is_some(line_end) { slice(rest, 0, unwrap(line_end)) } else { rest });
+    val declared = parse_i64(digits);
+    val length = if is_some(declared) { unwrap(declared) } else { 0 };
+    length - (len(raw) - unwrap(end) - 4)
+}
+
+// One whole request: a request can arrive in several pieces, and closing a
+// socket with unread bytes resets it, losing the reply. At most 64 KiB; ""
+// if the client stops sending first, or sends nothing for 2 s.
+async def read_request(conn: TcpStream) -> str {
+    var raw = "";
+    var reading = true;
+    while reading {
+        val waited = await timeout_after(tcp_read_async(conn, 65536), 2000);
+        val chunk = if is_some(waited) { unwrap(waited) } else { err("timed out") };
+        val piece = if is_ok(chunk) { unwrap(chunk) } else { "" };
+        if len(piece) > 0 {
+            raw = raw + piece;
+            if body_missing(raw) <= 0 || len(raw) > 65536 {
+                reading = false
+            }
+        } else {
+            raw = "";
+            reading = false
+        }
+    };
+    raw
+}
+
+// Read, answer and close one connection: 1 if it was a request answered,
+// 0 for an empty connection or /shutdown (which also signals `stop`).
+async def connection(conn: TcpStream, stop: chan<i64>) -> i64 {
+    val raw = await read_request(conn);
+    val shutdown = len(raw) > 0 && request_path(raw) == "/shutdown";
+    val response = if len(raw) == 0 {
+        ""
+    } else if shutdown {
+        http(200, "{\"stopping\":true}")
+    } else {
+        await handle(raw)
+    };
+    if len(response) > 0 {
+        tcp_write_all_checked(conn, response);
+    };
+    tcp_close_checked(conn);
+    if shutdown {
+        send(stop, 1)
+    };
+    if len(raw) > 0 && shutdown == false { 1 } else { 0 }
+}
+
+// Accept until /shutdown, then finish the requests in flight; returns how
+// many requests were answered.
+async def serve(listener: TcpListener) -> i64 {
+    val stop: chan<i64> = channel();
+    val inflight: list<task<i64>> = list();
+    var running = true;
+    while running {
+        val accepting = tcp_accept_async(listener, 2000, 2000);
+        val which = await async_any(accepting, async_recv(stop));
+        if which == 0 {
+            val accepted = await accepting;
+            if is_ok(accepted) {
+                push(inflight, connection(unwrap(accepted), stop))
+            }
+        } else {
+            running = false
+        }
+    };
+    var answered = 0;
+    var i = 0;
+    while i < list_len(inflight) {
+        val one = await list_get(inflight, i);
+        answered = answered + one;
+        i = i + 1
+    };
+    answered
+}
+
+def main() -> i64 {
+    val port = setting("IRIS_GATEWAY_PORT", 8088);
+    val listening = tcp_listen_local_checked(port);
+    if is_ok(listening) == false {
+        println("cannot listen on 127.0.0.1:" + to_str(port));
+    };
+    assert(is_ok(listening));
+    val listener = unwrap(listening);
+    println("async gateway listening on http://127.0.0.1:" + to_str(port));
+    val answered = await serve(listener);
+    tcp_close_listener(listener);
+    println(stats_json());
+    println("async gateway: stopped after " + to_str(answered) + " requests");
+    return 0
+}

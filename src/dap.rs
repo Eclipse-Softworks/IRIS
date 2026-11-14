@@ -29,15 +29,27 @@ use crate::debugger::{BreakpointInfo, DebugSession};
 /// Use `iris dap` to start this server; configure your editor to use
 /// `iris dap` as the debug adapter command with adapter type `"iris"`.
 pub fn run_dap_server() -> std::io::Result<()> {
-    let stdin = std::io::stdin();
-    let mut reader = std::io::BufReader::new(stdin);
-    let stdout = std::io::stdout();
+    // Do not lock stdout for the lifetime of the server: `NativeBridge` relays
+    // adapter messages to stdout from a background thread, and locking stdout
+    // permanently across blocking stdin reads deadlocks native DAP sessions.
+    run_dap_server_with_io(std::io::stdin().lock(), std::io::stdout())
+}
+
+/// Runs the DAP server over arbitrary [`Read`] / [`Write`] streams.
+pub fn run_dap_server_with_io<R: Read, W: Write>(reader: R, writer: W) -> std::io::Result<()> {
+    let mut reader = std::io::BufReader::new(reader);
+    let writer = std::cell::RefCell::new(writer);
     let mut session = DebugSession::new();
     let mut seq = 1i64;
     let mut source_path = String::new();
     let mut source_content = String::new();
     let mut stop_on_entry = false;
     let mut entry_function: Option<String> = None;
+    // Native sessions (`"native": true` in the launch configuration) are
+    // relayed to a native DAP adapter; see `crate::dap_native`.
+    let mut initialize_args = serde_json::Value::Null;
+    let mut recorded_config: Vec<(String, serde_json::Value)> = Vec::new();
+    let mut native: Option<crate::dap_native::NativeBridge> = None;
 
     loop {
         // Read Content-Length header.
@@ -53,6 +65,9 @@ pub fn run_dap_server() -> std::io::Result<()> {
                     // client reads as a crash. Same defect as the LSP server had
                     // -- see known-issues #58.
                     Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                        if let Some(bridge) = native.take() {
+                            bridge.finish();
+                        }
                         return Ok(());
                     }
                     Err(e) => return Err(e),
@@ -80,7 +95,12 @@ pub fn run_dap_server() -> std::io::Result<()> {
         let mut body = vec![0u8; content_length];
         match reader.read_exact(&mut body) {
             Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                if let Some(bridge) = native.take() {
+                    bridge.finish();
+                }
+                return Ok(());
+            }
             Err(e) => return Err(e),
         }
         let body_str = String::from_utf8_lossy(&body);
@@ -98,18 +118,57 @@ pub fn run_dap_server() -> std::io::Result<()> {
             .unwrap_or(serde_json::Value::Null);
 
         let send = |body: serde_json::Value| -> std::io::Result<()> {
-            let text = serde_json::to_string(&body).unwrap_or_default();
-            write!(
-                stdout.lock(),
-                "Content-Length: {}\r\n\r\n{}",
-                text.len(),
-                text
-            )?;
-            stdout.lock().flush()
+            let mut w = writer.borrow_mut();
+            crate::dap_native::write_frame(&mut *w, &body)
         };
+
+        if let Some(bridge) = native.as_mut() {
+            match command {
+                // IRIS's exception filter ("all" panics) has no native
+                // equivalent; acknowledge it rather than fail the request.
+                "setExceptionBreakpoints" => {
+                    send(serde_json::json!({
+                        "seq": seq, "type": "response", "request_seq": request_seq,
+                        "success": true, "command": command, "body": {}
+                    }))?;
+                    seq += 1;
+                }
+                "stepBack" | "reverseContinue" if !bridge.supports_step_back() => {
+                    send(serde_json::json!({
+                        "seq": seq,
+                        "type": "response",
+                        "request_seq": request_seq,
+                        "success": false,
+                        "command": command,
+                        "message": format!(
+                            "{command} is not supported by this native debug adapter (reverse execution requires a target/adapter with supportsStepBack, e.g. rr or trace-based interpreter mode)"
+                        )
+                    }))?;
+                    seq += 1;
+                }
+                "disconnect" => {
+                    let _ = bridge.forward(&msg);
+                    if let Some(bridge) = native.take() {
+                        bridge.finish();
+                    }
+                    return Ok(());
+                }
+                _ => {
+                    if let Err(error) = bridge.forward(&msg) {
+                        send(serde_json::json!({
+                            "seq": seq, "type": "response", "request_seq": request_seq,
+                            "success": false, "command": command, "message": error
+                        }))?;
+                        seq += 1;
+                    }
+                }
+            }
+            continue;
+        }
 
         match command {
             "initialize" => {
+                initialize_args = arguments.clone();
                 send(serde_json::json!({
                     "seq": seq, "type": "response", "request_seq": request_seq,
                     "success": true, "command": command,
@@ -149,6 +208,73 @@ pub fn run_dap_server() -> std::io::Result<()> {
                 }))?;
                 seq += 1;
             }
+            "launch" if arguments["native"].as_bool().unwrap_or(false) => {
+                match crate::dap_native::NativeBridge::start(
+                    &initialize_args,
+                    &msg,
+                    &recorded_config,
+                ) {
+                    Ok((bridge, description)) => {
+                        // The native adapter answers this launch request.
+                        native = Some(bridge);
+                        send(serde_json::json!({
+                            "seq": seq, "type": "event", "event": "output",
+                            "body": {
+                                "category": "console",
+                                "output": format!("Native debugging via {description}\n")
+                            }
+                        }))?;
+                        seq += 1;
+                    }
+                    Err(error) => {
+                        send(serde_json::json!({
+                            "seq": seq, "type": "response", "request_seq": request_seq,
+                            "success": false, "command": command, "message": error
+                        }))?;
+                        seq += 1;
+                    }
+                }
+            }
+            "attach"
+                if arguments["native"].as_bool().unwrap_or_else(|| {
+                    arguments.get("processId").is_some()
+                        || arguments.get("pid").is_some()
+                        || arguments.get("target").is_some()
+                }) =>
+            {
+                match crate::dap_native::NativeBridge::attach(
+                    &initialize_args,
+                    &msg,
+                    &recorded_config,
+                ) {
+                    Ok((bridge, description)) => {
+                        native = Some(bridge);
+                        send(serde_json::json!({
+                            "seq": seq, "type": "event", "event": "output",
+                            "body": {
+                                "category": "console",
+                                "output": format!("Native debugging via {description}\n")
+                            }
+                        }))?;
+                        seq += 1;
+                    }
+                    Err(error) => {
+                        send(serde_json::json!({
+                            "seq": seq, "type": "response", "request_seq": request_seq,
+                            "success": false, "command": command, "message": error
+                        }))?;
+                        seq += 1;
+                    }
+                }
+            }
+            "attach" => {
+                send(serde_json::json!({
+                    "seq": seq, "type": "response", "request_seq": request_seq,
+                    "success": false, "command": command,
+                    "message": "attach requires native mode (set \"native\": true with \"processId\"/\"pid\" or \"target\"); trace-based interpreter DAP only supports \"launch\""
+                }))?;
+                seq += 1;
+            }
             "launch" => {
                 source_path = arguments["program"].as_str().unwrap_or("").to_owned();
                 stop_on_entry = arguments["stopOnEntry"].as_bool().unwrap_or(false);
@@ -177,6 +303,7 @@ pub fn run_dap_server() -> std::io::Result<()> {
                 seq += 1;
             }
             "setBreakpoints" => {
+                recorded_config.push((command.to_owned(), arguments.clone()));
                 // If the program has already been traced, only update breakpoints —
                 // resetting the session would discard the execution trace and make
                 // step/continue non-functional for the rest of the session.
@@ -326,13 +453,23 @@ pub fn run_dap_server() -> std::io::Result<()> {
                     }
                 }
             }
-            "continue" => {
+            "continue" | "reverseContinue" => {
+                let is_reverse = command == "reverseContinue";
+                let body = if is_reverse {
+                    serde_json::json!({})
+                } else {
+                    serde_json::json!({ "allThreadsContinued": true })
+                };
                 send(serde_json::json!({
                     "seq": seq, "type": "response", "request_seq": request_seq,
-                    "success": true, "command": command, "body": { "allThreadsContinued": true }
+                    "success": true, "command": command, "body": body
                 }))?;
                 seq += 1;
-                let hit = session.continue_to_breakpoint().is_some();
+                let hit = if is_reverse {
+                    session.reverse_continue().is_some()
+                } else {
+                    session.continue_to_breakpoint().is_some()
+                };
                 let logs: Vec<String> = std::mem::take(&mut session.pending_logs);
                 for log_msg in logs {
                     send(serde_json::json!({
@@ -352,6 +489,23 @@ pub fn run_dap_server() -> std::io::Result<()> {
                             "threadId": 1,
                             "line": frame.line,
                             "description": format!("Breakpoint hit at line {}", frame.line),
+                        }
+                    }))?;
+                    seq += 1;
+                } else if is_reverse {
+                    let line = session.current_frame().map(|f| f.line).unwrap_or(0);
+                    send(serde_json::json!({
+                        "seq": seq, "type": "event", "event": "output",
+                        "body": { "category": "console", "output": "Reached program start.\n" }
+                    }))?;
+                    seq += 1;
+                    send(serde_json::json!({
+                        "seq": seq, "type": "event", "event": "stopped",
+                        "body": {
+                            "reason": "entry",
+                            "threadId": 1,
+                            "line": line,
+                            "description": "Already at program start",
                         }
                     }))?;
                     seq += 1;
@@ -829,4 +983,227 @@ fn send_step_result(
         *seq += 1;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    fn frame(msg: serde_json::Value) -> Vec<u8> {
+        let s = serde_json::to_string(&msg).unwrap();
+        format!("Content-Length: {}\r\n\r\n{}", s.len(), s).into_bytes()
+    }
+
+    fn parse_frames(raw: &[u8]) -> Vec<serde_json::Value> {
+        let mut msgs = Vec::new();
+        let mut rest = raw;
+        while !rest.is_empty() {
+            let Some(pos) = rest.windows(4).position(|w| w == b"\r\n\r\n") else {
+                break;
+            };
+            let header = std::str::from_utf8(&rest[..pos]).unwrap();
+            let len: usize = header
+                .lines()
+                .find_map(|l| {
+                    l.to_lowercase()
+                        .strip_prefix("content-length:")
+                        .and_then(|v| v.trim().parse().ok())
+                })
+                .unwrap();
+            let body_start = pos + 4;
+            let body = &rest[body_start..body_start + len];
+            msgs.push(serde_json::from_slice(body).unwrap());
+            rest = &rest[body_start + len..];
+        }
+        msgs
+    }
+
+    #[test]
+    fn dap_initialize_launch_breakpoints_inspect_step_and_disconnect() {
+        let dir = std::env::temp_dir().join("iris_dap_unit_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let src_path = dir.join("prog.iris");
+        std::fs::write(
+            &src_path,
+            "def add_one(n: i64) -> i64 {\n    val r = n + 1;\n    r\n}\ndef main() -> i64 {\n    val x = 41;\n    val y = add_one(x);\n    y\n}\n",
+        )
+        .unwrap();
+
+        let mut input = Vec::new();
+        input.extend(frame(serde_json::json!({
+            "seq": 1, "type": "request", "command": "initialize", "arguments": {}
+        })));
+        input.extend(frame(serde_json::json!({
+            "seq": 2, "type": "request", "command": "launch",
+            "arguments": { "program": src_path.to_string_lossy(), "stopOnEntry": true }
+        })));
+        input.extend(frame(serde_json::json!({
+            "seq": 3, "type": "request", "command": "setBreakpoints",
+            "arguments": {
+                "source": { "path": src_path.to_string_lossy() },
+                "breakpoints": [{ "line": 7, "condition": "x == 41" }]
+            }
+        })));
+        input.extend(frame(serde_json::json!({
+            "seq": 4, "type": "request", "command": "configurationDone"
+        })));
+        input.extend(frame(serde_json::json!({
+            "seq": 5, "type": "request", "command": "threads"
+        })));
+        input.extend(frame(serde_json::json!({
+            "seq": 6, "type": "request", "command": "stackTrace", "arguments": { "threadId": 1 }
+        })));
+        input.extend(frame(serde_json::json!({
+            "seq": 7, "type": "request", "command": "scopes", "arguments": { "frameId": 0 }
+        })));
+        input.extend(frame(serde_json::json!({
+            "seq": 8, "type": "request", "command": "variables", "arguments": { "variablesReference": 1 }
+        })));
+        input.extend(frame(serde_json::json!({
+            "seq": 9, "type": "request", "command": "evaluate", "arguments": { "expression": "1 + 2" }
+        })));
+        input.extend(frame(serde_json::json!({
+            "seq": 10, "type": "request", "command": "next", "arguments": { "threadId": 1 }
+        })));
+        input.extend(frame(serde_json::json!({
+            "seq": 11, "type": "request", "command": "stepIn", "arguments": { "threadId": 1 }
+        })));
+        input.extend(frame(serde_json::json!({
+            "seq": 12, "type": "request", "command": "continue", "arguments": { "threadId": 1 }
+        })));
+        input.extend(frame(serde_json::json!({
+            "seq": 13, "type": "request", "command": "disconnect"
+        })));
+
+        let mut output = Vec::new();
+        run_dap_server_with_io(Cursor::new(input), &mut output).unwrap();
+
+        let msgs = parse_frames(&output);
+        let resp = |cmd: &str| {
+            msgs.iter()
+                .find(|m| m["type"] == "response" && m["command"] == cmd)
+                .unwrap_or_else(|| panic!("missing response for {cmd}: {msgs:?}"))
+        };
+
+        assert_eq!(resp("initialize")["success"], true);
+        assert_eq!(
+            resp("initialize")["body"]["supportsEvaluateForHovers"],
+            true
+        );
+        assert_eq!(resp("launch")["success"], true);
+        assert_eq!(
+            resp("setBreakpoints")["body"]["breakpoints"][0]["verified"],
+            true
+        );
+        assert_eq!(resp("threads")["body"]["threads"][0]["id"], 1);
+        assert!(resp("stackTrace")["body"]["stackFrames"]
+            .as_array()
+            .is_some());
+        assert!(resp("scopes")["body"]["scopes"].as_array().is_some());
+        assert_eq!(resp("evaluate")["body"]["result"], "3");
+        assert_eq!(resp("next")["success"], true);
+        assert_eq!(resp("stepIn")["success"], true);
+        assert_eq!(resp("continue")["success"], true);
+        assert_eq!(resp("disconnect")["success"], true);
+        assert!(msgs
+            .iter()
+            .any(|m| m["type"] == "event" && m["event"] == "initialized"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn dap_trace_reverse_continue_and_rejects_non_native_attach() {
+        let dir = std::env::temp_dir().join("iris_dap_reverse_unit_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let src_path = dir.join("rev.iris");
+        std::fs::write(
+            &src_path,
+            "def main() -> i64 {\n    var x = 1;\n    x = x + 1;\n    x = x + 2;\n    x = x + 3;\n    x\n}\n",
+        )
+        .unwrap();
+
+        let mut input = Vec::new();
+        input.extend(frame(serde_json::json!({
+            "seq": 1, "type": "request", "command": "initialize", "arguments": {}
+        })));
+        input.extend(frame(serde_json::json!({
+            "seq": 2, "type": "request", "command": "launch",
+            "arguments": { "program": src_path.to_string_lossy(), "stopOnEntry": true }
+        })));
+        input.extend(frame(serde_json::json!({
+            "seq": 3, "type": "request", "command": "setBreakpoints",
+            "arguments": {
+                "source": { "path": src_path.to_string_lossy() },
+                "breakpoints": [{ "line": 3 }, { "line": 5 }]
+            }
+        })));
+        input.extend(frame(serde_json::json!({
+            "seq": 4, "type": "request", "command": "configurationDone"
+        })));
+        // Continue to line 3, then line 5.
+        input.extend(frame(serde_json::json!({
+            "seq": 5, "type": "request", "command": "continue", "arguments": { "threadId": 1 }
+        })));
+        input.extend(frame(serde_json::json!({
+            "seq": 6, "type": "request", "command": "continue", "arguments": { "threadId": 1 }
+        })));
+        // Step back one frame, then reverseContinue back to line 3, then to program start.
+        input.extend(frame(serde_json::json!({
+            "seq": 7, "type": "request", "command": "stepBack", "arguments": { "threadId": 1 }
+        })));
+        input.extend(frame(serde_json::json!({
+            "seq": 8, "type": "request", "command": "reverseContinue", "arguments": { "threadId": 1 }
+        })));
+        input.extend(frame(serde_json::json!({
+            "seq": 9, "type": "request", "command": "reverseContinue", "arguments": { "threadId": 1 }
+        })));
+        // Explicit non-native attach must fail cleanly rather than returning {}.
+        input.extend(frame(serde_json::json!({
+            "seq": 10, "type": "request", "command": "attach",
+            "arguments": { "native": false, "processId": 1 }
+        })));
+        input.extend(frame(serde_json::json!({
+            "seq": 11, "type": "request", "command": "disconnect"
+        })));
+
+        let mut output = Vec::new();
+        run_dap_server_with_io(Cursor::new(input), &mut output).unwrap();
+        let msgs = parse_frames(&output);
+
+        let rev_responses: Vec<&serde_json::Value> = msgs
+            .iter()
+            .filter(|m| m["type"] == "response" && m["command"] == "reverseContinue")
+            .collect();
+        assert_eq!(rev_responses.len(), 2, "{msgs:?}");
+        assert!(rev_responses.iter().all(|r| r["success"] == true));
+
+        let stopped_reasons: Vec<(&str, i64)> = msgs
+            .iter()
+            .filter(|m| m["type"] == "event" && m["event"] == "stopped")
+            .map(|m| {
+                (
+                    m["body"]["reason"].as_str().unwrap_or_default(),
+                    m["body"]["line"].as_i64().unwrap_or(-1),
+                )
+            })
+            .collect();
+        assert!(
+            stopped_reasons.contains(&("entry", 1)) || stopped_reasons.contains(&("entry", 2)),
+            "expected reverseContinue to stop at program entry: {stopped_reasons:?}"
+        );
+        assert!(
+            stopped_reasons.contains(&("breakpoint", 3)),
+            "expected breakpoint hit on line 3: {stopped_reasons:?}"
+        );
+
+        let attach_resp = msgs
+            .iter()
+            .find(|m| m["type"] == "response" && m["command"] == "attach")
+            .expect("attach response");
+        assert_eq!(attach_resp["success"], false);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

@@ -1,0 +1,75 @@
+/// types.iris — Autonomous Deep Space Probe Domain Models
+/// Defines algebraic data types (choices), telemetry records, actuator commands,
+/// viability envelope budgets, and generational control leases.
+
+pub choice SubsystemState {
+    Nominal,
+    Degraded(str),
+    InvertedPolarity(f64),
+    CriticalRupture(str)
+}
+
+pub choice AlertSeverity {
+    GreenNominal,
+    YellowAdvisory(str),
+    OrangeViabilityRisk(str),
+    RedEmergency(str, i64)
+}
+
+pub choice GateDecision {
+    GatePassed,
+    GateRejected(str)
+}
+
+pub record VesselState {
+    cycle : i64,
+    pitch_deg : f64,
+    pitch_rate : f64,
+    yaw_deg : f64,
+    yaw_rate : f64,
+    bus_temp_c : f64,
+    battery_soc : f64,
+    solar_irradiance : f64,
+    science_packets : i64,
+    pitch_actuator_health : SubsystemState,
+    radiator_health : SubsystemState
+}
+
+pub record ActuatorCommand {
+    pitch_torque_nm : f64,
+    yaw_torque_nm : f64,
+    radiator_louver_pos : f64,
+    payload_power_watts : f64,
+    survival_heater_watts : f64
+}
+
+pub record ViabilityEnvelope {
+    max_attitude_error_deg : f64,
+    min_temp_c : f64,
+    max_temp_c : f64,
+    min_battery_soc : f64
+}
+
+pub record GenerationLease {
+    generation_id : i64,
+    name : str,
+    kp_pitch : f64,
+    kd_pitch : f64,
+    kp_yaw : f64,
+    kd_yaw : f64,
+    target_temp_c : f64,
+    louver_gain : f64,
+    science_power_target : f64,
+    polarity_compensation : f64,
+    lease_duration_cycles : i64,
+    verification_signature : i64
+}
+
+pub def envelope_default() -> ViabilityEnvelope {
+    ViabilityEnvelope {
+        max_attitude_error_deg : 20.0,
+        min_temp_c : -25.0,
+        max_temp_c : 65.0,
+        min_battery_soc : 18.0
+    }
+}

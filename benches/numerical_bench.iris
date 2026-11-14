@@ -24,5 +24,7 @@ def simpson(a: f64, b: f64, n: i64) -> f64 {
 def main() -> i64 {
     val result = simpson(0.0, 3.14159265, 1000);
     print(result);
+    assert(result > 0.8862);
+    assert(result < 0.8863);
     0
 }

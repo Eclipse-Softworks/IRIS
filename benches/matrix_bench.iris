@@ -47,5 +47,6 @@ def main() -> i64 {
     val c = mat_mul(a, b, 3)
     val first = list_get(list_get(c, 0), 0)
     print(first);
+    assert(first == 30);
     0
 }

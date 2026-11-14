@@ -1,0 +1,58 @@
+// Tensor indexing: every dimension indexed reads that element; one index
+// reads the element at that flat, row-major position. Writes take the same
+// forms. Natively, t[i, j] called a stub that returned NULL, and t[i] read
+// the runtime's tensor header as if it were the data.
+bring std.tensor
+
+def main() -> i64 {
+    val m = tensor_ad_from_data(list(1.0, 2.0, 3.0, 4.0, 5.0, 6.0), list(2, 3))
+    assert(to_f64(m[0, 0]) == 1.0)
+    assert(to_f64(m[0, 2]) == 3.0)
+    assert(to_f64(m[1, 0]) == 4.0)
+    assert(to_f64(m[1, 2]) == 6.0)
+    // flat, row-major
+    assert(to_f64(m[0]) == 1.0)
+    assert(to_f64(m[4]) == 5.0)
+    assert(to_f64(m[5]) == 6.0)
+
+    // a write by position is seen by position and by flat index
+    m[1, 1] = 50.0
+    assert(to_f64(m[1, 1]) == 50.0)
+    assert(to_f64(m[4]) == 50.0)
+    m[0] = 10.0
+    assert(to_f64(m[0, 0]) == 10.0)
+
+    // rank 3: [1, 0, 1] is position 1*4 + 0*2 + 1 = 5
+    val c = tensor_ad_from_data(list(0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0), list(2, 2, 2))
+    assert(to_f64(c[1, 0, 1]) == 5.0)
+    assert(to_f64(c[0, 1, 1]) == 3.0)
+    assert(to_f64(c[7]) == 7.0)
+
+    // rank 5, beyond any fixed number of index slots: [1, 0, 1, 0, 1] of
+    // 2x2x2x2x2 is position 16 + 4 + 1 = 21
+    val data5: list<f64> = list()
+    var k = 0
+    while k < 32 {
+        list_push(data5, to_f64(k))
+        k = k + 1
+    }
+    val r5 = tensor_ad_from_data(data5, list(2, 2, 2, 2, 2))
+    assert(to_f64(r5[1, 0, 1, 0, 1]) == 21.0)
+    r5[1, 1, 1, 1, 1] = 99.0
+    assert(to_f64(r5[31]) == 99.0)
+
+    // indices computed at run time
+    var sum = 0.0
+    var i = 0
+    while i < 2 {
+        var j = 0
+        while j < 3 {
+            sum = sum + to_f64(m[i, j])
+            j = j + 1
+        }
+        i = i + 1
+    }
+    assert(sum == 10.0 + 2.0 + 3.0 + 4.0 + 50.0 + 6.0)
+    println("tensor indexing ok")
+    return 0
+}

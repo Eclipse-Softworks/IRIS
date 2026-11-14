@@ -1,0 +1,9 @@
+// expect: ok
+
+def main() -> i64 {
+    var xs: list<i64> = list()
+    push(xs, 1)
+    push(xs, 2)
+    assert(list_len(xs) == 2);
+    return 0
+}

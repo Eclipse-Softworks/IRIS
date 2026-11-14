@@ -1,0 +1,6 @@
+// expect: E0002 at 4:13
+
+def main() -> i64 {
+    println("hi);
+    return 0
+}

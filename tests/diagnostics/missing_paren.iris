@@ -1,0 +1,8 @@
+// expect: E0005 at 6:17
+// fix: println("hi");
+// fix-compiles
+
+def main() -> i64 {
+    println("hi";
+    return 0
+}

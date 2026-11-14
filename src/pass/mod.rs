@@ -1,10 +1,13 @@
 pub mod ast_exhaustive;
+pub mod async_lower;
+pub mod binding_checker;
 pub mod borrow_checker;
 pub mod cfg_borrow_checker;
 pub mod const_eval;
 pub mod const_fold;
 pub mod copy_prop;
 pub mod dead_node;
+pub mod drop_elaboration;
 pub mod effect_checker;
 pub mod effect_registry;
 pub mod exhaustive;
@@ -14,13 +17,14 @@ pub mod inline;
 pub mod licm;
 pub mod lint;
 pub mod loop_unroll;
+pub mod ml_fusion;
+pub mod mono;
 pub mod opt;
 pub mod shape_check;
 pub mod shape_infer_graph;
 pub mod strength_reduce;
 pub mod tail_call;
 pub mod type_infer;
-pub mod type_infer_hm;
 pub mod validate;
 pub mod variance_checker;
 
@@ -30,6 +34,7 @@ pub use const_eval::{ConstEvalPass, ConstEvaluator, ConstValue};
 pub use const_fold::ConstFoldPass;
 pub use copy_prop::CopyPropPass;
 pub use dead_node::DeadNodePass;
+pub use drop_elaboration::DropElaborationPass;
 pub use exhaustive::ExhaustivePass;
 pub use gc_annotate::GcAnnotatePass;
 pub use graph_pass::{GraphPass, GraphPassManager};
@@ -37,11 +42,12 @@ pub use inline::InlinePass;
 pub use licm::LicmPass;
 pub use lint::{find_source_warnings, find_unused_vars, IrWarning};
 pub use loop_unroll::LoopUnrollPass;
+pub use ml_fusion::MlFusionPass;
+pub use mono::MonoPass;
 pub use opt::{CsePass, DcePass, OpExpandPass};
 pub use shape_check::ShapeCheckPass;
 pub use shape_infer_graph::infer_shapes;
 pub use strength_reduce::StrengthReducePass;
-pub use type_infer_hm::HmTypeInferPass;
 
 use crate::error::PassError;
 use crate::ir::module::IrModule;
@@ -258,9 +264,10 @@ impl Default for PassManager {
 pub fn build_standard_pipeline() -> PassManager {
     let mut pm = PassManager::new();
     pm.add_pass(crate::pass::validate::ValidatePass);
-    pm.add_pass(HmTypeInferPass);
     pm.add_pass(crate::pass::type_infer::TypeInferPass);
+    pm.add_pass(MonoPass);
     pm.add_pass(crate::pass::cfg_borrow_checker::CfgBorrowCheckerPass);
+    pm.add_pass(crate::pass::drop_elaboration::DropElaborationPass);
     pm.add_pass(ShapeCheckPass);
     pm.add_pass(InlinePass::default());
     pm.add_pass(ConstFoldPass);
@@ -272,10 +279,14 @@ pub fn build_standard_pipeline() -> PassManager {
     pm.add_pass(LicmPass);
     pm.add_pass(LoopUnrollPass::default());
     pm.add_pass(StrengthReducePass);
+    pm.add_pass(MlFusionPass);
     pm.add_pass(crate::pass::opt::OptPass);
     pm.add_pass(ExhaustivePass);
     pm.add_pass(GcAnnotatePass);
     pm.add_pass(crate::pass::lint::IrLintPass);
+    // Last: async poll bodies become state machines only after every other
+    // pass (and the retain/release annotation) has seen them as plain code.
+    pm.add_pass(crate::pass::async_lower::AsyncLowerPass);
     pm
 }
 

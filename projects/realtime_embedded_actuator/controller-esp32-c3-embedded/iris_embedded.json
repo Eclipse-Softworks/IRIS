@@ -1,0 +1,11 @@
+{
+  "schema": "iris-embedded/1",
+  "target": "esp32-c3",
+  "triple": "riscv32-unknown-none-elf",
+  "entry": "main",
+  "fingerprint": "07b77a781d4c869b",
+  "allocation_free": true,
+  "recursive_calls": false,
+  "fixed_array_bytes": 32,
+  "reachable_functions": ["clamp_i64", "main"]
+}

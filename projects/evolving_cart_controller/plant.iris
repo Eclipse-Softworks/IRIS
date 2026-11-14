@@ -1,0 +1,17 @@
+// The cart: 1.2 kg on a track with viscous drag, pushed by a motor force.
+// `iris evolve-live` serves `plant` natively through the record ABI and calls
+// it once per control period; reference.iris uses the same model to derive
+// the optimal controller.
+
+pub record PlantInput { position: f64, velocity: f64, force: f64, dt: f64 }
+pub record PlantState { position: f64, velocity: f64 }
+
+pub const MASS: f64 = 1.2
+pub const DRAG: f64 = 0.4
+
+// One semi-implicit Euler step: the new velocity moves the cart.
+pub def plant(s: PlantInput) -> PlantState {
+    val accel = (s.force - DRAG * s.velocity) / MASS
+    val velocity = s.velocity + accel * s.dt
+    PlantState { position: s.position + velocity * s.dt, velocity: velocity }
+}

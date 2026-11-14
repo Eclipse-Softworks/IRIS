@@ -1,0 +1,17 @@
+// Arduino Uno: hold a sensor on A0 at the setpoint dialled on a
+// potentiometer on A1, driving the actuator on D9.
+// Build: iris embedded projects/uno_controls/uno_pid.iris --target arduino-uno
+// The bundled board support package's PWM is a digital fallback (on at duty
+// 128 and above); give iris_embedded_pwm_write a Timer1 PWM for proportional
+// drive. A step takes two ADC conversions, about 210 us.
+bring "pid.iris"
+
+extern "C" def iris_embedded_adc_read(channel: i64) -> i64 effect io
+extern "C" def iris_embedded_pwm_write(pin: i64, duty: i64) -> i64 effect io
+
+def main() -> i64 effect io {
+    val setpoint = iris_embedded_adc_read(1);
+    val measurement = iris_embedded_adc_read(0);
+    iris_embedded_pwm_write(9, pid_step(setpoint, measurement));
+    return 0
+}

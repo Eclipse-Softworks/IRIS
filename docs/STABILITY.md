@@ -1,6 +1,6 @@
 # IRIS Stability Policy
 
-> **Current version: 1.0.0-rc1** — IRIS is pre-1.0 and evolving rapidly.
+> **Current version: 1.0.0-rc2** — IRIS is pre-1.0 and evolving rapidly.
 > The current locked language/tooling surface is tracked in
 > [`current-language-lock.md`](current-language-lock.md).
 
@@ -62,7 +62,7 @@ change before 1.0.
 - CLI: `iris run`, `iris build`, `iris repl`
 - ML built-ins: `tensor<T,[dims]>`, `einsum`, `grad<T>`, `sparse<T>`
 - Model DSL (`model { ... }`)
-- ONNX/CUDA/SIMD codegen targets
+- ONNX codegen (text graph)
 - DAP debugger protocol
 - `atomic<T>`, `mutex<T>`
 
@@ -76,8 +76,10 @@ syntax or semantics before stabilization.
 - Concurrency primitives: `channel<T>`, `spawn`, `par for`, `async/await`
 - Collections: `list<T>`, `map<K,V>`, deque, heap, queue, bitset
 - FFI: C, Python, Rust
-- Standard library modules (25 modules)
-- Package manager (`iris pkg`)
+- Standard library modules (51 modules)
+- Package manager (`iris pkg`), including `publish`, `search` and `serve` (added 2026-10-21)
+- `--simd`, `--pgo-generate`/`--pgo-use`, binary ONNX with `--weights`, and
+  `--emit python-ext` (rewritten 2026-10-21, see known issues #121-#128)
 
 ### Tier 3 — Experimental
 
@@ -85,6 +87,9 @@ These features are available but subject to redesign or removal.
 
 - Obscure/undocumented CLI flags
 - Custom compiler passes API
+- `--gpu cuda` and `--emit cuda`/`cuda-ptx`: device code tested on the CPU,
+  not yet run on an NVIDIA GPU (known issue #124)
+- `--emit tensorrt`: not yet run where TensorRT is installed (#129)
 
 ---
 

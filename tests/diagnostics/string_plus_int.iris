@@ -1,0 +1,9 @@
+// expect: E0101 at 6:13
+// fix: "n = " + to_str(3)
+// fix-compiles
+
+def main() -> i64 {
+    val s = "n = " + 3
+    println(s);
+    return 0
+}

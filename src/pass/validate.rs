@@ -9,34 +9,8 @@ use std::collections::HashSet;
 use crate::error::PassError;
 use crate::ir::instr::IrInstr;
 use crate::ir::module::IrModule;
-use crate::ir::types::IrType;
 use crate::ir::value::ValueId;
 use crate::pass::Pass;
-
-fn contains_infer(ty: &IrType) -> bool {
-    match ty {
-        IrType::Infer => true,
-        // Opaque tape handle: no inner type to be unresolved.
-        IrType::TapeRef => false,
-        // Deferred-type containers: element type resolved at use site.
-        IrType::Option(_)
-        | IrType::ResultType(..)
-        | IrType::Chan(_)
-        | IrType::Atomic(_)
-        | IrType::Mutex(_) => false,
-        IrType::Scalar(_) | IrType::Str | IrType::Enum { .. } | IrType::Struct { .. } => false,
-        IrType::Tensor { .. } => false,
-        IrType::Tuple(elems) => elems.iter().any(contains_infer),
-        IrType::Array { elem, .. } | IrType::Slice { elem, .. } => contains_infer(elem),
-        IrType::Grad(inner) | IrType::Sparse(inner) | IrType::List(inner) => contains_infer(inner),
-        IrType::Map(k, v) => contains_infer(k) || contains_infer(v),
-        IrType::Fn { params, ret } => params.iter().any(contains_infer) || contains_infer(ret),
-        IrType::TraitObject { methods, .. } => methods
-            .iter()
-            .any(|m| m.params.iter().any(contains_infer) || contains_infer(&m.ret)),
-        IrType::TaskGroup | IrType::WeakRef(_) => false,
-    }
-}
 
 /// Validates SSA invariants across the entire module.
 ///
@@ -46,8 +20,6 @@ fn contains_infer(ty: &IrType) -> bool {
 ///    style the lowerer emits, where blocks appear in topological order).
 /// 2. Every value is defined exactly once.
 /// 3. Every block ends with exactly one terminator as its last instruction.
-/// 4. No `IrType::Infer` remains in the type map, including inside compound
-///    types such as `Chan`, `Atomic`, `Mutex`, `Fn`, `Tuple`, and `Array`.
 pub struct ValidatePass;
 
 impl Pass for ValidatePass {
@@ -58,18 +30,6 @@ impl Pass for ValidatePass {
     fn run(&mut self, module: &mut IrModule) -> Result<(), PassError> {
         for func in module.functions() {
             let func_name = &func.name;
-
-            if module.name == "infer_test" {
-                // Check for unresolved Infer types (top-level and inside compound
-                // types) anywhere in the value_types map.
-                for ty in func.value_types.values() {
-                    if contains_infer(ty) {
-                        return Err(PassError::UnresolvedInfer {
-                            func: func_name.clone(),
-                        });
-                    }
-                }
-            }
 
             // Track all defined ValueIds in program order (params then instrs,
             // block by block). This works because the lowerer emits blocks in
@@ -128,27 +88,30 @@ impl Pass for ValidatePass {
                 // A branch must pass exactly as many arguments as the block
                 // it targets declares parameters.
                 //
-                // Nothing checked this anywhere. `HmTypeInferPass` pairs the
-                // two with `zip`, which silently truncates on a mismatch and
-                // then unifies each argument against the *wrong* parameter --
-                // so a count bug does not surface as a count bug. It surfaces
-                // as an unrelated "type mismatch: i64 vs f64" attributed to
-                // some later value, if it surfaces at all. In a
+                // Nothing checked this anywhere. Type inference over the IR
+                // (since removed) paired the two with `zip`, which silently
+                // truncated on a mismatch and unified each argument against
+                // the *wrong* parameter -- so a count bug surfaced as an
+                // unrelated "type mismatch: i64 vs f64" attributed to some
+                // later value, if it surfaced at all. In a
                 // block-parameter SSA IR this is the most basic invariant
                 // there is. See known-issues #27.
                 let check_args = |target, args: &[ValueId], which: &str| -> Result<(), PassError> {
                     if let Some(want) = func.block(target).map(|b| b.params.len()) {
                         if want != args.len() {
-                            return Err(PassError::TypeError {
-                                    func: func_name.clone(),
-                                    detail: format!(
-                                        "{} in block {} passes {} argument(s) to a block                                          declaring {} parameter(s)",
-                                        which,
-                                        block_label,
-                                        args.len(),
-                                        want
-                                    ),
-                                });
+                            // An IR invariant: a defect in IRIS, not the program.
+                            let mut diag = crate::diagnostics::Diagnostic::error(format!(
+                                "internal compiler error: IRIS generated invalid code for `{func_name}`"
+                            ))
+                            .with_note("this is a bug in IRIS, not in your program")
+                            .with_help("`iris bug-report <file.iris>` collects what is needed to report it");
+                            if std::env::var_os("IRIS_DEBUG").is_some() {
+                                diag = diag.with_note(format!(
+                                    "compiler detail: {which} in block {block_label} passes {} argument(s) to a block declaring {want} parameter(s)",
+                                    args.len()
+                                ));
+                            }
+                            return Err(PassError::rich("E0900", diag));
                         }
                     }
                     Ok(())
@@ -296,11 +259,17 @@ mod tests {
             )],
             value_defs: std::collections::HashMap::new(),
             value_types: std::collections::HashMap::new(),
+            type_arena: Default::default(),
+            value_type_ids: std::collections::HashMap::new(),
             next_value: 0,
             attrs: vec![],
             span_table: crate::ir::function::SpanTable::default(),
+            value_names: Default::default(),
             capture_count: 0,
             is_const: false,
+            place_meta: Default::default(),
+            drop_scopes: Vec::new(),
+            mono_calls: std::collections::HashMap::new(),
         };
         m.add_function(func).unwrap();
 

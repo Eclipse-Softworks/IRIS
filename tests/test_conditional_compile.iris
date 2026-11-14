@@ -4,7 +4,8 @@
 // file*, so the expected answers do not depend on the host. That matters:
 // `WINDOWS` and `DEBUG` are both predefined by the compiler on this machine, so
 // a test written around `#ifdef WINDOWS` asserts the build environment rather
-// than the preprocessor.
+// than the preprocessor (that `--target` decides them is checked in
+// src/preprocessor.rs).
 #define VERSION 1
 #define BUILD "alpha"
 #define FEATURE_ON 1
@@ -35,11 +36,47 @@ def never_compiled() -> i64 {
 }
 #endif
 
+// `#if` compares values, with C's precedence: `||` binds looser than `&&`.
+#if BUILD == "beta"
+def channel() -> str { "beta" }
+#elif BUILD == "alpha" && VERSION >= 1 || FEATURE_ABSENT
+def channel() -> str { "alpha" }
+#else
+def channel() -> str { "unknown" }
+#endif
+
+// A true `#ifdef` inside a skipped group stays skipped, and so does the rest
+// of the group after it.
+#ifdef FEATURE_ABSENT
+#ifdef FEATURE_ON
+def nested() -> str { "inner" }
+#endif
+this line is skipped too
+#else
+def nested() -> str { "outer else" }
+#endif
+
+// A macro's value replaces later uses of its name, but not text in a string.
+#define LIMIT 40
+#define GREETING "hello"
+def limit_plus(n: i64) -> i64 { LIMIT + n }
+#undef LIMIT
+def LIMIT() -> i64 { 7 }
+
 def main() -> i64 {
     // FEATURE_ON is defined above, so the `#ifdef` body is compiled.
     assert(feature() == "on");
     // FEATURE_ABSENT is never defined, so `#ifndef` selects its first body.
     assert(absent() == "not-defined");
+    assert(channel() == "alpha");
+    assert(nested() == "outer else");
+    // `VERSION`, `BUILD` and `LIMIT` are substituted; "LIMIT" in a string is not.
+    assert(VERSION + 1 == 2);
+    assert(BUILD == "alpha");
+    assert(limit_plus(2) == 42);
+    assert(GREETING + " LIMIT" == "hello LIMIT");
+    // After `#undef LIMIT` the name is an ordinary identifier again.
+    assert(LIMIT() == 7);
     // The file also contains a `#ifdef FEATURE_ABSENT` block holding invalid
     // syntax. That this file compiles at all proves the block was stripped
     // before parsing rather than merely skipped at runtime.

@@ -1,0 +1,10 @@
+// expect: ok
+
+def greet(name: str) {
+    println("hello " + name);
+}
+
+def main() -> i64 {
+    greet("iris");
+    return 0
+}

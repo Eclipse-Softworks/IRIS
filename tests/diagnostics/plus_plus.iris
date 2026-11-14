@@ -1,0 +1,9 @@
+// expect: E0005 at 7:6
+// fix: i = i + 1
+// fix-compiles
+
+def main() -> i64 {
+    var i = 0
+    i++
+    return i
+}

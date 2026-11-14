@@ -1,0 +1,158 @@
+// projects/autonomous_drone_hunter/math_3d.iris
+// 3D vector geometry, trigonometry, and kinematic helper routines.
+
+bring "types.iris"
+
+pub def v3_new(x: f64, y: f64, z: f64) -> Vector3 {
+    Vector3 { x: x, y: y, z: z }
+}
+
+pub def v3_zero() -> Vector3 {
+    Vector3 { x: 0.0, y: 0.0, z: 0.0 }
+}
+
+pub def v3_add(a: Vector3, b: Vector3) -> Vector3 {
+    Vector3 {
+        x: a.x + b.x,
+        y: a.y + b.y,
+        z: a.z + b.z,
+    }
+}
+
+pub def v3_sub(a: Vector3, b: Vector3) -> Vector3 {
+    Vector3 {
+        x: a.x - b.x,
+        y: a.y - b.y,
+        z: a.z - b.z,
+    }
+}
+
+pub def v3_scale(v: Vector3, s: f64) -> Vector3 {
+    Vector3 {
+        x: v.x * s,
+        y: v.y * s,
+        z: v.z * s,
+    }
+}
+
+pub def v3_dot(a: Vector3, b: Vector3) -> f64 {
+    (a.x * b.x) + (a.y * b.y) + (a.z * b.z)
+}
+
+pub def v3_mag(v: Vector3) -> f64 {
+    val sq = (v.x * v.x) + (v.y * v.y) + (v.z * v.z);
+    if sq < 0.0000000001 {
+        0.0
+    } else {
+        sqrt(sq)
+    }
+}
+
+pub def v3_dist(a: Vector3, b: Vector3) -> f64 {
+    val dx = a.x - b.x;
+    val dy = a.y - b.y;
+    val dz = a.z - b.z;
+    val sq = (dx * dx) + (dy * dy) + (dz * dz);
+    if sq < 0.0000000001 {
+        0.0
+    } else {
+        sqrt(sq)
+    }
+}
+
+pub def v3_dist_2d(a: Vector3, b: Vector3) -> f64 {
+    val dx = a.x - b.x;
+    val dy = a.y - b.y;
+    val sq = (dx * dx) + (dy * dy);
+    if sq < 0.0000000001 {
+        0.0
+    } else {
+        sqrt(sq)
+    }
+}
+
+pub def v3_norm(v: Vector3) -> Vector3 {
+    val m = v3_mag(v);
+    if m < 0.0000001 {
+        Vector3 { x: 0.0, y: 0.0, z: 0.0 }
+    } else {
+        Vector3 {
+            x: v.x / m,
+            y: v.y / m,
+            z: v.z / m,
+        }
+    }
+}
+
+pub def clamp_f64(v: f64, lo: f64, hi: f64) -> f64 {
+    if v < lo {
+        lo
+    } else if v > hi {
+        hi
+    } else {
+        v
+    }
+}
+
+pub def abs_f64(v: f64) -> f64 {
+    if v < 0.0 { -v } else { v }
+}
+
+pub def pi_const() -> f64 {
+    3.141592653589793
+}
+
+pub def normalize_angle(rad: f64) -> f64 {
+    val pi = pi_const();
+    val two_pi = 2.0 * pi;
+    var a = rad;
+    while a > pi {
+        a = a - two_pi;
+    };
+    while a < -pi {
+        a = a + two_pi;
+    };
+    a
+}
+
+// Robust polynomial approximation of atan2(y, x)
+pub def atan2_approx(y: f64, x: f64) -> f64 {
+    val pi = pi_const();
+    if abs_f64(x) < 0.0000001 {
+        if y > 0.0 {
+            return pi * 0.5;
+        } else if y < 0.0 {
+            return -pi * 0.5;
+        } else {
+            return 0.0;
+        };
+    };
+
+    val r = y / x;
+    val r_abs = abs_f64(r);
+    // Approximation for atan(|r|) on [0, 1]
+    val c1 = 0.97239411;
+    val c3 = -0.19194795;
+    
+    var angle = 0.0;
+    if r_abs <= 1.0 {
+        angle = (c1 * r_abs) + (c3 * r_abs * r_abs * r_abs);
+    } else {
+        val inv_r = 1.0 / r_abs;
+        angle = (pi * 0.5) - ((c1 * inv_r) + (c3 * inv_r * inv_r * inv_r));
+    };
+
+    if r < 0.0 {
+        angle = -angle;
+    };
+
+    if x < 0.0 {
+        if y >= 0.0 {
+            angle = angle + pi;
+        } else {
+            angle = angle - pi;
+        };
+    };
+
+    angle
+}

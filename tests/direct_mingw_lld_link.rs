@@ -29,6 +29,7 @@ fn direct_mingw_lld_builds_and_runs_without_linker_fallback() {
 
     let build = Command::new(env!("CARGO_BIN_EXE_iris"))
         .env("IRIS_REQUIRE_DIRECT_LLD", "1")
+        .env("IRIS_VERBOSE", "1")
         .args(["-o"])
         .arg(&binary)
         .arg("build")

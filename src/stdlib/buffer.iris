@@ -1,0 +1,279 @@
+// src/stdlib/buffer.iris -- IRIS standard binary byte buffer library.
+//
+// Provides safe, zero-copy, length-tracked octet buffers capable of handling
+// arbitrary binary protocols with embedded null bytes (0x00) without truncation.
+
+pub record ByteBuffer {
+    data: list<i64>,
+    len: i64,
+}
+
+/// Create a new empty ByteBuffer.
+pub def byte_buffer_new() -> ByteBuffer {
+    ByteBuffer {
+        data: list(),
+        len: 0,
+    }
+}
+
+/// Create a ByteBuffer initialized with a given byte capacity filled with zeroes.
+pub def byte_buffer_zeros(capacity: i64) -> ByteBuffer {
+    val d: list<i64> = list();
+    for i in 0 .. capacity {
+        list_push(d, 0);
+    }
+    ByteBuffer {
+        data: d,
+        len: capacity,
+    }
+}
+
+/// Push a single raw byte (0..255) to the buffer.
+pub def byte_buffer_push(buf: ByteBuffer, byte_val: i64) -> ByteBuffer {
+    val b = byte_val % 256;
+    list_push(buf.data, b);
+    ByteBuffer {
+        data: buf.data,
+        len: buf.len + 1,
+    }
+}
+
+/// Get a byte at 0-indexed position. Returns -1 if out of bounds.
+pub def byte_buffer_get(buf: ByteBuffer, index: i64) -> i64 {
+    if index < 0 || index >= buf.len {
+        return -1
+    }
+    list_get(buf.data, index)
+}
+
+/// Set a byte at 0-indexed position.
+pub def byte_buffer_set(buf: ByteBuffer, index: i64, byte_val: i64) -> bool {
+    if index < 0 || index >= buf.len {
+        return false
+    }
+    val b = byte_val % 256;
+    list_set(buf.data, index, b);
+    true
+}
+
+/// Create a ByteBuffer by copying the bytes of an ASCII/UTF-8 string.
+pub def byte_buffer_from_str(s: str) -> ByteBuffer {
+    val bytes = str_bytes(s);
+    val count = list_len(bytes);
+    ByteBuffer {
+        data: bytes,
+        len: count,
+    }
+}
+
+/// Convert ByteBuffer to an ASCII lossy string, replacing non-printable bytes with '.'.
+pub def byte_buffer_to_ascii_lossy(buf: ByteBuffer) -> str {
+    var out = "";
+    val ascii_chars = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~";
+    for i in 0 .. buf.len {
+        val b = list_get(buf.data, i);
+        if b >= 32 && b <= 126 {
+            val idx = b - 32;
+            out = out + slice(ascii_chars, idx, idx + 1);
+        } else {
+            out = out + ".";
+        }
+    }
+    out
+}
+
+def hex_nibble(ch: i64) -> i64 {
+    if ch >= 48 && ch <= 57 { return ch - 48 } // '0'..'9'
+    if ch >= 97 && ch <= 102 { return ch - 87 } // 'a'..'f'
+    if ch >= 65 && ch <= 70 { return ch - 55 } // 'A'..'F'
+    -1
+}
+
+/// Decode a hexadecimal string into a ByteBuffer.
+/// Automatically handles optional "0x" prefix, spaces, and colons.
+pub def byte_buffer_from_hex(hex_str: str) -> ByteBuffer {
+    val bytes: list<i64> = str_bytes(hex_str);
+    val n = list_len(bytes);
+    var buf = byte_buffer_new();
+    var i = 0;
+    // Skip optional leading "0x" or "0X"
+    if n >= 2 {
+        val b0 = list_get(bytes, 0);
+        val b1 = list_get(bytes, 1);
+        if b0 == 48 && (b1 == 120 || b1 == 88) {
+            i = 2;
+        }
+    }
+    while i < n {
+        val c1 = list_get(bytes, i);
+        // Skip whitespace, colon, comma
+        if c1 == 32 || c1 == 58 || c1 == 44 {
+            i = i + 1;
+            continue;
+        }
+        val n1 = hex_nibble(c1);
+        if n1 < 0 {
+            i = i + 1;
+            continue;
+        }
+        var j = i + 1;
+        while j < n && hex_nibble(list_get(bytes, j)) < 0 {
+            j = j + 1;
+        }
+        if j < n {
+            val n2 = hex_nibble(list_get(bytes, j));
+            buf = byte_buffer_push(buf, n1 * 16 + n2);
+            i = j + 1;
+        } else {
+            buf = byte_buffer_push(buf, n1);
+            i = j;
+        }
+    }
+    buf
+}
+
+/// Convert ByteBuffer to a hexadecimal string.
+pub def byte_buffer_to_hex(buf: ByteBuffer) -> str {
+    var out = "";
+    val hex_chars = "0123456789abcdef";
+    for i in 0 .. buf.len {
+        val b = list_get(buf.data, i);
+        val hi = (b / 16) % 16;
+        val lo = b % 16;
+        out = out + slice(hex_chars, hi, hi + 1) + slice(hex_chars, lo, lo + 1);
+    }
+    out
+}
+
+/// Extract a sub-slice of a ByteBuffer from [start, end).
+pub def byte_buffer_slice(buf: ByteBuffer, start: i64, end: i64) -> ByteBuffer {
+    val s = if start < 0 { 0 } else { start };
+    val e = if end > buf.len { buf.len } else { end };
+    var out = byte_buffer_new();
+    if s >= e { return out }
+    for i in s .. e {
+        list_push(out.data, list_get(buf.data, i));
+    }
+    ByteBuffer {
+        data: out.data,
+        len: e - s,
+    }
+}
+
+/// Concatenate two ByteBuffers into a new ByteBuffer.
+pub def byte_buffer_concat(a: ByteBuffer, b: ByteBuffer) -> ByteBuffer {
+    val out_data: list<i64> = list();
+    for i in 0 .. a.len {
+        list_push(out_data, list_get(a.data, i));
+    }
+    for j in 0 .. b.len {
+        list_push(out_data, list_get(b.data, j));
+    }
+    ByteBuffer {
+        data: out_data,
+        len: a.len + b.len,
+    }
+}
+
+/// Find the first offset of needle inside haystack, or -1 if not found.
+pub def byte_buffer_find(haystack: ByteBuffer, needle: ByteBuffer) -> i64 {
+    if needle.len == 0 { return 0 }
+    if needle.len > haystack.len { return -1 }
+    val max_i = haystack.len - needle.len + 1;
+    for i in 0 .. max_i {
+        var matched = true;
+        for j in 0 .. needle.len {
+            if list_get(haystack.data, i + j) != list_get(needle.data, j) {
+                matched = false;
+                break;
+            }
+        }
+        if matched {
+            return i
+        }
+    }
+    -1
+}
+
+/// Check if haystack contains needle as a sub-sequence.
+pub def byte_buffer_contains(haystack: ByteBuffer, needle: ByteBuffer) -> bool {
+    byte_buffer_find(haystack, needle) >= 0
+}
+
+/// Read a big-endian 16-bit unsigned integer (network byte order).
+pub def byte_buffer_read_u16_be(buf: ByteBuffer, offset: i64) -> i64 {
+    if offset < 0 || offset + 1 >= buf.len { return -1 }
+    val hi = list_get(buf.data, offset);
+    val lo = list_get(buf.data, offset + 1);
+    hi * 256 + lo
+}
+
+/// Read a big-endian 32-bit unsigned integer (network byte order).
+pub def byte_buffer_read_u32_be(buf: ByteBuffer, offset: i64) -> i64 {
+    if offset < 0 || offset + 3 >= buf.len { return -1 }
+    val b0 = list_get(buf.data, offset);
+    val b1 = list_get(buf.data, offset + 1);
+    val b2 = list_get(buf.data, offset + 2);
+    val b3 = list_get(buf.data, offset + 3);
+    b0 * 16777216 + b1 * 65536 + b2 * 256 + b3
+}
+
+/// Write a big-endian 16-bit unsigned integer (network byte order).
+pub def byte_buffer_write_u16_be(buf: ByteBuffer, val16: i64) -> ByteBuffer {
+    val hi = (val16 / 256) % 256;
+    val lo = val16 % 256;
+    byte_buffer_push(byte_buffer_push(buf, hi), lo)
+}
+
+/// Write a big-endian 32-bit unsigned integer (network byte order).
+pub def byte_buffer_write_u32_be(buf: ByteBuffer, val32: i64) -> ByteBuffer {
+    val b0 = (val32 / 16777216) % 256;
+    val b1 = (val32 / 65536) % 256;
+    val b2 = (val32 / 256) % 256;
+    val b3 = val32 % 256;
+    byte_buffer_push(byte_buffer_push(byte_buffer_push(byte_buffer_push(buf, b0), b1), b2), b3)
+}
+
+/// Read a little-endian 16-bit unsigned integer.
+pub def byte_buffer_read_u16_le(buf: ByteBuffer, offset: i64) -> i64 {
+    if offset < 0 || offset + 1 >= buf.len { return -1 }
+    val lo = list_get(buf.data, offset);
+    val hi = list_get(buf.data, offset + 1);
+    hi * 256 + lo
+}
+
+/// Read a little-endian 32-bit unsigned integer.
+pub def byte_buffer_read_u32_le(buf: ByteBuffer, offset: i64) -> i64 {
+    if offset < 0 || offset + 3 >= buf.len { return -1 }
+    val b0 = list_get(buf.data, offset);
+    val b1 = list_get(buf.data, offset + 1);
+    val b2 = list_get(buf.data, offset + 2);
+    val b3 = list_get(buf.data, offset + 3);
+    b3 * 16777216 + b2 * 65536 + b1 * 256 + b0
+}
+
+/// Write a little-endian 16-bit unsigned integer.
+pub def byte_buffer_write_u16_le(buf: ByteBuffer, val16: i64) -> ByteBuffer {
+    val lo = val16 % 256;
+    val hi = (val16 / 256) % 256;
+    byte_buffer_push(byte_buffer_push(buf, lo), hi)
+}
+
+/// Write a little-endian 32-bit unsigned integer.
+pub def byte_buffer_write_u32_le(buf: ByteBuffer, val32: i64) -> ByteBuffer {
+    val b0 = val32 % 256;
+    val b1 = (val32 / 256) % 256;
+    val b2 = (val32 / 65536) % 256;
+    val b3 = (val32 / 16777216) % 256;
+    byte_buffer_push(byte_buffer_push(byte_buffer_push(byte_buffer_push(buf, b0), b1), b2), b3)
+}
+
+/// Check if buffer contains null bytes (0x00).
+pub def byte_buffer_has_null(buf: ByteBuffer) -> bool {
+    for i in 0 .. buf.len {
+        if list_get(buf.data, i) == 0 {
+            return true
+        }
+    }
+    false
+}

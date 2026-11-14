@@ -4,8 +4,8 @@ Full-featured IDE support for the [IRIS programming language](https://github.com
 
 ![VS Code](https://img.shields.io/badge/VS%20Code-1.85+-blue?logo=visualstudiocode)
 ![License](https://img.shields.io/badge/license-GPL--2.0--or--later-green)
-![Extension](https://img.shields.io/badge/extension-1.0.5-orange)
-![Compiler](https://img.shields.io/badge/compiler-1.0.0--rc1-purple)
+![Extension](https://img.shields.io/badge/extension-1.0.8-orange)
+![Compiler](https://img.shields.io/badge/compiler-1.0.0--rc2-purple)
 
 ---
 
@@ -19,8 +19,8 @@ Rich TextMate grammar for `.iris` files — keywords, types, strings, f-strings,
 
 Powered by the IRIS compiler's built-in language server:
 
-- **Hover** — full signatures, generic parameters, docs, declared/inferred effects, and unsafe-region status for functions, traits, effects, fields, and builtins
-- **Completions** — context-aware functions, fields, types, traits, keywords, and every registered standard-library module
+- **Hover** — full signatures, generic parameters, docs, declared/inferred effects, and unsafe-region status for functions, traits, effects, fields, and builtins; every keyword and type explains its rules, the idiomatic form, and a runnable example (each example is compiled and run by the compiler's test suite)
+- **Completions** — context-aware functions, fields, types, traits, keywords, and every registered standard-library module; keyword, type and builtin items show their documentation
 - **Diagnostics** — exact-range compiler errors plus dead/unused, unreachable, unsafe, possible-infinite-loop, and best-practice warnings; unnecessary code is faded by VS Code
 - **Go to Definition** / **Peek Definition**
 - **Document Symbols** — outline view and breadcrumbs
@@ -40,8 +40,20 @@ Step-through debugging with the built-in IRIS debugger:
 - Debug Console evaluation and completions
 - Named-function launch, used to debug the selected `test_*` function
 
-The debugger records and replays interpreter traces. It does not currently
-attach to a native executable or expose machine instructions/registers.
+By default the debugger records and replays interpreter traces.
+
+**Native debugging** (`"native": true` in the launch configuration, the
+**IRIS: Debug Native Binary** command, or the `iris.debug.native` setting)
+builds the program with DWARF debug information (`iris build -g`, `-O0`) and
+runs it under GDB 14+'s DAP mode through the same `iris` adapter:
+
+- Breakpoints on `.iris` lines, including in brought modules
+- Step In / Over / Out, Continue, Pause (plus `stepBack` / `reverseContinue` when supported by the native adapter)
+- Call stacks with IRIS function names and lines
+- Function arguments, `val`/`var` locals, and loop-carried `var`s with DWARF types for scalars, `str`, `record`, `enum`, fixed scalar arrays, `option`, `result`, `tuple`, `list`, `map`, and `ptr` fallback
+- Native `attach` (`"request": "attach"` with `"processId"` / `"pid"` or `"target"`, e.g. `"localhost:3333"`) to binaries built with `iris -g build` (or the **iris: build-debug** task)
+
+Point `iris.debug.nativeAdapter` at another adapter (for example `lldb-dap`) to use it instead of GDB.
 
 ### Test Explorer
 
@@ -56,7 +68,8 @@ UI; CodeLens actions use the same compiler and named-entry debugger.
 |---------|------------|-------------|
 | **IRIS: Run File** | `Ctrl+F5` | Run the current `.iris` file |
 | **IRIS: Build Binary** | — | Compile to a native executable |
-| **IRIS: Debug File** | `F5` | Launch the current `.iris` file under the trace-based DAP debugger |
+| **IRIS: Debug File** | `F5` | Launch the current `.iris` file under the trace-based DAP debugger (or natively, with `iris.debug.native`) |
+| **IRIS: Debug Native Binary** | — | Build with debug info and debug the native executable under GDB |
 | **IRIS: Run Tests in File** | — | Run every `test_*` function in the file |
 | **IRIS: Run All Workspace Tests** | — | Run the workspace test suite |
 | **IRIS: Format Workspace** | — | Format workspace `.iris` files |
@@ -70,9 +83,12 @@ UI; CodeLens actions use the same compiler and named-entry debugger.
 ### Snippets
 
 Scaffold current language patterns including ownership/borrowing, traits and
-trait objects, effects/handlers, true async and structured task groups,
+trait objects, effects/handlers, async/await and structured task groups,
 differentiable tensors, AIS, ROS 2, LLM clients, typed metaprogramming, checked
-networking, FFI, and assertion-backed tests.
+networking, FFI, and assertion-backed tests. Idiom snippets cover `try`/`?`
+(`try`, `resultfn`), `iflet`, `whenval`, `recorddefault`, extension methods
+(`ext`), effect-pure functions (`pure`, `withpure`), `fstr`, generators (`gen`),
+`constdef`, `mod`, `parsum`, `worker`, `loopbreak`, `forby` and `unsafe`.
 
 ### Code Lens & Status Bar
 
@@ -101,14 +117,21 @@ cargo build --release
 |---------|---------|-------------|
 | `iris.executablePath` | `"iris"` | Path to the `iris` binary |
 | `iris.maxNumberOfProblems` | `100` | Maximum diagnostics shown in the Problems panel |
-| `iris.formatOnSave` | `true` | Auto-format `.iris` files on save |
+| `iris.formatOnSave` | `false` | Auto-format `.iris` files on save |
 | `iris.format.indentSize` | `4` | Formatter indentation width |
 | `iris.format.maxLineWidth` | `100` | Preferred line width for safe comma-boundary wrapping |
 | `iris.trace.server` | `"off"` | Trace LSP communication (`off` / `messages` / `verbose`) |
 | `iris.inlayHints.enabled` | `true` | Enable inlay hints |
 | `iris.inlayHints.typeHints` | `true` | Show inferred binding hints on `val` / `var` bindings |
 | `iris.debug.stopOnEntry` | `false` | Stop at the first executable trace point when debugging |
+| `iris.debug.native` | `false` | Make **IRIS: Debug File** debug the native binary under GDB |
+| `iris.debug.nativeAdapter` | `""` | Native DAP adapter command (sets `IRIS_NATIVE_DAP`), e.g. `lldb-dap` |
+| `iris.build.debugInfo` | `false` | **IRIS: Build Binary** emits DWARF debug info (`-g`) |
 | `iris.showTimingOnRun` | `true` | Show compile + run elapsed time |
+| `iris.sandbox` | `false` | Pass `--sandbox` (deny filesystem, network, FFI, process) |
+| `iris.noCache` | `false` | Pass `--no-cache` |
+| `iris.strictEffects` | `false` | Pass `--strict-effects` |
+| `iris.target` | `""` | Target preset/triple for **IRIS: Build Binary** |
 
 ---
 
@@ -156,7 +179,7 @@ def main() -> i64 {
 }
 ```
 
-IRIS RC1 includes strong static typing, ownership/borrowing, effect checking,
+IRIS 1.0.0-rc2 includes strong static typing, ownership/borrowing, effect checking,
 algebraic data types, closures, traits and trait objects, generics, pattern
 matching, structured concurrency, reverse-mode autodiff/tensors, native and ORC
 JIT execution, metaprogramming, governed evolution, networking, ROS 2, AIS/ML,
@@ -166,7 +189,10 @@ multi-module projects, and a broad standard library.
 
 ## Known Limits
 
-- DAP is an interpreter-trace debugger, not native attach/debugging.
+- Native debug sessions need GDB 14+ (tested on Windows with GDB 17.1) or
+  another adapter via `iris.debug.nativeAdapter`. Reverse stepping natively
+  requires an adapter/target that advertises `supportsStepBack` (e.g. `gdb`
+  record mode). On Windows, LLVM `lldb-dap` requires its Python DLL on `PATH`.
 - Native toolchain requirements depend on the target. Supported Windows MinGW
   builds link directly with `ld.lld`; consult the repository requirements and
   portability documentation for other targets.

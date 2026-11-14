@@ -1,5 +1,96 @@
 # IRIS Language Extension Changelog
 
+## 1.0.8
+
+### New Features
+
+- **Native debugging updates**: added `"request": "attach"` configuration schema, `launch.json` snippet (`IRIS: Attach Native Process`), and `IrisDebugConfigurationProvider` support for `"processId"`/`"pid"` and `"target"`; updated native capability descriptions for rich DWARF local/composite inspection (`str`, `record`, `enum`, arrays, `option`, `result`, `tuple`, `list`, `map`), GDB 17.1 on Windows / LLVM 23, and `supportsStepBack` forwarding.
+
+- **Quick fixes from the compiler**: every fix the compiler attaches to an
+  error (did-you-mean, `==` for `=`, `to_str(...)`, a missing field, `var` for
+  a reassigned `val`, ...) is offered as a quick fix, the first one preferred;
+  fixes that touch several places apply as one edit. All errors are shown --
+  every parse error and one per function -- underlined across the whole
+  token, with "declared here" locations as related information.
+- **Stale compiler warning**: when the compiler in use is older than a build
+  in the workspace (`target/debug` or `target/release`), the status bar turns
+  yellow and says so, since its diagnostics can disagree with the terminal.
+- **Async tasks**: `task` is highlighted as a type, and the task builtins
+  (`async_sleep`, `async_yield`, `async_recv`, `async_any`, `task_done`,
+  `task_cancel`, `task_cancelled`) as concurrency builtins. Hovers for
+  `async`, `await` and `task` describe the compiled state-machine model and
+  carry runnable examples; the builtins have signature hovers. New `tasks`
+  snippet: start tasks, then await them so they run concurrently.
+- **ROS 2 on rclcpp**: new `ros2` (an event-loop node with a timer-driven
+  publisher and a subscription), `ros2srv`, `ros2action` and `tflookup`
+  snippets for the rclcpp-backed `std.ros2`; the old `ros2` snippet called
+  functions that never existed (`rcl_init`) and is replaced. The core
+  `std.ros2` functions are highlighted; the removed lifecycle stand-ins
+  (`lifecycle_new`, `lifecycle_transition`, `lifecycle_can_publish`) no
+  longer are.
+
+### Fixes
+
+- **The language server follows the compiler you build.** In a workspace
+  that builds IRIS itself, the newer of `target/release` and `target/debug`
+  is used (a week-old release build used to answer for today's debug build,
+  so the editor reported errors the compiler no longer made), and the server
+  restarts on its own when `cargo build` replaces the binary. The server runs
+  from a copy in the temp directory, so the build can replace the original:
+  on Windows a running server used to make `cargo build` fail with "Access is
+  denied". An explicit `iris.executablePath` is still used as given.
+
+## 1.0.7
+
+### New Features
+
+- **Hover documentation for every keyword and type** (served by the `iris`
+  language server): each of the 60 lexer keywords, the scalar types,
+  `option`/`result`/`chan`, and contextual words (`handle`, `where`, `self`)
+  explains its rules and pitfalls, gives the idiomatic form, and shows a short
+  example. Every example is a complete program that the compiler's test suite
+  runs, so hovers cannot drift from the language. Keyword, type and builtin
+  completions carry the same documentation, and 17 missing keywords (`defer`,
+  `yield`, `select`, `unsafe`, `defmacro`, `effect`, `with`, `dyn`, …) are now
+  offered. Math builtin hovers show their real, generic signatures (they said
+  `f32` only).
+- **19 idiom snippets**: `try` (try/catch with `?`), `resultfn`, `iflet`,
+  `whenval` (when as a value), `recorddefault`, `ext` (extension method),
+  `pure` (effect-pure control function), `withpure`, `fstr`, `gen` (yield
+  generator), `constdef`, `type`, `defmacro`, `mod`, `parsum`, `worker`,
+  `loopbreak`, `forby`, `unsafe`. Every new or changed snippet compiles when
+  expanded with its defaults.
+- **Native debugging**: launch configurations accept `"native": true`; the
+  new **IRIS: Debug Native Binary** command and the `iris.debug.native`
+  setting build the program with DWARF debug info and debug the executable
+  under GDB 14+ through `iris dap` — `.iris` line breakpoints (including in
+  brought modules), stepping, call stacks and scalar arguments.
+  `iris.debug.nativeAdapter` selects another adapter (e.g. `lldb-dap`).
+  Requires an `iris` compiler with `-g` support.
+- **F5 without launch.json**: a debug configuration provider debugs the active
+  `.iris` file using the `iris.debug.*` settings, and offers trace and native
+  configurations when creating a `launch.json`.
+- **`iris: build-debug` task** and the `iris.build.debugInfo` setting for
+  debuggable native binaries; **`iris.strictEffects`** setting passes
+  `--strict-effects` to run/build.
+
+### Bug Fixes
+
+- **Run/Build with settings enabled**: `iris.target`, `iris.sandbox` and
+  `iris.noCache` were passed *after* the subcommand (`iris build --target …`),
+  which the compiler rejects, so **IRIS: Build Binary** and **IRIS: Run File**
+  failed whenever one was set. All options now precede the subcommand. (The
+  compiler also accepts `--sandbox`, `--no-cache`, `--strict-effects`,
+  `--error-format` and `-g` after the subcommand in builds after 1.0.0-rc2.)
+- **Stale runs**: Run/Build and CodeLens runs now wait for the file to be
+  saved before invoking the compiler, instead of racing the save.
+- **Snippets that inserted invalid code**: `select` (now `select! { msg = ch => …, default => … }`),
+  `test` (declared `-> bool` but returned `0`; now `-> i64` with `assert`),
+  `tx` (`catch` without a binding), and `defer` (now defers an expression).
+- `where` is highlighted as a keyword.
+- README: `iris.formatOnSave` defaults to `false` (it said `true`); the
+  settings table now lists every setting.
+
 ## 1.0.6
 
 ### Language & Grammar Updates (IRIS 1.0.0-rc2)

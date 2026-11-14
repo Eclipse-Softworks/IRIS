@@ -1,0 +1,8 @@
+// expect: E0409 at 5:13
+// message: integer overflow in multiplication (4611686018427387904 * 2)
+const BIG: i64 = 4611686018427387904
+def main() -> i64 {
+    val m = BIG * 2
+    println(to_str(m))
+    return 0
+}

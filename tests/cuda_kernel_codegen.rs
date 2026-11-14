@@ -126,3 +126,103 @@ fn test_cuda_header_comment() {
         ir
     );
 }
+
+// ── Tensor indexing and whole-tensor operations on the device ────────────
+
+#[test]
+fn test_cuda_multi_index_reads_the_shape() {
+    // [i, j] is resolved against the tensor's own shape, checked.
+    let src = r#"
+        @kernel
+        def get(t: tensor<f32,[4, 8]>, i: i64, j: i64) -> f32 { t[i, j] }
+    "#;
+    let ir = compile(src, "test", EmitKind::Cuda).unwrap();
+    assert!(
+        ir.contains("call i64 @__iris_dev_offn(ptr %v0, i32 2,"),
+        "{ir}"
+    );
+    assert!(ir.contains("define internal i64 @__iris_dev_offn("), "{ir}");
+    assert!(
+        !ir.contains("iris_tensor_load"),
+        "no host runtime call on the device:
+{ir}"
+    );
+}
+
+#[test]
+fn test_cuda_multi_index_with_named_dimensions() {
+    let src = r#"
+        @kernel
+        def get(t: tensor<f32,[M, N]>, i: i64, j: i64) -> f32 { t[i, j] }
+    "#;
+    let ir = compile(src, "test", EmitKind::Cuda).unwrap();
+    assert!(ir.contains("@__iris_dev_offn"), "{ir}");
+}
+
+#[test]
+fn test_cuda_whole_tensor_operation_runs_on_the_device() {
+    let src = r#"
+        def mm(a: tensor<f32, [2, 2]>, b: tensor<f32, [2, 2]>) -> tensor<f32, [2, 2]> {
+            einsum("mk,kn->mn", a, b)
+        }
+    "#;
+    let ir = compile(src, "test", EmitKind::Cuda).unwrap();
+    assert!(
+        ir.contains("define internal ptr @__iris_dev_einsum_0(ptr %in0, ptr %in1, i64 %loc)"),
+        "{ir}"
+    );
+    assert!(
+        ir.contains("call ptr @malloc("),
+        "the result is allocated on the device:
+{ir}"
+    );
+}
+
+#[test]
+fn test_cuda_has_no_placeholder_calls() {
+    let src = r#"def f(x: i64) -> i64 { x * 2 + 1 }"#;
+    let ir = compile(src, "test", EmitKind::Cuda).unwrap();
+    for stub in [
+        "iris_cuda_unsupported",
+        "iris_tensor_op",
+        "iris_const_str",
+        "add i64 0, 0",
+    ] {
+        assert!(
+            !ir.contains(stub),
+            "{stub} in:
+{ir}"
+        );
+    }
+}
+
+#[test]
+fn test_cuda_device_code_compiles_to_ptx() {
+    let src = r#"
+        @kernel
+        def scale(x: f32, k: f32) -> f32 { x * k + (1.0 to f32) }
+        def mm(a: tensor<f32, [2, 2]>, b: tensor<f32, [2, 2]>) -> f32 {
+            val c = einsum("mk,kn->mn", a, b)
+            c[1, 1]
+        }
+        @kernel
+        def first(a: tensor<f32, [2, 2]>, i: i64) -> f32 { a[i, 0] + mm(a, a) }
+    "#;
+    match compile(src, "test", EmitKind::CudaPtx) {
+        Ok(ptx) => {
+            assert!(ptx.contains(".entry scale_kernel"), "{ptx}");
+            assert!(ptx.contains(".entry first_kernel"), "{ptx}");
+            assert!(
+                ptx.contains(".global .align 8 .b8 __iris_dev_error"),
+                "{ptx}"
+            );
+        }
+        // No clang with the NVPTX target here.
+        Err(e)
+            if e.to_string().contains("NVPTX") || e.to_string().contains("no native toolchain") =>
+        {
+            eprintln!("skipped: {e}");
+        }
+        Err(e) => panic!("{e}"),
+    }
+}

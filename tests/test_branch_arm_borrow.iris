@@ -1,0 +1,11 @@
+// iris-test: compile-fail
+// iris-test: error=borrow error
+// The two arms of the `if` borrow `x` with incompatible mutability:
+// the value cannot keep both. Must be rejected.
+def main() -> i64 {
+    val x: i64 = 10
+    val c = 1 + 1
+    val y = if c == 2 { &x } else { &mut x }
+    println(f"y = {*y}")
+    0
+}

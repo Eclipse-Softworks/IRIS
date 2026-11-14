@@ -1,5 +1,15 @@
 # IRIS ML Integration Guide
 
+> ⚠️ **ARCHITECTURAL UPDATE & DEPRECATION NOTICE**
+>
+> **Compile-time SDK linking (`IRIS_NATIVE_ML_BACKENDS=1`, `cargo clean && cargo build`) is DEPRECATED and OBSOLETE.**
+>
+> IRIS has migrated to a **dynamic runtime loading (`dlopen`/`LoadLibrary`)** architecture (see [`docs/ml-backends.md`](ml-backends.md) and [`src/runtime/iris_ml_dynload.h`](../src/runtime/iris_ml_dynload.h)):
+> - **Zero compile-time SDK requirement**: IRIS does not require external ML SDKs to build, and does not link against external ML libraries at compile time.
+> - **Lazy dynamic resolution**: Shared libraries (`onnxruntime.dll`/`libonnxruntime.so`, `tensorflow.dll`/`libtensorflow.so`, or the `iris_torch_plugin` shared library) are discovered and loaded at runtime on first use via `dlopen`/`LoadLibrary`.
+> - **Self-contained binaries**: Programs that do not use ML backends never load external ML shared libraries. If an ML library is missing when an ML function is called, IRIS returns a graceful runtime error rather than crashing or failing at start.
+> - `IRIS_NATIVE_ML_BACKENDS` is obsolete and ignored by the build system.
+
 This guide explains how to set up and test ONNX Runtime, LibTorch, and TensorFlow integration with IRIS.
 
 ## Architecture Overview
@@ -11,10 +21,11 @@ Stdlib Module: std.ml
     ↓
 Native IRIS runtime bridge (`iris_mlrt_*` wrappers)
     ↓
-C Shim Layer (src/runtime/*.c)
+Dynamic ML Loader (src/runtime/iris_ml_dynload.h / dlopen / LoadLibrary)
     ↓
-Native ML Framework APIs
-    ↓ (ONNX Runtime, LibTorch, TensorFlow)
+C/C++ Shim Layer (src/runtime/onnx_shim.c, tf_shim.c, iris_torch_plugin)
+    ↓
+Shared Libraries at Runtime (onnxruntime.dll/.so, tensorflow.dll/.so, iris_torch_plugin)
 ```
 
 ### Data Flow
@@ -27,35 +38,23 @@ Native ML Framework APIs
 
 ### Windows Setup
 
-1. **Download ONNX Runtime SDK**:
+1. **Download ONNX Runtime Shared Library**:
    - Visit: https://github.com/microsoft/onnxruntime/releases
    - Download: `onnxruntime-win-x64-1.17.0.zip` (or latest)
    - Extract to: `C:\onnxruntime` (or your preferred location)
 
-2. **Set Environment Variable**:
-   ```powershell
-   $env:ONNXRUNTIME_DIR = "C:\onnxruntime"
-   $env:IRIS_NATIVE_ML_BACKENDS = "1"
-   ```
+2. **Configure Library Search Path**:
+   Ensure `onnxruntime.dll` is discoverable at runtime by doing one of:
+   - Placing `onnxruntime.dll` next to your compiled IRIS binary
+   - Adding `C:\onnxruntime\lib` to your system `PATH`
+   - Setting `$env:ONNXRUNTIME_DIR = "C:\onnxruntime"`
 
-3. **Verify Installation**:
-   ```powershell
-   Test-Path "$env:ONNXRUNTIME_DIR\include\onnxruntime_c_api.h"
-   Test-Path "$env:ONNXRUNTIME_DIR\lib\onnxruntime.lib"
-   ```
+   *(Note: The legacy `$env:IRIS_NATIVE_ML_BACKENDS = "1"` is deprecated and obsolete; IRIS automatically resolves ONNX Runtime via `dlopen`/`LoadLibrary` at runtime).*
 
-4. **Build IRIS with ONNX Support**:
-   ```powershell
-   cargo clean
-   cargo build
-   ```
+3. **No Compiler Rebuild Needed**:
+   IRIS dynamically resolves ONNX entry points on first use via `iris_ml_dynload.h`. You do **not** need to run `cargo clean && cargo build`.
 
-   Expected output during build:
-   ```
-   Linking ONNX Runtime from: C:\onnxruntime
-   ```
-
-5. **Generate Test Models**:
+4. **Generate Test Models**:
    ```bash
    cd tests
    pip install onnx numpy
@@ -67,7 +66,7 @@ Native ML Framework APIs
    - `fixtures/add_const.onnx`: Add constant (output = input + 2.0)
    - `fixtures/matmul.onnx`: Matrix multiplication
 
-6. **Run Tests**:
+5. **Run Tests**:
    ```bash
    cargo test --test ml_inference -- --nocapture
    ```
@@ -81,21 +80,23 @@ Native ML Framework APIs
    tar xzf onnxruntime-linux-x64-1.17.0.tgz
    ```
 
-2. **Set Environment Variable**:
+2. **Configure Library Search Path**:
    ```bash
-   export ONNXRUNTIME_DIR=/opt/onnxruntime-linux-x64-1.17.0
-   export IRIS_NATIVE_ML_BACKENDS=1
+   export LD_LIBRARY_PATH=/opt/onnxruntime-linux-x64-1.17.0/lib:$LD_LIBRARY_PATH
    ```
+   Or place `libonnxruntime.so` in `/usr/local/lib`.
 
-3. **Build and Test**:
+3. **Run Tests**:
    ```bash
-   cargo clean
-   cargo build
    cd tests && python create_onnx_model.py
    cargo test --test ml_inference
    ```
 
 ## LibTorch Integration (PyTorch C++)
+
+### Dynamic Plugin Architecture
+
+Because LibTorch exposes a C++ ABI with mangled symbols, IRIS uses a standalone dynamic C-ABI plugin (`iris_torch_plugin`) built once against LibTorch (see `docs/ml-backends.md`). IRIS runtime loads this plugin via `dlopen` on demand.
 
 ### Windows Setup
 
@@ -105,19 +106,15 @@ Native ML Framework APIs
    - Download: `libtorch-win-shared-with-deps-*.zip`
    - Extract to: `C:\libtorch`
 
-2. **Set Environment Variable**:
+2. **Build the Plugin Once**:
+   Build `iris_torch_plugin.dll` using `codegen::build::build_torch_plugin` or:
    ```powershell
-   $env:LIBTORCH_DIR = "C:\libtorch"
-   $env:IRIS_NATIVE_ML_BACKENDS = "1"
+   $env:LIBTORCH = "C:\libtorch"
+   cargo test --test ml_inference
    ```
+   Place `iris_torch_plugin.dll` and LibTorch DLLs on your `PATH` or next to your binary.
 
-3. **Build**:
-   ```powershell
-   cargo clean
-   cargo build
-   ```
-
-4. **Create Test Models**:
+3. **Create Test Models**:
    ```python
    import torch
    model = torch.nn.Sequential(
@@ -128,21 +125,22 @@ Native ML Framework APIs
    torch.jit.save(scripted, 'tests/fixtures/model.pt')
    ```
 
-5. **Run Tests**:
+4. **Run Tests**:
    ```bash
    cargo test --test ml_inference
    ```
 
 ### Linux Setup
 
-Similar to ONNX Runtime, but with LibTorch:
-
-```bash
-export LIBTORCH_DIR=/opt/libtorch
-export IRIS_NATIVE_ML_BACKENDS=1
-cargo clean && cargo build
-cargo test --test ml_inference
-```
+1. Export LibTorch location:
+   ```bash
+   export LIBTORCH=/opt/libtorch
+   export LD_LIBRARY_PATH=$LIBTORCH/lib:$LD_LIBRARY_PATH
+   ```
+2. Build the plugin and run tests:
+   ```bash
+   cargo test --test ml_inference
+   ```
 
 ## TensorFlow Integration
 
@@ -150,22 +148,26 @@ cargo test --test ml_inference
 
 1. **Download TensorFlow C API**:
    ```
-   https://storage.googleapis.com/tensorflow/libtensorflow/libtensorflow-gpu-windows-x86_64-2.13.0.zip
-   ```
-   Or CPU version (recommended for testing):
-   ```
    https://storage.googleapis.com/tensorflow/libtensorflow/libtensorflow-cpu-windows-x86_64-2.13.0.zip
    ```
 
-2. **Extract and Set Environment**:
-   ```powershell
-   $env:TENSORFLOW_DIR = "C:\tensorflow"
-   $env:IRIS_NATIVE_ML_BACKENDS = "1"
+2. **Extract and Add to Search Path**:
+   Extract to `C:\tensorflow` and ensure `tensorflow.dll` is on `PATH` or next to your executable.
+
+3. **Run Tests**:
+   ```bash
+   cargo test --test ml_inference
    ```
 
-3. **Build and Test**:
+### Linux Setup
+
+1. Download and extract `libtensorflow` to `/usr/local` or `/opt/tensorflow`.
+2. Add to `LD_LIBRARY_PATH` if needed:
    ```bash
-   cargo clean && cargo build
+   export LD_LIBRARY_PATH=/opt/tensorflow/lib:$LD_LIBRARY_PATH
+   ```
+3. Run tests:
+   ```bash
    cargo test --test ml_inference
    ```
 
@@ -232,39 +234,25 @@ def test_onnx_inference() {
 
 ## Troubleshooting
 
-### "ONNX Runtime not enabled at build time"
+### "ONNX Runtime shared library not found at runtime"
 
-**Cause**: `ONNXRUNTIME_DIR` environment variable not set.
+**Cause**: `onnxruntime.dll` (Windows) or `libonnxruntime.so` (Linux) is not on the search path when an ML function is called.
 
 **Solution**:
-```powershell
-# PowerShell
-$env:ONNXRUNTIME_DIR = "C:\onnxruntime"
-cargo clean
-cargo build
+- On Windows: Place `onnxruntime.dll` in the same directory as the binary, add its location to `PATH`, or set `ONNXRUNTIME_DIR`.
+- On Linux: Add its parent `lib` directory to `LD_LIBRARY_PATH` (or copy to `/usr/local/lib`).
+- Note: IRIS does not require rebuilding with `cargo build`.
+
+### "LibTorch plugin not found"
+
+**Cause**: `iris_torch_plugin.dll` / `libiris_torch_plugin.so` is missing.
+
+**Solution**:
+Compile the dynamic C-ABI bridge plugin once:
+```sh
+LIBTORCH_DIR=/path/to/libtorch cargo run --release -- <build_command>
 ```
-
-### "Cannot open include file: 'onnxruntime_c_api.h'"
-
-**Cause**: SDK path is incorrect or incomplete.
-
-**Solution**:
-1. Verify SDK structure:
-   ```powershell
-   ls $env:ONNXRUNTIME_DIR\include\
-   ls $env:ONNXRUNTIME_DIR\lib\
-   ```
-2. Both directories should exist with appropriate files.
-
-### "unresolved external symbol iris_mlrt_pytorch_load" or "iris_pytorch_load"
-
-**Cause**: LibTorch SDK not available or path incorrect.
-
-**Solution**:
-```powershell
-$env:LIBTORCH_DIR = "C:\libtorch"
-cargo clean && cargo build
-```
+Place `iris_torch_plugin` and LibTorch libraries on your system library path.
 
 ### Test models not found
 
@@ -279,51 +267,41 @@ python create_onnx_model.py
 
 ## Platform-Specific Notes
 
-### Windows MSVC Specifics
+### Windows Specifics
 
-- Uses Visual C++ compiler (cl.exe)
-- Link with `.lib` files (not `.a` or `.so`)
-- Ensure ONNXRUNTIME_DIR contains both:
-  - `include/onnxruntime_c_api.h`
-  - `lib/onnxruntime.lib` (or `onnxruntime.dll.a`)
+- Shared library: `onnxruntime.dll`, `tensorflow.dll`, `iris_torch_plugin.dll`.
+- Place libraries in the executable directory or on `PATH`.
 
 ### Linux Specifics
 
-- Uses GCC/Clang compiler
-- Link with `.so` files
-- Set `LD_LIBRARY_PATH` if needed:
+- Shared library: `libonnxruntime.so`, `libtensorflow.so`, `libiris_torch_plugin.so`.
+- Set `LD_LIBRARY_PATH` if libraries are in a custom directory:
   ```bash
-  export LD_LIBRARY_PATH=$ONNXRUNTIME_DIR/lib:$LD_LIBRARY_PATH
+  export LD_LIBRARY_PATH=/opt/onnxruntime/lib:$LD_LIBRARY_PATH
   ```
 
 ### macOS Specifics
 
-- Uses Clang compiler
-- Link with `.dylib` files
-- May need to set `DYLD_LIBRARY_PATH`:
+- Shared library: `libonnxruntime.dylib`, `libtensorflow.dylib`, `libiris_torch_plugin.dylib`.
+- Set `DYLD_LIBRARY_PATH` if needed:
   ```bash
-  export DYLD_LIBRARY_PATH=$ONNXRUNTIME_DIR/lib:$DYLD_LIBRARY_PATH
+  export DYLD_LIBRARY_PATH=/opt/onnxruntime/lib:$DYLD_LIBRARY_PATH
   ```
 
-## Build System Integration
+## Runtime Dynamic Loading Architecture
 
-The build script (`build.rs`) automatically:
+Unlike early prototype versions that attempted compile-time static linking:
 
-1. Checks for `ONNXRUNTIME_DIR`, `LIBTORCH_DIR`, `TENSORFLOW_DIR` env vars. Generated native IRIS programs only link external ONNX/TensorFlow SDKs when `IRIS_NATIVE_ML_BACKENDS=1` is set; otherwise they use safe shim stubs.
-2. Includes C/C++ headers from `include/` subdirectories
-3. Links libraries from `lib/` subdirectories
-4. Sets conditional compilation flags (`ONNX_RUNTIME_ENABLED`, etc.)
-5. Compiles C/C++ shim files with appropriate flags
-
-If an env var is not set, the corresponding backend compiles fallback stubs that return error codes.
+1. **SDK-Independent Runtime Object**: The precompiled `iris_runtime.o` contains no compile-time SDK dependencies.
+2. **Lazy Dynamic Binding**: Entry points are dynamically bound via `dlopen`/`LoadLibrary` in `src/runtime/iris_ml_dynload.h` only when ML functions are invoked.
+3. **API Downward Negotiation**: IRIS negotiates API versions downward at load time so older shared libraries remain compatible.
+4. **Obsolete Flags**: `IRIS_NATIVE_ML_BACKENDS` is deprecated, obsolete, and ignored.
 
 ## Next Steps
 
-1. Choose a framework (start with **ONNX Runtime** - simplest)
-2. Download and extract the SDK
-3. Set the environment variable
-4. Run `cargo clean && cargo build`
-5. Generate test models
-6. Run tests: `cargo test --test ml_inference -- --nocapture`
+1. Obtain external shared libraries (e.g. `onnxruntime.dll` / `libonnxruntime.so`)
+2. Ensure they are placed on your system library search path
+3. Generate test models in `tests/fixtures/`
+4. Run inference tests: `cargo test --test ml_inference -- --nocapture`
 
 For questions or issues, check the build output logs in `target/debug/build/iris-*/output/`.

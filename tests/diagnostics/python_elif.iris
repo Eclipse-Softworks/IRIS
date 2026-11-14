@@ -1,0 +1,9 @@
+// expect: E0005 at 7:32
+// fix: else if x > 0
+// fix-compiles
+
+def main() -> i64 {
+    val x = 3
+    if x > 1 { println("a"); } elif x > 0 { println("b"); }
+    return 0
+}

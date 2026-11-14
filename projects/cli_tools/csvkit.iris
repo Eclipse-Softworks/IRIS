@@ -1,0 +1,355 @@
+// CSV and JSON Lines processing for csvq.iris.
+//
+// CSV follows RFC 4180: a quoted field may hold commas, doubled quotes and
+// line breaks, and rows end at CRLF or LF. Money is handled in integer cents,
+// so sums are exact and print the same on every backend.
+
+bring std.json
+
+// Every row of `text`, each a list of fields. Blank lines are skipped.
+pub def csv_records(text: str) -> list<list<str>> {
+    val rows: list<list<str>> = list();
+    var row: list<str> = list();
+    var field = "";
+    var in_row = false;
+    var quoted = false;
+    val n = len(text);
+    // Start of the run of ordinary bytes not yet copied into `field`.
+    var run = 0;
+    var i = 0;
+    while i < n {
+        val c = str_index(text, i);
+        if quoted {
+            if c == 34 {
+                field = field + slice(text, run, i);
+                if i + 1 < n && str_index(text, i + 1) == 34 {
+                    field = field + "\"";
+                    i = i + 1
+                } else {
+                    quoted = false
+                };
+                run = i + 1
+            }
+        } else if c == 34 {
+            field = field + slice(text, run, i);
+            quoted = true;
+            in_row = true;
+            run = i + 1
+        } else if c == 44 {
+            push(row, field + slice(text, run, i));
+            field = "";
+            in_row = true;
+            run = i + 1
+        } else if c == 10 || c == 13 {
+            val last = field + slice(text, run, i);
+            if in_row || len(last) > 0 {
+                push(row, last);
+                push(rows, row);
+                row = list()
+            };
+            field = "";
+            in_row = false;
+            if c == 13 && i + 1 < n && str_index(text, i + 1) == 10 {
+                i = i + 1
+            };
+            run = i + 1
+        } else {
+            in_row = true
+        };
+        i = i + 1
+    };
+    val last = field + slice(text, run, n);
+    if in_row || len(last) > 0 {
+        push(row, last);
+        push(rows, row)
+    };
+    rows
+}
+
+// One field as RFC 4180 output: quoted when it holds a comma, quote or break.
+pub def csv_field(value: str) -> str {
+    if contains(value, ",") || contains(value, "\"") || contains(value, "\n") || contains(value, "\r") {
+        "\"" + str_replace(value, "\"", "\"\"") + "\""
+    } else {
+        value
+    }
+}
+
+pub def csv_line(fields: list<str>) -> str {
+    val out: list<str> = list();
+    var i = 0;
+    while i < list_len(fields) {
+        push(out, csv_field(list_get(fields, i)));
+        i = i + 1
+    };
+    join(out, ",")
+}
+
+// A JSON string literal, with every control character escaped.
+pub def json_string(value: str) -> str {
+    val parts: list<str> = list();
+    val digits = "0123456789abcdef";
+    var run = 0;
+    var i = 0;
+    val n = len(value);
+    while i < n {
+        val c = str_index(value, i);
+        if c == 34 || c == 92 || c < 32 {
+            push(parts, slice(value, run, i));
+            if c == 34 {
+                push(parts, "\\\"")
+            } else if c == 92 {
+                push(parts, "\\\\")
+            } else if c == 10 {
+                push(parts, "\\n")
+            } else if c == 13 {
+                push(parts, "\\r")
+            } else if c == 9 {
+                push(parts, "\\t")
+            } else {
+                push(parts, "\\u00" + slice(digits, c / 16, c / 16 + 1) + slice(digits, c % 16, c % 16 + 1))
+            };
+            run = i + 1
+        };
+        i = i + 1
+    };
+    push(parts, slice(value, run, n));
+    "\"" + join(parts, "") + "\""
+}
+
+// "1189.45" -> 118945, "12" -> 1200, "-3.5" -> -350; none if not a number.
+pub def parse_cents(text: str) -> option<i64> {
+    val t = trim(text);
+    val negative = starts_with(t, "-");
+    val digits = if negative { slice(t, 1, len(t)) } else { t };
+    val dot = find(digits, ".");
+    val whole_text = if is_some(dot) { slice(digits, 0, unwrap(dot)) } else { digits };
+    val frac_text = if is_some(dot) { slice(digits, unwrap(dot) + 1, len(digits)) } else { "" };
+    if len(whole_text) == 0 || len(frac_text) > 2 || contains(frac_text, "-") || contains(whole_text, "-") {
+        return none()
+    };
+    val whole = parse_i64(whole_text);
+    val padded = if len(frac_text) == 0 { "00" } else if len(frac_text) == 1 { frac_text + "0" } else { frac_text };
+    val frac = parse_i64(padded);
+    if is_some(whole) == false || is_some(frac) == false {
+        return none()
+    };
+    val cents = unwrap(whole) * 100 + unwrap(frac);
+    some(if negative { 0 - cents } else { cents })
+}
+
+pub def format_cents(cents: i64) -> str {
+    val sign = if cents < 0 { "-" } else { "" };
+    val magnitude = if cents < 0 { 0 - cents } else { cents };
+    val frac = magnitude % 100;
+    sign + to_str(magnitude / 100) + "." + (if frac < 10 { "0" } else { "" }) + to_str(frac)
+}
+
+// The position of `name` in `header`, or -1.
+pub def column(header: list<str>, name: str) -> i64 {
+    var found = -1;
+    var i = 0;
+    while i < list_len(header) && found < 0 {
+        if list_get(header, i) == name {
+            found = i
+        };
+        i = i + 1
+    };
+    found
+}
+
+// A filter "name=value", "name!=value", or a numeric comparison
+// "name>=n", "name<=n", "name>n", "name<n". The operator and its operands.
+pub def split_condition(condition: str) -> list<str> {
+    val out: list<str> = list();
+    val ops = ["!=", ">=", "<=", "=", ">", "<"];
+    var done = false;
+    var k = 0;
+    while k < 6 && done == false {
+        val op = ops[k];
+        val at = find(condition, op);
+        if is_some(at) {
+            push(out, slice(condition, 0, unwrap(at)));
+            push(out, op);
+            push(out, slice(condition, unwrap(at) + len(op), len(condition)));
+            done = true
+        };
+        k = k + 1
+    };
+    out
+}
+
+// Whether `value` satisfies `op operand`; numbers compare as cents.
+pub def satisfies(value: str, op: str, operand: str) -> bool {
+    if op == "=" {
+        return value == operand
+    };
+    if op == "!=" {
+        return value != operand
+    };
+    val left = parse_cents(value);
+    val right = parse_cents(operand);
+    if is_some(left) == false || is_some(right) == false {
+        return false
+    };
+    val a = unwrap(left);
+    val b = unwrap(right);
+    if op == ">=" { a >= b } else if op == "<=" { a <= b } else if op == ">" { a > b } else { a < b }
+}
+
+// The rows of `rows` (header first) that pass every condition.
+pub def filter_rows(rows: list<list<str>>, conditions: list<str>) -> list<list<str>> {
+    val header = list_get(rows, 0);
+    val kept: list<list<str>> = list();
+    push(kept, header);
+    var r = 1;
+    while r < list_len(rows) {
+        val row = list_get(rows, r);
+        var pass = true;
+        var c = 0;
+        while c < list_len(conditions) {
+            val parts = split_condition(list_get(conditions, c));
+            val at = if list_len(parts) == 3 { column(header, list_get(parts, 0)) } else { -1 };
+            if at < 0 || at >= list_len(row) {
+                pass = false
+            } else if satisfies(list_get(row, at), list_get(parts, 1), list_get(parts, 2)) == false {
+                pass = false
+            };
+            c = c + 1
+        };
+        if pass {
+            push(kept, row)
+        };
+        r = r + 1
+    };
+    kept
+}
+
+// Only the named columns, in the order named.
+pub def select_columns(rows: list<list<str>>, names: list<str>) -> list<list<str>> {
+    val header = list_get(rows, 0);
+    val at: list<i64> = list();
+    var k = 0;
+    while k < list_len(names) {
+        push(at, column(header, list_get(names, k)));
+        k = k + 1
+    };
+    val out: list<list<str>> = list();
+    var r = 0;
+    while r < list_len(rows) {
+        val row = list_get(rows, r);
+        val picked: list<str> = list();
+        var j = 0;
+        while j < list_len(at) {
+            val i = list_get(at, j);
+            push(picked, if i >= 0 && i < list_len(row) { list_get(row, i) } else { "" });
+            j = j + 1
+        };
+        push(out, picked);
+        r = r + 1
+    };
+    out
+}
+
+// Rows per value of `key`, and the exact sum of `amount` (as money), sorted
+// by key: "key,count,sum_<amount>".
+pub def group_sum(rows: list<list<str>>, key: str, amount: str) -> list<list<str>> {
+    val header = list_get(rows, 0);
+    val k_at = column(header, key);
+    val a_at = column(header, amount);
+    val keys: list<str> = list();
+    val counts: map<str, i64> = map();
+    val sums: map<str, i64> = map();
+    var r = 1;
+    while r < list_len(rows) {
+        val row = list_get(rows, r);
+        if k_at >= 0 && k_at < list_len(row) && a_at >= 0 && a_at < list_len(row) {
+            val k = list_get(row, k_at);
+            if map_contains(counts, k) == false {
+                push(keys, k)
+            };
+            map_set(counts, k, map_get(counts, k).unwrap_or(0) + 1);
+            val cents = parse_cents(list_get(row, a_at));
+            map_set(sums, k, map_get(sums, k).unwrap_or(0) + (if is_some(cents) { unwrap(cents) } else { 0 }))
+        };
+        r = r + 1
+    };
+    list_sort(keys);
+    val sorted = keys;
+    val out: list<list<str>> = list();
+    val head: list<str> = list();
+    push(head, key);
+    push(head, "count");
+    push(head, "sum_" + amount);
+    push(out, head);
+    var i = 0;
+    while i < list_len(sorted) {
+        val k = list_get(sorted, i);
+        val line: list<str> = list();
+        push(line, k);
+        push(line, to_str(map_get(counts, k).unwrap_or(0)));
+        push(line, format_cents(map_get(sums, k).unwrap_or(0)));
+        push(out, line);
+        i = i + 1
+    };
+    out
+}
+
+pub def to_csv(rows: list<list<str>>) -> str {
+    val lines: list<str> = list();
+    var r = 0;
+    while r < list_len(rows) {
+        push(lines, csv_line(list_get(rows, r)));
+        r = r + 1
+    };
+    join(lines, "\n")
+}
+
+// The rows after the header as a JSON array of objects (values as strings).
+pub def to_json(rows: list<list<str>>) -> str {
+    val header = list_get(rows, 0);
+    val objects: list<str> = list();
+    var r = 1;
+    while r < list_len(rows) {
+        val row = list_get(rows, r);
+        val members: list<str> = list();
+        var c = 0;
+        while c < list_len(header) {
+            val value = if c < list_len(row) { list_get(row, c) } else { "" };
+            push(members, json_string(list_get(header, c)) + ":" + json_string(value));
+            c = c + 1
+        };
+        push(objects, "{" + join(members, ",") + "}");
+        r = r + 1
+    };
+    "[" + join(objects, ",\n") + "]"
+}
+
+// JSON Lines to rows: a header of `fields` (dot paths such as "meta.ok"),
+// then each line's values, read with json_query.
+pub def jsonl_rows(text: str, fields: list<str>) -> list<list<str>> {
+    val rows: list<list<str>> = list();
+    val header: list<str> = list();
+    var f = 0;
+    while f < list_len(fields) {
+        push(header, list_get(fields, f));
+        f = f + 1
+    };
+    push(rows, header);
+    val lines = split(text, "\n");
+    var i = 0;
+    while i < list_len(lines) {
+        val line = trim(list_get(lines, i));
+        if len(line) > 0 {
+            val row: list<str> = list();
+            var j = 0;
+            while j < list_len(fields) {
+                push(row, json_query(line, list_get(fields, j)));
+                j = j + 1
+            };
+            push(rows, row)
+        };
+        i = i + 1
+    };
+    rows
+}

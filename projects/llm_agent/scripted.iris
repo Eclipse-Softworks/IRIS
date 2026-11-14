@@ -1,0 +1,123 @@
+// A scripted stand-in for a chat model. It reads an OpenAI chat-completions
+// request and answers in the same format, so the agent's protocol handling
+// (request building, tool-call parsing, typed tool results, the loop) runs
+// offline and deterministically. It is a test double, not a model: it follows
+// fixed rules for four questions, including a turn that misbehaves and one
+// that never stops calling tools.
+
+bring std.json
+
+def message_field(request: str, i: i64, field: str) -> str {
+    json_query(request, "messages." + to_str(i) + "." + field)
+}
+
+def message_count(request: str) -> i64 {
+    var n = 0;
+    while len(message_field(request, n, "role")) > 0 {
+        n = n + 1
+    };
+    n
+}
+
+// Tool results so far, oldest first.
+def tool_results(request: str) -> list<str> {
+    val results: list<str> = list();
+    val n = message_count(request);
+    var i = 0;
+    while i < n {
+        if message_field(request, i, "role") == "tool" {
+            push(results, message_field(request, i, "content"))
+        };
+        i = i + 1
+    };
+    results
+}
+
+// A turn of tool calls: names and their arguments (JSON text), ids from `first`.
+def calls_response(names: list<str>, args: list<str>, first: i64) -> str {
+    val parts: list<str> = list();
+    var i = 0;
+    while i < list_len(names) {
+        val function = "{\"name\":" + json_stringify(list_get(names, i)) + ",\"arguments\":" + json_stringify(list_get(args, i)) + "}";
+        push(parts, "{\"id\":\"call_" + to_str(first + i) + "\",\"type\":\"function\",\"function\":" + function + "}");
+        i = i + 1
+    };
+    "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":null,\"tool_calls\":[" + join(parts, ",") + "]},\"finish_reason\":\"tool_calls\"}]}"
+}
+
+def one_call(name: str, args: str, first: i64) -> str {
+    val names: list<str> = list();
+    val all: list<str> = list();
+    push(names, name);
+    push(all, args);
+    calls_response(names, all, first)
+}
+
+def answer(text: str) -> str {
+    "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":" + json_stringify(text) + "},\"finish_reason\":\"stop\"}]}"
+}
+
+def money(cents: i64) -> str {
+    val c = cents % 100;
+    "$" + to_str(cents / 100) + "." + (if c < 10 { "0" } else { "" }) + to_str(c)
+}
+
+/// The scripted model's reply (OpenAI response JSON) to a request.
+pub def scripted_reply(request: str) -> str {
+    var first_user = 0;
+    while message_field(request, first_user, "role") != "user" && first_user < 64 {
+        first_user = first_user + 1
+    };
+    val question = message_field(request, first_user, "content");
+    val results = tool_results(request);
+    val done = list_len(results);
+    if contains(question, "reorder") {
+        if done == 0 {
+            return one_call("stock_level", "{\"sku\":\"A-100\"}", 1)
+        };
+        val stock = list_get(results, 0);
+        val on_hand = unwrap(parse_i64(json_query(stock, "on_hand")));
+        if done == 1 && on_hand < 20 {
+            return one_call("reorder_stock", "{\"sku\":\"A-100\",\"quantity\":50}", 2)
+        };
+        if done == 1 {
+            return answer("A-100 has " + to_str(on_hand) + " on hand; no order needed.")
+        };
+        val receipt = list_get(results, 1);
+        return answer("A-100 had " + to_str(on_hand) + " on hand, so I ordered " + json_query(receipt, "quantity") + " (order " + json_query(receipt, "order_id") + ", arriving in " + json_query(receipt, "eta_days") + " days).")
+    };
+    if contains(question, "ship") {
+        if done == 0 {
+            return one_call("shipping_quote", "{\"weight_grams\":2500,\"zone\":\"EU\"}", 1)
+        };
+        val quote = list_get(results, 0);
+        val cents = unwrap(parse_i64(json_query(quote, "cost_cents")));
+        return answer("Shipping 2.5 kg to the EU costs " + money(cents) + " and takes " + json_query(quote, "days") + " days.")
+    };
+    if contains(question, "Clear out") {
+        if done == 0 {
+            // A tool that does not exist, an order over the limit, and
+            // arguments that are not JSON, all in one turn.
+            val names: list<str> = list();
+            val args: list<str> = list();
+            push(names, "delete_records");
+            push(args, "{}");
+            push(names, "reorder_stock");
+            push(args, "{\"sku\":\"A-100\",\"quantity\":5000}");
+            push(names, "stock_level");
+            push(args, "{sku: A-100");
+            return calls_response(names, args, 1)
+        };
+        val codes: list<str> = list();
+        var i = 0;
+        while i < done {
+            push(codes, json_query(list_get(results, i), "error.code"));
+            i = i + 1
+        };
+        return answer("I could not do that: " + join(codes, ", ") + ".")
+    };
+    if contains(question, "forever") {
+        return one_call("stock_level", "{\"sku\":\"B-200\"}", done + 1)
+    };
+    answer("I can check stock, reorder, and quote shipping.")
+}

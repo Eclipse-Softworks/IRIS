@@ -122,3 +122,23 @@ def f() -> str {
     let result = compile_multi(&[("main", src)], "main", EmitKind::Eval).unwrap();
     assert_eq!(result.trim(), "val=7 msg=world!");
 }
+
+// ── 9. printf prints the formatted text and returns it ──────────────────────
+#[test]
+fn test_printf_prints_and_returns() {
+    let src = r#"
+bring std.fmt
+def f() -> i64 {
+    var args = list()
+    push(args, to_str(7));
+    push(args, "world");
+    val r = printf("[%03d %s]", args)
+    assert(r == "[007 world]")
+    len(r)
+}
+"#;
+    let result = compile_multi(&[("main", src)], "main", EmitKind::Eval).unwrap();
+    // What it printed, then (on its own line) `f`'s value.
+    let lines: Vec<&str> = result.trim().lines().collect();
+    assert_eq!(lines, ["[007 world]", "11"]);
+}

@@ -1,11 +1,12 @@
-//! Phase 28 integration tests: async/await
+//! Integration tests: async/await
 //!
-//! `async def` returns a single-result awaitable channel. Native execution uses
-//! a fixed scheduler (not one OS thread per task); `await` receives its result.
+//! `async def` returns a `task<T>`. The compiler turns the body into a
+//! resumable state machine (`pass::async_lower`) run by a cooperative
+//! executor on the calling thread; `await` yields the task's result.
 
 use iris::{compile, EmitKind};
 
-// 1. async def compiles to IR (wrapper + inner + spawn body)
+// 1. async def compiles to IR (a constructor plus a state-machine poll function)
 #[test]
 fn test_async_def_compiles_to_ir() {
     let src = r#"
@@ -22,13 +23,13 @@ async def fetch(id: i64) -> i64 { id * 2 }
         out
     );
     assert!(
-        out.contains("__async_inner_fetch"),
-        "IR should contain async inner function, got:\n{}",
+        out.contains("__poll_fetch"),
+        "IR should contain the task's poll function, got:\n{}",
         out
     );
     assert!(
-        out.contains("__async_spawn_fetch"),
-        "IR should contain async spawn wrapper, got:\n{}",
+        out.contains("async_task_new"),
+        "the constructor should create a task, got:\n{}",
         out
     );
     assert!(
@@ -96,7 +97,7 @@ async def triple(x: i64) -> i64 { x * 3 }
     );
 }
 
-// 5. async function can be called without await (returns channel)
+// 5. an async call returns a task; `recv` on it also waits for the result
 #[test]
 fn test_async_no_await_still_works() {
     let src = r#"
@@ -136,7 +137,6 @@ async def get_val() -> i64 { 42 }
 
 // 7. async with conditional body
 #[test]
-#[cfg_attr(target_os = "linux", ignore = "hangs on Linux CI")]
 fn test_async_with_conditional() {
     let src = r#"
 def run() -> i64 {
@@ -175,15 +175,15 @@ async def step2(x: i64) -> i64 { x * 2 }
     );
 }
 
-// 9. Many outstanding async calls use the bounded native executor and all
-// complete correctly. The worker count must be independent of task count.
+// 9. Many outstanding tasks all complete. They run on the calling thread's
+// cooperative executor, so nothing is queued for the spawn workers.
 #[test]
-fn test_async_uses_bounded_scheduler() {
+fn test_many_tasks_share_one_executor() {
     let src = r#"
-extern def iris_async_worker_count() -> i64 effect thread
+extern def iris_async_queued_tasks() -> i64 effect thread
 
 def run() -> i64 effect thread, alloc {
-    val pending: list<chan<i64>> = list()
+    val pending: list<task<i64>> = list()
     for i in 0..128 {
         list_push(pending, square(i));
     }
@@ -191,8 +191,7 @@ def run() -> i64 effect thread, alloc {
     for i in 0..128 {
         total = total + await list_get(pending, i)
     }
-    val workers = iris_async_worker_count()
-    if workers < 1 || workers > 64 { return -1 }
+    if iris_async_queued_tasks() != 0 { return -1 }
     return total
 }
 

@@ -430,6 +430,13 @@ pub(crate) fn apply_replacements(instr: &mut IrInstr, reps: &HashMap<ValueId, Va
             replace(index);
             replace(value);
         }
+        IrInstr::Borrow { place, .. } | IrInstr::Move { place, .. } => {
+            replace(place);
+        }
+        IrInstr::EnterScope { .. } | IrInstr::ExitScope { .. } => {}
+        IrInstr::Drop { value, .. } => {
+            replace(value);
+        }
         IrInstr::ConstStr { .. } => {}
         IrInstr::StrLen { operand, .. } => {
             replace(operand);

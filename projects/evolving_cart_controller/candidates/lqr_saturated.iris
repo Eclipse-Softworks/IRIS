@@ -1,0 +1,25 @@
+// The LQR-optimal law, saturated at the actuator rating: optimal near the
+// operating point, and never outside +/-10 N.
+def saturate(u: f64) -> f64 effect pure {
+    if u > 10.0 { 10.0 } else { if u < -10.0 { -10.0 } else { u } }
+}
+
+def policy(error: f64, velocity: f64) -> f64 effect pure {
+    saturate(4.340176623413436 * error - 3.4653432951749576 * velocity)
+}
+
+def test_policy() -> i64 effect throw {
+    assert(policy(1.0, 0.0) == 4.340176623413436);
+    assert(policy(50.0, 0.0) == 10.0);
+    assert(policy(-50.0, 0.0) == -10.0);
+    0
+}
+
+def test_transaction_rollback() -> i64 effect alloc, transaction {
+    val state: list<i64> = list()
+    push(state, 10);
+    transaction_begin();
+    push(state, 99);
+    transaction_rollback();
+    if list_len(state) == 1 && list_get(state, 0) == 10 { 0 } else { 1 }
+}

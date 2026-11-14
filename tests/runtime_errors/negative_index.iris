@@ -1,0 +1,8 @@
+// expect: E0403 at 6:20
+// message: index -1 is out of bounds for length 2
+def main() -> i64 {
+    val xs: list<f64> = list(1.5, 2.5)
+    val i = 0 - 1
+    println(to_str(list_get(xs, i)))
+    return 0
+}

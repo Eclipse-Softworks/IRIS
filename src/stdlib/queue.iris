@@ -1,6 +1,6 @@
-// src/stdlib/queue.iris -- IRIS standard FIFO queue (i64, list-backed with head index)
+// src/stdlib/queue.iris -- IRIS standard FIFO queue (i64, list-backed with bounded head index)
 
-record Queue { items: list<i64>, head: i64 }
+pub record Queue { items: list<i64>, head: i64 }
 
 pub def queue_new() -> Queue {
     Queue { items: list(), head: 0 }
@@ -13,7 +13,24 @@ pub def queue_is_empty(q: Queue) -> bool {
 
 // Returns the number of elements available to dequeue.
 pub def queue_len(q: Queue) -> i64 {
-    list_len(q.items) - q.head
+    val total = list_len(q.items);
+    if q.head >= total { 0 } else { total - q.head }
+}
+
+// Auto-compacts internal list buffer when head index exceeds memory threshold.
+pub def queue_compact(q: Queue) -> Queue {
+    val total = list_len(q.items);
+    if q.head == 0 {
+        return q;
+    };
+    if q.head >= total {
+        return Queue { items: list(), head: 0 };
+    };
+    val compacted: list<i64> = list();
+    for i in q.head .. total {
+        push(compacted, list_get(q.items, i));
+    };
+    Queue { items: compacted, head: 0 }
 }
 
 // Adds v to the back of the queue and returns the updated queue.
@@ -32,7 +49,46 @@ pub def dequeue_val(q: Queue) -> i64 {
     list_get(q.items, q.head)
 }
 
-// Returns the queue with the front element removed.
+// Returns the queue with the front element removed, auto-compacting when needed.
 pub def dequeue_queue(q: Queue) -> Queue {
-    Queue { items: q.items, head: q.head + 1 }
+    val next_head = q.head + 1;
+    val total = list_len(q.items);
+    if next_head >= total {
+        Queue { items: list(), head: 0 }
+    } else if next_head >= 64 && (next_head * 2) >= total {
+        queue_compact(Queue { items: q.items, head: next_head })
+    } else {
+        Queue { items: q.items, head: next_head }
+    }
+}
+
+// Converts remaining queue elements into a standard list.
+pub def queue_to_list(q: Queue) -> list<i64> {
+    val res: list<i64> = list();
+    val total = list_len(q.items);
+    for i in q.head .. total {
+        push(res, list_get(q.items, i));
+    };
+    res
+}
+
+// Builds a new queue from an existing list of items.
+pub def queue_from_list(items: list<i64>) -> Queue {
+    val q_items: list<i64> = list();
+    val n = list_len(items);
+    for i in 0 .. n {
+        push(q_items, list_get(items, i));
+    };
+    Queue { items: q_items, head: 0 }
+}
+
+// Checks if element exists in the remaining queue items.
+pub def queue_contains(q: Queue, v: i64) -> bool {
+    val total = list_len(q.items);
+    for i in q.head .. total {
+        if list_get(q.items, i) == v {
+            return true;
+        };
+    };
+    false
 }

@@ -1,5 +1,6 @@
 pub mod build;
 pub mod cuda;
+pub(crate) mod debug_info;
 pub mod embedded;
 pub mod graph_printer;
 pub mod hot_swap;
@@ -45,6 +46,6 @@ pub use pgo::{emit_pgo_instrument, emit_pgo_optimize};
 pub use printer::emit_ir_text;
 pub use python_ext::emit_python_ext;
 pub use simd::emit_simd;
-pub use tensorrt::emit_tensorrt;
+pub use tensorrt::build_engine as build_tensorrt_engine;
 
 use crate::error::CodegenError;

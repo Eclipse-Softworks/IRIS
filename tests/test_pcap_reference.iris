@@ -1,0 +1,134 @@
+// std.pcap against a capture assembled by hand from the libpcap file format
+// (LINKTYPE_ETHERNET), RFC 791 (IPv4), RFC 9293 (TCP) and RFC 768 (UDP).
+// Every byte is written out below; the expected values are read off them.
+
+bring std.buffer
+bring std.pcap
+
+// Little-endian global header, as tcpdump writes it on x86: magic a1b2c3d4,
+// version 2.4, thiszone 0, sigfigs 0, snaplen 65535, network 1.
+def le_header() -> str {
+    "d4c3b2a1" + "0200" + "0400" + "00000000" + "00000000" + "ffff0000" + "01000000"
+}
+
+// Ethernet 00:1a:2b:3c:4d:5e <- 66:77:88:99:aa:bb, IPv4 192.168.0.1 ->
+// 192.168.0.199, TTL 64, TCP 443 -> 50000, seq 1, SYN, no payload. IPv4 total
+// length 40; the frame is padded with 6 zero bytes to Ethernet's 60.
+def syn_frame() -> str {
+    "001a2b3c4d5e" + "66778899aabb" + "0800"
+        + "45000028" + "1c464000" + "4006b1e6" + "c0a80001" + "c0a800c7"
+        + "01bbc350" + "00000001" + "00000000" + "50027210" + "00000000"
+        + "000000000000"
+}
+
+// IPv4 10.0.0.1 -> 8.8.8.8, UDP 54321 -> 53, length 13, payload "hello",
+// padded with 13 zero bytes to 60.
+def udp_frame() -> str {
+    "001a2b3c4d5e" + "66778899aabb" + "0800"
+        + "45000021" + "00004000" + "40110000" + "0a000001" + "08080808"
+        + "d4310035" + "000d0000" + "68656c6c6f"
+        + "00000000000000000000000000"
+}
+
+// Packet records: ts_sec 1700000000 (0x6553f100), ts_usec 123456
+// (0x0001e240), then ts_sec + 1 and 0; incl_len = orig_len = 60.
+def capture() -> ByteBuffer {
+    byte_buffer_from_hex(
+        le_header()
+            + "00f15365" + "40e20100" + "3c000000" + "3c000000" + syn_frame()
+            + "01f15365" + "00000000" + "3c000000" + "3c000000" + udp_frame()
+    )
+}
+
+def read_little_endian_capture() -> i64 {
+    val buf = capture();
+    assert(buf.len == 24 + 16 + 60 + 16 + 60);
+    val h = unwrap(pcap_parse_global_header(buf));
+    assert(h.little_endian);
+    assert(!h.nanosecond);
+    assert(h.magic == 0xa1b2c3d4);
+    assert(h.version_major == 2 && h.version_minor == 4);
+    assert(h.snaplen == 65535);
+    assert(h.network == 1);
+
+    val p1 = unwrap(pcap_read_packet(buf, 24, h));
+    assert(p1.ts_sec == 1700000000);
+    assert(p1.ts_usec == 123456);
+    assert(p1.incl_len == 60 && p1.orig_len == 60);
+
+    val eth = unwrap(dissect_ethernet(p1.data));
+    assert(eth.dst_mac == "00:1a:2b:3c:4d:5e");
+    assert(eth.src_mac == "66:77:88:99:aa:bb");
+    assert(eth.ethertype == 0x0800);
+
+    val ip = unwrap(dissect_ipv4(eth.payload));
+    assert(ip.version == 4 && ip.ihl == 5);
+    assert(ip.total_len == 40);
+    assert(ip.ttl == 64);
+    assert(ip.protocol == 6);
+    assert(ip.src_ip == "192.168.0.1" && ip.dst_ip == "192.168.0.199");
+    // The padding is not part of the datagram.
+    assert(ip.payload.len == 20);
+
+    val tcp = unwrap(dissect_tcp(ip.payload));
+    assert(tcp.src_port == 443 && tcp.dst_port == 50000);
+    assert(tcp.seq == 1 && tcp.ack == 0);
+    assert(tcp.data_offset == 5);
+    assert(tcp.flags == 0x02);
+    assert(tcp.syn && !tcp.ack_flag && !tcp.fin && !tcp.rst && !tcp.psh);
+    assert(tcp.payload.len == 0);
+
+    val p2 = unwrap(pcap_read_packet(buf, 24 + 16 + 60, h));
+    assert(p2.ts_sec == 1700000001 && p2.ts_usec == 0);
+    val eth2 = unwrap(dissect_ethernet(p2.data));
+    val ip2 = unwrap(dissect_ipv4(eth2.payload));
+    assert(ip2.protocol == 17);
+    assert(ip2.src_ip == "10.0.0.1" && ip2.dst_ip == "8.8.8.8");
+    val udp = unwrap(dissect_udp(ip2.payload));
+    assert(udp.src_port == 54321 && udp.dst_port == 53);
+    assert(udp.length == 13);
+    assert(byte_buffer_to_hex(udp.payload) == "68656c6c6f");
+
+    // Past the last record.
+    val end = when pcap_read_packet(buf, buf.len, h) { ok(_) => "read", err(e) => e };
+    assert(starts_with(end, "pcap packet header truncated"));
+    0
+}
+
+def headers_and_formats() -> i64 {
+    // Written big-endian.
+    assert(byte_buffer_to_hex(pcap_create_global_header(65535)) == "a1b2c3d4000200040000000000000000" + "0000ffff00000001");
+    val frame = byte_buffer_from_hex(syn_frame());
+    val rec = pcap_create_packet_record(frame, 7, 8);
+    assert(slice(byte_buffer_to_hex(rec), 0, 32) == "00000007" + "00000008" + "0000003c" + "0000003c");
+    assert(rec.len == 16 + 60);
+
+    // A written capture reads back.
+    val file = byte_buffer_concat(pcap_create_global_header(65535), rec);
+    val h = unwrap(pcap_parse_global_header(file));
+    assert(!h.little_endian);
+    val p = unwrap(pcap_read_packet(file, 24, h));
+    assert(p.ts_sec == 7 && p.ts_usec == 8 && p.incl_len == 60);
+
+    // Nanosecond magic a1b23c4d, little-endian.
+    val nano = byte_buffer_from_hex("4d3cb2a1" + "0200" + "0400" + "00000000" + "00000000" + "ffff0000" + "01000000");
+    val hn = unwrap(pcap_parse_global_header(nano));
+    assert(hn.nanosecond && hn.little_endian);
+
+    // pcapng's section header block is refused, as is a short buffer.
+    val ng = when pcap_parse_global_header(byte_buffer_from_hex("0a0d0d0a" + "1c000000" + "4d3c2b1a" + "01000000" + "ffffffffffffffff" + "1c000000")) { ok(_) => "accepted", err(e) => e };
+    assert(contains(ng, "pcapng is not supported"));
+    val short = when pcap_parse_global_header(byte_buffer_from_hex("d4c3b2a1")) { ok(_) => "accepted", err(e) => e };
+    assert(contains(short, "too small"));
+
+    assert(pcap_format_mac(byte_buffer_from_hex("ffeeddccbbaa"), 0) == "ff:ee:dd:cc:bb:aa");
+    assert(pcap_format_ip(byte_buffer_from_hex("000a00000001"), 2) == "0.0.0.1");
+    0
+}
+
+def main() -> i64 {
+    read_little_endian_capture();
+    headers_and_formats();
+    println("pcap reference ok");
+    return 0
+}

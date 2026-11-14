@@ -1,0 +1,37 @@
+{
+  "01_damaged_plant": {
+    "benchmark": "01_damaged_plant",
+    "nominal_steady_state_error": 7,
+    "unadapted_crash_tick": 57,
+    "adaptation_latency_ticks": 4,
+    "recovered_steady_state_error": 7,
+    "viability_envelope_maintained": true,
+    "seven_gates_passed": true,
+    "status": "PASS",
+    "elapsed_seconds": 0.744
+  },
+  "02_symbolic_discovery": {
+    "benchmark": "02_symbolic_discovery",
+    "discovered_hamiltonian": "((v * v) + (4 * (x * x)))",
+    "discovered_kepler_law": "((x * vy) - (y * vx))",
+    "hamiltonian_score": 941.8489210339225,
+    "kepler_score": 349.63486591190684,
+    "kepler_variance": 0.0004330105637180221,
+    "relative_conservation_error_pct": 0,
+    "status": "PASS",
+    "elapsed_seconds": 1.604
+  },
+  "03_nonstationary_generalization": {
+    "benchmark": "03_nonstationary_generalization",
+    "fixed_baseline_average": 56.25,
+    "continual_retention_pct": 10.526315789473683,
+    "iris_map_elites_retention_pct": 100.0,
+    "adaptation_latency_continual": 25,
+    "adaptation_latency_iris": 0,
+    "zero_catastrophic_forgetting": true,
+    "status": "PASS",
+    "elapsed_seconds": 0.68
+  },
+  "total_elapsed_seconds": 3.08,
+  "all_passed": true
+}

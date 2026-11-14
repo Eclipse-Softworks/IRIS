@@ -377,11 +377,17 @@ fn merge_scc(module: &mut IrModule, scc: &[usize]) {
         blocks: Vec::new(),
         value_defs: HashMap::new(),
         value_types: HashMap::new(),
+        type_arena: Default::default(),
+        value_type_ids: HashMap::new(),
         next_value: 0,
         attrs: Vec::new(),
         span_table: Default::default(),
+        value_names: Default::default(),
         capture_count: 0,
         is_const: false,
+        place_meta: Default::default(),
+        drop_scopes: Vec::new(),
+        mono_calls: HashMap::new(),
     };
 
     // Layout: `k - 1` dispatch blocks, then each member's blocks contiguously.

@@ -1,0 +1,101 @@
+// std.ais against an independent implementation.
+//
+// tests/ais_reference/reference.py computes the same quantities in plain
+// Python from their textbook definitions -- information gain as the expected
+// KL divergence between posterior and prior, expected free energy as KL risk
+// plus ambiguity, least squares in closed form -- where std.ais computes
+// them differently (information gain as H[q(o)] minus ambiguity, G as minus
+// utility minus information gain, least squares one sample at a time). The
+// constants below are its output; agreement to 1e-9 checks both the formulas
+// and the identity that makes them equal.
+bring std.ais
+
+def tmaze() -> Pomdp {
+    val m = pomdp_new(8, 7, 4)
+    for ctx in 0..2 {
+        val c = to_f64(ctx)
+        pomdp_set_likelihood(m, 0 * 2 + ctx, list(1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0), 100.0)
+        pomdp_set_likelihood(m, 1 * 2 + ctx, list(0.0, 1.0 - c, c, 0.0, 0.0, 0.0, 0.0), 100.0)
+        val left_win = if ctx == 0 { 0.8 } else { 0.2 }
+        pomdp_set_likelihood(m, 2 * 2 + ctx, list(0.0, 0.0, 0.0, left_win, 1.0 - left_win, 0.0, 0.0), 100.0)
+        val right_win = if ctx == 1 { 0.8 } else { 0.2 }
+        pomdp_set_likelihood(m, 3 * 2 + ctx, list(0.0, 0.0, 0.0, 0.0, 0.0, right_win, 1.0 - right_win), 100.0)
+        for act in 0..4 {
+            for loc in 0..4 {
+                val dest = if loc >= 2 { loc } else { act }
+                val probs: list<f64> = list()
+                for s2 in 0..8 { list_push(probs, if s2 == dest * 2 + ctx { 1.0 } else { 0.0 }) }
+                pomdp_set_transition(m, act, loc * 2 + ctx, probs, 100.0)
+            }
+        }
+    }
+    pomdp_set_preferences(m, list(0.0, 0.0, 0.0, 3.0, 0.0 - 3.0, 3.0, 0.0 - 3.0))
+    pomdp_set_prior(m, list(0.5, 0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0))
+    m
+}
+
+def close(a: f64, b: f64) -> bool {
+    abs(a - b) <= 1.0e-9 * (1.0 + abs(b))
+}
+
+def main() -> i64 {
+    // ── reference.py output ────────────────────────────────────────────────
+    val want_efe = list(7.534949058936228, 6.841801878376282, 7.34220430191447, 7.34220430191447, 6.841801878376282, 6.148654697816337, 6.649057121354525, 6.649057121354525, 7.1494595448927125, 7.1494595448927125, 7.1494595448927125, 7.1494595448927125, 7.1494595448927125, 7.1494595448927125, 7.1494595448927125, 7.1494595448927125)
+    val want_ig = list(0.0, 0.6931471805599453, 0.19274475702175747, 0.19274475702175747, 0.6931471805599453, 1.3862943611198906, 0.8858919375817028, 0.8858919375817028, 0.38548951404351495, 0.38548951404351495, 0.38548951404351495, 0.38548951404351495, 0.38548951404351495, 0.38548951404351495, 0.38548951404351495, 0.38548951404351495)
+    val want_action = list(1.5258542683639007e-05, 0.9999838533149674, 4.440711744574907e-07, 4.440711744574907e-07)
+    val want_belief = list(0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+    val want_action_after_cue = list(7.76710059386215e-14, 7.76710059386215e-14, 0.9999999999998446, 9.316991188245095e-51)
+    val want_novelty = 0.36197916666666663
+    val want_rls = list(0.9510299152748728, 1.5003294548581165, 0.9751121429627916)
+
+    // ── Expected free energy of every two-step policy from the centre ──────
+    var agent = aif_observe(aif_agent_new(tmaze(), 2, 16.0), 0)
+    val step = aif_decide(agent)
+    val d = step.1
+    for i in 0..16 {
+        val v = list_get(d.values, i)
+        assert(close(v.efe, list_get(want_efe, i)), "efe of policy " + to_str(i) + ": " + to_str(v.efe))
+        assert(close(v.info_gain, list_get(want_ig, i)), "info gain of policy " + to_str(i) + ": " + to_str(v.info_gain))
+        assert(close(v.efe, v.risk + v.ambiguity))
+    }
+    for a in 0..4 { assert(close(list_get(d.action_probs, a), list_get(want_action, a))) }
+    assert(d.action == 1)
+    println("efe and policy posterior: 16 policies match the reference")
+
+    // ── Bayesian filtering: go to the cue, see it point left ───────────────
+    agent = aif_observe(step.0, 1)
+    for s in 0..8 { assert(close(list_get(agent.belief, s), list_get(want_belief, s))) }
+    val after = aif_decide(agent).1
+    for a in 0..4 { assert(abs(list_get(after.action_probs, a) - list_get(want_action_after_cue, a)) <= 1.0e-12) }
+    assert(after.action == 2)
+    println("belief after the cue and the next decision match the reference")
+
+    // ── Novelty: counts [[2, 1], [1, 3]], beliefs (0.25, 0.75) ─────────────
+    val m = pomdp_new(2, 2, 1)
+    list_set(m.pa, 0, 2.0)
+    list_set(m.pa, 1, 1.0)
+    list_set(m.pa, 2, 1.0)
+    list_set(m.pa, 3, 3.0)
+    list_set(m.a, 0, 2.0 / 3.0)
+    list_set(m.a, 1, 0.25)
+    list_set(m.a, 2, 1.0 / 3.0)
+    list_set(m.a, 3, 0.75)
+    for s in 0..2 { pomdp_set_transition(m, 0, s, if s == 0 { list(1.0, 0.0) } else { list(0.0, 1.0) }, 100.0) }
+    val nv = pomdp_policy_value(m, list(0.25, 0.75), list(0), 0.0, 1.0)
+    assert(close(nv.novelty, want_novelty), "novelty " + to_str(nv.novelty))
+    println("novelty matches the reference: " + to_str(nv.novelty))
+
+    // ── Recursive least squares reaches the closed-form solution ───────────
+    var lm = linear_model_new(3, 1, 1.0, 100.0)
+    var t = 30.0
+    for i in 0..40 {
+        val u = to_f64(i % 3 - 1)
+        val next = t + 0.1 * (0.0 - 0.5 * (t - 20.0) + 15.0 * u)
+        lm = linear_model_update(lm, list(t, u, 1.0), list(next))
+        t = next
+    }
+    for i in 0..3 { assert(close(list_get(lm.w, i), list_get(want_rls, i)), "rls weight " + to_str(i) + ": " + to_str(list_get(lm.w, i))) }
+    println("recursive least squares matches the closed form")
+    println("std.ais reference: ok")
+    return 0
+}

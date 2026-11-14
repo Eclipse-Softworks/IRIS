@@ -1,0 +1,25 @@
+bring "system.iris"
+
+def main() -> i64 {
+    val nominal = Plant { dynamics: Dynamics { retention: 0.5, gain: 1.0 }, drag: 0.0, noise: 0.0 };
+    val changed = Plant { dynamics: Dynamics { retention: 0.8, gain: 0.25 }, drag: 0.01, noise: 0.01 };
+    val frozen = train(collect(nominal, 96, 11), Dynamics { retention: 0.1, gain: 0.5 });
+    var total_frozen = 0.0;
+    var total_adapted = 0.0;
+    for trial in 0 .. 5 {
+        val data = collect(changed, 96, 101 + trial * 18);
+        val selection = collect(changed, 64, 211 + trial * 24);
+        val update = adapt(data, selection, changed, frozen);
+        assert(update.triggers == 1 && update.accepted == 1);
+        val evaluation = Plant { dynamics: Dynamics { retention: 0.78, gain: 0.28 }, drag: 0.015, noise: 0.02 };
+        val fixed = episode(evaluation, frozen, 1, false);
+        val learned = episode(evaluation, update.active, 1, false);
+        assert(learned.mse < fixed.mse);
+        total_frozen = total_frozen + fixed.mse;
+        total_adapted = total_adapted + learned.mse;
+        println(f"noisy trial={trial} frozen_mse={fixed.mse} adapted_mse={learned.mse}");
+    };
+    println(f"noisy mean MSE: frozen={total_frozen / 5.0} adapted={total_adapted / 5.0}");
+    println("learning robot: noisy trajectory training verified");
+    return 0
+}

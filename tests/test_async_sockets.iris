@@ -1,0 +1,81 @@
+// Awaitable sockets: one thread serves two connections at once.
+//
+// The slow client connects first but sends only after 800 ms; the fast
+// client connects 100 ms in and sends at once. A server that blocked on the
+// first connection's read would answer "slow" first. Awaiting readiness
+// (`tcp_accept_async`, `tcp_read_async`) leaves the thread free, so the fast
+// client is answered while the slow one is still quiet.
+
+bring std.net
+
+record Listening { listener: TcpListener, port: i64 }
+
+// The first free port from 47391: two copies of this test may run at once.
+def listen() -> Listening {
+    var port = 47391;
+    var listening = tcp_listen_local_checked(port);
+    while is_ok(listening) == false && port < 47431 {
+        port = port + 1;
+        listening = tcp_listen_local_checked(port)
+    };
+    Listening { listener: unwrap(listening), port: port }
+}
+
+def slow_client(port: i64, replies: chan<str>) -> i64 {
+    val s = unwrap(tcp_connect_checked("127.0.0.1", port, 5000, 5000));
+    sleep_ms(800);
+    unwrap(tcp_write_all_checked(s, "slow"));
+    send(replies, unwrap(tcp_read_bounded(s, 100)));
+    tcp_close_checked(s);
+    0
+}
+
+def fast_client(port: i64, replies: chan<str>) -> i64 {
+    sleep_ms(100);
+    val s = unwrap(tcp_connect_checked("127.0.0.1", port, 5000, 5000));
+    unwrap(tcp_write_all_checked(s, "fast"));
+    send(replies, unwrap(tcp_read_bounded(s, 100)));
+    tcp_close_checked(s);
+    0
+}
+
+async def handle(conn: TcpStream, log: list<str>) -> i64 {
+    val r = await tcp_read_async(conn, 100);
+    val msg = unwrap(r);
+    push(log, msg);
+    unwrap(tcp_write_all_checked(conn, "echo " + msg));
+    tcp_close_checked(conn);
+    0
+}
+
+async def serve(listener: TcpListener, log: list<str>) -> i64 {
+    val a = await tcp_accept_async(listener, 5000, 5000);
+    val first = handle(unwrap(a), log);
+    val b = await tcp_accept_async(listener, 5000, 5000);
+    val second = handle(unwrap(b), log);
+    val x = await first;
+    val y = await second;
+    x + y
+}
+
+def main() -> i64 {
+    val bound = listen();
+    val listener = bound.listener;
+    val port = bound.port;
+    val replies: chan<str> = channel();
+    spawn { slow_client(port, replies) };
+    spawn { fast_client(port, replies) };
+    val log: list<str> = list();
+    val served = await serve(listener, log);
+    assert(served == 0);
+    assert(list_len(log) == 2);
+    assert(list_get(log, 0) == "fast");
+    assert(list_get(log, 1) == "slow");
+    val r1 = recv(replies);
+    val r2 = recv(replies);
+    assert(r1 == "echo fast");
+    assert(r2 == "echo slow");
+    tcp_close_listener(listener);
+    println("async sockets ok");
+    return 0
+}

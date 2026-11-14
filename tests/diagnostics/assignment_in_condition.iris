@@ -1,0 +1,9 @@
+// expect: E0005 at 7:10
+// fix: if x == 2
+// fix-compiles
+
+def main() -> i64 {
+    var x = 1
+    if x = 2 { println("two"); }
+    return 0
+}

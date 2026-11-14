@@ -181,3 +181,58 @@ fn test_lsp_hover_and_completions_local_bindings() {
         .expect("expected completion item for y");
     assert_eq!(y_comp.detail.as_deref(), Some("var: f64"));
 }
+
+// ── The compiler's fixes are the editor's quick fixes ──────────────────────
+
+#[test]
+fn test_lsp_reports_every_error_with_full_spans_and_quick_fixes() {
+    let mut lsp = LspState::new();
+    // Two functions, one mistake each: both are reported.
+    let src = "def a() -> i64 {\n    pritnln(\"x\");\n    0\n}\n\ndef b() -> i64 {\n    val total = 3\n    totl\n}\n";
+    let diags = lsp.open_document(URI, src);
+    let errors: Vec<_> = diags.iter().filter(|d| d.severity == 1).collect();
+    assert_eq!(errors.len(), 2, "{errors:?}");
+    // The span covers the whole name, not one character.
+    let first = errors
+        .iter()
+        .find(|d| d.message.contains("pritnln"))
+        .expect("pritnln");
+    assert_eq!(
+        (first.line, first.character, first.end_character),
+        (1, 4, 11),
+        "{first:?}"
+    );
+    // The fix comes back as a preferred quick fix that replaces the name.
+    let actions = lsp.code_actions(URI, 1, 4, 1, 11);
+    let fix = actions
+        .iter()
+        .find(|a| a.title.contains("did you mean `println`"))
+        .unwrap_or_else(|| panic!("no quick fix: {actions:?}"));
+    assert!(fix.preferred);
+    assert_eq!(fix.edit_range, (1, 4, 1, 11));
+    assert_eq!(fix.new_text, "println");
+}
+
+#[test]
+fn test_lsp_multi_edit_fix_and_related_location() {
+    let mut lsp = LspState::new();
+    // `to_str(...)` wraps the operand: two edits in one quick fix.
+    let src = "def main() -> i64 {\n    val s = \"n = \" + 3\n    println(s)\n    return 0\n}\n";
+    lsp.open_document(URI, src);
+    let actions = lsp.code_actions(URI, 1, 0, 1, 30);
+    let wrap = actions
+        .iter()
+        .find(|a| a.title.contains("to_str"))
+        .unwrap_or_else(|| panic!("{actions:?}"));
+    assert_eq!(wrap.new_text, "to_str(");
+    assert_eq!(wrap.more_edits.len(), 1);
+    // `val` reassigned: the declaration is a related location.
+    let src = "def main() -> i64 {\n    val x = 1\n    x = 2\n    return x\n}\n";
+    let diags = lsp.open_document(URI, src);
+    let d = diags
+        .iter()
+        .find(|d| d.code.as_deref() == Some("E0112"))
+        .unwrap_or_else(|| panic!("{diags:?}"));
+    assert_eq!(d.related.len(), 1);
+    assert_eq!(d.related[0].0 .0, 1, "declared on line 2 (0-based 1)");
+}

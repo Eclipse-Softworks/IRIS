@@ -1,0 +1,52 @@
+bring "checkpoint.iris" bring "uno_control.iris"
+
+// Round nonnegative model coefficients to scale 1000 with bounded integer search.
+def quantize(value: f64) -> i64 {
+    assert(value >= 0.0 && value <= 2.0);
+    var rounded = 0;
+    for candidate in 0 .. 2001 {
+        if to_f64(candidate) <= value * 1000.0 + 0.5 { rounded = candidate };
+    };
+    return rounded
+}
+
+def main() -> i64 {
+    val plant = Plant { dynamics: Dynamics { retention: 0.8, gain: 0.25 }, drag: 0.0, noise: 0.01 };
+    val trained = train(collect(plant, 96, 43), Dynamics { retention: 0.1, gain: 0.5 });
+    assert(valid(trained));
+    assert(is_ok(save_checkpoint("iris-robot-learned.txt", trained)));
+    val loaded = load_checkpoint("iris-robot-learned.txt");
+    assert(is_ok(loaded));
+    val restored = unwrap(loaded);
+    val a = quantize(restored.retention);
+    val b = quantize(restored.gain);
+    assert(a >= 0 && a < 990 && b >= 50 && b <= 2000);
+    var maximum_error = 0.0;
+    // 9 * 9 * 3 states include saturation, sign changes, and odd integer inputs.
+    for p in 0 .. 9 {
+        for v in 0 .. 9 {
+            for t in 0 .. 3 {
+                val position = p * 501 - 2004;
+                val velocity = v * 201 - 804;
+                val target = t * 1301 - 1301;
+                val expected = clamp(requested(restored, to_f64(position) / 1000.0, to_f64(velocity) / 1000.0, to_f64(target) / 1000.0, false), -1.0, 1.0);
+                val actual = to_f64(fixed_command(a, b, position, velocity, target)) / 1000.0;
+                val difference = expected - actual;
+                val error = if difference < 0.0 { -difference } else { difference };
+                if error > maximum_error { maximum_error = error };
+                assert(error < 0.01);
+            };
+        };
+    };
+    // Generated code imports the exact same scalar kernel used above.
+    var source = concat("bring \"uno_control.iris\"\n\npub def learned_command(position: i64, velocity: i64, target: i64) -> i64 {\n    return fixed_command(",
+        concat(to_str(a), concat(", ", concat(to_str(b), ", position, velocity, target)\n}\n\ndef main() -> i64 {\n    if learned_command(0, 0, 2000) != 1000 { return 1 };\n    if learned_command(0, 0, -2000) != -1000 { return 2 };\n    if learned_command(1000, 0, 1000) != 0 { return 3 };\n    if learned_command(100001, 0, 0) != 0 { return 4 };\n"))));
+    val positive = fixed_command(a, b, 0, 100, 200);
+    val negative = fixed_command(a, b, 0, -100, -200);
+    source = concat(source, concat("    if learned_command(0, 100, 200) != ", concat(to_str(positive), " { return 5 };\n")));
+    source = concat(source, concat("    if learned_command(0, -100, -200) != ", concat(to_str(negative), " { return 6 };\n    return 0\n}\n")));
+    assert(is_ok(write_text("learned_policy.iris", source)));
+    println(f"exported coefficients: retention={a}/1000 gain={b}/1000 max_command_error={maximum_error}");
+    println("learning robot: learned policy exported and quantization checked");
+    return 0
+}

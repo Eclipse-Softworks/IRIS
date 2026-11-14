@@ -1,0 +1,199 @@
+// The agent learns the grid online, episode after episode, and is compared
+// with a random walk and with the best possible policy (planned on the true
+// dynamics). Everything is seeded, so a run is reproducible.
+
+bring "world.iris"
+bring "agent.iris"
+
+pub const EPISODES: i64 = 20
+pub const STEP_CAP: i64 = 100
+pub const ETA: f64 = 0.5
+
+// Expected steps to the goal from every cell under the best policy, by value
+// iteration on the true dynamics (one step costs one).
+def oracle_steps() -> list<f64> {
+    var v: list<f64> = list();
+    var i = 0;
+    while i < CELLS {
+        push(v, 0.0);
+        i = i + 1
+    };
+    var change = 1.0;
+    while change > 1.0e-9 {
+        change = 0.0;
+        val next: list<f64> = list();
+        var s = 0;
+        while s < CELLS {
+            if s == GOAL || is_wall(s) {
+                push(next, 0.0)
+            } else {
+                var best = 1.0e30;
+                var a = 0;
+                while a < ACTIONS {
+                    var q = 1.0;
+                    var slot = 0;
+                    while slot < SLOTS {
+                        val p = true_slot_prob(s, a, slot);
+                        if p > 0.0 {
+                            val target = slot_target(s, slot);
+                            q = q + p * (if target == GOAL { 0.0 } else { list_get(v, target) })
+                        };
+                        slot = slot + 1
+                    };
+                    if q < best {
+                        best = q
+                    };
+                    a = a + 1
+                };
+                change = max(change, abs(best - list_get(v, s)));
+                push(next, best)
+            };
+            s = s + 1
+        };
+        v = next
+    };
+    v
+}
+
+// Steps a uniformly random walk takes, capped, over `episodes` runs.
+def random_walk(episodes: i64, seed: i64) -> list<i64> {
+    val steps: list<i64> = list();
+    var rng = seed;
+    var e = 0;
+    while e < episodes {
+        var s = START;
+        var n = 0;
+        while s != GOAL && n < STEP_CAP {
+            rng = rng_next(rng);
+            val moved = world_step(s, rng % ACTIONS, rng);
+            s = moved.0;
+            rng = moved.1;
+            n = n + 1
+        };
+        push(steps, n);
+        e = e + 1
+    };
+    steps
+}
+
+// One episode of the agent from START: steps taken; learns as it goes when
+// `learning` is true. The generator's state is kept in rng[0].
+def episode(agent: Agent, eta: f64, rng: list<i64>, learning: bool) -> i64 {
+    var s = START;
+    var n = 0;
+    while s != GOAL && n < STEP_CAP {
+        val a = choose(agent, s, eta);
+        val moved = world_step(s, a, list_get(rng, 0));
+        list_set(rng, 0, moved.1);
+        if learning {
+            learn(agent, s, a, moved.0)
+        };
+        s = moved.0;
+        n = n + 1
+    };
+    n
+}
+
+def mean(values: list<i64>, lo: i64, hi: i64) -> f64 {
+    var sum = 0;
+    var i = lo;
+    while i < hi {
+        sum = sum + list_get(values, i);
+        i = i + 1
+    };
+    (sum to f64) / ((hi - lo) to f64)
+}
+
+// Tenths, as text: 12.345 -> "12.3".
+def tenths(x: f64) -> str {
+    val t = (x * 10.0 + 0.5) to i64;
+    to_str(t / 10) + "." + to_str(t % 10)
+}
+
+def curve(steps: list<i64>) -> str {
+    var out = "";
+    var k = 0;
+    while k < list_len(steps) {
+        out = out + to_str(list_get(steps, k)) + " ";
+        k = k + 1
+    };
+    out
+}
+
+// `episodes` episodes of online learning; the steps of each.
+def learn_for(agent: Agent, episodes: i64, rng: list<i64>) -> list<i64> {
+    val steps: list<i64> = list();
+    var e = 0;
+    while e < episodes {
+        push(steps, episode(agent, ETA, rng, true));
+        e = e + 1
+    };
+    steps
+}
+
+// Mean steps over 20 episodes exploiting what was learned, without learning.
+def exploit(agent: Agent, seed: i64) -> f64 {
+    val steps: list<i64> = list();
+    val rng: list<i64> = list();
+    push(rng, seed);
+    var t = 0;
+    while t < 20 {
+        push(steps, episode(agent, 0.0, rng, false));
+        t = t + 1
+    };
+    mean(steps, 0, 20)
+}
+
+def main() -> i64 {
+    val oracle = list_get(oracle_steps(), START);
+    println("best possible: " + tenths(oracle) + " expected steps");
+    val walk = random_walk(EPISODES, 12345);
+    val walk_mean = mean(walk, 0, EPISODES);
+    println("random walk: " + tenths(walk_mean) + " steps on average (capped at " + to_str(STEP_CAP) + ")");
+
+    val agent = agent_new();
+    val rng: list<i64> = list();
+    push(rng, 2024);
+    val phase1 = learn_for(agent, EPISODES, rng);
+    println("learning, steps per episode: " + curve(phase1));
+    val exploit1 = exploit(agent, 777);
+    println("then exploiting: " + tenths(exploit1) + " steps on average over 20 episodes");
+    assert(oracle > 7.99 && oracle < 8.01);
+    assert(walk_mean > 50.0);
+    assert(list_get(phase1, 0) > 2 * 8);
+    assert(mean(phase1, EPISODES - 5, EPISODES) <= oracle + 1.0);
+    assert(exploit1 <= oracle * 1.1);
+
+    // The world changes: a wall closes the left column.
+    close_cell(15);
+    val oracle2 = list_get(oracle_steps(), START);
+    println("cell 15 walled off; best possible now: " + tenths(oracle2) + " expected steps");
+    val phase2 = learn_for(agent, 15, rng);
+    println("relearning, steps per episode: " + curve(phase2));
+    val exploit2 = exploit(agent, 778);
+    println("then exploiting: " + tenths(exploit2) + " steps on average over 20 episodes");
+    assert(oracle2 > oracle);
+    assert(list_get(phase2, 0) > list_get(phase1, EPISODES - 1));
+    assert(mean(phase2, 10, 15) <= oracle2 * 1.3);
+    assert(exploit2 <= oracle2 * 1.25);
+
+    // What it learned about the mud, where it has enough evidence.
+    var slips = "";
+    var judged = 0;
+    val mud: list<i64> = [6, 7, 11, 12];
+    var m = 0;
+    while m < 4 {
+        val estimate = learned_slip(agent, mud[m]);
+        val tries = tries_from(agent, mud[m]);
+        slips = slips + to_str(mud[m]) + ": " + (if estimate < 0.0 { "unvisited" } else { tenths(estimate) + " (" + tenths(tries) + " recent moves)" }) + "  ";
+        if tries >= 8.0 {
+            assert(abs(estimate - 0.5) <= 0.2);
+            judged = judged + 1
+        };
+        m = m + 1
+    };
+    assert(judged >= 2);
+    println("learned chance a move fails in the mud (true 0.5): " + slips);
+    println("gridworld inference: learned online, adapted to a change, compared with random and the best policy");
+    return 0
+}

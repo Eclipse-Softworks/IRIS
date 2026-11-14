@@ -48,8 +48,13 @@ pub fn infer_shapes(graph: &GraphIr) -> Result<HashMap<NodeId, IrType>, LowerErr
                 let output_ty = infer_op_output_ty(op, params, &input_tys)?;
                 shapes.insert(*id, output_ty);
             }
-            GraphNode::Output { id, from, .. } => {
-                let ty = shapes.get(from).cloned().unwrap_or(IrType::Infer);
+            GraphNode::Output { id, from, name, .. } => {
+                let ty = shapes
+                    .get(from)
+                    .cloned()
+                    .ok_or_else(|| LowerError::UnknownOp {
+                        op: format!("output `{name}` names a layer that is not in the model"),
+                    })?;
                 shapes.insert(*id, ty);
             }
         }
@@ -64,7 +69,13 @@ fn infer_op_output_ty(
     params: &[LayerParam],
     input_tys: &[&IrType],
 ) -> Result<IrType, LowerError> {
-    let first = input_tys.first().copied().cloned().unwrap_or(IrType::Infer);
+    let first = input_tys
+        .first()
+        .copied()
+        .cloned()
+        .ok_or_else(|| LowerError::UnknownOp {
+            op: format!("{op}: the layer has no input"),
+        })?;
     match op {
         "Dense" | "Linear" => {
             let units = params

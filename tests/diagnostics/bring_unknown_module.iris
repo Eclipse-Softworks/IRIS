@@ -1,0 +1,8 @@
+// expect: E0115 at 6:7
+// message: no module `std.mathz`
+// fix: bring std.math
+// fix-compiles
+
+bring std.mathz
+
+def main() -> i64 { 0 }

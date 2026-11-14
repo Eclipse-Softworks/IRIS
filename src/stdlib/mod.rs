@@ -2,6 +2,7 @@
 //!
 //! Stdlib modules are embedded as source strings via `include_str!`.
 //! Use `stdlib_source("name")` to retrieve the IRIS source for a module.
+//! stdlib matured with extended mathematical, time, collection, queue, string, json, bitset, path, deque, heap, and set APIs. v1.3
 
 /// Canonical completion/discovery list for every embedded standard-library
 /// module. Editor integrations consume this instead of maintaining a second,
@@ -11,6 +12,7 @@ pub const STDLIB_MODULE_NAMES: &[&str] = &[
     "ais",
     "async",
     "bitset",
+    "buffer",
     "collections",
     "container",
     "crypto",
@@ -37,6 +39,7 @@ pub const STDLIB_MODULE_NAMES: &[&str] = &[
     "nn",
     "os",
     "path",
+    "pcap",
     "queue",
     "reflect",
     "rl",
@@ -54,6 +57,7 @@ pub const STDLIB_MODULE_NAMES: &[&str] = &[
     "termplot",
     "testing",
     "time",
+    "tls",
     "uncertainty",
     "unicode",
 ];
@@ -91,6 +95,7 @@ pub fn stdlib_source(name: &str) -> Option<&'static str> {
         "dataset" => Some(include_str!("dataset.iris")),
         "dataframe" => Some(include_str!("dataframe.iris")),
         "bitset" => Some(include_str!("bitset.iris")),
+        "buffer" => Some(include_str!("buffer.iris")),
         "log" => Some(include_str!("log.iris")),
         "meta_learning" => Some(include_str!("meta_learning.iris")),
         "async" => Some(include_str!("async.iris")),
@@ -107,6 +112,8 @@ pub fn stdlib_source(name: &str) -> Option<&'static str> {
         // Adaptive AI (v1.0.1)
         "adaptive" => Some(include_str!("adaptive.iris")),
         "uncertainty" => Some(include_str!("uncertainty.iris")),
+        "pcap" => Some(include_str!("pcap.iris")),
+        "tls" => Some(include_str!("tls.iris")),
         // Networking
         "http_server" => Some(include_str!("http_server.iris")),
         "net" => Some(include_str!("net.iris")),

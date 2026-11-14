@@ -6,3 +6,9 @@ pub def test_spans_and_assertions() -> i64 {
     assert(a * 2 == b);
     0
 }
+
+def main() -> i64 {
+    test_spans_and_assertions();
+    0
+}
+

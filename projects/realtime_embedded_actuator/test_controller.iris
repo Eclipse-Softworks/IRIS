@@ -1,0 +1,40 @@
+// Host assertion harness for the bare-metal embedded actuator controller.
+// `controller.iris` targets `iris embedded` (where panic/assert is disallowed),
+// so host verification lives here using `bring "controller.iris"`.
+bring "controller.iris"
+
+def main() -> i64 {
+    // 1. Clamp edge cases
+    assert(clamp_i64(-150, -100, 100) == -100);
+    assert(clamp_i64(150, -100, 100) == 100);
+    assert(clamp_i64(-100, -100, 100) == -100);
+    assert(clamp_i64(100, -100, 100) == 100);
+    assert(clamp_i64(42, -100, 100) == 42);
+
+    // 2. Single-step PD math and saturation boundaries
+    assert(actuator_step(0, 0, 384, 192, -100, 100) == 0);
+    assert(actuator_step(200, 0, 384, 192, -100, 100) == 100);
+    assert(actuator_step(-200, 0, 384, 192, -100, 100) == -100);
+    assert(actuator_step(64, 0, 256, 0, -100, 100) == 64);
+    assert(actuator_step(32, -16, 512, 256, -100, 100) == 48);
+
+    // 3. Reproduce the exact 4-step trajectory exercised in controller::main()
+    var error_samples = [120, 85, 42, 10];
+    var expected_efforts = [100, 100, 30, -9];
+    var prev_error = 160;
+    var accumulated_effort = 0;
+
+    for idx in 0 .. 4 {
+        val current_error = error_samples[idx];
+        val delta_error = current_error - prev_error;
+        prev_error = current_error;
+        val effort = actuator_step(current_error, delta_error, 384, 192, -100, 100);
+        assert(effort == expected_efforts[idx]);
+        accumulated_effort = accumulated_effort + effort;
+    };
+
+    assert(accumulated_effort == 221);
+    println("realtime_embedded_actuator host harness ok");
+    return 0
+}
+

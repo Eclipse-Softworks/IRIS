@@ -1,0 +1,53 @@
+// {{name}}: a ROS 2 node.
+//
+//   iris run main.iris     needs ROS 2 and the IRIS bridge (`iris doctor` checks)
+//   iris test              the control law, without ROS
+//
+// It publishes a geometry_msgs/Twist on /{{name}}/cmd_vel every 100 ms and
+// listens to that topic itself, so it runs without other nodes; point it at a
+// robot by changing the topics. The speed follows `speed_for`, the part to
+// change. `ros2 topic echo /{{name}}/cmd_vel` shows the commands, and
+// `ros2 param set /{{name}} gain 0.5` changes the gain while it runs.
+
+bring std.ros2
+
+// Forward speed for `clearance` metres of free space ahead: slow near
+// obstacles, stopped inside 0.3 m, never above 1 m/s.
+def speed_for(clearance: f64, gain: f64) -> f64 {
+    if clearance < 0.3 { 0.0 } else { min(1.0, gain * (clearance - 0.3)) }
+}
+
+def main() -> i64 {
+    val ctx = context_create()
+    assert(ctx.handle != 0)
+    val node = node_create(ctx, "{{name}}", "")
+    assert(node.handle != 0)
+    param_declare_f64_range(node, "gain", 0.5, 0.0, 2.0, "speed per metre of clearance")
+    val cmd_pub = publisher_create(node, "/{{name}}/cmd_vel", "geometry_msgs/msg/Twist")
+    val cmd_sub = subscription_create(node, "/{{name}}/cmd_vel", "geometry_msgs/msg/Twist")
+    val tick = wall_timer_create(node, 100)
+    // A stand-in for a range sensor: an obstacle 3 m away, closing.
+    var clearance = 3.0
+    var heard = 0
+    while heard < 20 {
+        val ev = spin_once(ctx, 200)
+        if is_timer(ev, tick) {
+            val speed = speed_for(clearance, param_f64(node, "gain"))
+            publish_twist(cmd_pub, make_twist(speed, 0.0, 0.0, 0.0, 0.0, 0.0))
+            clearance = clearance - 0.15
+        }
+        if is_message(ev, cmd_sub) {
+            heard = heard + 1
+            println("cmd_vel " + to_str(msg_f64(ev.message, "linear.x")))
+        }
+    }
+    println("{{name}}: 20 commands published and received")
+    return 0
+}
+
+def test_speed_for() -> i64 {
+    assert(speed_for(0.2, 0.5) == 0.0)
+    assert(speed_for(1.3, 0.5) == 0.5)
+    assert(speed_for(10.0, 0.5) == 1.0)
+    0
+}

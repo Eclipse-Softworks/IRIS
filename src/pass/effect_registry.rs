@@ -25,6 +25,9 @@ impl EffectRow {
 
     pub fn new(effects: Vec<String>) -> Self {
         let mut s = effects;
+        // `pure` names the empty row; it is never an effect a body performs.
+        // Keeping it as a tag made `effect pure` leak into callers' rows.
+        s.retain(|e| e != "pure");
         s.sort();
         s.dedup();
         Self {
@@ -40,6 +43,7 @@ impl EffectRow {
     /// Build from effect list + effect variable names.
     pub fn from_parts(effects: Vec<String>, vars: Vec<String>) -> Self {
         let mut s = effects;
+        s.retain(|e| e != "pure");
         s.sort();
         s.dedup();
         Self { effects: s, vars }
@@ -286,6 +290,8 @@ impl EffectRegistry {
                 "tcp_recv",
                 "tcp_close",
                 "tcp_accept",
+                // A task that completes when a socket can be read.
+                "async_readable",
                 "tcp_set_timeout",
                 "udp_bind",
                 "udp_send",
@@ -321,6 +327,9 @@ impl EffectRegistry {
                 "spawn_async",
                 "chan_send",
                 "chan_recv",
+                // A task that completes with the channel's next value.
+                "async_recv",
+                "task_cancel",
                 "chan_close",
                 "chan_try_recv",
                 "chan_len",
@@ -394,6 +403,8 @@ impl EffectRegistry {
                 "sleep",
                 "sleep_ms",
                 "sleep_us",
+                // A task that completes after the given milliseconds.
+                "async_sleep",
                 "std.time.now",
                 "std.time.now_ms",
                 "std.time.now_us",

@@ -96,7 +96,11 @@ fn panic_message(output: &std::process::Output) -> Option<String> {
         .filter(|s| !s.is_empty())
         .collect::<Vec<_>>()
         .join("\n");
-    if combined.to_ascii_lowercase().contains("panic") {
+    // A runtime error -- a panic, a failed assert, an index out of bounds,
+    // an overflow -- exits with 101 and reports `error[E04xx]: ...`.
+    let runtime_error = output.status.code() == Some(101)
+        || crate::codegen::build::split_runtime_report(&stderr).is_some();
+    if runtime_error || combined.to_ascii_lowercase().contains("panic") {
         Some(combined)
     } else {
         None
@@ -198,6 +202,20 @@ mod tests {
             stderr: b"panic: boom".to_vec(),
         };
         assert_eq!(panic_message(&output), Some("panic: boom".to_owned()));
+    }
+
+    #[test]
+    fn panic_message_detects_runtime_errors() {
+        let output = std::process::Output {
+            status: std::process::ExitStatus::default(),
+            stdout: Vec::new(),
+            stderr: b"error[E0403]: index 5 is out of bounds for length 3
+ --> t.iris:4:5
+"
+            .to_vec(),
+        };
+        let msg = panic_message(&output).expect("a runtime error is a panic");
+        assert!(msg.contains("E0403") && msg.contains("t.iris:4:5"), "{msg}");
     }
 
     #[test]

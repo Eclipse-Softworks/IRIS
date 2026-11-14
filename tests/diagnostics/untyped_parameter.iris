@@ -1,0 +1,8 @@
+// expect: E0005 at 6:7
+// message: needs a type
+// fix: def f(x: i64)
+// fix-compiles
+
+def f(x) -> i64 { x }
+
+def main() -> i64 { f(1) }

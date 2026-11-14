@@ -28,5 +28,7 @@ def main() -> i64 {
     }
     print(max_n);
     print(max_steps);
+    assert(max_n > 1);
+    assert(max_steps > 0);
     0
 }

@@ -1,0 +1,9 @@
+// expect: E0005 at 7:10
+// fix: if a && true
+// fix-compiles
+
+def main() -> i64 {
+    val a = true
+    if a and true { println("y"); }
+    return 0
+}

@@ -31,6 +31,10 @@ const MUST_FAIL: &[(&str, &str)] = &[
         "the borrow checker must reject it",
     ),
     (
+        "test_branch_arm_borrow.iris",
+        "arms of the same `if` borrowing a place with incompatible mutability must be rejected",
+    ),
+    (
         "test_exhaustiveness.iris",
         "a non-exhaustive match must be rejected",
     ),
@@ -43,6 +47,14 @@ const MUST_FAIL: &[(&str, &str)] = &[
         "borrow of a moved value must be rejected",
     ),
     ("test_move_error.iris", "use after move must be rejected"),
+    (
+        "test_dyn_requires_impl.iris",
+        "a record that does not implement the trait must not become dyn",
+    ),
+    (
+        "test_infer_annotation_needed.iris",
+        "a used value of undetermined type must not default to i64",
+    ),
 ];
 
 /// Import-only fixtures used by standalone corpus tests. These are valid IRIS
@@ -60,10 +72,7 @@ const SUPPORT_MODULES: &[(&str, &str)] = &[
 
 /// Files that do not currently run, each with why. A debt register, not a
 /// permission slip: every entry names a cause, and the list should only shrink.
-const KNOWN_BROKEN: &[(&str, &str)] = &[(
-    "test_doc_comments.iris",
-    "no zero-argument function, so there is nothing to evaluate",
-)];
+const KNOWN_BROKEN: &[(&str, &str)] = &[];
 
 /// Files that do not yet assert their results. Shrinking; see #4.
 const NEEDS_ASSERTIONS: &[&str] = &[];
@@ -74,8 +83,6 @@ const NEEDS_ASSERTIONS: &[&str] = &[];
 const KNOWN_DIVERGENT: &[(&str, &str)] = &[
     ("test_adaptive.iris",
      "std.adaptive is native-only; the interpreter refuses its externs by design rather than returning a zero -- not a defect, and #34 is fixed"),
-    ("test_quick_wins.iris",
-     "produces no output under the interpreter"),
 ];
 
 fn corpus() -> Vec<String> {

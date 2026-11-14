@@ -1,0 +1,131 @@
+// Inventory service, version 2: a reservation larger than the shelf is
+// refused, and refusals are counted.
+//
+// `iris evolve-serve` serves the gateways below over HTTP. The top-level
+// `var`s are the program's state: when a new version is promoted, every
+// variable it also declares (with the same type) carries over, so stock and
+// counters survive the upgrade.
+
+var skus: list<str> = list()
+var stock: list<i64> = list()
+var served: i64 = 0
+var reserved: i64 = 0
+var refused: i64 = 0
+
+// The value of `key` in a flat JSON object, without quotes; "" if absent.
+def field(json: str, key: str) -> str effect throw {
+    val marker = "\"" + key + "\":";
+    val at = find(json, marker);
+    if is_some(at) == false {
+        return ""
+    };
+    val start = unwrap(at) + len(marker);
+    val n = len(json);
+    var end = start;
+    while end < n && str_index(json, end) != 44 && str_index(json, end) != 125 {
+        end = end + 1
+    };
+    val raw = trim(slice(json, start, end));
+    if len(raw) >= 2 && starts_with(raw, "\"") && ends_with(raw, "\"") {
+        slice(raw, 1, len(raw) - 1)
+    } else {
+        raw
+    }
+}
+
+def number(json: str, key: str) -> i64 effect throw {
+    val parsed = parse_i64(field(json, key));
+    if is_some(parsed) { unwrap(parsed) } else { 0 }
+}
+
+// The position of `sku` in the catalogue, or -1.
+def slot(sku: str) -> i64 effect alloc {
+    var found = -1;
+    var i = 0;
+    while i < len(skus) && found < 0 {
+        if list_get(skus, i) == sku {
+            found = i
+        };
+        i = i + 1
+    };
+    found
+}
+
+def refusal(reason: str) -> str {
+    "{\"ok\":false,\"error\":\"" + reason + "\"}"
+}
+
+def restock(request: str) -> str effect alloc, io, throw {
+    served = served + 1;
+    val sku = field(request, "sku");
+    val qty = number(request, "qty");
+    if len(sku) == 0 {
+        return refusal("missing sku")
+    };
+    if qty <= 0 {
+        return refusal("quantity must be positive")
+    };
+    var at = slot(sku);
+    if at < 0 {
+        push(skus, sku);
+        push(stock, 0);
+        at = len(skus) - 1
+    };
+    list_set(stock, at, list_get(stock, at) + qty);
+    "{\"ok\":true,\"stock\":" + to_str(list_get(stock, at)) + "}"
+}
+
+def reserve(request: str) -> str effect alloc, io, throw {
+    served = served + 1;
+    val at = slot(field(request, "sku"));
+    val qty = number(request, "qty");
+    if at < 0 {
+        return refusal("unknown sku")
+    };
+    if qty <= 0 {
+        return refusal("quantity must be positive")
+    };
+    val on_hand = list_get(stock, at);
+    if qty > on_hand {
+        refused = refused + 1;
+        return "{\"ok\":false,\"error\":\"insufficient stock\",\"stock\":" + to_str(on_hand) + ",\"short\":" + to_str(qty - on_hand) + "}"
+    };
+    list_set(stock, at, on_hand - qty);
+    reserved = reserved + qty;
+    "{\"ok\":true,\"stock\":" + to_str(list_get(stock, at)) + "}"
+}
+
+def stats(request: str) -> str effect alloc, io {
+    var units = 0;
+    var i = 0;
+    while i < len(stock) {
+        units = units + list_get(stock, i);
+        i = i + 1
+    };
+    val counters = "{\"served\":" + to_str(served) + ",\"reserved\":" + to_str(reserved) + ",\"refused\":" + to_str(refused);
+    counters + ",\"skus\":" + to_str(len(skus)) + ",\"units\":" + to_str(units) + "}"
+}
+
+def test_program() -> i64 effect alloc, io, throw {
+    assert(field("{\"qty\":3,\"sku\":\"bolt\"}", "sku") == "bolt");
+    assert(number("{\"qty\":3,\"sku\":\"bolt\"}", "qty") == 3);
+    assert(field("{\"sku\":\"bolt\"}", "qty") == "");
+    val before = served;
+    assert(restock("{\"sku\":\"test-part\",\"qty\":5}") == "{\"ok\":true,\"stock\":5}");
+    assert(reserve("{\"sku\":\"test-part\",\"qty\":2}") == "{\"ok\":true,\"stock\":3}");
+    assert(reserve("{\"sku\":\"nothing\",\"qty\":2}") == "{\"ok\":false,\"error\":\"unknown sku\"}");
+    val short = reserve("{\"sku\":\"test-part\",\"qty\":4}");
+    assert(short == "{\"ok\":false,\"error\":\"insufficient stock\",\"stock\":3,\"short\":1}");
+    assert(served == before + 4);
+    0
+}
+
+def test_transaction_rollback() -> i64 effect alloc, transaction, throw {
+    val probe: list<i64> = list(10);
+    transaction_begin();
+    list_push(probe, 99);
+    transaction_rollback();
+    assert(transaction_depth() == 0);
+    assert(list_len(probe) == 1);
+    0
+}

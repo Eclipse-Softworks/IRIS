@@ -1,0 +1,91 @@
+// projects/mission_intelligence/planner.iris
+// Autonomous scientific decision and experiment planning engine.
+
+bring std.math.*
+bring "types.iris"
+
+/// Propose next scientific action based on epistemic uncertainty, opportunities, and spacecraft state
+pub def planner_propose_action(
+    state: SpacecraftState,
+    sector_uncertainty: f64,
+    active_anomaly: AnomalyReport,
+    step_idx: i64
+) -> ProposedAction {
+    val has_anomaly = active_anomaly.has_anomaly;
+    val is_periapsis = state.altitude_km < 300.0;
+
+    // Epistemic value of the observation
+    val scientific_value = (sector_uncertainty * 1.5) + (if has_anomaly { 2.2 } else { 0.0 }) + (if is_periapsis { 1.8 } else { 0.0 });
+
+    // Intentionally ambitious exploration:
+    // If a plasma burst or high-value opportunity occurs, the discovery engine will propose
+    // aggressive spectral survey. If target geometry is near the Sun, it proposes pointing at 24 deg!
+    if has_anomaly {
+        if active_anomaly.anomaly_kind == "PLASMA_SURGE" {
+            // Aggressively sound the flare; geometry might point close to the Sun!
+            val sun_angle = if step_idx == 40 || step_idx == 41 { 24.0 } else { 55.0 };
+            return ProposedAction {
+                action_id: 1,
+                action_name: "SPECTRAL_SURVEY",
+                target_sun_angle_deg: sun_angle,
+                power_draw_w: 48.0,
+                expected_info_gain: 3.5,
+                rationale: "Urgent opportunity: High-resolution spectral tracking of magnetospheric plasma flare.",
+            };
+        };
+
+        if active_anomaly.anomaly_kind == "THERMAL_EXCURSION" {
+            return ProposedAction {
+                action_id: 3,
+                action_name: "THERMAL_RADIATOR_PURGE",
+                target_sun_angle_deg: 85.0,
+                power_draw_w: 12.0,
+                expected_info_gain: 0.5,
+                rationale: "Corrective action: Orient cold face to deep space to dump bus thermal load.",
+            };
+        };
+
+        if active_anomaly.anomaly_kind == "MOMENTUM_SATURATION" {
+            return ProposedAction {
+                action_id: 4,
+                action_name: "MOMENTUM_DESATURATION",
+                target_sun_angle_deg: 90.0,
+                power_draw_w: 15.0,
+                expected_info_gain: 0.2,
+                rationale: "Subsystem maintenance: Fire cold-gas thrusters to dump reaction wheel angular momentum.",
+            };
+        };
+    };
+
+    // Routine science operations based on expected information gain
+    if scientific_value > 1.4 {
+        ProposedAction {
+            action_id: 1,
+            action_name: "SPECTRAL_SURVEY",
+            target_sun_angle_deg: 65.0,
+            power_draw_w: 45.0,
+            expected_info_gain: scientific_value,
+            rationale: "High epistemic uncertainty: Acquiring high-resolution spectral surface & atmospheric data.",
+        }
+    } else {
+        if scientific_value > 0.8 {
+            ProposedAction {
+                action_id: 2,
+                action_name: "MAG_SOUNDING",
+                target_sun_angle_deg: 75.0,
+                power_draw_w: 16.0,
+                expected_info_gain: scientific_value,
+                rationale: "Routine orbital mapping: Multi-frequency magnetometer sounding pass.",
+            }
+        } else {
+            ProposedAction {
+                action_id: 0,
+                action_name: "IDLE_MONITOR",
+                target_sun_angle_deg: 90.0,
+                power_draw_w: 4.0,
+                expected_info_gain: 0.1,
+                rationale: "Thoroughly mapped sector: Low-power passive telemetry monitoring & battery recharge.",
+            }
+        }
+    }
+}

@@ -1,0 +1,80 @@
+// std.unicode against UTF-8 (RFC 3629) and the Unicode Character Database.
+// Expected values are hand-derived from those references: each string's
+// bytes and code points are given in the comments.
+
+bring std.unicode
+
+def utf8() -> i64 {
+    // "h" 68, "é" C3 A9 (U+00E9), "l" "l" "o": 5 code points, 6 bytes.
+    assert(len("héllo") == 6);
+    assert(codepoint_count("héllo") == 5);
+    // "日本語": three 3-byte sequences.
+    assert(codepoint_count("日本語") == 3);
+    // U+1F600 is F0 9F 98 80.
+    assert(codepoint_count("😀") == 1);
+    assert(codepoint_count("") == 0);
+
+    val e = decode_at("héllo", 1);
+    assert(e.0 == 0xE9);
+    assert(e.1 == 3);
+    val ri = decode_at("日本語", 3);
+    assert(ri.0 == 0x672C);
+    assert(ri.1 == 6);
+    val smile = decode_at("a😀", 1);
+    assert(smile.0 == 0x1F600);
+    assert(smile.1 == 5);
+    val past = decode_at("a", 1);
+    assert(past.0 == -1 && past.1 == -1);
+    assert(codepoint_at("héllo", 0) == 0x68);
+    assert(codepoint_at("héllo", 1) == 0xE9);
+
+    // Continuation bytes are 80-BF; C0-FF begin sequences.
+    assert(is_continuation(0x80));
+    assert(is_continuation(0xBF));
+    assert(!is_continuation(0x7F));
+    assert(!is_continuation(0xC3));
+    assert(!is_continuation(0xF0));
+    0
+}
+
+def properties() -> i64 {
+    assert(is_ascii_letter(0x41) && is_ascii_letter(0x7A));
+    assert(!is_ascii_letter(0x40) && !is_ascii_letter(0x5B) && !is_ascii_letter(0xE9));
+    assert(is_ascii_digit(0x30) && is_ascii_digit(0x39) && !is_ascii_digit(0x3A));
+    assert(is_whitespace(0x20) && is_whitespace(0x09) && is_whitespace(0x0A) && is_whitespace(0x0D));
+    assert(!is_whitespace(0x41));
+    // Latin-1 letters: U+00C0-00D6, U+00D8-00F6, U+00F8-00FF; U+00D7 (×)
+    // and U+00F7 (÷) are symbols.
+    assert(is_letter(0xC0) && is_letter(0xE9) && is_letter(0xFF));
+    assert(!is_letter(0xD7) && !is_letter(0xF7));
+    // Arabic-Indic digits U+0660-0669 and U+06F0-06F9 are Nd.
+    assert(is_digit(0x0660) && is_digit(0x06F9) && !is_digit(0x066A));
+    assert(word_count("  the quick\tbrown\nfox  ") == 4);
+    assert(word_count("") == 0);
+    0
+}
+
+// General_Category from UnicodeData.txt.
+def categories() -> i64 {
+    assert(category(0x41) == "Lu");     // A
+    assert(category(0x61) == "Ll");     // a
+    assert(category(0x30) == "Nd");     // 0
+    assert(category(0x20) == "Zs");     // space
+    assert(category(0x0A) == "Cc");     // line feed
+    assert(category(0x09) == "Cc");     // tab
+    assert(category(0xC0) == "Lu");     // À
+    assert(category(0xDE) == "Lu");     // Þ
+    assert(category(0xDF) == "Ll");     // ß
+    assert(category(0xE9) == "Ll");     // é
+    assert(category(0xFF) == "Ll");     // ÿ
+    assert(category(0x0660) == "Nd");   // Arabic-Indic zero
+    0
+}
+
+def main() -> i64 {
+    utf8();
+    properties();
+    categories();
+    println("unicode reference ok");
+    return 0
+}

@@ -1,0 +1,9 @@
+// expect: E0406 at 7:5
+// message: assertion failed: total == 7
+// output: total 6
+def main() -> i64 {
+    val total = 1 + 2 + 3
+    println("total " + to_str(total))
+    assert(total == 7)
+    return 0
+}

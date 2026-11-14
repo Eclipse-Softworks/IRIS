@@ -1,0 +1,9 @@
+// expect: E0403 at 7:20
+// message: index 5 is out of bounds for length 3
+// output: before
+def main() -> i64 {
+    val xs: list<i64> = list(1, 2, 3)
+    println("before")
+    println(to_str(list_get(xs, 5)))
+    return 0
+}

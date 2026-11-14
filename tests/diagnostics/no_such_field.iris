@@ -1,0 +1,9 @@
+// expect: E0113 at 8:14
+// message: `Point` has no field `z`
+
+record Point { x: i64, y: i64 }
+
+def main() -> i64 {
+    val p = Point { x: 1, y: 2 }
+    return p.z
+}

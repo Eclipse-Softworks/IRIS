@@ -6,7 +6,8 @@
 
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::CommandFactory;
+use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use crate::EmitKind;
 
@@ -92,7 +93,7 @@ pub struct Cli {
     pub output: Option<PathBuf>,
 
     /// Diagnostic error format (human or json)
-    #[arg(long = "error-format", value_enum, default_value_t = ErrorFormatCli::Human)]
+    #[arg(long = "error-format", value_enum, default_value_t = ErrorFormatCli::Human, global = true)]
     pub error_format: ErrorFormatCli,
 
     /// Target preset/triple for LLVM and native builds
@@ -117,20 +118,66 @@ pub struct Cli {
     pub max_depth: usize,
 
     /// Disable incremental compilation cache
-    #[arg(long = "no-cache")]
+    #[arg(long = "no-cache", global = true)]
     pub no_cache: bool,
 
     /// Run with sandboxed security (deny fs/network/ffi/process)
-    #[arg(long = "sandbox")]
+    #[arg(long = "sandbox", global = true)]
     pub sandbox: bool,
 
     /// Require every effectful function to declare an `effect` clause that
     /// covers what it does; a violation fails the build
-    #[arg(long = "strict-effects")]
+    #[arg(long = "strict-effects", global = true)]
     pub strict_effects: bool,
+
+    /// Native code: run element-wise `par for` bodies as explicit vector
+    /// kernels (AVX2 on x86-64, NEON on AArch64) and enable LLVM's loop
+    /// vectorizer on every other loop
+    #[arg(long = "simd", global = true)]
+    pub simd: bool,
+
+    /// Native code: count how often each block runs; the program adds the
+    /// counts to IRIS_PROFILE_FILE (default iris.profile) when it exits
+    #[arg(long = "pgo-generate", global = true)]
+    pub pgo_generate: bool,
+
+    /// Native code: optimise with the profile a `--pgo-generate` build
+    /// recorded (branch weights, entry counts, hot and cold code)
+    #[arg(long = "pgo-use", global = true, value_name = "FILE")]
+    pub pgo_use: Option<PathBuf>,
+
+    /// ONNX and TensorRT: the model's trained parameters, a JSON object of
+    /// `"layer.weight": nested lists` (else freshly initialised)
+    #[arg(long = "weights", global = true, value_name = "FILE")]
+    pub weights: Option<PathBuf>,
+
+    /// Native code: run `par for` loops whose bodies work on numbers and
+    /// tensors on the GPU (`cuda`: NVIDIA, through the CUDA driver)
+    #[arg(long = "gpu", global = true, value_name = "API")]
+    pub gpu: Option<String>,
+
+    /// Native builds: emit DWARF debug info mapping machine code to IRIS
+    /// source lines, compiled at -O0, for gdb/lldb/VS Code debugging
+    #[arg(short = 'g', long = "debug", global = true)]
+    pub debug: bool,
+
+    /// Define a preprocessor symbol for `#ifdef`/`#if`, or with a value a
+    /// macro the source's uses of NAME become (repeatable)
+    #[arg(
+        short = 'D',
+        long = "define",
+        global = true,
+        value_name = "NAME[=VALUE]"
+    )]
+    pub defines: Vec<String>,
 
     /// Input file
     pub file: Option<PathBuf>,
+
+    /// Arguments for the program, after `--` (`iris file.iris --emit eval
+    /// -- a b`); the program sees them as `args()[1..]`
+    #[arg(last = true)]
+    pub program_args: Vec<String>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -139,11 +186,26 @@ pub enum Command {
     Build {
         /// Input file
         file: Option<PathBuf>,
+        /// Output file path
+        #[arg(short = 'o', long = "output")]
+        output: Option<PathBuf>,
+        /// Target triple (or native/wasm32/cortex-m4f/...)
+        #[arg(long)]
+        target: Option<String>,
     },
     /// Build and run the binary
     Run {
         /// Input file
         file: Option<PathBuf>,
+        /// Output file path
+        #[arg(short = 'o', long = "output")]
+        output: Option<PathBuf>,
+        /// Target triple (or native/wasm32/cortex-m4f/...)
+        #[arg(long)]
+        target: Option<String>,
+        /// Arguments for the program, after `--` (`iris run tool.iris -- a b`)
+        #[arg(last = true)]
+        program_args: Vec<String>,
     },
     /// Build an allocation-free bare-metal component bundle
     Embedded {
@@ -159,7 +221,8 @@ pub enum Command {
         #[arg(long, default_value = "main")]
         entry: String,
     },
-    /// Evaluate and hot-swap an evolved `(i64) -> i64` policy through seven gates
+    /// Evaluate and hot-swap an evolved policy, or a whole program, through
+    /// seven gates
     Evolve {
         /// Trusted baseline IRIS source
         #[arg(long)]
@@ -167,9 +230,25 @@ pub enum Command {
         /// Candidate IRIS source to validate and promote
         #[arg(long)]
         candidate: PathBuf,
-        /// JSON array of `{ "input": i64, "expected": i64 }` canary cases
+        /// JSON canary cases for a policy: `[{ "input": i64, "expected": i64 }]`
+        /// for the `i64` ABI, `[{ "inputs": [f64, ...], "expected": f64 }]` for
+        /// `f64:N`, `[{ "input": {field: value, ...}, "expected": {...} }]` for
+        /// `record`
         #[arg(long)]
-        cases: PathBuf,
+        cases: Option<PathBuf>,
+        /// Evolve a whole program instead: its `iris-evolution-program/2`
+        /// manifest (gateways), judged by --scenarios; program state is handed
+        /// over from the live generation
+        #[arg(long)]
+        manifest: Option<PathBuf>,
+        /// JSON scenarios for --manifest: `[{ "name": ..., "state": {...},
+        /// "steps": [{ "gateway": ..., "input": ..., "expected": ... }] }]`
+        #[arg(long)]
+        scenarios: Option<PathBuf>,
+        /// Required test of a program (`() -> i64`, must return 0);
+        /// repeatable, default `test_program`
+        #[arg(long = "test")]
+        test: Vec<String>,
         /// Trusted constitution text whose hash is pinned below
         #[arg(long)]
         constitution: PathBuf,
@@ -182,12 +261,33 @@ pub enum Command {
         /// Independently protected audit-head checkpoint (required)
         #[arg(long = "audit-head")]
         audit_head: PathBuf,
-        /// Lowest constitution-approved output
-        #[arg(long = "min-output", default_value_t = i64::MIN)]
-        min_output: i64,
-        /// Highest constitution-approved output
-        #[arg(long = "max-output", default_value_t = i64::MAX)]
-        max_output: i64,
+        /// Lowest constitution-approved output (an integer for `i64`, a
+        /// number for `f64:N`); unbounded when omitted
+        #[arg(long = "min-output", allow_hyphen_values = true)]
+        min_output: Option<String>,
+        /// Highest constitution-approved output; unbounded when omitted
+        #[arg(long = "max-output", allow_hyphen_values = true)]
+        max_output: Option<String>,
+        /// Policy ABI: `i64` for `(i64) -> i64`, `f64:N` for `N` f64 inputs
+        /// returning f64 (1 <= N <= 8), or `record` for a record of f64, i64
+        /// and bool fields in and out
+        #[arg(long, default_value = "i64")]
+        abi: String,
+        /// Constitution bound on one output field of a `record` policy,
+        /// `FIELD=MIN:MAX` (either side may be empty); repeatable. The
+        /// --min-output/--max-output range applies to every numeric field.
+        #[arg(long = "bound", allow_hyphen_values = true)]
+        bound: Vec<String>,
+        /// Require the IR-level allocation-free proof for the policy's call graph
+        #[arg(long = "require-allocation-free")]
+        require_allocation_free: bool,
+        /// Where candidate code runs during validation: `sandbox` (native
+        /// build inside the worker sandbox; fails closed where no sandbox is
+        /// enforced) or `interpreter`
+        #[arg(long = "validate", default_value = "sandbox")]
+        validate: String,
+        #[command(flatten)]
+        audit_trust: AuditTrustArgs,
     },
     /// Compile and atomically activate a whole program without behavioral gates
     #[command(name = "evolve-unrestricted")]
@@ -202,13 +302,15 @@ pub enum Command {
         #[arg(long = "acknowledge-unsafe")]
         acknowledge_unsafe: String,
     },
-    /// Search and evolve an optimal policy genome using genetic programming
+    /// Search for a policy by genetic programming, then optionally promote the
+    /// winner through the seven gates
     #[command(name = "evolve-search")]
     EvolveSearch {
-        /// Optional trusted baseline IRIS source to seed population
+        /// Trusted baseline IRIS source (required with --promote)
         #[arg(long)]
         baseline: Option<PathBuf>,
-        /// JSON array of `{ "input": i64, "expected": i64 }` canary cases
+        /// JSON canary cases: `[{ "input": i64, "expected": i64 }]` for the
+        /// `i64` ABI, `[{ "inputs": [f64, ...], "expected": f64 }]` for `f64:N`
         #[arg(long)]
         cases: PathBuf,
         /// Number of generations to evolve
@@ -259,35 +361,65 @@ pub enum Command {
         /// Independently protected audit-head checkpoint (required if --promote)
         #[arg(long = "audit-head")]
         audit_head: Option<PathBuf>,
-        /// Lowest constitution-approved output
-        #[arg(long = "min-output", default_value_t = i64::MIN)]
-        min_output: i64,
-        /// Highest constitution-approved output
-        #[arg(long = "max-output", default_value_t = i64::MAX)]
-        max_output: i64,
+        /// Lowest constitution-approved output (an integer for `i64`, a
+        /// number for `f64:N`); unbounded when omitted
+        #[arg(long = "min-output", allow_hyphen_values = true)]
+        min_output: Option<String>,
+        /// Highest constitution-approved output; unbounded when omitted
+        #[arg(long = "max-output", allow_hyphen_values = true)]
+        max_output: Option<String>,
+        /// Policy ABI: `i64` searches integer genomes for `(i64) -> i64`;
+        /// `f64:N` searches control laws over N f64 inputs (1 <= N <= 8)
+        #[arg(long, default_value = "i64")]
+        abi: String,
+        #[command(flatten)]
+        audit_trust: AuditTrustArgs,
     },
-    /// Run the production autonomic microservice daemon or living organism simulation
+    /// Run a control loop whose controller evolves while it runs: candidates
+    /// (and a background search's winner) are promoted through the seven
+    /// gates between steps and rolled back on a field violation
+    #[command(name = "evolve-live")]
+    EvolveLive(EvolveLiveArgs),
+    /// Serve a stateful program over HTTP and promote new versions of it
+    /// while it runs, carrying its state over
+    #[command(name = "evolve-serve")]
+    EvolveServe(EvolveServeArgs),
+    /// Run a service behind the autonomic daemon: a reverse proxy that
+    /// measures it and applies the policy that best holds its SLA
     #[command(name = "service-daemon")]
     ServiceDaemon {
-        /// Number of autonomic simulation ticks (default: 60)
-        #[arg(long, default_value_t = 60)]
+        /// The service, as an http:// URL (e.g. http://127.0.0.1:8080)
+        #[arg(long)]
+        upstream: String,
+        /// The port clients reach the service through
+        #[arg(long, default_value_t = 8088)]
+        listen: u16,
+        /// Monitoring intervals to run; 0 runs until stopped
+        #[arg(long, default_value_t = 0)]
         ticks: usize,
+        /// Length of a monitoring interval, in milliseconds
+        #[arg(long = "tick-ms", default_value_t = 1000)]
+        tick_ms: u64,
+        /// In-flight requests from which the shedding policy answers 429
+        #[arg(long = "max-inflight", default_value_t = 64)]
+        max_inflight: usize,
         /// Target P99 SLA threshold in milliseconds
         #[arg(long = "target-p99", default_value_t = 15.0)]
         target_p99: f64,
         /// Maximum allowed error budget ratio
         #[arg(long = "error-budget", default_value_t = 0.01)]
         error_budget: f64,
-        /// Run in headless mode without interactive terminal UI
+        /// Print nothing while running
         #[arg(long)]
         headless: bool,
-        /// Optional path to export JSON audit ledger
+        /// Write the JSON audit ledger here (after every interval when
+        /// running until stopped)
         #[arg(long)]
         audit: Option<PathBuf>,
-        /// Enable embedded HTTP live dashboard and Prometheus metrics server
+        /// Serve the live dashboard and Prometheus metrics
         #[arg(long)]
         serve: bool,
-        /// HTTP server port (default: 9090)
+        /// The dashboard and metrics port
         #[arg(long, default_value_t = 9090)]
         port: u16,
     },
@@ -323,6 +455,32 @@ pub enum Command {
     Pkg {
         /// Subcommand and arguments for the package manager
         args: Vec<String>,
+    },
+    /// Generate IRIS FFI bindings from a C/C++ header (.h/.hpp)
+    Bindgen {
+        /// Input C/C++ header path
+        header: PathBuf,
+        /// Optional output .iris file path (defaults to stdout)
+        #[arg(short = 'o', long = "output")]
+        output: Option<PathBuf>,
+        /// Library name to emit in @link(lib = "...")
+        #[arg(short = 'l', long = "lib")]
+        lib: Option<String>,
+        /// Treat header as C++ (namespaces, classes, templates, overloads)
+        #[arg(long = "cpp")]
+        cpp: bool,
+        /// Add header include search directory
+        #[arg(short = 'I', long = "include")]
+        include_dirs: Vec<PathBuf>,
+        /// Define preprocessor macro NAME or NAME=VALUE
+        #[arg(short = 'D', long = "define")]
+        defines: Vec<String>,
+        /// Write an extern "C" .cpp wrapper shim for C++ APIs
+        #[arg(long = "shim-out")]
+        shim_out: Option<PathBuf>,
+        /// Disable external clang/clang++ AST driver and use built-in parser
+        #[arg(long = "no-clang")]
+        no_clang: bool,
     },
     /// Run performance benchmarks
     Bench {
@@ -384,6 +542,45 @@ pub enum Command {
         #[arg(short = 'o', long = "output")]
         output: Option<PathBuf>,
     },
+    /// Find errors without building: every diagnostic, in every file given
+    /// (a directory checks each .iris file under it; default: this directory)
+    Check {
+        /// Files or directories
+        paths: Vec<PathBuf>,
+    },
+    /// Run, test or check again on every save
+    Watch {
+        /// The program (or directory) to watch
+        file: PathBuf,
+        /// Run `iris test` instead of `iris run`
+        #[arg(long)]
+        test: bool,
+        /// Run `iris check` instead of `iris run`
+        #[arg(long)]
+        check: bool,
+    },
+    /// Check the toolchain IRIS needs, end to end, and say how to fix what is missing
+    Doctor,
+    /// Create a project from a template: app, cli, server, ros2, controller
+    New {
+        /// Template (app, cli, server, ros2, controller); default app
+        #[arg(default_value = "app")]
+        template: String,
+        /// Project name: the directory to create
+        name: Option<String>,
+    },
+    /// Collect what is needed to report a compiler bug (nothing is sent)
+    #[command(name = "bug-report")]
+    BugReport {
+        /// The program that shows the bug
+        file: PathBuf,
+        /// Where to write the report (default: iris-bug-report-<time>)
+        #[arg(short = 'o', long = "output")]
+        output: Option<PathBuf>,
+        /// Also run the program, natively and in the interpreter
+        #[arg(long)]
+        run: bool,
+    },
     /// Format IRIS source files
     Fmt {
         /// Input file (optional — formats all *.iris in current directory)
@@ -412,15 +609,200 @@ pub struct CliArgs {
     pub no_cache: bool,
     pub sandbox: bool,
     pub strict_effects: bool,
+    pub simd: bool,
+    pub pgo_generate: bool,
+    pub pgo_use: Option<PathBuf>,
+    pub weights: Option<PathBuf>,
+    pub gpu: Option<String>,
     pub error_format: ErrorFormatCli,
+    pub debug: bool,
+    /// Arguments passed to the program itself (after `--`).
+    pub program_args: Vec<String>,
+}
+
+/// Hardening options for evolution audit checkpoints (`--audit-head`).
+#[derive(Args, Debug, Clone, Default)]
+pub struct AuditTrustArgs {
+    /// Shared secret for HMAC-SHA256 authenticated audit checkpoints
+    /// (`iris-evolution-audit-head/2`); or set `IRIS_AUDIT_HMAC_KEY`
+    #[arg(long = "audit-hmac-key")]
+    pub audit_hmac_key: Option<String>,
+    /// File containing the HMAC-SHA256 secret key; or set
+    /// `IRIS_AUDIT_HMAC_KEY_FILE`
+    #[arg(long = "audit-hmac-key-file")]
+    pub audit_hmac_key_file: Option<PathBuf>,
+    /// Secondary checkpoint file kept atomically in sync (repeatable); or set
+    /// `IRIS_AUDIT_HEAD_MIRROR`
+    #[arg(long = "audit-head-mirror")]
+    pub audit_head_mirror: Vec<PathBuf>,
+    /// Fail closed if `--audit-head` (or any mirror) resides in the same
+    /// directory as `--audit`; or set `IRIS_AUDIT_REQUIRE_SEPARATE_DOMAIN=1`
+    #[arg(long = "require-separate-audit-domain")]
+    pub require_separate_audit_domain: bool,
 }
 
 /// Result of `parse_args` — backward-compatible with the old API.
+/// `iris evolve-live`: a plant and controllers in IRIS, a loop on the host.
+#[derive(Args, Debug, Clone)]
+pub struct EvolveLiveArgs {
+    /// The plant: `def plant(s: PlantInput) -> PlantState`, PlantInput with
+    /// f64 fields position, velocity, force, dt and PlantState position, velocity
+    #[arg(long)]
+    pub plant: PathBuf,
+    /// The controller installed first: `def policy(error: f64, velocity: f64) -> f64`
+    #[arg(long)]
+    pub baseline: PathBuf,
+    /// A candidate controller, offered while the loop runs (repeatable, in order)
+    #[arg(long = "candidate")]
+    pub candidates: Vec<PathBuf>,
+    /// Canary cases: `[{ "inputs": [error, velocity], "expected": force }]`
+    #[arg(long)]
+    pub cases: PathBuf,
+    /// Trusted constitution text
+    #[arg(long)]
+    pub constitution: PathBuf,
+    /// Expected lowercase SHA-256 of the constitution
+    #[arg(long = "constitution-sha256")]
+    pub constitution_sha256: String,
+    /// Append-only JSONL decision log
+    #[arg(long)]
+    pub audit: PathBuf,
+    /// Independently protected audit-head checkpoint
+    #[arg(long = "audit-head")]
+    pub audit_head: PathBuf,
+    /// The actuator rating's lower bound (constitution)
+    #[arg(long = "min-output", allow_hyphen_values = true)]
+    pub min_output: f64,
+    /// The actuator rating's upper bound (constitution)
+    #[arg(long = "max-output", allow_hyphen_values = true)]
+    pub max_output: f64,
+    /// Comma-separated setpoints, each held for --hold seconds
+    #[arg(
+        long,
+        value_delimiter = ',',
+        allow_hyphen_values = true,
+        default_value = "1.0"
+    )]
+    pub setpoints: Vec<f64>,
+    /// Simulated seconds each setpoint is held
+    #[arg(long, default_value_t = 8.0)]
+    pub hold: f64,
+    /// Control period, seconds
+    #[arg(long, default_value_t = 0.02)]
+    pub dt: f64,
+    /// Simulated seconds between candidate offers
+    #[arg(long = "offer-every", default_value_t = 4.0)]
+    pub offer_every: f64,
+    /// Also run the float search beside the loop and offer its winner
+    #[arg(long)]
+    pub search: bool,
+    /// Search generations
+    #[arg(long, default_value_t = 20)]
+    pub generations: usize,
+    /// Search population
+    #[arg(long = "pop-size", default_value_t = 60)]
+    pub pop_size: usize,
+    /// Search seed, for a reproducible run
+    #[arg(long)]
+    pub seed: Option<u64>,
+    /// Require the IR-level allocation-free proof of every promoted controller
+    #[arg(long = "require-allocation-free")]
+    pub require_allocation_free: bool,
+    /// Pace the loop to the wall clock
+    #[arg(long)]
+    pub realtime: bool,
+    /// Maximum in-memory generations per slot (`N >= 1` or `unlimited`;
+    /// default 8, or `IRIS_HOT_SWAP_RETENTION`)
+    #[arg(long = "max-generations")]
+    pub max_generations: Option<String>,
+    /// External directory to durably archive generation records; or set
+    /// `IRIS_HOT_SWAP_ARCHIVE_DIR`
+    #[arg(long = "generation-archive")]
+    pub generation_archive: Option<PathBuf>,
+    #[command(flatten)]
+    pub audit_trust: AuditTrustArgs,
+}
+
+/// `iris evolve-serve`: a program's gateways over HTTP, upgradable in place.
+#[derive(Args, Debug, Clone)]
+pub struct EvolveServeArgs {
+    /// Program manifest (`iris-evolution-program/2`): the gateways served
+    #[arg(long)]
+    pub manifest: PathBuf,
+    /// The version served first
+    #[arg(long)]
+    pub baseline: PathBuf,
+    /// Scenarios every upgrade is judged by
+    #[arg(long)]
+    pub scenarios: PathBuf,
+    /// Required test function (repeatable); `test_program` when omitted
+    #[arg(long = "test")]
+    pub tests: Vec<String>,
+    /// Trusted constitution text
+    #[arg(long)]
+    pub constitution: PathBuf,
+    /// Expected lowercase SHA-256 of the constitution
+    #[arg(long = "constitution-sha256")]
+    pub constitution_sha256: String,
+    /// Append-only JSONL decision log
+    #[arg(long)]
+    pub audit: PathBuf,
+    /// Independently protected audit-head checkpoint
+    #[arg(long = "audit-head")]
+    pub audit_head: PathBuf,
+    /// Lowest number allowed in any scenario result (constitution)
+    #[arg(long = "min-output", allow_hyphen_values = true)]
+    pub min_output: Option<f64>,
+    /// Highest number allowed in any scenario result (constitution)
+    #[arg(long = "max-output", allow_hyphen_values = true)]
+    pub max_output: Option<f64>,
+    /// Port on 127.0.0.1; 0 picks a free one
+    #[arg(long, default_value_t = 8787)]
+    pub port: u16,
+    /// Write the bound port here once listening
+    #[arg(long = "port-file")]
+    pub port_file: Option<PathBuf>,
+    /// Largest accepted request body, in bytes
+    #[arg(long = "max-body", default_value_t = 1 << 20)]
+    pub max_body: usize,
+    /// Maximum in-memory generations per slot (`N >= 1` or `unlimited`;
+    /// default 8, or `IRIS_HOT_SWAP_RETENTION`)
+    #[arg(long = "max-generations")]
+    pub max_generations: Option<String>,
+    /// External directory to durably archive generation records; or set
+    /// `IRIS_HOT_SWAP_ARCHIVE_DIR`
+    #[arg(long = "generation-archive")]
+    pub generation_archive: Option<PathBuf>,
+    #[command(flatten)]
+    pub audit_trust: AuditTrustArgs,
+}
+
 #[derive(Debug)]
 pub enum ParseArgsResult {
     Args(CliArgs),
     Help,
+    /// `iris <command> --help`: that command's own help.
+    HelpFor(String),
     Version,
+    Check {
+        paths: Vec<PathBuf>,
+        json: bool,
+    },
+    Watch {
+        file: PathBuf,
+        test: bool,
+        check: bool,
+    },
+    Doctor,
+    New {
+        template: String,
+        name: Option<String>,
+    },
+    BugReport {
+        file: PathBuf,
+        output: Option<PathBuf>,
+        run: bool,
+    },
     Repl,
     Lsp,
     Dap,
@@ -433,19 +815,29 @@ pub enum ParseArgsResult {
     Evolve {
         baseline: PathBuf,
         candidate: PathBuf,
-        cases: PathBuf,
+        cases: Option<PathBuf>,
+        manifest: Option<PathBuf>,
+        scenarios: Option<PathBuf>,
+        test: Vec<String>,
         constitution: PathBuf,
         constitution_sha256: String,
         audit: PathBuf,
         audit_head: PathBuf,
-        min_output: i64,
-        max_output: i64,
+        min_output: Option<String>,
+        max_output: Option<String>,
+        abi: String,
+        bound: Vec<String>,
+        require_allocation_free: bool,
+        validate: String,
+        audit_trust: AuditTrustArgs,
     },
     EvolveUnrestricted {
         candidate: PathBuf,
         manifest: PathBuf,
         acknowledge_unsafe: String,
     },
+    EvolveLive(EvolveLiveArgs),
+    EvolveServe(EvolveServeArgs),
     EvolveSearch {
         baseline: Option<PathBuf>,
         cases: PathBuf,
@@ -465,8 +857,10 @@ pub enum ParseArgsResult {
         constitution_sha256: Option<String>,
         audit: Option<PathBuf>,
         audit_head: Option<PathBuf>,
-        min_output: i64,
-        max_output: i64,
+        min_output: Option<String>,
+        max_output: Option<String>,
+        abi: String,
+        audit_trust: AuditTrustArgs,
     },
     Meta {
         file: PathBuf,
@@ -475,6 +869,16 @@ pub enum ParseArgsResult {
     Pkg {
         /// Raw arguments after `pkg` subcommand
         args: Vec<String>,
+    },
+    Bindgen {
+        header: PathBuf,
+        output: Option<PathBuf>,
+        lib: Option<String>,
+        cpp: bool,
+        include_dirs: Vec<PathBuf>,
+        defines: Vec<String>,
+        shim_out: Option<PathBuf>,
+        no_clang: bool,
     },
     Bench {
         file: PathBuf,
@@ -508,7 +912,11 @@ pub enum ParseArgsResult {
         output: Option<PathBuf>,
     },
     ServiceDaemon {
+        upstream: String,
+        listen: u16,
         ticks: usize,
+        tick_ms: u64,
+        max_inflight: usize,
         target_p99: f64,
         error_budget: f64,
         headless: bool,
@@ -527,6 +935,16 @@ pub fn parse_args(args: &[String]) -> Result<ParseArgsResult, String> {
         Ok(c) => c,
         Err(e) => {
             if e.kind() == clap::error::ErrorKind::DisplayHelp {
+                // `iris <command> --help` (or `iris help <command>`) shows that
+                // command's options; `iris --help` the overview.
+                let named = args.iter().skip(1).any(|a| {
+                    !a.starts_with('-')
+                        && a != "help"
+                        && Cli::command().find_subcommand(a).is_some()
+                });
+                if named {
+                    return Ok(ParseArgsResult::HelpFor(e.render().to_string()));
+                }
                 return Ok(ParseArgsResult::Help);
             }
             if e.kind() == clap::error::ErrorKind::DisplayVersion {
@@ -535,44 +953,74 @@ pub fn parse_args(args: &[String]) -> Result<ParseArgsResult, String> {
             return Err(e.to_string());
         }
     };
+    // `#ifdef WINDOWS`, `DEBUG` and `-D` symbols describe this build.
+    crate::preprocessor::configure(cli.target.as_deref(), cli.debug, &cli.defines);
 
     match cli.command {
-        Some(Command::Build { file }) => {
+        Some(Command::Build {
+            file,
+            output,
+            target,
+        }) => {
             let path = file
                 .or(cli.file)
                 .ok_or_else(|| "no input file specified".to_owned())?;
             Ok(ParseArgsResult::Args(CliArgs {
                 emit: EmitKind::Binary,
                 path,
-                output: cli.output,
+                output: output.or(cli.output),
                 run_after_build: false,
-                target: cli.target,
+                target: target.or(cli.target),
                 dump_ir_after: cli.dump_ir_after,
                 max_steps: cli.max_steps,
                 max_depth: cli.max_depth,
                 no_cache: cli.no_cache,
                 sandbox: cli.sandbox,
                 strict_effects: cli.strict_effects,
+                simd: cli.simd,
+                pgo_generate: cli.pgo_generate,
+                pgo_use: cli.pgo_use.clone(),
+                weights: cli.weights.clone(),
+                gpu: cli.gpu.clone(),
                 error_format: cli.error_format,
+                debug: cli.debug,
+                program_args: cli.program_args.clone(),
             }))
         }
-        Some(Command::Run { file }) => {
+        Some(Command::Run {
+            file,
+            output,
+            target,
+            program_args,
+        }) => {
             let path = file
                 .or(cli.file)
                 .ok_or_else(|| "no input file specified".to_owned())?;
+            let program_args = if program_args.is_empty() {
+                cli.program_args
+            } else {
+                program_args
+            };
             Ok(ParseArgsResult::Args(CliArgs {
                 emit: EmitKind::Binary,
                 path,
-                output: cli.output,
+                output: output.or(cli.output),
                 run_after_build: true,
-                target: cli.target,
+                target: target.or(cli.target),
                 dump_ir_after: cli.dump_ir_after,
                 max_steps: cli.max_steps,
                 max_depth: cli.max_depth,
                 no_cache: cli.no_cache,
                 sandbox: cli.sandbox,
                 strict_effects: cli.strict_effects,
+                simd: cli.simd,
+                pgo_generate: cli.pgo_generate,
+                pgo_use: cli.pgo_use.clone(),
+                weights: cli.weights.clone(),
+                gpu: cli.gpu.clone(),
                 error_format: cli.error_format,
+                debug: cli.debug,
+                program_args,
             }))
         }
         Some(Command::Embedded {
@@ -590,22 +1038,38 @@ pub fn parse_args(args: &[String]) -> Result<ParseArgsResult, String> {
             baseline,
             candidate,
             cases,
+            manifest,
+            scenarios,
+            test,
             constitution,
             constitution_sha256,
             audit,
             audit_head,
             min_output,
             max_output,
+            abi,
+            bound,
+            require_allocation_free,
+            validate,
+            audit_trust,
         }) => Ok(ParseArgsResult::Evolve {
             baseline,
             candidate,
             cases,
+            manifest,
+            scenarios,
+            test,
             constitution,
             constitution_sha256,
             audit,
             audit_head,
             min_output,
             max_output,
+            abi,
+            bound,
+            require_allocation_free,
+            validate,
+            audit_trust,
         }),
         Some(Command::EvolveUnrestricted {
             candidate,
@@ -637,6 +1101,8 @@ pub fn parse_args(args: &[String]) -> Result<ParseArgsResult, String> {
             audit_head,
             min_output,
             max_output,
+            abi,
+            audit_trust,
         }) => Ok(ParseArgsResult::EvolveSearch {
             baseline,
             cases,
@@ -658,12 +1124,35 @@ pub fn parse_args(args: &[String]) -> Result<ParseArgsResult, String> {
             audit_head,
             min_output,
             max_output,
+            abi,
+            audit_trust,
         }),
+        Some(Command::EvolveLive(args)) => Ok(ParseArgsResult::EvolveLive(args)),
+        Some(Command::EvolveServe(args)) => Ok(ParseArgsResult::EvolveServe(args)),
         Some(Command::Meta { file, emit_ir }) => Ok(ParseArgsResult::Meta { file, emit_ir }),
         Some(Command::Repl) => Ok(ParseArgsResult::Repl),
         Some(Command::Lsp { .. }) => Ok(ParseArgsResult::Lsp),
         Some(Command::Dap { .. }) => Ok(ParseArgsResult::Dap),
         Some(Command::Pkg { args }) => Ok(ParseArgsResult::Pkg { args }),
+        Some(Command::Bindgen {
+            header,
+            output,
+            lib,
+            cpp,
+            include_dirs,
+            defines,
+            shim_out,
+            no_clang,
+        }) => Ok(ParseArgsResult::Bindgen {
+            header,
+            output,
+            lib,
+            cpp,
+            include_dirs,
+            defines,
+            shim_out,
+            no_clang,
+        }),
         Some(Command::Bench { file, iterations }) => {
             Ok(ParseArgsResult::Bench { file, iterations })
         }
@@ -681,7 +1170,14 @@ pub fn parse_args(args: &[String]) -> Result<ParseArgsResult, String> {
                     no_cache: cli.no_cache,
                     sandbox: cli.sandbox,
                     strict_effects: cli.strict_effects,
+                    simd: cli.simd,
+                    pgo_generate: cli.pgo_generate,
+                    pgo_use: cli.pgo_use.clone(),
+                    weights: cli.weights.clone(),
+                    gpu: cli.gpu.clone(),
                     error_format: cli.error_format,
+                    debug: cli.debug,
+                    program_args: cli.program_args.clone(),
                 }))
             } else {
                 Ok(ParseArgsResult::Profile)
@@ -701,11 +1197,31 @@ pub fn parse_args(args: &[String]) -> Result<ParseArgsResult, String> {
             Ok(ParseArgsResult::Upgrade { check, yes, force })
         }
         Some(Command::Setup) => Ok(ParseArgsResult::Setup),
+        Some(Command::Check { paths }) => Ok(ParseArgsResult::Check {
+            paths: if paths.is_empty() {
+                cli.file.into_iter().collect()
+            } else {
+                paths
+            },
+            json: matches!(cli.error_format, ErrorFormatCli::Json),
+        }),
+        Some(Command::Watch { file, test, check }) => {
+            Ok(ParseArgsResult::Watch { file, test, check })
+        }
+        Some(Command::Doctor) => Ok(ParseArgsResult::Doctor),
+        Some(Command::New { template, name }) => Ok(ParseArgsResult::New { template, name }),
+        Some(Command::BugReport { file, output, run }) => {
+            Ok(ParseArgsResult::BugReport { file, output, run })
+        }
         Some(Command::Install { url }) => Ok(ParseArgsResult::Install { url }),
         Some(Command::Fmt { file, check }) => Ok(ParseArgsResult::Fmt { file, check }),
         Some(Command::Docs { file, output }) => Ok(ParseArgsResult::Docs { file, output }),
         Some(Command::ServiceDaemon {
+            upstream,
+            listen,
             ticks,
+            tick_ms,
+            max_inflight,
             target_p99,
             error_budget,
             headless,
@@ -713,7 +1229,11 @@ pub fn parse_args(args: &[String]) -> Result<ParseArgsResult, String> {
             serve,
             port,
         }) => Ok(ParseArgsResult::ServiceDaemon {
+            upstream,
+            listen,
             ticks,
+            tick_ms,
+            max_inflight,
             target_p99,
             error_budget,
             headless,
@@ -738,7 +1258,14 @@ pub fn parse_args(args: &[String]) -> Result<ParseArgsResult, String> {
                 no_cache: cli.no_cache,
                 sandbox: cli.sandbox,
                 strict_effects: cli.strict_effects,
+                simd: cli.simd,
+                pgo_generate: cli.pgo_generate,
+                pgo_use: cli.pgo_use.clone(),
+                weights: cli.weights.clone(),
+                gpu: cli.gpu.clone(),
                 error_format: cli.error_format,
+                debug: cli.debug,
+                program_args: cli.program_args.clone(),
             }))
         }
     }
@@ -811,42 +1338,22 @@ pub fn version_text() -> String {
     )
 }
 
-/// Returns the usage/help text for the CLI.
-pub fn help_text() -> &'static str {
-    "IRIS compiler\n\
-     Usage: iris [subcommand] [options] <file.iris>\n\
-     \n\
-     Subcommands:\n\
-       build                 Build native binary (same as --emit binary)\n\
-       run                   Build and run the binary\n\
-       embedded             Build an allocation-free bare-metal component bundle\n\
-        evolve               Validate and hot-swap a governed `(i64) -> i64` policy\n\
-        test [file.iris]      Discover and run test_ functions (--filter <substr> --no-color)\n\
-       install [url]         Install dependencies or a package from a Git URL\n\
-       fmt [file.iris]       Format source files (--check to verify without modifying)\n\
-       repl                  Start an interactive REPL session\n\
-       lsp                   Start the LSP server (JSON-RPC on stdin/stdout)\n\
-       dap                   Start the DAP debug adapter (JSON-RPC on stdin/stdout)\n\
-       pkg <cmd>             Package manager (init, add, remove, install, list, build, run)\n\
-       bench <file.iris>     Run performance benchmarks on a file\n\
-       explain [code]        Show detailed explanation for an error code (e.g. E0100)\n\
-        upgrade               Self-upgrade the IRIS compiler to the latest version\n\
-        setup                 Download and configure toolchain dependencies\n\
-        docs [file.iris]      Generate HTML documentation from doc comments\n\
-     \n\
-     Options:\n\
-     --emit <kind>         Output kind: ir (default), llvm, llvm-complete, cuda, cuda-ptx, simd,\n\
-                              jit, pgo-instrument, pgo-optimize, graph, onnx, onnx-binary,\n\
-                              eval, binary, tensorrt\n\
-       -o <file>             Write output to <file> instead of stdout\n\
-       --target <triple>     Target preset/triple for llvm/binary outputs (e.g. linux-arm64)\n\
-       --dump-ir-after <p>   Dump IR to stderr after pass <p> completes\n\
-       --max-steps <n>       Legacy interpreter guardrail (ignored for native build/run/eval/jit)\n\
-       --max-depth <n>       Legacy call-depth guardrail (ignored for native build/run/eval/jit)\n\
-       --no-cache            Disable incremental compilation cache\n\
-       --sandbox             Run with sandboxed security (deny fs/network/ffi/process)\n\
-       --strict-effects      Require `effect` clauses that cover what each function\n\
-                             does; an effect violation fails the build\n\
-       --help, -h            Print this help and exit\n\
-       --version, -V         Print version and exit\n"
+/// The overview `iris --help` prints, generated from the command definitions
+/// above so it cannot fall out of date (it used to be a hand-written copy that
+/// lacked `evolve-live` and `evolve-serve`).
+pub fn help_text() -> String {
+    let mut cmd = Cli::command()
+        .about("IRIS compiler: build, run, test and check IRIS programs")
+        .after_help(
+            "Examples:\n  \
+             iris new app hello         start a project (templates: app, cli, server, ros2, controller)\n  \
+             iris run main.iris         build and run\n  \
+             iris test                  run the test_ functions in this directory\n  \
+             iris check                 find errors without building\n  \
+             iris watch main.iris       run again on every save\n  \
+             iris doctor                check the toolchain\n  \
+             iris explain E0109         what an error code means\n\n\
+             `iris <command> --help` shows a command's options.",
+        );
+    cmd.render_help().to_string()
 }

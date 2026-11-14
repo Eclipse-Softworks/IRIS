@@ -1,0 +1,275 @@
+// projects/mission_intelligence/types.iris
+// Domain types and telemetry contracts for IRIS Mission Intelligence (Simulated Mission Benchmark).
+
+pub record SpacecraftState {
+    time_s: f64,                     // Elapsed mission time (seconds)
+    altitude_km: f64,                // True physical orbital altitude above planetary surface (km)
+    radius_km: f64,                  // Total planetary radius r = R_p + h (km)
+    true_anomaly_rad: f64,           // Angular orbital position nu (radians)
+    velocity_kms: f64,               // Orbital velocity magnitude (km/s)
+    specific_energy: f64,            // Specific orbital energy E = v^2/2 - mu/r (km^2/s^2)
+    specific_momentum: f64,          // Specific angular momentum h = r * v_perp (km^2/s)
+    battery_pct: f64,                // Energy storage state of charge (0.0 to 100.0 %)
+    temp_celsius: f64,               // Spacecraft bus temperature (-20.0 to +65.0 C)
+    wheel_momentum_nms: f64,         // Reaction wheel angular momentum (N*m*s)
+    solar_flux_wm2: f64,             // Direct incident solar irradiance (W/m^2)
+    is_eclipse: bool,                // True if occluded by planetary shadow
+    sensor_sun_angle_deg: f64,       // Angle between payload boresight and Sun vector (deg)
+    accumulated_radiation_krad: f64, // Ambient unshielded cumulative ionizing radiation dose (Jovian belt) (krad)
+    vault_radiation_krad: f64,       // Shielded electronics vault cumulative dose (parametric scenario estimate: assumed 36x attenuation for 9.2 mm Al-Zn vault) (krad)
+}
+
+pub record RawObservation {
+    time_s: f64,                     // Observation timestamp
+    altitude_km: f64,                // True physical altitude (ground truth)
+    measured_altitude_km: f64,       // Telemetry altitude reading from noisy radar altimeter (km)
+    radius_km: f64,                  // Total radius (km)
+    measured_mag_nt: f64,            // Measured magnetic field intensity (nT)
+    plasma_density_cm3: f64,         // Plasma density (particles/cm^3)
+    spectrometer_snr: f64,           // Spectral acquisition signal-to-noise ratio
+    sensor_healthy: bool,            // Sensor hardware self-test status (simulator flag)
+    ground_truth_anomaly: bool,      // Simulator truth: true if step is an actual injected anomaly
+    anomaly_type: str,               // "NONE", "PLASMA_SURGE", "THERMAL_EXCURSION", "SENSOR_DROPOUT"
+}
+
+pub record AgentTelemetry {
+    time_s: f64,                     // Timestamp (seconds)
+    measured_altitude_km: f64,       // Radar altimeter telemetry reading
+    radius_km: f64,                  // Radius from center of body (km)
+    measured_mag_nt: f64,            // Magnetometer telemetry reading
+    plasma_density_cm3: f64,         // Plasma sensor telemetry reading
+    spectrometer_snr: f64,           // Spectrometer telemetry SNR
+    battery_pct: f64,                // Battery state of charge (%)
+    temp_celsius: f64,               // Spacecraft bus temperature (C)
+    wheel_momentum_nms: f64,         // Reaction wheel angular momentum (N*m*s)
+    is_eclipse: bool,                // Eclipse flag
+}
+
+pub record EnvironmentTimelineStep {
+    step_idx: i64,                   // Step index (0 to 99)
+    time_s: f64,                     // Mission elapsed time (s)
+    radius_km: f64,                  // True orbital radius (km)
+    altitude_km: f64,                // True physical altitude (km)
+    velocity_kms: f64,               // True orbital velocity (km/s)
+    ambient_mag_nt: f64,             // Ambient physical magnetic field (nT)
+    plasma_density_cm3: f64,         // Ambient plasma density (particles/cm^3)
+    is_eclipse: bool,                // Eclipse occultation
+    solar_flux_wm2: f64,             // Direct solar flux (W/m^2)
+    alt_noise_km: f64,               // Radar altimeter noise term (km)
+    mag_noise_nt: f64,               // Magnetometer sensor noise term (nT)
+    plasma_noise_cm3: f64,           // Plasma instrument noise term
+    spectrometer_snr: f64,           // Nominal spectrometer SNR
+    is_plasma_flare: bool,           // Ground truth physical plasma flare present
+    is_thermal_excursion: bool,      // Ground truth thermal excursion present
+    is_sensor_dropout: bool,         // Ground truth sensor dropout present
+    gt_anomaly_type: str,            // Ground truth classification string
+    flare_mag_boost: f64,            // Magnetic boost during flare (nT)
+    flare_plasma_boost: f64,         // Plasma boost during flare (cm^-3)
+}
+
+pub record TrajectoryPoint {
+    step: i64,
+    time_s: f64,
+    radius_km: f64,
+    ref_radius_km: f64,              // Independent analytical Kepler reference radius (km)
+    pos_diff_mm: f64,                // |r_numerical - r_reference| in mm
+    altitude_km: f64,
+    velocity_kms: f64,
+    ref_velocity_kms: f64,          // Independent analytical Kepler reference velocity (km/s)
+    vel_diff_mms: f64,               // |v_numerical - v_reference| in mm/s
+    specific_energy: f64,
+    specific_momentum: f64,
+    energy_drift_ppm: f64,
+}
+
+pub record ConvergenceStepRecord {
+    steps: i64,                      // Number of steps across full orbital revolution
+    dt_s: f64,                       // Timestep size delta_t (seconds)
+    max_pos_error_m: f64,            // Peak radial discrepancy vs analytical Kepler reference (meters)
+    pos_error_ratio: f64,            // Error reduction factor E(2*dt) / E(dt)
+    pos_order_alpha: f64,            // Observed empirical order of convergence alpha = log2(ratio)
+    max_vel_error_mms: f64,          // Peak velocity discrepancy vs analytical Kepler reference (mm/s)
+    vel_error_ratio: f64,            // Velocity error reduction factor
+    vel_order_alpha: f64,            // Observed empirical velocity order alpha
+    closure_error_mm: f64,           // Full-period closure position discrepancy |r(T) - r(0)| (mm)
+}
+
+pub record HypothesisResult {
+    hypothesis_id: i64,              // 0=Constant, 1=Linear, 2=InvSquare(1/r^2), 3=InvCube(1/r^3), 4=Exponential, 5=FreePowerLaw
+    name: str,                       // Hypothesis description
+    param_a: f64,                    // Primary parameter (e.g. exponent or slope)
+    param_b: f64,                    // Secondary parameter (e.g. scale factor)
+    train_mse: f64,                  // In-sample training MSE (Stage 1)
+    train_bic: f64,                  // Conventional training BIC (Stage 1)
+    val_mse: f64,                    // Validation MSE for model selection (Stage 2)
+    val_r2: f64,                     // Validation R^2 (Stage 2)
+    val_pred_score: f64,             // Validation predictive BIC-style score (Stage 2)
+    final_test_mse: f64,             // Untouched final held-out test MSE (Stage 3)
+    final_test_r2: f64,              // Untouched final held-out test R^2 (Stage 3)
+}
+
+pub record EquationCandidate {
+    formula_name: str,               // e.g. "Unconstrained Power Law: B(r) = k * r^p"
+    inferred_exponent: f64,          // Empirical power-law exponent (Target: -3.000)
+    inferred_k: f64,                 // Inferred dipole moment coefficient
+    train_mse: f64,                  // In-sample training MSE
+    final_test_mse: f64,             // Untouched final test MSE on unseen orbital radii
+    final_test_r2: f64,              // Untouched final test R^2
+    is_validated: bool,              // True if statistical confidence threshold exceeded
+}
+
+pub record AnomalyReport {
+    has_anomaly: bool,               // True if out-of-distribution event detected
+    time_s: f64,                     // Event detection timestamp
+    anomaly_kind: str,               // "NONE", "PLASMA_SURGE", "THERMAL_EXCURSION", "SENSOR_DROPOUT", "MOMENTUM_SATURATION"
+    severity_sigma: f64,             // Deviation Z-score from inferred nominal model
+    measured_val: f64,               // Observed abnormal magnitude
+    expected_val: f64,               // Inferred baseline prediction
+    description: str,                // Natural language description
+}
+
+pub def anomaly_none() -> AnomalyReport {
+    AnomalyReport {
+        has_anomaly: false,
+        time_s: 0.0,
+        anomaly_kind: "NONE",
+        severity_sigma: 0.0,
+        measured_val: 0.0,
+        expected_val: 0.0,
+        description: "",
+    }
+}
+
+pub record AnomalyStressScenario {
+    scenario_id: i64,
+    name: str,
+    total_steps: i64,
+    true_positives: i64,
+    false_positives: i64,
+    true_negatives: i64,
+    false_negatives: i64,
+    detection_lag_steps: i64,
+    recall: f64,
+    precision: f64,
+    f1_score: f64,
+    characteristic: str,
+}
+
+pub record ProposedAction {
+    action_id: i64,                  // Action enum identifier
+    action_name: str,                // "IDLE_MONITOR", "SPECTRAL_SURVEY", "MAG_SOUNDING", etc.
+    target_sun_angle_deg: f64,       // Commanded sensor angle relative to Sun vector
+    power_draw_w: f64,               // Required payload electrical power consumption (Watts)
+    expected_info_gain: f64,         // Expected information gain / scientific acquisition utility
+    rationale: str,                  // Epistemic justification from the discovery planner
+}
+
+pub record SafetyVerdict {
+    approved: bool,                  // True if passed all independent hard limits
+    violated_rule: str,              // "NONE", "SUN_POINTING_EXCLUSION", "BATTERY_RESERVE_VIOLATION", etc.
+    executed_action_name: str,       // Action actually cleared and dispatched to actuators
+    mitigation_reason: str,          // Explanation if proposal was vetoed or clamped
+}
+
+pub record ConfusionMatrix {
+    true_positives: i64,             // Anomaly correctly flagged
+    false_positives: i64,            // Normal step falsely flagged as anomaly
+    true_negatives: i64,             // Normal step correctly accepted as nominal
+    false_negatives: i64,            // Anomaly missed
+    recall: f64,                     // TP / (TP + FN)
+    precision: f64,                  // TP / (TP + FP)
+    f1_score: f64,                   // 2 * (P * R) / (P + R)
+    mean_delay_steps: f64,           // Average steps between onset and first detection
+}
+
+pub record AdversarialTestRecord {
+    test_id: i64,
+    vector_name: str,
+    commanded_action: str,
+    target_rule: str,
+    is_safe_command: bool,           // True if command is legitimately within bounds
+    expected_outcome: str,           // Test oracle: "[PASS: BLOCKED]" or "[PASS: ALLOWED]"
+    verdict_approved: bool,
+    executed_action: str,
+    correctly_arbitrated: bool,      // True if unsafe was rejected OR safe was approved
+}
+
+pub record AdversarialSafetyResult {
+    tests_run: i64,                  // Total adversarial test vectors (10)
+    unsafe_correctly_rejected: i64,  // True Rejections (9 / 9)
+    safe_correctly_approved: i64,    // True Approvals (1 / 1)
+    unsafe_incorrectly_approved: i64,// False Approvals / Hardware Breaches (0)
+    safe_incorrectly_rejected: i64,  // False Alarms / False Vetoes (0)
+    hardware_breaches: i64,          // Number of safety envelope breaches (must be 0)
+    arbitration_accuracy: f64,       // (True Rejections + True Approvals) / Total (100.0%)
+    fail_closed_rate: f64,           // 100.0% if all invalid/extreme inputs fail closed safely
+    records: list<AdversarialTestRecord>, // Individual test vector verification records
+}
+
+pub record MonteCarloTrialRecord {
+    trial_id: i64,
+    integer_seed: i64,
+    adaptive_yield: f64,
+    baseline_yield: f64,
+    conservative_yield: f64,
+    paired_diff: f64,
+    advantage_pct: f64,
+}
+
+pub record MonteCarloSummary {
+    num_trials: i64,                 // Number of repeated matched trials (20)
+    mean_adaptive_yield: f64,        // Average adaptive discovery yield across trials
+    std_adaptive_yield: f64,         // Sample standard deviation (s_ad)
+    se_adaptive_yield: f64,          // Standard error (SE_ad = s_ad / sqrt(N))
+    mean_baseline_yield: f64,        // Average fixed-schedule baseline yield
+    std_baseline_yield: f64,         // Sample standard deviation (s_bs)
+    se_baseline_yield: f64,          // Standard error (SE_bs = s_bs / sqrt(N))
+    mean_conservative_yield: f64,    // Average uniform conservative sounding baseline yield
+    std_conservative_yield: f64,     // Sample standard deviation of conservative baseline
+    mean_conservative_adv_pct: f64,  // Mean advantage relative to conservative baseline (%)
+    mean_paired_diff_cs: f64,        // Mean paired difference vs conservative baseline (yield units)
+    std_paired_diff_cs: f64,         // Sample std dev of paired difference vs conservative baseline
+    se_paired_diff_cs: f64,          // Standard error vs conservative baseline
+    ci_cs_diff_lower: f64,           // 99% Student's t CI lower bound vs conservative baseline (units)
+    ci_cs_diff_upper: f64,           // 99% Student's t CI upper bound vs conservative baseline (units)
+    t_stat_cs: f64,                  // Paired Student's t statistic vs conservative baseline
+    mean_paired_diff: f64,           // Mean of (Adaptive - Baseline 1) differences (d_bar) in yield units
+    std_paired_diff: f64,            // Sample std dev of paired differences (s_d)
+    se_paired_diff: f64,             // Standard error of difference (SE_d = s_d / sqrt(N))
+    ci_yield_diff_lower: f64,        // 99% Student's t CI lower bound for mean paired difference (yield units)
+    ci_yield_diff_upper: f64,        // 99% Student's t CI upper bound for mean paired difference (yield units)
+    mean_advantage_pct: f64,         // Average relative percentage advantage vs Baseline 1 (%)
+    std_advantage_pct: f64,          // Sample standard deviation of advantage % (s_adv)
+    se_advantage_pct: f64,           // Standard error of advantage % (SE_adv = s_adv / sqrt(N))
+    ci_99_lower: f64,                // 99% Student's t CI lower bound for relative percentage advantage (%)
+    ci_99_upper: f64,                // 99% Student's t CI upper bound for relative percentage advantage (%)
+    t_statistic: f64,                // Paired Student's t statistic vs Baseline 1 (t = d_bar / SE_d)
+    p_value_str: str,                // Statistical significance text (e.g. "p < 1e-12")
+    hypothesis_tested_target: str,   // Explicit definition of tested variable
+    trials: list<MonteCarloTrialRecord>, // Detailed per-trial log
+}
+
+pub record MissionDebrief {
+    total_steps: i64,                // Total evaluation timesteps
+    orbital_closure_error_km: f64,   // Distance between step 0 and numerical midpoint closure state
+    velocity_closure_error_kms: f64, // Velocity vector difference between step 0 and step 100
+    ref_closure_error_mm: f64,       // Analytical conic closure residual (0.00 mm)
+    max_trajectory_divergence_mm: f64, // Max |r_numerical - r_reference| across orbit (mm)
+    energy_conservation_error: f64,  // Maximum relative specific orbital energy drift |dE/E|
+    initial_measured_altitude_km: f64, // Exact measured radar altimeter reading at step 000 (km)
+    accumulated_radiation_krad: f64, // Unshielded cumulative ionizing radiation dose (krad)
+    vault_radiation_krad: f64,       // Shielded vault cumulative dose (parametric scenario estimate: assumed 36x attenuation for 9.2 mm Al-Zn vault) (krad)
+    observations_logged: i64,        // Total valid non-anomalous sensor frames processed
+    train_samples: i64,              // Number of training split observations (Stage 1)
+    val_samples: i64,                // Number of validation split observations (Stage 2)
+    test_samples: i64,               // Number of final untouched test observations (Stage 3)
+    confusion: ConfusionMatrix,      // Detailed statistical confusion matrix
+    stress_scenarios: list<AnomalyStressScenario>, // Multi-condition anomaly stress evaluation
+    safety_summary: AdversarialSafetyResult, // Safety layer audit report
+    selected_hypothesis: HypothesisResult,   // Winning discrete model among 6 competing hypotheses
+    model_selection_reason: str,             // Decision rule (e.g. minimum validation MSE)
+    discovered_equation: EquationCandidate,  // Continuous parameter recovery of induction amplitude
+    convergence_study: list<ConvergenceStepRecord>, // Timestep refinement convergence records
+    monte_carlo: MonteCarloSummary,  // 20-trial statistical verification
+    trajectory_samples: list<TrajectoryPoint>, // Logged trajectory points for audit
+}

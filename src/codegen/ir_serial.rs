@@ -156,6 +156,11 @@ const OP_DYN_CALL: u8 = 0x7A;
 const OP_RESUME_CONT: u8 = 0x7B;
 const OP_PUSH_HANDLER: u8 = 0x7C;
 const OP_POP_HANDLER: u8 = 0x7D;
+const OP_BORROW: u8 = 0x7F;
+const OP_MOVE: u8 = 0x80;
+const OP_ENTER_SCOPE: u8 = 0x81;
+const OP_EXIT_SCOPE: u8 = 0x82;
+const OP_DROP: u8 = 0x83;
 
 const MAGIC: &[u8; 4] = b"IRIS";
 const VERSION: u8 = 1;
@@ -320,6 +325,10 @@ impl Writer {
                 self.u8(0x0C);
                 self.ty(elem);
             }
+            IrType::Task(elem) => {
+                self.u8(0x17);
+                self.ty(elem);
+            }
             IrType::Atomic(inner) => {
                 self.u8(0x0D);
                 self.ty(inner);
@@ -370,6 +379,11 @@ impl Writer {
                 self.ty(elem);
                 self.u8(if *is_mut { 1 } else { 0 });
             }
+            IrType::ConstInt(n) => {
+                self.u8(0x18);
+                self.u64(*n as u64);
+            }
+            IrType::TypeParam(_) | IrType::HktApp { .. } => self.u8(0x00),
         }
     }
 
@@ -395,6 +409,9 @@ impl Writer {
             BinOp::CmpLe => 18,
             BinOp::CmpGt => 19,
             BinOp::CmpGe => 20,
+            BinOp::WrapAdd => 21,
+            BinOp::WrapSub => 22,
+            BinOp::WrapMul => 23,
         };
         self.u8(tag);
     }
@@ -757,6 +774,35 @@ impl Writer {
                 self.vid(*array);
                 self.vid(*index);
                 self.vid(*value);
+            }
+            IrInstr::Borrow {
+                result,
+                place,
+                is_mut,
+            } => {
+                self.u8(OP_BORROW);
+                self.vid(*result);
+                self.vid(*place);
+                self.bool(*is_mut);
+            }
+            IrInstr::Move { result, place } => {
+                self.u8(OP_MOVE);
+                self.vid(*result);
+                self.vid(*place);
+            }
+            IrInstr::EnterScope { scope } => {
+                self.u8(OP_ENTER_SCOPE);
+                self.u32(scope.0);
+            }
+            IrInstr::ExitScope { scope } => {
+                self.u8(OP_EXIT_SCOPE);
+                self.u32(scope.0);
+            }
+            IrInstr::Drop { value, drop_fn, ty } => {
+                self.u8(OP_DROP);
+                self.vid(*value);
+                self.str(drop_fn);
+                self.ty(ty);
             }
             IrInstr::MakeSome {
                 result,
@@ -1737,6 +1783,7 @@ impl<'a> Reader<'a> {
                 IrType::ResultType(Box::new(ok), Box::new(err))
             }
             0x0C => IrType::Chan(Box::new(self.ty()?)),
+            0x17 => IrType::Task(Box::new(self.ty()?)),
             0x0D => IrType::Atomic(Box::new(self.ty()?)),
             0x0E => IrType::Mutex(Box::new(self.ty()?)),
             0x0F => IrType::Grad(Box::new(self.ty()?)),
@@ -1777,6 +1824,7 @@ impl<'a> Reader<'a> {
                     is_mut,
                 }
             }
+            0x18 => IrType::ConstInt(self.u64()? as i64),
             t => return Err(format!("unknown type tag 0x{:02x}", t)),
         })
     }
@@ -1803,6 +1851,9 @@ impl<'a> Reader<'a> {
             18 => BinOp::CmpLe,
             19 => BinOp::CmpGt,
             20 => BinOp::CmpGe,
+            21 => BinOp::WrapAdd,
+            22 => BinOp::WrapSub,
+            23 => BinOp::WrapMul,
             t => return Err(format!("unknown binop tag {}", t)),
         })
     }
@@ -2131,6 +2182,35 @@ impl<'a> Reader<'a> {
                     index,
                     value,
                 }
+            }
+            OP_BORROW => {
+                let result = self.vid()?;
+                let place = self.vid()?;
+                let is_mut = self.bool()?;
+                IrInstr::Borrow {
+                    result,
+                    place,
+                    is_mut,
+                }
+            }
+            OP_MOVE => {
+                let result = self.vid()?;
+                let place = self.vid()?;
+                IrInstr::Move { result, place }
+            }
+            OP_ENTER_SCOPE => {
+                let scope = crate::ir::function::ScopeId(self.u32()?);
+                IrInstr::EnterScope { scope }
+            }
+            OP_EXIT_SCOPE => {
+                let scope = crate::ir::function::ScopeId(self.u32()?);
+                IrInstr::ExitScope { scope }
+            }
+            OP_DROP => {
+                let value = self.vid()?;
+                let drop_fn = self.str()?;
+                let ty = self.ty()?;
+                IrInstr::Drop { value, drop_fn, ty }
             }
             OP_MAKE_SOME => {
                 let result = self.vid()?;
@@ -3116,10 +3196,16 @@ fn deserialize_function(r: &mut Reader) -> Result<IrFunction, String> {
         blocks,
         value_defs,
         value_types,
+        type_arena: Default::default(),
+        value_type_ids: Default::default(),
         next_value,
         attrs: Vec::new(),
         span_table: SpanTable::default(),
+        value_names: Default::default(),
         capture_count: 0,
         is_const: false,
+        place_meta: Default::default(),
+        drop_scopes: Vec::new(),
+        mono_calls: HashMap::new(),
     })
 }

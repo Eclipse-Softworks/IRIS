@@ -9,9 +9,9 @@
 //
 // Usage: bring std.ais
 //
-// NOTE: model_save and model_load require bring std.fs additionally.
-// NOTE: mapek_step and mapek_run are disabled (IRIS cannot call
-//        function-typed record fields). Use agent_loop instead.
+// The v3 section at the end -- discrete active inference with learning, an
+// online world model, a safety policy and an autopilot -- is where the parts
+// compose; tests/test_ais_*.iris show each working, on both backends.
 
 pub def clamp(x: f64, low: f64, high: f64) -> f64 {
     if x < low { low } else { if x > high { high } else { x } }
@@ -215,6 +215,8 @@ pub record BeliefState {
     confidence: f64
 }
 
+// All three tables hold log-probabilities. likelihood: P(o | s) at
+// o * n_states + s. transitions: P(s' | s, a) at (a * n_states + s) * n_states + s'.
 pub record GenerativeModel {
     state_prior: list<f64>,
     likelihood: list<f64>,
@@ -303,7 +305,9 @@ pub def epsilon_greedy(values: list<f64>, epsilon: f64) -> i64 effect random {
     val n = list_len(values)
     if n <= 0 { return -1 }
     val eps = if epsilon < 0.0 { 0.0 } else { if epsilon > 1.0 { 1.0 } else { epsilon } }
-    if random() < eps { random_range(0, n - 1) } else { argmax(values) }
+    // random_range is half-open: (0, n) can return every action. (0, n - 1)
+    // never explored the last one, and with two actions never explored.
+    if random() < eps { random_range(0, n) } else { argmax(values) }
 }
 
 pub def softmax_sample(logits: list<f64>) -> i64 effect random {
@@ -468,8 +472,12 @@ pub def homeostat_update(h: Homeostat, sensor_values: list<f64>, dt: f64) -> (Ho
         }
         list_push(corrections, correction);
         list_push(new_vars, v_updated);
-        total_deviation = total_deviation + abs(sensor_val - v.set_point)
+        val scale = if v.tolerance > 0.0 { v.tolerance } else { 1.0 }
+        total_deviation = total_deviation + abs(sensor_val - v.set_point) / scale
     }
+    // Each deviation in units of its variable's tolerance, so health does not
+    // depend on the units: milliseconds of latency used to swamp a CPU
+    // fraction, and a system well inside every band read as unhealthy.
     val avg_deviation = total_deviation / to_f64(if n_vars <= 0 { 1 } else { n_vars })
     val bounded_health = if 1.0 / (1.0 + avg_deviation) < 0.0 { 0.0 } else { 1.0 / (1.0 + avg_deviation) }
     val nh = if bounded_health > 1.0 { 1.0 } else { bounded_health }
@@ -511,20 +519,71 @@ pub def belief_update(beliefs: BeliefState, gm: GenerativeModel, obs_idx: i64, l
     BeliefState { probs: new_probs, entropy: ent, confidence: max_p }
 }
 
-pub def active_inference_step(gm: GenerativeModel, beliefs: BeliefState, obs_idx: i64, lr: f64) -> (BeliefState, i64) {
-    val nb = belief_update(beliefs, gm, obs_idx, lr)
-    val na = gm.n_actions
+/// Expected free energy of taking `action` under beliefs `beliefs`, one step
+/// ahead: risk (the KL divergence of the predicted observations from the
+/// preferred ones, given as one log-probability per observation) plus
+/// ambiguity (the expected entropy of the observation given the next state).
+/// Lower is better.
+pub def model_expected_free_energy(gm: GenerativeModel, beliefs: BeliefState, action: i64, log_preferences: list<f64>) -> f64 {
+    val ns = gm.n_states
+    val no = gm.n_obs
+    // Predicted next-state distribution.
+    val next: list<f64> = list()
+    for s2 in 0 .. ns { list_push(next, 0.0) }
+    for s in 0 .. ns {
+        val qs = list_get(beliefs.probs, s)
+        if qs > 0.0 {
+            for s2 in 0 .. ns {
+                val p = exp(list_get(gm.transitions, (action * ns + s) * ns + s2))
+                list_set(next, s2, list_get(next, s2) + qs * p)
+            }
+        }
+    }
+    var ambiguity = 0.0
+    var risk = 0.0
+    for o in 0 .. no {
+        var qo = 0.0
+        for s2 in 0 .. ns {
+            qo = qo + list_get(next, s2) * exp(list_get(gm.likelihood, o * ns + s2))
+        }
+        if qo > 1.0e-15 { risk = risk + qo * (log(qo) - list_get(log_preferences, o)) }
+    }
+    for s2 in 0 .. ns {
+        val qs2 = list_get(next, s2)
+        if qs2 > 1.0e-15 {
+            var h = 0.0
+            for o in 0 .. no {
+                val lp = list_get(gm.likelihood, o * ns + s2)
+                h = h - exp(lp) * lp
+            }
+            ambiguity = ambiguity + qs2 * h
+        }
+    }
+    risk + ambiguity
+}
+
+/// The action with the lowest expected free energy (the first among equals).
+pub def active_inference_choose(gm: GenerativeModel, beliefs: BeliefState, log_preferences: list<f64>) -> i64 {
     var best_a = 0
     var best_efe = 1.0e30
-    for a in 0 .. na {
-        var efe = 0.0
-        for s in 0 .. gm.n_states {
-            val qs = list_get(nb.probs, s)
-            if qs > 1.0e-15 { efe = efe + qs * 0.0 - log(qs) }
+    for a in 0 .. gm.n_actions {
+        val efe = model_expected_free_energy(gm, beliefs, a, log_preferences)
+        if efe < best_efe {
+            best_efe = efe
+            best_a = a
         }
-        if efe < best_efe { best_efe = efe; best_a = a }
     }
-    (nb, best_a)
+    best_a
+}
+
+/// Update beliefs on observation `obs_idx`, then choose an action by expected
+/// free energy with no preference among observations (pure information
+/// seeking). Use active_inference_choose to pass preferences.
+pub def active_inference_step(gm: GenerativeModel, beliefs: BeliefState, obs_idx: i64, lr: f64) -> (BeliefState, i64) {
+    val nb = belief_update(beliefs, gm, obs_idx, lr)
+    val uniform: list<f64> = list()
+    for o in 0 .. gm.n_obs { list_push(uniform, 0.0 - log(to_f64(gm.n_obs))) }
+    (nb, active_inference_choose(gm, nb, uniform))
 }
 
 // Constitution safety
@@ -1228,4 +1287,1146 @@ pub def agent_production_step(
         rewards: runtime.rewards,
     }
     return AgentStep { runtime: next, decision: final_decision, degraded: degraded }
+}
+
+// ===== AIS v3: inference, learning and safety that compose =================
+//
+// v1 and v2 held the parts: a homeostat, viability bounds, an expected free
+// energy formula with the ambiguity and epistemic terms supplied by the
+// caller, a constitution that checked names. v3 makes them work on their own
+// data and fit together:
+//
+//   - discrete active inference: exact Bayesian filtering, expected free
+//     energy computed from the model over multi-step policies, a policy
+//     posterior with precision, and Dirichlet learning of the model;
+//   - an online world model (recursive least squares) for continuous state,
+//     and viability-preserving action choice over its predictions;
+//   - a safety policy whose rules depend on the state and on predictions,
+//     and which filters what the agent may do;
+//   - an autopilot that composes model learning, the safety policy and
+//     viability, and persistence for what was learned.
+
+// ---------------------------------------------------------------------------
+// Categorical helpers
+// ---------------------------------------------------------------------------
+
+/// `xs` scaled to sum to 1; uniform when the sum is not positive.
+pub def probs_normalize(xs: list<f64>) -> list<f64> {
+    val n = list_len(xs)
+    var total = 0.0
+    for i in 0..n { total = total + list_get(xs, i) }
+    val out: list<f64> = list()
+    for i in 0..n {
+        if total > 0.0 { list_push(out, list_get(xs, i) / total) } else { list_push(out, 1.0 / to_f64(n)) }
+    }
+    out
+}
+
+/// softmax(xs), computed stably.
+pub def probs_softmax(xs: list<f64>) -> list<f64> {
+    val n = list_len(xs)
+    val out: list<f64> = list()
+    if n == 0 { return out }
+    var mx = list_get(xs, 0)
+    for i in 1..n { if list_get(xs, i) > mx { mx = list_get(xs, i) } }
+    var total = 0.0
+    for i in 0..n {
+        val e = exp(list_get(xs, i) - mx)
+        list_push(out, e)
+        total = total + e
+    }
+    for i in 0..n { list_set(out, i, list_get(out, i) / total) }
+    out
+}
+
+/// log(softmax(xs)): turns arbitrary preference scores into log-probabilities.
+pub def probs_log_softmax(xs: list<f64>) -> list<f64> {
+    val n = list_len(xs)
+    val out: list<f64> = list()
+    if n == 0 { return out }
+    var mx = list_get(xs, 0)
+    for i in 1..n { if list_get(xs, i) > mx { mx = list_get(xs, i) } }
+    var total = 0.0
+    for i in 0..n { total = total + exp(list_get(xs, i) - mx) }
+    val lse = mx + log(total)
+    for i in 0..n { list_push(out, list_get(xs, i) - lse) }
+    out
+}
+
+/// KL(p || q) in nats, over the entries where p > 0.
+pub def probs_kl(p: list<f64>, q: list<f64>) -> f64 {
+    var kl = 0.0
+    for i in 0..list_len(p) {
+        val pi = list_get(p, i)
+        if pi > 1.0e-300 { kl = kl + pi * (log(pi) - log(list_get(q, i) + 1.0e-300)) }
+    }
+    kl
+}
+
+/// Index of the largest entry; the first among equals.
+pub def probs_argmax(xs: list<f64>) -> i64 {
+    var best = 0
+    for i in 1..list_len(xs) { if list_get(xs, i) > list_get(xs, best) { best = i } }
+    best
+}
+
+/// An index drawn from the categorical distribution `probs`.
+pub def probs_sample(probs: list<f64>) -> i64 effect random {
+    val r = random()
+    var cum = 0.0
+    val n = list_len(probs)
+    for i in 0..n {
+        cum = cum + list_get(probs, i)
+        if r < cum { return i }
+    }
+    n - 1
+}
+
+// ---------------------------------------------------------------------------
+// Discrete active inference
+//
+// A partially observed Markov decision process with categorical beliefs:
+//   a      P(o | s), at o * n_states + s; each column sums to 1
+//   b      P(s2 | s, act), at (act * n_states + s) * n_states + s2; each row
+//          sums to 1
+//   log_c  log preferences over observations, normalised (a log-softmax)
+//   d      the prior over the first state
+// pa and pb are Dirichlet concentration counts, and a and b are always their
+// means: learning adds to the counts and renormalises.
+// ---------------------------------------------------------------------------
+
+pub record Pomdp {
+    n_states: i64,
+    n_obs: i64,
+    n_actions: i64,
+    a: list<f64>,
+    b: list<f64>,
+    log_c: list<f64>,
+    d: list<f64>,
+    pa: list<f64>,
+    pb: list<f64>
+}
+
+/// A model knowing nothing: uniform likelihood, transitions, prior and
+/// preferences, each count 1.
+pub def pomdp_new(n_states: i64, n_obs: i64, n_actions: i64) -> Pomdp {
+    val ns = if n_states < 1 { 1 } else { n_states }
+    val no = if n_obs < 1 { 1 } else { n_obs }
+    val na = if n_actions < 1 { 1 } else { n_actions }
+    val a: list<f64> = list()
+    val pa: list<f64> = list()
+    for i in 0..(no * ns) {
+        list_push(a, 1.0 / to_f64(no))
+        list_push(pa, 1.0)
+    }
+    val b: list<f64> = list()
+    val pb: list<f64> = list()
+    for i in 0..(na * ns * ns) {
+        list_push(b, 1.0 / to_f64(ns))
+        list_push(pb, 1.0)
+    }
+    val d: list<f64> = list()
+    for s in 0..ns { list_push(d, 1.0 / to_f64(ns)) }
+    val log_c: list<f64> = list()
+    for o in 0..no { list_push(log_c, 0.0 - log(to_f64(no))) }
+    Pomdp { n_states: ns, n_obs: no, n_actions: na, a: a, b: b, log_c: log_c, d: d, pa: pa, pb: pb }
+}
+
+/// Set P(o | s) for every o; `probs` is normalised. The counts become
+/// `probs` times `confidence`: how many observations the setting is worth.
+pub def pomdp_set_likelihood(m: Pomdp, s: i64, probs: list<f64>, confidence: f64) -> Pomdp {
+    val p = probs_normalize(probs)
+    for o in 0..m.n_obs {
+        list_set(m.a, o * m.n_states + s, list_get(p, o))
+        list_set(m.pa, o * m.n_states + s, list_get(p, o) * confidence)
+    }
+    m
+}
+
+/// Set P(s2 | s, act) for every s2.
+pub def pomdp_set_transition(m: Pomdp, act: i64, s: i64, probs: list<f64>, confidence: f64) -> Pomdp {
+    val p = probs_normalize(probs)
+    val row = (act * m.n_states + s) * m.n_states
+    for s2 in 0..m.n_states {
+        list_set(m.b, row + s2, list_get(p, s2))
+        list_set(m.pb, row + s2, list_get(p, s2) * confidence)
+    }
+    m
+}
+
+/// Preferences over observations as scores (higher is preferred); stored as
+/// their log-softmax, so only differences matter.
+pub def pomdp_set_preferences(m: Pomdp, scores: list<f64>) -> Pomdp {
+    val lc = probs_log_softmax(scores)
+    for o in 0..m.n_obs { list_set(m.log_c, o, list_get(lc, o)) }
+    m
+}
+
+pub def pomdp_set_prior(m: Pomdp, probs: list<f64>) -> Pomdp {
+    val p = probs_normalize(probs)
+    for s in 0..m.n_states { list_set(m.d, s, list_get(p, s)) }
+    m
+}
+
+/// The predicted state distribution after `act`: sum over s of P(s2|s,act) q(s).
+pub def pomdp_predict(m: Pomdp, q: list<f64>, act: i64) -> list<f64> {
+    val ns = m.n_states
+    val out: list<f64> = list()
+    for s2 in 0..ns { list_push(out, 0.0) }
+    for s in 0..ns {
+        val qs = list_get(q, s)
+        if qs > 0.0 {
+            val row = (act * ns + s) * ns
+            for s2 in 0..ns { list_set(out, s2, list_get(out, s2) + qs * list_get(m.b, row + s2)) }
+        }
+    }
+    out
+}
+
+/// The predicted observation distribution: sum over s of P(o|s) q(s).
+pub def pomdp_observation_probs(m: Pomdp, q: list<f64>) -> list<f64> {
+    val ns = m.n_states
+    val out: list<f64> = list()
+    for o in 0..m.n_obs {
+        var p = 0.0
+        for s in 0..ns { p = p + list_get(m.a, o * ns + s) * list_get(q, s) }
+        list_push(out, p)
+    }
+    out
+}
+
+/// Bayes' rule: the posterior over states after observing `obs` from `prior`.
+/// An observation the model gives probability 0 leaves the prior unchanged.
+pub def pomdp_posterior(m: Pomdp, prior: list<f64>, obs: i64) -> list<f64> {
+    val ns = m.n_states
+    val out: list<f64> = list()
+    var total = 0.0
+    for s in 0..ns {
+        val v = list_get(m.a, obs * ns + s) * list_get(prior, s)
+        list_push(out, v)
+        total = total + v
+    }
+    if total <= 1.0e-300 {
+        val keep: list<f64> = list()
+        for s in 0..ns { list_push(keep, list_get(prior, s)) }
+        return keep
+    }
+    for s in 0..ns { list_set(out, s, list_get(out, s) / total) }
+    out
+}
+
+/// H[P(o | s)] for each state: how ambiguous each state's observations are.
+pub def pomdp_state_ambiguity(m: Pomdp) -> list<f64> {
+    val ns = m.n_states
+    val out: list<f64> = list()
+    for s in 0..ns {
+        var h = 0.0
+        for o in 0..m.n_obs {
+            val p = list_get(m.a, o * ns + s)
+            if p > 1.0e-300 { h = h - p * log(p) }
+        }
+        list_push(out, h)
+    }
+    out
+}
+
+/// 1/pa - 1/(sum over o of pa): how much one more observation of each (o, s)
+/// would change the likelihood estimate. Large where the counts are small.
+pub def pomdp_novelty_weights(m: Pomdp) -> list<f64> {
+    val ns = m.n_states
+    val no = m.n_obs
+    val out: list<f64> = list()
+    for i in 0..(no * ns) { list_push(out, 0.0) }
+    for s in 0..ns {
+        var col = 0.0
+        for o in 0..no { col = col + list_get(m.pa, o * ns + s) }
+        for o in 0..no {
+            val c = list_get(m.pa, o * ns + s)
+            if c > 0.0 { list_set(out, o * ns + s, 1.0 / c - 1.0 / col) }
+        }
+    }
+    out
+}
+
+/// The value of following a policy, summed over its steps.
+///
+/// efe is the expected free energy G (lower is better):
+///   G = -utility - w_epistemic * info_gain - w_novelty * novelty
+/// with utility the expected log preference of the predicted observations,
+/// info_gain the expected information the observations carry about the state
+/// (their mutual information), and novelty the expected information about the
+/// likelihood's parameters. With w_epistemic 1 and w_novelty 0, G equals
+/// risk + ambiguity: the KL divergence of predicted from preferred
+/// observations, plus the expected entropy of observations given states.
+pub record PolicyValue {
+    policy: list<i64>,
+    efe: f64,
+    risk: f64,
+    ambiguity: f64,
+    info_gain: f64,
+    utility: f64,
+    novelty: f64
+}
+
+pub def pomdp_policy_value(m: Pomdp, q: list<f64>, policy: list<i64>, w_epistemic: f64, w_novelty: f64) -> PolicyValue {
+    policy_value_with(m, q, policy, pomdp_state_ambiguity(m), pomdp_novelty_weights(m), w_epistemic, w_novelty)
+}
+
+def policy_value_with(m: Pomdp, q: list<f64>, policy: list<i64>, h_a: list<f64>, w_a: list<f64>, w_epistemic: f64, w_novelty: f64) -> PolicyValue {
+    val ns = m.n_states
+    var qs = q
+    var risk = 0.0
+    var ambiguity = 0.0
+    var info_gain = 0.0
+    var utility = 0.0
+    var novelty = 0.0
+    for t in 0..list_len(policy) {
+        qs = pomdp_predict(m, qs, list_get(policy, t))
+        val qo = pomdp_observation_probs(m, qs)
+        var h_o = 0.0
+        var u = 0.0
+        for o in 0..m.n_obs {
+            val p = list_get(qo, o)
+            if p > 1.0e-300 { h_o = h_o - p * log(p) }
+            u = u + p * list_get(m.log_c, o)
+        }
+        var amb = 0.0
+        for s in 0..ns { amb = amb + list_get(qs, s) * list_get(h_a, s) }
+        var nov = 0.0
+        if w_novelty != 0.0 {
+            for o in 0..m.n_obs {
+                var ws = 0.0
+                for s in 0..ns { ws = ws + list_get(w_a, o * ns + s) * list_get(qs, s) }
+                nov = nov + list_get(qo, o) * ws
+            }
+        }
+        risk = risk + (0.0 - h_o - u)
+        ambiguity = ambiguity + amb
+        info_gain = info_gain + (h_o - amb)
+        utility = utility + u
+        novelty = novelty + nov
+    }
+    PolicyValue {
+        policy: policy,
+        efe: 0.0 - utility - w_epistemic * info_gain - w_novelty * novelty,
+        risk: risk,
+        ambiguity: ambiguity,
+        info_gain: info_gain,
+        utility: utility,
+        novelty: novelty
+    }
+}
+
+/// Every sequence of `horizon` actions, in lexicographic order.
+pub def policies_all(n_actions: i64, horizon: i64) -> list<list<i64>> {
+    var current: list<list<i64>> = list()
+    val empty: list<i64> = list()
+    list_push(current, empty)
+    for step in 0..horizon {
+        val next: list<list<i64>> = list()
+        for i in 0..list_len(current) {
+            val base = list_get(current, i)
+            for act in 0..n_actions {
+                val p: list<i64> = list()
+                for j in 0..list_len(base) { list_push(p, list_get(base, j)) }
+                list_push(p, act)
+                list_push(next, p)
+            }
+        }
+        current = next
+    }
+    current
+}
+
+/// Add an observation to the likelihood counts, weighted by the posterior
+/// over the state it came from, and renormalise the affected columns.
+pub def pomdp_learn_likelihood(m: Pomdp, obs: i64, posterior: list<f64>, rate: f64) -> Pomdp {
+    val ns = m.n_states
+    for s in 0..ns {
+        val w = list_get(posterior, s) * rate
+        if w > 0.0 {
+            list_set(m.pa, obs * ns + s, list_get(m.pa, obs * ns + s) + w)
+            var col = 0.0
+            for o in 0..m.n_obs { col = col + list_get(m.pa, o * ns + s) }
+            for o in 0..m.n_obs { list_set(m.a, o * ns + s, list_get(m.pa, o * ns + s) / col) }
+        }
+    }
+    m
+}
+
+/// Add a transition to the counts, weighted by the beliefs before and after.
+pub def pomdp_learn_transition(m: Pomdp, act: i64, before: list<f64>, after: list<f64>, rate: f64) -> Pomdp {
+    val ns = m.n_states
+    for s in 0..ns {
+        val ws = list_get(before, s) * rate
+        if ws > 0.0 {
+            val row = (act * ns + s) * ns
+            var total = 0.0
+            for s2 in 0..ns {
+                list_set(m.pb, row + s2, list_get(m.pb, row + s2) + ws * list_get(after, s2))
+                total = total + list_get(m.pb, row + s2)
+            }
+            for s2 in 0..ns { list_set(m.b, row + s2, list_get(m.pb, row + s2) / total) }
+        }
+    }
+    m
+}
+
+/// An agent that infers its state, chooses by expected free energy and,
+/// with a learning rate, learns its model.
+pub record AifAgent {
+    model: Pomdp,
+    belief: list<f64>,
+    policies: list<list<i64>>,
+    gamma: f64,
+    w_epistemic: f64,
+    w_novelty: f64,
+    learning_rate: f64,
+    stochastic: bool,
+    last_action: i64,
+    t: i64
+}
+
+pub record AifDecision {
+    action: i64,
+    action_probs: list<f64>,
+    policy_probs: list<f64>,
+    values: list<PolicyValue>,
+    best_policy: i64
+}
+
+/// An agent planning `horizon` steps ahead with policy precision `gamma`.
+/// It values information (w_epistemic 1), does not seek novelty, does not
+/// learn, and acts on the most probable action; the `aif_with_*` functions
+/// change that.
+pub def aif_agent_new(m: Pomdp, horizon: i64, gamma: f64) -> AifAgent {
+    val belief: list<f64> = list()
+    for s in 0..m.n_states { list_push(belief, list_get(m.d, s)) }
+    AifAgent {
+        model: m,
+        belief: belief,
+        policies: policies_all(m.n_actions, if horizon < 1 { 1 } else { horizon }),
+        gamma: gamma,
+        w_epistemic: 1.0,
+        w_novelty: 0.0,
+        learning_rate: 0.0,
+        stochastic: false,
+        last_action: 0 - 1,
+        t: 0
+    }
+}
+
+/// How much the agent values information about its state, and about its
+/// model's parameters. 0 and 0 make a purely reward-seeking agent.
+pub def aif_with_drives(agent: AifAgent, w_epistemic: f64, w_novelty: f64) -> AifAgent {
+    var ag = agent
+    ag.w_epistemic = w_epistemic
+    ag.w_novelty = w_novelty
+    ag
+}
+
+pub def aif_with_learning(agent: AifAgent, rate: f64) -> AifAgent {
+    var ag = agent
+    ag.learning_rate = rate
+    ag
+}
+
+/// Sample actions from their posterior (with `seed(n)` for a reproducible
+/// run) instead of taking the most probable.
+pub def aif_with_sampling(agent: AifAgent, stochastic: bool) -> AifAgent {
+    var ag = agent
+    ag.stochastic = stochastic
+    ag
+}
+
+/// Start a new episode: beliefs back to the prior; what was learned stays.
+pub def aif_reset(agent: AifAgent) -> AifAgent {
+    var ag = agent
+    val belief: list<f64> = list()
+    for s in 0..ag.model.n_states { list_push(belief, list_get(ag.model.d, s)) }
+    ag.belief = belief
+    ag.last_action = 0 - 1
+    ag.t = 0
+    ag
+}
+
+/// Take in an observation: predict from the last action, apply Bayes' rule,
+/// and learn from it when the agent learns.
+pub def aif_observe(agent: AifAgent, obs: i64) -> AifAgent {
+    var ag = agent
+    val prior = if ag.t == 0 || ag.last_action < 0 { ag.belief } else { pomdp_predict(ag.model, ag.belief, ag.last_action) }
+    val post = pomdp_posterior(ag.model, prior, obs)
+    if ag.learning_rate > 0.0 {
+        pomdp_learn_likelihood(ag.model, obs, post, ag.learning_rate)
+        if ag.t > 0 && ag.last_action >= 0 {
+            pomdp_learn_transition(ag.model, ag.last_action, ag.belief, post, ag.learning_rate)
+        }
+    }
+    ag.belief = post
+    ag.t = ag.t + 1
+    ag
+}
+
+/// Choose an action: the expected free energy of every policy, the policy
+/// posterior softmax(-gamma * G), and the action probabilities it implies.
+pub def aif_decide(agent: AifAgent) -> (AifAgent, AifDecision) {
+    val all: list<bool> = list()
+    for a in 0..agent.model.n_actions { list_push(all, true) }
+    aif_decide_permitted(agent, all)
+}
+
+/// `aif_decide` among the actions `permitted` allows (see safety_permitted):
+/// a policy whose first action is forbidden gets probability 0. With nothing
+/// permitted the decision's action is -1.
+pub def aif_decide_permitted(agent: AifAgent, permitted: list<bool>) -> (AifAgent, AifDecision) {
+    val m = agent.model
+    val h_a = pomdp_state_ambiguity(m)
+    val w_a = if agent.w_novelty != 0.0 { pomdp_novelty_weights(m) } else { h_a }
+    val values: list<PolicyValue> = list()
+    val scores: list<f64> = list()
+    val n = list_len(agent.policies)
+    var any = false
+    for i in 0..n {
+        val policy = list_get(agent.policies, i)
+        val v = policy_value_with(m, agent.belief, policy, h_a, w_a, agent.w_epistemic, agent.w_novelty)
+        list_push(values, v)
+        val first = list_get(policy, 0)
+        val allowed = first < list_len(permitted) && list_get(permitted, first)
+        if allowed { any = true }
+        list_push(scores, if allowed { 0.0 - agent.gamma * v.efe } else { -1.0e300 })
+    }
+    val action_probs: list<f64> = list()
+    for a in 0..m.n_actions { list_push(action_probs, 0.0) }
+    if !any {
+        val none_probs: list<f64> = list()
+        for i in 0..n { list_push(none_probs, 0.0) }
+        var ag = agent
+        ag.last_action = 0 - 1
+        return (ag, AifDecision { action: 0 - 1, action_probs: action_probs, policy_probs: none_probs, values: values, best_policy: 0 - 1 })
+    }
+    val policy_probs = probs_softmax(scores)
+    for i in 0..n {
+        val first = list_get(list_get(agent.policies, i), 0)
+        list_set(action_probs, first, list_get(action_probs, first) + list_get(policy_probs, i))
+    }
+    val action = if agent.stochastic { probs_sample(action_probs) } else { probs_argmax(action_probs) }
+    var ag = agent
+    ag.last_action = action
+    (ag, AifDecision { action: action, action_probs: action_probs, policy_probs: policy_probs, values: values, best_policy: probs_argmax(policy_probs) })
+}
+
+// ---------------------------------------------------------------------------
+// Online world model: recursive least squares
+//
+// y = W x for a feature vector x, fitted one sample at a time with
+// exponential forgetting, so it follows a plant whose dynamics drift. For a
+// state and an action the features are the state, the action and a constant
+// 1 (see wm_features), and the output is the next state.
+// ---------------------------------------------------------------------------
+
+pub record LinearModel {
+    n_in: i64,
+    n_out: i64,
+    w: list<f64>,
+    p: list<f64>,
+    forgetting: f64,
+    max_variance: f64,
+    updates: i64,
+    mse: f64
+}
+
+/// A model with weights 0. `forgetting` in (0, 1]: 1 remembers everything,
+/// 0.98 weights a sample 50 steps old by a third. `initial_variance` is the
+/// prior variance of the weights: large (1e6) lets the data decide alone,
+/// small pulls the estimates toward 0. It also caps P's diagonal, so a
+/// direction the data never excites cannot wind up under forgetting.
+pub def linear_model_new(n_in: i64, n_out: i64, forgetting: f64, initial_variance: f64) -> LinearModel {
+    val w: list<f64> = list()
+    for i in 0..(n_in * n_out) { list_push(w, 0.0) }
+    val p: list<f64> = list()
+    for r in 0..n_in {
+        for c in 0..n_in { list_push(p, if r == c { initial_variance } else { 0.0 }) }
+    }
+    LinearModel {
+        n_in: n_in, n_out: n_out, w: w, p: p,
+        forgetting: if forgetting <= 0.0 || forgetting > 1.0 { 1.0 } else { forgetting },
+        max_variance: initial_variance,
+        updates: 0, mse: 0.0
+    }
+}
+
+pub def linear_model_predict(m: LinearModel, x: list<f64>) -> list<f64> {
+    val out: list<f64> = list()
+    for o in 0..m.n_out {
+        var s = 0.0
+        for i in 0..m.n_in { s = s + list_get(m.w, o * m.n_in + i) * list_get(x, i) }
+        list_push(out, s)
+    }
+    out
+}
+
+/// Fit one sample: the gain k = P x / (lambda + x'P x), each output's weights
+/// move by its prediction error times k, and P = (P - k x'P) / lambda.
+pub def linear_model_update(m: LinearModel, x: list<f64>, y: list<f64>) -> LinearModel {
+    val n = m.n_in
+    val px: list<f64> = list()
+    for r in 0..n {
+        var s = 0.0
+        for c in 0..n { s = s + list_get(m.p, r * n + c) * list_get(x, c) }
+        list_push(px, s)
+    }
+    var denom = m.forgetting
+    for i in 0..n { denom = denom + list_get(x, i) * list_get(px, i) }
+    val k: list<f64> = list()
+    for i in 0..n { list_push(k, list_get(px, i) / denom) }
+    val pred = linear_model_predict(m, x)
+    var sq = 0.0
+    for o in 0..m.n_out {
+        val e = list_get(y, o) - list_get(pred, o)
+        sq = sq + e * e
+        for i in 0..n { list_set(m.w, o * n + i, list_get(m.w, o * n + i) + e * list_get(k, i)) }
+    }
+    var top = 0.0
+    for r in 0..n {
+        for c in 0..n {
+            list_set(m.p, r * n + c, (list_get(m.p, r * n + c) - list_get(k, r) * list_get(px, c)) / m.forgetting)
+        }
+        if list_get(m.p, r * n + r) > top { top = list_get(m.p, r * n + r) }
+    }
+    if top > m.max_variance {
+        val scale = m.max_variance / top
+        for i in 0..(n * n) { list_set(m.p, i, list_get(m.p, i) * scale) }
+    }
+    var mm = m
+    val err = sq / to_f64(if m.n_out < 1 { 1 } else { m.n_out })
+    mm.mse = if m.updates == 0 { err } else { 0.9 * m.mse + 0.1 * err }
+    mm.updates = m.updates + 1
+    mm
+}
+
+/// x'P x: how uncertain the model's prediction at `x` is, relative to the
+/// noise. Large far from the data it was fitted on.
+pub def linear_model_variance(m: LinearModel, x: list<f64>) -> f64 {
+    val n = m.n_in
+    var v = 0.0
+    for r in 0..n {
+        var s = 0.0
+        for c in 0..n { s = s + list_get(m.p, r * n + c) * list_get(x, c) }
+        v = v + list_get(x, r) * s
+    }
+    v
+}
+
+/// The features of a state and an action: the state, the action, and 1.
+pub def wm_features(state: list<f64>, action: list<f64>) -> list<f64> {
+    val x: list<f64> = list()
+    for i in 0..list_len(state) { list_push(x, list_get(state, i)) }
+    for i in 0..list_len(action) { list_push(x, list_get(action, i)) }
+    list_push(x, 1.0)
+    x
+}
+
+/// A world model for `n_state` variables driven by `n_action` controls.
+pub def wm_new(n_state: i64, n_action: i64, forgetting: f64) -> LinearModel {
+    linear_model_new(n_state + n_action + 1, n_state, forgetting, 1.0e6)
+}
+
+pub def wm_learn(m: LinearModel, state: list<f64>, action: list<f64>, next_state: list<f64>) -> LinearModel {
+    linear_model_update(m, wm_features(state, action), next_state)
+}
+
+pub def wm_predict(m: LinearModel, state: list<f64>, action: list<f64>) -> list<f64> {
+    linear_model_predict(m, wm_features(state, action))
+}
+
+/// The states the model predicts over `steps` steps holding `action`.
+pub def wm_rollout(m: LinearModel, state: list<f64>, action: list<f64>, steps: i64) -> list<list<f64>> {
+    val out: list<list<f64>> = list()
+    var s = state
+    for t in 0..steps {
+        s = wm_predict(m, s, action)
+        list_push(out, s)
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
+// Viability over predictions
+// ---------------------------------------------------------------------------
+
+pub record ViabilityChoice {
+    action: i64,
+    risk: f64,
+    critical: bool,
+    risks: list<f64>,
+    predicted: list<list<f64>>
+}
+
+/// The permitted action whose predicted trajectory keeps the state most
+/// viable: the least viability risk summed over `steps` predicted steps, an
+/// action predicted to reach a critical bound counting as risk 1000 more.
+///
+/// `exploration` weighs how uncertain the model is about each action's
+/// outcome (the square root of linear_model_variance) as a bonus. Kept small
+/// it only decides between actions of nearly equal risk -- which is what an
+/// unfitted model predicts for all of them, and why a controller that never
+/// tries an action never learns what it does. Remaining ties go to the lowest
+/// index. An empty `permitted` permits everything.
+pub def viability_choose(bounds: list<ViabilityBound>, m: LinearModel, state: list<f64>, actions: list<list<f64>>, steps: i64, permitted: list<bool>, exploration: f64) -> ViabilityChoice {
+    val risks: list<f64> = list()
+    var best = 0 - 1
+    var best_risk = 1.0e300
+    var best_critical = false
+    var best_path: list<list<f64>> = list()
+    for a in 0..list_len(actions) {
+        val allowed = list_len(permitted) == 0 || (a < list_len(permitted) && list_get(permitted, a))
+        val path = wm_rollout(m, state, list_get(actions, a), if steps < 1 { 1 } else { steps })
+        var risk = 0.0
+        var critical = false
+        for t in 0..list_len(path) {
+            val v = viability_assess(bounds, list_get(path, t))
+            risk = risk + v.risk
+            if v.critical { critical = true }
+        }
+        if critical { risk = risk + 1000.0 }
+        list_push(risks, risk)
+        val score = risk - exploration * sqrt(linear_model_variance(m, wm_features(state, list_get(actions, a))))
+        if allowed && score < best_risk {
+            best = a
+            best_risk = score
+            best_critical = critical
+            best_path = path
+        }
+    }
+    val chosen_risk = if best >= 0 { list_get(risks, best) } else { best_risk }
+    ViabilityChoice { action: best, risk: chosen_risk, critical: best_critical, risks: risks, predicted: best_path }
+}
+
+// ---------------------------------------------------------------------------
+// Safety policy: rules over the state and over predictions
+//
+//   forbid_when   forbid an action while state[variable] op threshold holds
+//   require_when  require an action while the condition holds (a mandatory
+//                 response, such as shutting down when overheated)
+//   keep_within   forbid every action the world model predicts would take
+//                 state[variable] outside [low, high] at the next step
+// A rule is never silently inert: an unknown operator stops the program.
+// ---------------------------------------------------------------------------
+
+pub record SafetyRule {
+    name: str,
+    kind: i64,
+    variable: i64,
+    op: str,
+    threshold: f64,
+    action: i64,
+    low: f64,
+    high: f64,
+    severity: i64
+}
+
+pub record SafetyPolicy {
+    rules: list<SafetyRule>,
+    audit: list<str>,
+    interventions: i64
+}
+
+pub record SafetyVerdict {
+    action: i64,
+    permitted: list<bool>,
+    overridden: bool,
+    rule: str
+}
+
+pub def safety_policy_new() -> SafetyPolicy {
+    SafetyPolicy { rules: list(), audit: list(), interventions: 0 }
+}
+
+pub def safety_forbid_when(p: SafetyPolicy, name: str, variable: i64, op: str, threshold: f64, action: i64, severity: i64) -> SafetyPolicy {
+    list_push(p.rules, SafetyRule { name: name, kind: 0, variable: variable, op: op, threshold: threshold, action: action, low: 0.0, high: 0.0, severity: severity })
+    p
+}
+
+pub def safety_require_when(p: SafetyPolicy, name: str, variable: i64, op: str, threshold: f64, action: i64, severity: i64) -> SafetyPolicy {
+    list_push(p.rules, SafetyRule { name: name, kind: 1, variable: variable, op: op, threshold: threshold, action: action, low: 0.0, high: 0.0, severity: severity })
+    p
+}
+
+pub def safety_keep_within(p: SafetyPolicy, name: str, variable: i64, low: f64, high: f64, severity: i64) -> SafetyPolicy {
+    list_push(p.rules, SafetyRule { name: name, kind: 2, variable: variable, op: "in", threshold: 0.0, action: 0 - 1, low: low, high: high, severity: severity })
+    p
+}
+
+/// `value op threshold`, for op one of > < >= <= == !=.
+pub def safety_condition(op: str, value: f64, threshold: f64) -> bool {
+    if op == ">" { return value > threshold }
+    if op == "<" { return value < threshold }
+    if op == ">=" { return value >= threshold }
+    if op == "<=" { return value <= threshold }
+    if op == "==" { return value == threshold }
+    if op == "!=" { return value != threshold }
+    panic("safety rule: unknown operator '" + op + "' -- expected one of > < >= <= == !=")
+    false
+}
+
+def rule_fires(r: SafetyRule, state: list<f64>) -> bool {
+    r.variable >= 0 && r.variable < list_len(state) && safety_condition(r.op, list_get(state, r.variable), r.threshold)
+}
+
+/// Which of `n_actions` actions the state-based rules allow now. keep_within
+/// rules need predictions: see safety_permitted.
+pub def safety_permitted_now(p: SafetyPolicy, state: list<f64>, n_actions: i64) -> list<bool> {
+    val ok: list<bool> = list()
+    for a in 0..n_actions { list_push(ok, true) }
+    for i in 0..list_len(p.rules) {
+        val r = list_get(p.rules, i)
+        if r.kind == 0 && r.action >= 0 && r.action < n_actions && rule_fires(r, state) { list_set(ok, r.action, false) }
+    }
+    ok
+}
+
+/// Which actions every rule allows, keep_within judged on the model's
+/// prediction of the next state under each action.
+pub def safety_permitted(p: SafetyPolicy, state: list<f64>, m: LinearModel, actions: list<list<f64>>) -> list<bool> {
+    val n = list_len(actions)
+    val ok = safety_permitted_now(p, state, n)
+    for i in 0..list_len(p.rules) {
+        val r = list_get(p.rules, i)
+        if r.kind == 2 {
+            for a in 0..n {
+                val next = wm_predict(m, state, list_get(actions, a))
+                if r.variable < list_len(next) {
+                    val v = list_get(next, r.variable)
+                    if v < r.low || v > r.high { list_set(ok, a, false) }
+                }
+            }
+        }
+    }
+    ok
+}
+
+/// The action the most severe firing require_when rule demands, or -1.
+pub def safety_required(p: SafetyPolicy, state: list<f64>) -> i64 {
+    var best = 0 - 1
+    var best_severity = 0 - 1
+    for i in 0..list_len(p.rules) {
+        val r = list_get(p.rules, i)
+        if r.kind == 1 && r.severity > best_severity && rule_fires(r, state) {
+            best = r.action
+            best_severity = r.severity
+        }
+    }
+    best
+}
+
+def required_rule_name(p: SafetyPolicy, state: list<f64>) -> str {
+    var name = ""
+    var best_severity = 0 - 1
+    for i in 0..list_len(p.rules) {
+        val r = list_get(p.rules, i)
+        if r.kind == 1 && r.severity > best_severity && rule_fires(r, state) {
+            name = r.name
+            best_severity = r.severity
+        }
+    }
+    name
+}
+
+/// The action to take given the one proposed: a required action first, then
+/// the proposal if permitted, then the first permitted action, then
+/// `fallback`. Every override is counted and written to the audit trail.
+pub def safety_resolve(p: SafetyPolicy, state: list<f64>, permitted: list<bool>, proposed: i64, fallback: i64) -> (SafetyPolicy, SafetyVerdict) {
+    val required = safety_required(p, state)
+    if required >= 0 {
+        val name = required_rule_name(p, state)
+        if required != proposed {
+            list_push(p.audit, "required " + to_str(required) + " instead of " + to_str(proposed) + " by '" + name + "'")
+            var q = p
+            q.interventions = p.interventions + 1
+            return (q, SafetyVerdict { action: required, permitted: permitted, overridden: true, rule: name })
+        }
+        return (p, SafetyVerdict { action: required, permitted: permitted, overridden: false, rule: name })
+    }
+    if proposed >= 0 && proposed < list_len(permitted) && list_get(permitted, proposed) {
+        return (p, SafetyVerdict { action: proposed, permitted: permitted, overridden: false, rule: "" })
+    }
+    var first_permitted = 0 - 1
+    for a in 0..list_len(permitted) {
+        if first_permitted < 0 && list_get(permitted, a) { first_permitted = a }
+    }
+    val action = if first_permitted >= 0 { first_permitted } else { fallback }
+    list_push(p.audit, "forbade " + to_str(proposed) + ", took " + to_str(action))
+    var q = p
+    q.interventions = p.interventions + 1
+    (q, SafetyVerdict { action: action, permitted: permitted, overridden: true, rule: "forbidden" })
+}
+
+// ---------------------------------------------------------------------------
+// Autopilot: model learning, safety and viability in one loop
+// ---------------------------------------------------------------------------
+
+pub record Autopilot {
+    model: LinearModel,
+    bounds: list<ViabilityBound>,
+    safety: SafetyPolicy,
+    actions: list<list<f64>>,
+    horizon: i64,
+    runtime: AgentRuntime,
+    prev_state: list<f64>,
+    prev_action: i64,
+    exploration: f64,
+    learning: bool
+}
+
+pub record AutopilotStep {
+    pilot: Autopilot,
+    action: i64,
+    risk: f64,
+    overridden: bool,
+    reason: str
+}
+
+/// An autopilot for `n_state` variables choosing among `actions` (each a
+/// control vector), looking `horizon` steps ahead.
+pub def autopilot_new(n_state: i64, actions: list<list<f64>>, bounds: list<ViabilityBound>, safety: SafetyPolicy, horizon: i64, forgetting: f64) -> Autopilot {
+    val n_action = if list_len(actions) > 0 { list_len(list_get(actions, 0)) } else { 0 }
+    Autopilot {
+        model: wm_new(n_state, n_action, forgetting),
+        bounds: bounds,
+        safety: safety,
+        actions: actions,
+        horizon: horizon,
+        runtime: agent_runtime_new(3),
+        prev_state: list(),
+        prev_action: 0 - 1,
+        exploration: 0.001,
+        learning: true
+    }
+}
+
+/// Stop (or resume) learning: the model keeps what it has.
+pub def autopilot_with_learning(pilot: Autopilot, learning: bool) -> Autopilot {
+    var ap = pilot
+    ap.learning = learning
+    ap
+}
+
+/// One cycle: learn from what the last action did, then choose the action
+/// that keeps the predicted state viable among those the safety policy
+/// permits, with a required action taking precedence.
+pub def autopilot_step(pilot: Autopilot, state: list<f64>) -> AutopilotStep {
+    var ap = pilot
+    if ap.learning && ap.prev_action >= 0 {
+        ap.model = wm_learn(ap.model, ap.prev_state, list_get(ap.actions, ap.prev_action), state)
+    }
+    val permitted = safety_permitted(ap.safety, state, ap.model, ap.actions)
+    val pick = viability_choose(ap.bounds, ap.model, state, ap.actions, ap.horizon, permitted, ap.exploration)
+    val resolved = safety_resolve(ap.safety, state, permitted, pick.action, 0)
+    ap.safety = resolved.0
+    val verdict = resolved.1
+    val copy: list<f64> = list()
+    for i in 0..list_len(state) { list_push(copy, list_get(state, i)) }
+    ap.prev_state = copy
+    ap.prev_action = verdict.action
+    var rt = ap.runtime
+    rt.cycle = rt.cycle + 1
+    rt.last_action = verdict.action
+    rt.state = if verdict.overridden { "protecting" } else { "active" }
+    ap.runtime = rt
+    val reason = if verdict.overridden { "safety: " + verdict.rule } else { if pick.critical { "best of critical options" } else { "viable" } }
+    AutopilotStep { pilot: ap, action: verdict.action, risk: pick.risk, overridden: verdict.overridden, reason: reason }
+}
+
+// ---------------------------------------------------------------------------
+// Software governor: the autonomic loop over named metrics
+// ---------------------------------------------------------------------------
+
+pub record GovernorStep {
+    governor: SoftwareGovernor,
+    action: i64,
+    action_name: str,
+    rule: i64,
+    health: f64,
+    reason: str
+}
+
+/// One autonomic cycle. The metrics are recorded and fed to the homeostat
+/// (by position), every rule is evaluated against the metric it names, and
+/// the most severe firing rule picks the action -- unless the constitution
+/// does not clear that action's name (constitution_check false), in which
+/// case the governor takes action 0. A rule naming a metric that was not
+/// measured stops the program: a rule that can never fire is a bug.
+pub def software_governor_step(gov: SoftwareGovernor, metric_names: list<str>, metrics: list<f64>, dt: f64) -> GovernorStep {
+    val snapshot: list<f64> = list()
+    for i in 0..list_len(metrics) { list_push(snapshot, list_get(metrics, i)) }
+    list_push(gov.metrics_history, snapshot)
+    val updated = homeostat_update(gov.homeostat, metrics, dt)
+    var g = gov
+    g.homeostat = updated.0
+    var best = 0 - 1
+    var best_severity = 0 - 1
+    for i in 0..list_len(g.rules) {
+        val rule = list_get(g.rules, i)
+        var idx = 0 - 1
+        for j in 0..list_len(metric_names) {
+            if idx < 0 && list_get(metric_names, j) == rule.metric_name { idx = j }
+        }
+        if idx < 0 || idx >= list_len(metrics) {
+            panic("software_governor_step: rule on metric '" + rule.metric_name + "', which was not measured")
+        }
+        if eval_rule(rule, list_get(metrics, idx)) && rule.severity > best_severity {
+            best = i
+            best_severity = rule.severity
+        }
+    }
+    val health = g.homeostat.health
+    if best < 0 {
+        g.last_action = 0
+        val why = if homeostat_is_safe(g.homeostat) { "no rule fired" } else { "outside homeostatic bounds, but no rule fired" }
+        return GovernorStep { governor: g, action: 0, action_name: action_name_at(g, 0), rule: 0 - 1, health: health, reason: why }
+    }
+    val rule = list_get(g.rules, best)
+    val name = action_name_at(g, rule.action_idx)
+    if !constitution_check(g.constitution, name) {
+        g.last_action = 0
+        return GovernorStep { governor: g, action: 0, action_name: action_name_at(g, 0), rule: best, health: health, reason: "'" + name + "' not cleared by the constitution" }
+    }
+    g.last_action = rule.action_idx
+    GovernorStep { governor: g, action: rule.action_idx, action_name: name, rule: best, health: health, reason: rule.metric_name + " " + rule.operator + " " + to_str(rule.threshold) }
+}
+
+def action_name_at(g: SoftwareGovernor, idx: i64) -> str {
+    if idx >= 0 && idx < list_len(g.action_space) { list_get(g.action_space, idx) } else { "action " + to_str(idx) }
+}
+
+// ---------------------------------------------------------------------------
+// Elastic weight consolidation: learn a new task without forgetting the old
+// ---------------------------------------------------------------------------
+
+/// Consolidate a learned task: the diagonal Fisher information, the mean
+/// squared gradient over `grad_samples` (one gradient of the task's loss per
+/// sample), is added to the importance of each parameter, and the current
+/// parameters become the anchor. Accumulating the information keeps earlier
+/// tasks protected (online EWC).
+pub def ewc_consolidate(ewc: EWCState, params: list<f64>, grad_samples: list<list<f64>>) -> EWCState {
+    val n = list_len(params)
+    val k = list_len(grad_samples)
+    for i in 0..n {
+        var f = 0.0
+        for s in 0..k {
+            val g = list_get(list_get(grad_samples, s), i)
+            f = f + g * g
+        }
+        val fi = if k > 0 { f / to_f64(k) } else { 0.0 }
+        if i < list_len(ewc.importance_weights) {
+            list_set(ewc.importance_weights, i, list_get(ewc.importance_weights, i) + fi)
+            list_set(ewc.old_params, i, list_get(params, i))
+        } else {
+            list_push(ewc.importance_weights, fi)
+            list_push(ewc.old_params, list_get(params, i))
+        }
+    }
+    var e = ewc
+    e.n_tasks = ewc.n_tasks + 1
+    e
+}
+
+/// The gradient of ewc_penalty: lambda * F_i * (theta_i - anchor_i). Add it to
+/// the new task's gradient.
+pub def ewc_penalty_grad(ewc: EWCState, params: list<f64>) -> list<f64> {
+    val out: list<f64> = list()
+    for i in 0..list_len(params) {
+        val f = if i < list_len(ewc.importance_weights) { list_get(ewc.importance_weights, i) } else { 0.0 }
+        val anchor = if i < list_len(ewc.old_params) { list_get(ewc.old_params, i) } else { list_get(params, i) }
+        list_push(out, ewc.lambda_ewc * f * (list_get(params, i) - anchor))
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
+// Persistence of what was learned
+// ---------------------------------------------------------------------------
+
+def push_numbers(lines: list<str>, xs: list<f64>) -> i64 {
+    for i in 0..list_len(xs) { list_push(lines, to_str(list_get(xs, i))) }
+    list_len(lines)
+}
+
+def write_lines(path: str, lines: list<str>) -> bool effect fs, io {
+    var content = ""
+    for i in 0..list_len(lines) { content = content + list_get(lines, i) + "\n" }
+    val r = file_write_all(path, content)
+    when r {
+        ok(n) => true,
+        err(e) => false
+    }
+}
+
+def number_at(lines: list<str>, i: i64) -> f64 {
+    if i >= list_len(lines) { return 0.0 }
+    val parsed = parse_f64(trim(list_get(lines, i)))
+    if is_some(parsed) { unwrap(parsed) } else { 0.0 }
+}
+
+/// Save a model with what it has learned: its counts, preferences and prior.
+pub def pomdp_save(m: Pomdp, path: str) -> bool effect fs, io {
+    val lines: list<str> = list("iris-pomdp 1", to_str(m.n_states), to_str(m.n_obs), to_str(m.n_actions))
+    push_numbers(lines, m.pa)
+    push_numbers(lines, m.pb)
+    push_numbers(lines, m.log_c)
+    push_numbers(lines, m.d)
+    write_lines(path, lines)
+}
+
+/// A model saved by pomdp_save; none if the file is missing or not one.
+pub def pomdp_load(path: str) -> option<Pomdp> effect fs, io {
+    val lines = file_lines(path)
+    if list_len(lines) < 4 || trim(list_get(lines, 0)) != "iris-pomdp 1" { return none() }
+    val ns = number_at(lines, 1) to i64
+    val no = number_at(lines, 2) to i64
+    val na = number_at(lines, 3) to i64
+    if list_len(lines) < 4 + no * ns + na * ns * ns + no + ns { return none() }
+    val m = pomdp_new(ns, no, na)
+    var at = 4
+    for i in 0..(no * ns) { list_set(m.pa, i, number_at(lines, at + i)) }
+    at = at + no * ns
+    for i in 0..(na * ns * ns) { list_set(m.pb, i, number_at(lines, at + i)) }
+    at = at + na * ns * ns
+    for i in 0..no { list_set(m.log_c, i, number_at(lines, at + i)) }
+    at = at + no
+    for i in 0..ns { list_set(m.d, i, number_at(lines, at + i)) }
+    // The means of the counts.
+    for s in 0..ns {
+        var col = 0.0
+        for o in 0..no { col = col + list_get(m.pa, o * ns + s) }
+        for o in 0..no { list_set(m.a, o * ns + s, if col > 0.0 { list_get(m.pa, o * ns + s) / col } else { 1.0 / to_f64(no) }) }
+    }
+    for r in 0..(na * ns) {
+        var total = 0.0
+        for s2 in 0..ns { total = total + list_get(m.pb, r * ns + s2) }
+        for s2 in 0..ns { list_set(m.b, r * ns + s2, if total > 0.0 { list_get(m.pb, r * ns + s2) / total } else { 1.0 / to_f64(ns) }) }
+    }
+    some(m)
+}
+
+/// Save a linear model's weights and covariance, so learning resumes.
+pub def linear_model_save(m: LinearModel, path: str) -> bool effect fs, io {
+    val lines: list<str> = list("iris-linear-model 1", to_str(m.n_in), to_str(m.n_out), to_str(m.forgetting), to_str(m.max_variance), to_str(m.updates), to_str(m.mse))
+    push_numbers(lines, m.w)
+    push_numbers(lines, m.p)
+    write_lines(path, lines)
+}
+
+pub def linear_model_load(path: str) -> option<LinearModel> effect fs, io {
+    val lines = file_lines(path)
+    if list_len(lines) < 7 || trim(list_get(lines, 0)) != "iris-linear-model 1" { return none() }
+    val n_in = number_at(lines, 1) to i64
+    val n_out = number_at(lines, 2) to i64
+    if list_len(lines) < 7 + n_in * n_out + n_in * n_in { return none() }
+    var m = linear_model_new(n_in, n_out, number_at(lines, 3), number_at(lines, 4))
+    m.updates = number_at(lines, 5) to i64
+    m.mse = number_at(lines, 6)
+    for i in 0..(n_in * n_out) { list_set(m.w, i, number_at(lines, 7 + i)) }
+    for i in 0..(n_in * n_in) { list_set(m.p, i, number_at(lines, 7 + n_in * n_out + i)) }
+    some(m)
 }

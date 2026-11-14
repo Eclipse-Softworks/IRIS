@@ -1,0 +1,17 @@
+// iris-test: compile-fail
+// iris-test: error=does not implement trait
+//
+// A record that does not implement the trait cannot become a trait object;
+// it used to be accepted and fail only when a method was dispatched.
+
+trait Shape { def area(self) -> f64 }
+record Sq { s: f64 }
+record Label { text: str }
+impl Shape for Sq { def area(self) -> f64 { self.s * self.s } }
+
+def make() -> dyn Shape { Label { text: "not a shape" } }
+
+def main() -> i64 {
+    assert(make().area() > 0.0);
+    0
+}

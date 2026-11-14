@@ -12,7 +12,7 @@ use std::sync::{Mutex, OnceLock};
 // ---------------------------------------------------------------------------
 
 /// Global security policy controlling what an IRIS program is allowed to do.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SecurityPolicy {
     /// Allow filesystem read operations.
     pub allow_fs_read: bool,
@@ -106,6 +106,46 @@ impl SecurityPolicy {
             max_connections: 0,
         }
     }
+
+    /// Returns `true` when this policy matches `SecurityPolicy::default()`.
+    pub fn is_default_permissive(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// Serialize this policy into the key-value line format expected by the C runtime.
+    pub fn to_runtime_spec(&self) -> String {
+        use std::fmt::Write as _;
+        let mut out = String::new();
+        let bit = |flag: bool| i32::from(flag);
+        let _ = writeln!(out, "allow_fs_read={}", bit(self.allow_fs_read));
+        let _ = writeln!(out, "allow_fs_write={}", bit(self.allow_fs_write));
+        let _ = writeln!(out, "allow_network={}", bit(self.allow_network));
+        let _ = writeln!(out, "allow_ffi={}", bit(self.allow_ffi));
+        let _ = writeln!(out, "allow_process={}", bit(self.allow_process));
+        let max_write = i64::try_from(self.max_file_write_bytes).unwrap_or(i64::MAX);
+        let _ = writeln!(out, "max_file_write_bytes={max_write}");
+        let _ = writeln!(out, "max_open_files={}", self.max_open_files);
+        let _ = writeln!(out, "max_connections={}", self.max_connections);
+        for p in &self.fs_read_allowlist {
+            let _ = writeln!(out, "fs_read_allow={}", p.display());
+        }
+        for p in &self.fs_write_allowlist {
+            let _ = writeln!(out, "fs_write_allow={}", p.display());
+        }
+        for p in &self.fs_blocklist {
+            let _ = writeln!(out, "fs_block={}", p.display());
+        }
+        for h in &self.network_allowlist {
+            let _ = writeln!(out, "net_allow={h}");
+        }
+        for h in &self.network_blocklist {
+            let _ = writeln!(out, "net_block={h}");
+        }
+        for p in &self.ffi_allowlist {
+            let _ = writeln!(out, "ffi_allow={}", p.display());
+        }
+        out
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -178,6 +218,13 @@ impl std::error::Error for SecurityError {}
 // Global Security State
 // ---------------------------------------------------------------------------
 
+extern "C" {
+    fn iris_sandbox_set_policy_spec(
+        spec: *const std::os::raw::c_char,
+        lock_policy: std::os::raw::c_int,
+    );
+}
+
 static GLOBAL_POLICY: OnceLock<Mutex<SecurityPolicy>> = OnceLock::new();
 
 fn global_policy() -> &'static Mutex<SecurityPolicy> {
@@ -185,9 +232,78 @@ fn global_policy() -> &'static Mutex<SecurityPolicy> {
 }
 
 /// Set the global security policy. Should be called before any IRIS evaluation.
+/// Synchronizes both the Rust policy and the C runtime sandbox state.
 pub fn set_security_policy(policy: SecurityPolicy) {
-    let guard = global_policy();
-    *guard.lock().unwrap() = policy;
+    let spec = policy.to_runtime_spec();
+    {
+        let guard = global_policy();
+        *guard.lock().unwrap() = policy;
+    }
+    if let Ok(c_spec) = std::ffi::CString::new(spec) {
+        // SAFETY: `c_spec` is a valid NUL-terminated buffer for this call.
+        unsafe {
+            iris_sandbox_set_policy_spec(c_spec.as_ptr(), 0);
+        }
+    }
+}
+
+/// Return whether an `extern def` calls an IRIS runtime-mediated function
+/// rather than an unmediated raw C symbol or third-party shared library.
+pub fn is_mediated_runtime_extern(ext: &crate::ir::module::IrExternFn) -> bool {
+    ext.link_lib.is_none() && ext.name.starts_with("iris_")
+}
+
+/// Check FFI permission against an explicit `SecurityPolicy`.
+pub fn check_ffi_with_policy(
+    policy: &SecurityPolicy,
+    library_path: &str,
+) -> Result<(), SecurityError> {
+    if !policy.allow_ffi {
+        log_audit(AuditOp::FfiLoad, false, library_path.to_string());
+        return Err(SecurityError::FfiDenied {
+            library: library_path.to_string(),
+        });
+    }
+    let validated = validate_path(library_path)?;
+    if !policy.ffi_allowlist.is_empty() {
+        let allowed = policy
+            .ffi_allowlist
+            .iter()
+            .any(|a| validated.starts_with(a));
+        if !allowed {
+            log_audit(AuditOp::FfiLoad, false, library_path.to_string());
+            return Err(SecurityError::FfiDenied {
+                library: library_path.to_string(),
+            });
+        }
+    }
+    log_audit(AuditOp::FfiLoad, true, library_path.to_string());
+    Ok(())
+}
+
+/// Validate all `extern def` declarations in an IR module against `policy`.
+/// Any non-runtime C declaration or external linked library is rejected when FFI
+/// is denied or excluded by `ffi_allowlist`.
+pub fn validate_module_ffi_with_policy(
+    extern_fns: &[crate::ir::module::IrExternFn],
+    policy: &SecurityPolicy,
+) -> Result<(), SecurityError> {
+    for ext in extern_fns {
+        if is_mediated_runtime_extern(ext) {
+            continue;
+        }
+        let target = ext.link_lib.as_deref().unwrap_or(ext.name.as_str());
+        check_ffi_with_policy(policy, target)?;
+    }
+    Ok(())
+}
+
+/// Validate all `extern def` declarations in an IR module against the global policy.
+pub fn validate_module_ffi(
+    extern_fns: &[crate::ir::module::IrExternFn],
+) -> Result<(), SecurityError> {
+    let policy = get_security_policy();
+    validate_module_ffi_with_policy(extern_fns, &policy)
 }
 
 /// Get a snapshot of the current global security policy.
@@ -407,6 +523,17 @@ pub fn check_fs_write(path: &str) -> Result<(), SecurityError> {
     Ok(())
 }
 
+/// Check if writing `bytes` to `path` is allowed by the current policy.
+pub fn check_fs_write_bytes(path: &str, bytes: u64) -> Result<(), SecurityError> {
+    check_fs_write(path)?;
+    let limit = get_security_policy().max_file_write_bytes;
+    if limit > 0 && bytes > limit {
+        log_audit(AuditOp::FsWrite, false, path.to_string());
+        return Err(SecurityError::FileSizeLimitExceeded { size: bytes, limit });
+    }
+    Ok(())
+}
+
 /// Check if a network operation is allowed by the current policy.
 pub fn check_network(host: &str) -> Result<(), SecurityError> {
     let policy = get_security_policy();
@@ -448,34 +575,7 @@ pub fn check_network(host: &str) -> Result<(), SecurityError> {
 
 /// Check if FFI library loading is allowed by the current policy.
 pub fn check_ffi(library_path: &str) -> Result<(), SecurityError> {
-    let policy = get_security_policy();
-
-    if !policy.allow_ffi {
-        log_audit(AuditOp::FfiLoad, false, library_path.to_string());
-        return Err(SecurityError::FfiDenied {
-            library: library_path.to_string(),
-        });
-    }
-
-    // Validate the path itself.
-    let validated = validate_path(library_path)?;
-
-    // Check allowlist (if non-empty).
-    if !policy.ffi_allowlist.is_empty() {
-        let allowed = policy
-            .ffi_allowlist
-            .iter()
-            .any(|a| validated.starts_with(a));
-        if !allowed {
-            log_audit(AuditOp::FfiLoad, false, library_path.to_string());
-            return Err(SecurityError::FfiDenied {
-                library: library_path.to_string(),
-            });
-        }
-    }
-
-    log_audit(AuditOp::FfiLoad, true, library_path.to_string());
-    Ok(())
+    check_ffi_with_policy(&get_security_policy(), library_path)
 }
 
 /// Check if process spawning is allowed by the current policy.

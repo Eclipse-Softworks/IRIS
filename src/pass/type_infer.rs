@@ -19,43 +19,9 @@ fn same_nominal_type(a: &IrType, b: &IrType) -> bool {
     }
 }
 
-/// Returns true if `ty` contains `IrType::Infer` anywhere in its structure.
-fn contains_infer(ty: &IrType) -> bool {
-    match ty {
-        IrType::Infer => true,
-        // Opaque tape handle: no inner type to be unresolved.
-        IrType::TapeRef => false,
-        IrType::Option(inner)
-        | IrType::Chan(inner)
-        | IrType::Atomic(inner)
-        | IrType::Mutex(inner)
-        | IrType::Grad(inner)
-        | IrType::Sparse(inner)
-        | IrType::List(inner) => contains_infer(inner),
-        IrType::ResultType(ok, err) | IrType::Map(ok, err) => {
-            contains_infer(ok) || contains_infer(err)
-        }
-        IrType::Array { elem, .. } | IrType::Slice { elem, .. } => contains_infer(elem),
-        IrType::Tuple(fields) => fields.iter().any(contains_infer),
-        IrType::Struct { fields, .. } => fields.iter().any(|(_, t)| contains_infer(t)),
-        IrType::Fn { params, ret } => params.iter().any(contains_infer) || contains_infer(ret),
-        IrType::TraitObject { methods, .. } => methods
-            .iter()
-            .any(|m| m.params.iter().any(contains_infer) || contains_infer(&m.ret)),
-        IrType::Scalar(_)
-        | IrType::Tensor { .. }
-        | IrType::Str
-        | IrType::Enum { .. }
-        | IrType::TaskGroup
-        | IrType::WeakRef(_) => false,
-    }
-}
-
 /// Checks that tensor operation result types are consistent with their inputs,
-/// and that binary operations do not mix incompatible types.
-///
-/// This pass runs after `ValidatePass`, so `IrType::Infer` is guaranteed to
-/// have been eliminated already.
+/// and that binary operations do not mix incompatible types: a consistency
+/// check of what lowering produced (every value already typed), not inference.
 pub struct TypeInferPass;
 
 impl Pass for TypeInferPass {
@@ -65,8 +31,9 @@ impl Pass for TypeInferPass {
 
     fn run(&mut self, module: &mut IrModule) -> Result<(), PassError> {
         for func in module.functions() {
-            for block in func.blocks() {
-                for instr in &block.instrs {
+            for (bi, block) in func.blocks().iter().enumerate() {
+                for (ii, instr) in block.instrs.iter().enumerate() {
+                    let at = |message: String| located(func, bi, ii, instr, message);
                     match instr {
                         IrInstr::BinOp { lhs, rhs, .. } => {
                             let lhs_ty = func.value_type(*lhs);
@@ -82,13 +49,11 @@ impl Pass for TypeInferPass {
                                         || (matches!(l, IrType::Scalar(_))
                                             && matches!(r, IrType::Sparse(_)));
                                     if !is_grad_mixed && !is_sparse_mixed {
-                                        return Err(PassError::TypeError {
-                                            func: func.name.clone(),
-                                            detail: format!(
-                                                "binary op on mismatched types {} and {}",
-                                                l, r
-                                            ),
-                                        });
+                                        return Err(at(format!(
+                                            "cannot combine `{}` and `{}`",
+                                            src(l),
+                                            src(r)
+                                        )));
                                     }
                                 }
                                 _ => {}
@@ -110,24 +75,18 @@ impl Pass for TypeInferPass {
                                             ) | IrType::Grad(_)
                                                 | IrType::Tensor { .. }
                                         ) {
-                                            return Err(PassError::TypeError {
-                                                func: func.name.clone(),
-                                                detail: format!(
-                                                    "neg operand must be a numeric scalar, grad, or tensor, got {}",
-                                                    ty
-                                                ),
-                                            });
+                                            return Err(at(format!(
+                                                "`-` needs a number, but this is `{}`",
+                                                src(ty)
+                                            )));
                                         }
                                     }
                                     ScalarUnaryOp::Not => {
                                         if !matches!(ty, IrType::Scalar(DType::Bool)) {
-                                            return Err(PassError::TypeError {
-                                                func: func.name.clone(),
-                                                detail: format!(
-                                                    "not operand must be bool, got {}",
-                                                    ty
-                                                ),
-                                            });
+                                            return Err(at(format!(
+                                                "`!` needs a `bool`, but this is `{}`",
+                                                src(ty)
+                                            )));
                                         }
                                     }
                                     // Math builtins — accept any numeric scalar.
@@ -157,13 +116,11 @@ impl Pass for TypeInferPass {
                                                     | DType::USize
                                             )
                                         ) {
-                                            return Err(PassError::TypeError {
-                                                func: func.name.clone(),
-                                                detail: format!(
-                                                    "{:?} operand must be numeric scalar, got {}",
-                                                    op, ty
-                                                ),
-                                            });
+                                            return Err(at(format!(
+                                                "`{}` needs a number, but this is `{}`",
+                                                format!("{:?}", op).to_lowercase(),
+                                                src(ty)
+                                            )));
                                         }
                                     }
                                     // BitNot — integer scalars only.
@@ -180,13 +137,10 @@ impl Pass for TypeInferPass {
                                                     | DType::USize
                                             )
                                         ) {
-                                            return Err(PassError::TypeError {
-                                                func: func.name.clone(),
-                                                detail: format!(
-                                                    "bitnot operand must be integer scalar, got {}",
-                                                    ty
-                                                ),
-                                            });
+                                            return Err(at(format!(
+                                                "`~` needs an integer, but this is `{}`",
+                                                src(ty)
+                                            )));
                                         }
                                     }
                                 }
@@ -203,52 +157,41 @@ impl Pass for TypeInferPass {
                             for &input in inputs {
                                 if let Some(ty) = func.value_type(input) {
                                     if !matches!(ty, IrType::Tensor { .. }) {
-                                        return Err(PassError::TypeError {
-                                            func: func.name.clone(),
-                                            detail: format!(
-                                                "einsum input {} must be a tensor, got {}",
-                                                input, ty
-                                            ),
-                                        });
+                                        return Err(at(format!(
+                                            "`einsum` input {} must be a tensor, but it is `{}`",
+                                            input,
+                                            src(ty)
+                                        )));
                                     }
                                 }
                             }
 
                             // Result must also be a tensor.
                             if !matches!(result_ty, IrType::Tensor { .. }) {
-                                return Err(PassError::TypeError {
-                                    func: func.name.clone(),
-                                    detail: format!(
-                                        "einsum result type must be a tensor, got {}",
-                                        result_ty
-                                    ),
-                                });
+                                return Err(at(format!(
+                                    "`einsum` must produce a tensor, not `{}`",
+                                    src(result_ty)
+                                )));
                             }
                         }
 
                         IrInstr::Load { result_ty, .. } => {
                             // Load result must be a scalar.
                             if !matches!(result_ty, IrType::Scalar(_)) {
-                                return Err(PassError::TypeError {
-                                    func: func.name.clone(),
-                                    detail: format!(
-                                        "load result must be a scalar, got {}",
-                                        result_ty
-                                    ),
-                                });
+                                return Err(at(format!(
+                                    "loading this element gives `{}`, not a number",
+                                    src(result_ty)
+                                )));
                             }
                         }
 
                         IrInstr::Cast { to_ty, .. } => {
                             // Cast result must be a scalar type.
                             if !matches!(to_ty, IrType::Scalar(_)) {
-                                return Err(PassError::TypeError {
-                                    func: func.name.clone(),
-                                    detail: format!(
-                                        "cast target type must be a scalar, got {}",
-                                        to_ty
-                                    ),
-                                });
+                                return Err(at(format!(
+                                    "`to` converts between number types, not to `{}`",
+                                    src(to_ty)
+                                )));
                             }
                         }
 
@@ -257,13 +200,10 @@ impl Pass for TypeInferPass {
                         } => {
                             if let Some(ty) = func.value_type(*base) {
                                 if !matches!(ty, IrType::Struct { .. }) {
-                                    return Err(PassError::TypeError {
-                                        func: func.name.clone(),
-                                        detail: format!(
-                                            "GetField: base must be a struct, got {}",
-                                            ty
-                                        ),
-                                    });
+                                    return Err(at(format!(
+                                        "`{}` has no fields: only records do",
+                                        src(ty)
+                                    )));
                                 }
                             }
                             let _ = field_index;
@@ -272,13 +212,7 @@ impl Pass for TypeInferPass {
                         IrInstr::ArrayLoad { array, .. } => {
                             if let Some(ty) = func.value_type(*array) {
                                 if !matches!(ty, IrType::Array { .. } | IrType::Slice { .. }) {
-                                    return Err(PassError::TypeError {
-                                        func: func.name.clone(),
-                                        detail: format!(
-                                            "ArrayLoad: operand must be an array or slice, got {}",
-                                            ty
-                                        ),
-                                    });
+                                    return Err(at(format!("only arrays and slices are indexed this way, but this is `{}`", src(ty))));
                                 }
                             }
                         }
@@ -286,13 +220,7 @@ impl Pass for TypeInferPass {
                         IrInstr::ArrayStore { array, .. } => {
                             if let Some(ty) = func.value_type(*array) {
                                 if !matches!(ty, IrType::Array { .. } | IrType::Slice { .. }) {
-                                    return Err(PassError::TypeError {
-                                        func: func.name.clone(),
-                                        detail: format!(
-                                            "ArrayStore: operand must be an array or slice, got {}",
-                                            ty
-                                        ),
-                                    });
+                                    return Err(at(format!("only arrays and slices are indexed this way, but this is `{}`", src(ty))));
                                 }
                             }
                         }
@@ -300,13 +228,10 @@ impl Pass for TypeInferPass {
                         IrInstr::GetElement { base, .. } => {
                             if let Some(ty) = func.value_type(*base) {
                                 if !matches!(ty, IrType::Tuple(_) | IrType::Struct { .. }) {
-                                    return Err(PassError::TypeError {
-                                        func: func.name.clone(),
-                                        detail: format!(
-                                            "GetElement: base must be a tuple or struct, got {}",
-                                            ty
-                                        ),
-                                    });
+                                    return Err(at(format!(
+                                        "`.N` takes an element of a tuple, but this is `{}`",
+                                        src(ty)
+                                    )));
                                 }
                             }
                         }
@@ -317,18 +242,13 @@ impl Pass for TypeInferPass {
                                 if let (Some(val_ty), ret_ty) =
                                     (func.value_type(values[0]), &func.return_ty)
                                 {
-                                    if val_ty != ret_ty
-                                        && !same_nominal_type(val_ty, ret_ty)
-                                        && !contains_infer(val_ty)
-                                        && !contains_infer(ret_ty)
-                                    {
-                                        return Err(PassError::TypeError {
-                                            func: func.name.clone(),
-                                            detail: format!(
-                                                "return type mismatch — declared '{}' but found '{}'",
-                                                ret_ty, val_ty
-                                            ),
-                                        });
+                                    if val_ty != ret_ty && !same_nominal_type(val_ty, ret_ty) {
+                                        return Err(at(format!(
+                                            "`{}` returns `{}`, but this value is `{}`",
+                                            func.name,
+                                            src(ret_ty),
+                                            src(val_ty)
+                                        )));
                                     }
                                 }
                             }
@@ -341,4 +261,34 @@ impl Pass for TypeInferPass {
         }
         Ok(())
     }
+}
+
+/// A type as written in source: `Point`, not `%Point`.
+fn src(ty: &IrType) -> String {
+    ty.to_string().replace('%', "").replace("enum.", "")
+}
+
+/// A type error at instruction `ii` of block `bi`, located by the span table
+/// (the instruction's own position, its result's, or an operand's).
+fn located(
+    func: &crate::ir::function::IrFunction,
+    bi: usize,
+    ii: usize,
+    instr: &IrInstr,
+    message: String,
+) -> PassError {
+    let byte = func
+        .get_instr_span(bi as u32, ii)
+        .or_else(|| {
+            instr
+                .operands()
+                .iter()
+                .find_map(|v| func.span_table.get_for_val(*v))
+        })
+        .or_else(|| func.debug_span(bi as u32, ii));
+    let mut diag = crate::diagnostics::Diagnostic::error(message);
+    if let Some(b) = byte {
+        diag = diag.with_primary_span(b, b + 1, None);
+    }
+    PassError::rich("E0202", diag)
 }

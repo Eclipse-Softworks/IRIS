@@ -1,4 +1,18 @@
 // src/stdlib/math.iris -- IRIS standard math library
+// Comprehensive mathematical constants, scalar operations, trigonometry, combinatorics, and statistics.
+
+pub const PI: f64 = 3.141592653589793
+pub const TAU: f64 = 6.283185307179586
+pub const E: f64 = 2.718281828459045
+pub const SQRT2: f64 = 1.414213562373095
+pub const LN2: f64 = 0.693147180559945
+pub const LN10: f64 = 2.302585092994046
+
+pub def pi() -> f64 { 3.141592653589793 }
+pub def tau() -> f64 { 6.283185307179586 }
+pub def e_const() -> f64 { 2.718281828459045 }
+
+// --- Integer Number Theory & Arithmetic ---
 
 pub def gcd(a: i64, b: i64) -> i64 {
     var x = a
@@ -12,7 +26,13 @@ pub def gcd(a: i64, b: i64) -> i64 {
 }
 
 pub def lcm(a: i64, b: i64) -> i64 {
-    (a / gcd(a, b)) * b
+    if a == 0 || b == 0 {
+        0
+    } else {
+        val g = gcd(a, b);
+        val res = (a / g) * b;
+        if res < 0 { 0 - res } else { res }
+    }
 }
 
 pub def abs_i64(n: i64) -> i64 {
@@ -41,4 +61,324 @@ pub def is_even(n: i64) -> bool {
 
 pub def is_odd(n: i64) -> bool {
     (n - (n / 2) * 2) != 0
+}
+
+pub def pow_i64(base: i64, exp: i64) -> i64 {
+    if exp < 0 { return 0 };
+    if exp == 0 { return 1 };
+    var result = 1;
+    var b = base;
+    var cur_exp = exp;
+    while cur_exp > 0 {
+        if (cur_exp % 2) != 0 {
+            result = result * b;
+        };
+        b = b * b;
+        cur_exp = cur_exp / 2;
+    };
+    result
+}
+
+pub def is_power_of_two(n: i64) -> bool {
+    if n <= 0 { false } else { band(n, n - 1) == 0 }
+}
+
+pub def next_power_of_two(n: i64) -> i64 {
+    if n <= 1 { return 1 };
+    var p = 1;
+    while p < n {
+        p = p * 2;
+    };
+    p
+}
+
+pub def integer_sqrt(n: i64) -> i64 {
+    if n < 0 { return 0 };
+    if n == 0 || n == 1 { return n };
+    var x0 = n / 2;
+    var x1 = (x0 + (n / x0)) / 2;
+    while x1 < x0 {
+        x0 = x1;
+        x1 = (x0 + (n / x0)) / 2;
+    };
+    x0
+}
+
+pub def is_prime(n: i64) -> bool {
+    if n <= 1 { return false };
+    if n <= 3 { return true };
+    if (n % 2) == 0 || (n % 3) == 0 { return false };
+    var i = 5;
+    while (i * i) <= n {
+        if (n % i) == 0 || (n % (i + 2)) == 0 {
+            return false;
+        };
+        i = i + 6;
+    };
+    true
+}
+
+pub def next_prime(n: i64) -> i64 {
+    var candidate = if n < 2 { 2 } else { n + 1 };
+    while !is_prime(candidate) {
+        candidate = candidate + 1;
+    };
+    candidate
+}
+
+pub def factorial(n: i64) -> i64 {
+    if n <= 1 { return 1 };
+    var res = 1;
+    var i = 2;
+    while i <= n {
+        res = res * i;
+        i = i + 1;
+    };
+    res
+}
+
+pub def permutations(n: i64, r: i64) -> i64 {
+    if r < 0 || r > n { return 0 };
+    var res = 1;
+    var i = n;
+    while i > (n - r) {
+        res = res * i;
+        i = i - 1;
+    };
+    res
+}
+
+pub def combinations(n: i64, r: i64) -> i64 {
+    if r < 0 || r > n { return 0 };
+    val k = if r > (n - r) { n - r } else { r };
+    if k == 0 { return 1 };
+    var num = 1;
+    var den = 1;
+    var i = 1;
+    while i <= k {
+        num = num * (n - i + 1);
+        den = den * i;
+        i = i + 1;
+    };
+    num / den
+}
+
+// --- Floating Point Operations & Geometry ---
+
+pub def abs_f64(x: f64) -> f64 {
+    if x < 0.0 { -x } else { x }
+}
+
+pub def clamp_f64(x: f64, lo: f64, hi: f64) -> f64 {
+    if x < lo { lo } else if x > hi { hi } else { x }
+}
+
+pub def min_f64(a: f64, b: f64) -> f64 {
+    if a < b { a } else { b }
+}
+
+pub def max_f64(a: f64, b: f64) -> f64 {
+    if a > b { a } else { b }
+}
+
+pub def sign_f64(x: f64) -> f64 {
+    if x > 0.0 { 1.0 } else if x < 0.0 { -1.0 } else { 0.0 }
+}
+
+pub def deg_to_rad(deg: f64) -> f64 {
+    deg * (PI / 180.0)
+}
+
+pub def rad_to_deg(rad: f64) -> f64 {
+    rad * (180.0 / PI)
+}
+
+pub def normalize_angle(rad: f64) -> f64 {
+    var a = rad;
+    while a > PI {
+        a = a - TAU;
+    };
+    while a < -PI {
+        a = a + TAU;
+    };
+    a
+}
+
+pub def hypot(x: f64, y: f64) -> f64 {
+    val sq = (x * x) + (y * y);
+    if sq < 0.00000000000001 { 0.0 } else { sqrt(sq) }
+}
+
+pub def hypot_3d(x: f64, y: f64, z: f64) -> f64 {
+    val sq = (x * x) + (y * y) + (z * z);
+    if sq < 0.00000000000001 { 0.0 } else { sqrt(sq) }
+}
+
+pub def atan2(y: f64, x: f64) -> f64 {
+    if abs_f64(x) < 0.00000001 {
+        if y > 0.0 {
+            return PI * 0.5;
+        } else if y < 0.0 {
+            return -PI * 0.5;
+        } else {
+            return 0.0;
+        };
+    };
+
+    val r = y / x;
+    val r_abs = abs_f64(r);
+    val c1 = 0.97239411;
+    val c3 = -0.19194795;
+
+    var angle = 0.0;
+    if r_abs <= 1.0 {
+        angle = (c1 * r_abs) + (c3 * r_abs * r_abs * r_abs);
+    } else {
+        val inv_r = 1.0 / r_abs;
+        angle = (PI * 0.5) - ((c1 * inv_r) + (c3 * inv_r * inv_r * inv_r));
+    };
+
+    if r < 0.0 {
+        angle = -angle;
+    };
+
+    if x < 0.0 {
+        if y >= 0.0 {
+            angle = angle + PI;
+        } else {
+            angle = angle - PI;
+        };
+    };
+
+    // The polynomial alone is off by up to 0.004 rad -- enough to make a
+    // heading controller weave. Newton's method on y*cos(t) - x*sin(t) = 0,
+    // whose root is the exact angle, converges quadratically from there:
+    // three steps reach double precision.
+    var t = angle;
+    var steps = 0;
+    while steps < 3 {
+        val c = cos(t);
+        val s = sin(t);
+        val d = (y * s) + (x * c);
+        if abs_f64(d) > 0.0 {
+            t = t + ((y * c) - (x * s)) / d;
+        };
+        steps = steps + 1;
+    };
+    if t > PI {
+        t = t - TAU;
+    };
+    if t <= -PI {
+        t = t + TAU;
+    };
+    t
+}
+
+pub def sinh(x: f64) -> f64 {
+    (exp(x) - exp(-x)) * 0.5
+}
+
+pub def cosh(x: f64) -> f64 {
+    (exp(x) + exp(-x)) * 0.5
+}
+
+pub def tanh(x: f64) -> f64 {
+    val e2x = exp(2.0 * x);
+    (e2x - 1.0) / (e2x + 1.0)
+}
+
+pub def lerp(a: f64, b: f64, t: f64) -> f64 {
+    a + ((b - a) * t)
+}
+
+pub def inv_lerp(a: f64, b: f64, v: f64) -> f64 {
+    val diff = b - a;
+    if abs_f64(diff) < 0.00000000000001 {
+        0.0
+    } else {
+        (v - a) / diff
+    }
+}
+
+pub def remap(v: f64, in_min: f64, in_max: f64, out_min: f64, out_max: f64) -> f64 {
+    val t = inv_lerp(in_min, in_max, v);
+    lerp(out_min, out_max, t)
+}
+
+pub def smoothstep(edge0: f64, edge1: f64, x: f64) -> f64 {
+    val t = clamp_f64((x - edge0) / (edge1 - edge0), 0.0, 1.0);
+    t * t * (3.0 - (2.0 * t))
+}
+
+pub def is_close(a: f64, b: f64, tol: f64) -> bool {
+    abs_f64(a - b) <= tol
+}
+
+pub def round_to_decimals(val_f: f64, decimals: i64) -> f64 {
+    val factor = pow(10.0, to_f64(decimals));
+    round(val_f * factor) / factor
+}
+
+// --- Descriptive Statistics on Lists ---
+
+pub def sum_f64(vals: list<f64>) -> f64 {
+    var total = 0.0;
+    val n = list_len(vals);
+    for i in 0 .. n {
+        total = total + list_get(vals, i);
+    };
+    total
+}
+
+pub def sum_i64(vals: list<i64>) -> i64 {
+    var total = 0;
+    val n = list_len(vals);
+    for i in 0 .. n {
+        total = total + list_get(vals, i);
+    };
+    total
+}
+
+pub def mean(vals: list<f64>) -> f64 {
+    val n = list_len(vals);
+    if n == 0 { 0.0 } else { sum_f64(vals) / to_f64(n) }
+}
+
+pub def variance(vals: list<f64>) -> f64 {
+    val n = list_len(vals);
+    if n <= 1 { return 0.0 };
+    val m = mean(vals);
+    var sum_sq = 0.0;
+    for i in 0 .. n {
+        val diff = list_get(vals, i) - m;
+        sum_sq = sum_sq + (diff * diff);
+    };
+    sum_sq / to_f64(n - 1)
+}
+
+pub def std_dev(vals: list<f64>) -> f64 {
+    val v = variance(vals);
+    if v < 0.00000000000001 { 0.0 } else { sqrt(v) }
+}
+
+pub def min_in_list(vals: list<f64>) -> f64 {
+    val n = list_len(vals);
+    if n == 0 { return 0.0 };
+    var m = list_get(vals, 0);
+    for i in 1 .. n {
+        val v = list_get(vals, i);
+        if v < m { m = v };
+    };
+    m
+}
+
+pub def max_in_list(vals: list<f64>) -> f64 {
+    val n = list_len(vals);
+    if n == 0 { return 0.0 };
+    var m = list_get(vals, 0);
+    for i in 1 .. n {
+        val v = list_get(vals, i);
+        if v > m { m = v };
+    };
+    m
 }

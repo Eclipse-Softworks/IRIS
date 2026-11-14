@@ -1,0 +1,150 @@
+// std.crypto against published test vectors. Every expected value below is
+// taken from the cited standard, not from running this code.
+
+bring std.buffer
+bring std.crypto
+
+def hex(bytes: list<i64>) -> str {
+    byte_buffer_to_hex(ByteBuffer { data: bytes, len: list_len(bytes) })
+}
+
+def unhex(text: str) -> list<i64> {
+    byte_buffer_from_hex(text).data
+}
+
+def buf(text: str) -> ByteBuffer {
+    byte_buffer_from_hex(text)
+}
+
+// RFC 1321, appendix A.5.
+def md5_vectors() -> i64 {
+    assert(md5_str("") == "d41d8cd98f00b204e9800998ecf8427e");
+    assert(md5_str("a") == "0cc175b9c0f1b6a831c399e269772661");
+    assert(md5_str("abc") == "900150983cd24fb0d6963f7d28e17f72");
+    assert(md5_str("message digest") == "f96b697d7cb7938d525a2f31aaf161d0");
+    assert(md5_str("abcdefghijklmnopqrstuvwxyz") == "c3fcd3d76192e4007dfb496cca67e13b");
+    assert(md5_str("12345678901234567890123456789012345678901234567890123456789012345678901234567890") == "57edf4a22be3c955ac49da2e2107b67a");
+    assert(list_len(md5_bytes(str_bytes("abc"))) == 16);
+    assert(md5_hex(str_bytes("abc")) == "900150983cd24fb0d6963f7d28e17f72");
+    0
+}
+
+// FIPS 180-4 examples (SHA-1 of "abc" and the two-block message).
+def sha1_vectors() -> i64 {
+    assert(sha1_str("") == "da39a3ee5e6b4b0d3255bfef95601890afd80709");
+    assert(sha1_str("abc") == "a9993e364706816aba3e25717850c26c9cd0d89d");
+    assert(sha1_str("abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq") == "84983e441c3bd26ebaae4aa1f95129e5e54670f1");
+    assert(hex(sha1_bytes(str_bytes("abc"))) == "a9993e364706816aba3e25717850c26c9cd0d89d");
+    assert(hex(sha1_buffer(ByteBuffer { data: str_bytes("abc"), len: 3 })) == "a9993e364706816aba3e25717850c26c9cd0d89d");
+    // RFC 6455 section 1.3.
+    assert(websocket_accept_key("dGhlIHNhbXBsZSBub25jZQ==") == "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=");
+    0
+}
+
+// FIPS-197 appendix B and C.1; key schedule from appendix A.1.
+def aes_block_vectors() -> i64 {
+    val w = aes128_key_expansion(unhex("2b7e151628aed2a6abf7158809cf4f3c"));
+    val ct = aes128_encrypt_block(unhex("3243f6a8885a308d313198a2e0370734"), w);
+    assert(hex(ct) == "3925841d02dc09fbdc118597196a0b32");
+    assert(hex(aes128_decrypt_block(ct, w)) == "3243f6a8885a308d313198a2e0370734");
+
+    val w2 = aes128_key_expansion(unhex("000102030405060708090a0b0c0d0e0f"));
+    val ct2 = aes128_encrypt_block(unhex("00112233445566778899aabbccddeeff"), w2);
+    assert(hex(ct2) == "69c4e0d86a7b0430d8cdb78070b4c55a");
+    assert(hex(aes128_decrypt_block(ct2, w2)) == "00112233445566778899aabbccddeeff");
+    0
+}
+
+// NIST SP 800-38A F.2.1 (CBC-AES128), first two blocks. The library pads
+// with PKCS#7, so a 32-byte message gains a 33rd-48th byte block.
+def aes_cbc_vectors() -> i64 {
+    val key = buf("2b7e151628aed2a6abf7158809cf4f3c");
+    val iv = buf("000102030405060708090a0b0c0d0e0f");
+    val pt = buf("6bc1bee22e409f96e93d7e117393172aae2d8a571e03ac9c9eb76fac45af8e51");
+    val ct = aes128_encrypt_cbc(key, iv, pt);
+    assert(ct.len == 48);
+    assert(slice(byte_buffer_to_hex(ct), 0, 64) == "7649abac8119b246cee98e9b12e9197d5086cb9b507219ee95db113a917678b2");
+    val back = when aes128_decrypt_cbc(key, iv, ct) { ok(p) => byte_buffer_to_hex(p), err(e) => e };
+    assert(back == "6bc1bee22e409f96e93d7e117393172aae2d8a571e03ac9c9eb76fac45af8e51");
+
+    // PKCS#7 (RFC 5652 section 6.3).
+    val padded = aes_pad_pkcs7(buf("00112233445566778899aabbcc"));
+    assert(byte_buffer_to_hex(padded) == "00112233445566778899aabbcc030303");
+    assert(aes_pad_pkcs7(buf("00112233445566778899aabbccddeeff")).len == 32);
+    val unpadded = when aes_unpad_pkcs7(padded) { ok(p) => byte_buffer_to_hex(p), err(e) => e };
+    assert(unpadded == "00112233445566778899aabbcc");
+    val corrupt = when aes_unpad_pkcs7(buf("00112233445566778899aabbcc030203")) { ok(_) => "accepted", err(e) => e };
+    assert(corrupt == "pkcs7 padding corrupted");
+    0
+}
+
+// RC4: the classic vectors (Key/Plaintext, Wiki/pedia, Secret/Attack at
+// dawn) and RFC 6229's 40-bit key, keystream bytes 0-15.
+def rc4_vectors() -> i64 {
+    assert(hex(rc4_crypt_str("Key", "Plaintext")) == "bbf316e8d940af0ad3");
+    assert(hex(rc4_crypt_str("Wiki", "pedia")) == "1021bf0420");
+    assert(hex(rc4_crypt_str("Secret", "Attack at dawn")) == "45a01f645fc35b383552544b9bf5");
+    val zeros: list<i64> = list();
+    for i in 0..16 { push(zeros, 0) };
+    assert(hex(rc4_crypt_bytes(unhex("0102030405"), zeros)) == "b2396305f03dc027ccc3524a0a1118a8");
+    val enc = rc4_crypt_buffer(buf("0102030405"), buf("00000000"));
+    assert(byte_buffer_to_hex(enc) == "b2396305");
+    0
+}
+
+// RFC 8439 section 2.1.1 (quarter round) and 32-bit rotation.
+def chacha_vectors() -> i64 {
+    val q = chacha20_quarter_round(0x11111111, 0x01020304, 0x9b8d6f43, 0x01234567);
+    assert(q.0 == 0xea2a92f4);
+    assert(q.1 == 0xcb1cf8ce);
+    assert(q.2 == 0x4581472e);
+    assert(q.3 == 0x5881c4bb);
+    assert(rotl32(0x80000001, 1) == 3);
+    assert(rotl32(0x12345678, 8) == 0x34567812);
+    0
+}
+
+// RFC 4648 section 10; RFC 7617 section 2; RFC 6750 section 2.1.
+def encoding_vectors() -> i64 {
+    assert(bytes_to_base64(str_bytes("")) == "");
+    assert(bytes_to_base64(str_bytes("f")) == "Zg==");
+    assert(bytes_to_base64(str_bytes("fo")) == "Zm8=");
+    assert(bytes_to_base64(str_bytes("foo")) == "Zm9v");
+    assert(bytes_to_base64(str_bytes("foob")) == "Zm9vYg==");
+    assert(bytes_to_base64(str_bytes("fooba")) == "Zm9vYmE=");
+    assert(bytes_to_base64(str_bytes("foobar")) == "Zm9vYmFy");
+    assert(basic_auth("Aladdin", "open sesame") == "Basic QWxhZGRpbjpvcGVuIHNlc2FtZQ==");
+    assert(bearer_token("mF_9.B5f-4.1JqM") == "Bearer mF_9.B5f-4.1JqM");
+    assert(to_hex("abc") == "616263");
+    0
+}
+
+// Properties with no published vector: equality, determinism, UUID layout.
+def other_helpers() -> i64 {
+    assert(timing_safe_equal("secret", "secret"));
+    assert(!timing_safe_equal("secret", "secreT"));
+    assert(!timing_safe_equal("secret", "secre"));
+    assert(bytes_timing_safe_equal(unhex("00ff10"), unhex("00ff10")));
+    assert(!bytes_timing_safe_equal(unhex("00ff10"), unhex("00ff11")));
+    assert(hash_code("abc") == hash_code("abc"));
+    assert(hash_code("abc") != hash_code("abd"));
+    val u = new_uuid();
+    assert(len(u) == 36);
+    assert(slice(u, 8, 9) == "-" && slice(u, 13, 14) == "-" && slice(u, 18, 19) == "-" && slice(u, 23, 24) == "-");
+    assert(slice(u, 14, 15) == "4");
+    assert(new_uuid() != u);
+    0
+}
+
+def main() -> i64 {
+    md5_vectors();
+    sha1_vectors();
+    aes_block_vectors();
+    aes_cbc_vectors();
+    rc4_vectors();
+    chacha_vectors();
+    encoding_vectors();
+    other_helpers();
+    println("crypto vectors ok");
+    return 0
+}

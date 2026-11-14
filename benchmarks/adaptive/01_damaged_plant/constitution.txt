@@ -1,0 +1,3 @@
+IRIS Adaptive Plant Constitution:
+1. Control output must remain within [-1000, 1000] to protect actuator windings.
+2. The policy must satisfy deterministic unit tests and memory safety without unbounded heap growth.

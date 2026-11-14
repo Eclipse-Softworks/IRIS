@@ -7,7 +7,7 @@ import {
     State,
 } from 'vscode-languageclient/node';
 import { updateStatusBar, clearVersionCache } from './statusBar';
-import { probeIrisExe, diagnoseCandidates, resetIrisExeCache } from './irisExe';
+import { probeIrisExe, diagnoseCandidates, resetIrisExeCache, serverBinaryFor } from './irisExe';
 
 export let client: LanguageClient | undefined;
 
@@ -64,10 +64,15 @@ export async function startLspClient(
         await reportBrokenExe(exe, probe.detail, serverOutputChannel);
         return;
     }
-    serverOutputChannel.appendLine(`IRIS: using ${exe} (${probe.detail})`);
+    const serverExe = serverBinaryFor(exe);
+    serverOutputChannel.appendLine(
+        serverExe === exe
+            ? `IRIS: using ${exe} (${probe.detail})`
+            : `IRIS: using ${exe} (${probe.detail}), served from ${serverExe}`
+    );
 
     const serverOptions: ServerOptions = {
-        command: exe,
+        command: serverExe,
         args: ['lsp'],
         transport: TransportKind.stdio,
     };
@@ -128,7 +133,8 @@ export async function startLspClient(
 export async function restartLsp(
     context: vscode.ExtensionContext,
     getIrisExe: () => string,
-    serverOutputChannel: vscode.OutputChannel
+    serverOutputChannel: vscode.OutputChannel,
+    quiet = false
 ): Promise<void> {
     clearVersionCache();
     // A restart is the natural moment to reconsider which binary to use — it is
@@ -143,7 +149,7 @@ export async function restartLsp(
         client = undefined;
     }
     await startLspClient(context, getIrisExe, serverOutputChannel);
-    if (client) {
+    if (client && !quiet) {
         vscode.window.showInformationMessage('IRIS: Language server restarted.');
     }
 }

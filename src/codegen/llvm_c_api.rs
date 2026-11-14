@@ -5,12 +5,13 @@
 //!
 //! Supported on Windows (LLVM-C.dll) and POSIX (libLLVM.so / libLLVM.dylib).
 
+use std::collections::HashMap;
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::path::Path;
 use std::path::PathBuf;
 use std::ptr;
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
 use libloading::{Library, Symbol};
 
@@ -134,16 +135,52 @@ struct LlvmCApi {
 unsafe impl Send for LlvmCApi {}
 unsafe impl Sync for LlvmCApi {}
 
+#[cfg(target_os = "windows")]
+const LIBRARY_NAME: &str = "LLVM-C.dll";
+#[cfg(target_os = "macos")]
+const LIBRARY_NAME: &str = "libLLVM.dylib";
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+const LIBRARY_NAME: &str = "libLLVM.so";
+
+/// The LLVM component that provides the backend for `triple`.
+fn target_component(triple: &str) -> Result<&'static str, CodegenError> {
+    if triple.starts_with("x86_64") || triple.starts_with("i386") {
+        Ok("X86")
+    } else if triple.starts_with("avr") {
+        Ok("AVR")
+    } else if triple.starts_with("aarch64") {
+        Ok("AArch64")
+    } else if triple.starts_with("arm") || triple.starts_with("thumb") {
+        Ok("ARM")
+    } else if triple.starts_with("wasm") {
+        Ok("WebAssembly")
+    } else if triple.starts_with("riscv") {
+        Ok("RISCV")
+    } else if triple.starts_with("xtensa") {
+        // Available in Espressif's LLVM distribution.  Stock LLVM builds
+        // return a normal missing-symbol diagnostic here.
+        Ok("Xtensa")
+    } else {
+        Err(CodegenError::Unsupported {
+            backend: "llvm_c_api".into(),
+            detail: format!(
+                "LLVM-C target initialization is not implemented for '{}'",
+                triple
+            ),
+        })
+    }
+}
+
+/// Whether `library` was built with `component`'s backend.
+fn library_has_component(library: &Library, component: &str) -> bool {
+    let mut symbol = format!("LLVMInitialize{component}TargetInfo").into_bytes();
+    symbol.push(0);
+    unsafe { library.get::<FnInitializeTarget>(&symbol).is_ok() }
+}
+
 impl LlvmCApi {
     fn load() -> Result<Self, CodegenError> {
-        #[cfg(target_os = "windows")]
-        let lib_name = "LLVM-C.dll";
-        #[cfg(target_os = "macos")]
-        let lib_name = "libLLVM.dylib";
-        #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-        let lib_name = "libLLVM.so";
-
-        let candidates = llvm_library_candidates(lib_name);
+        let candidates = llvm_library_candidates(LIBRARY_NAME);
         let mut failures = Vec::new();
         let mut loaded = None;
         for candidate in &candidates {
@@ -163,7 +200,10 @@ impl LlvmCApi {
                 failures.join("; ")
             ),
         })?;
+        Self::from_library(lib)
+    }
 
+    fn from_library(lib: Library) -> Result<Self, CodegenError> {
         // Helper to load a function symbol
         macro_rules! load {
             ($lib:expr, $fn_ty:ty, $name:expr) => {{
@@ -236,31 +276,22 @@ impl LlvmCApi {
     }
 
     fn initialize_target(&self, triple: &str) -> Result<(), CodegenError> {
-        let component = if triple.starts_with("x86_64") || triple.starts_with("i386") {
-            "X86"
-        } else if triple.starts_with("avr") {
-            "AVR"
-        } else if triple.starts_with("aarch64") {
-            "AArch64"
-        } else if triple.starts_with("arm") || triple.starts_with("thumb") {
-            "ARM"
-        } else if triple.starts_with("wasm") {
-            "WebAssembly"
-        } else if triple.starts_with("riscv") {
-            "RISCV"
-        } else if triple.starts_with("xtensa") {
-            // Available in Espressif's LLVM distribution.  Stock LLVM builds
-            // return a normal missing-symbol diagnostic here.
-            "Xtensa"
-        } else {
-            return Err(CodegenError::Unsupported {
-                backend: "llvm_c_api".into(),
-                detail: format!(
-                    "LLVM-C target initialization is not implemented for '{}'",
-                    triple
-                ),
-            });
-        };
+        let component = target_component(triple)?;
+        // Once per library and target, under a lock. The initializers add the
+        // target to LLVM's global registry, a linked list: two threads
+        // registering at once can link it into a cycle, and every later
+        // target lookup then loops forever. Parallel native builds (the test
+        // suite's) hung that way.
+        static INITIALIZED: OnceLock<Mutex<std::collections::HashSet<(usize, &'static str)>>> =
+            OnceLock::new();
+        let mut done = INITIALIZED
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let key = (self as *const Self as usize, component);
+        if done.contains(&key) {
+            return Ok(());
+        }
 
         for suffix in ["TargetInfo", "Target", "TargetMC", "AsmPrinter"] {
             let symbol_name = format!("LLVMInitialize{}{}", component, suffix);
@@ -276,6 +307,7 @@ impl LlvmCApi {
             };
             unsafe { initializer() };
         }
+        done.insert(key);
         Ok(())
     }
 }
@@ -337,18 +369,29 @@ pub(crate) fn llvm_library_candidates(default_name: &str) -> Vec<PathBuf> {
 
     #[cfg(target_os = "linux")]
     {
-        for name in [
-            "libLLVM.so.23.1",
-            "libLLVM.so.23",
-            "libLLVM-23.so.1",
-            "libLLVM-23.so",
-        ] {
-            candidates.push(PathBuf::from(name));
-        }
-        for directory in ["/usr/lib/llvm-23/lib", "/usr/local/lib"] {
-            for name in ["libLLVM.so.23.1", "libLLVM.so.23", "libLLVM.so"] {
-                candidates.push(PathBuf::from(directory).join(name));
+        // Newest first. Distribution packages name the library by version
+        // (Ubuntu's libllvm18 installs only libLLVM-18.so.1), so a bare
+        // `libLLVM.so` is usually absent unless the -dev package is.
+        for version in (15..=23).rev() {
+            for name in [
+                format!("libLLVM.so.{version}.1"),
+                format!("libLLVM.so.{version}"),
+                format!("libLLVM-{version}.so.1"),
+                format!("libLLVM-{version}.so"),
+            ] {
+                candidates.push(PathBuf::from(name));
             }
+            let directory = PathBuf::from(format!("/usr/lib/llvm-{version}/lib"));
+            for name in [
+                format!("libLLVM-{version}.so.1"),
+                format!("libLLVM.so.{version}.1"),
+                "libLLVM.so".to_owned(),
+            ] {
+                candidates.push(directory.join(name));
+            }
+        }
+        for name in ["libLLVM.so.23.1", "libLLVM.so.23", "libLLVM.so"] {
+            candidates.push(PathBuf::from("/usr/local/lib").join(name));
         }
     }
 
@@ -366,6 +409,49 @@ fn llvm_c_api() -> Result<&'static LlvmCApi, CodegenError> {
             detail: detail.clone(),
         }),
     }
+}
+
+/// Libraries loaded because the preferred one lacks a backend, by component.
+/// Like the preferred library they stay loaded for the process lifetime.
+static TARGET_FALLBACKS: OnceLock<Mutex<HashMap<&'static str, &'static LlvmCApi>>> =
+    OnceLock::new();
+
+/// The LLVM-C library to emit code for `triple`: the preferred one, or, when
+/// its distribution omits that backend (the stock Windows package omits
+/// AVR), the first other candidate library that has it.
+fn llvm_c_api_for(triple: &str) -> Result<&'static LlvmCApi, CodegenError> {
+    let preferred = llvm_c_api()?;
+    let component = target_component(triple)?;
+    if library_has_component(&preferred._lib, component) {
+        return Ok(preferred);
+    }
+    let mut fallbacks = TARGET_FALLBACKS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(api) = fallbacks.get(component) {
+        return Ok(api);
+    }
+    for candidate in llvm_library_candidates(LIBRARY_NAME) {
+        let Ok(library) = (unsafe { Library::new(&candidate) }) else {
+            continue;
+        };
+        if !library_has_component(&library, component) {
+            continue;
+        }
+        if let Ok(api) = LlvmCApi::from_library(library) {
+            let api: &'static LlvmCApi = Box::leak(Box::new(api));
+            fallbacks.insert(component, api);
+            return Ok(api);
+        }
+    }
+    let (major, minor, patch) = preferred.version();
+    Err(CodegenError::Unsupported {
+        backend: "llvm_c_api".into(),
+        detail: format!(
+            "the loaded LLVM-C {major}.{minor}.{patch} has no {component} backend, and no other installed LLVM-C does; set IRIS_LLVM_C_API to an LLVM build that includes it"
+        ),
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -404,6 +490,7 @@ pub fn compile_llvm_ir_to_object_bytes(
         source_text,
         target_triple,
         custom_pipeline.as_deref(),
+        None,
     )
 }
 
@@ -416,19 +503,46 @@ pub fn compile_llvm_ir_to_object_bytes_optimized(
     target_triple: Option<&str>,
     pipeline: &str,
 ) -> Result<Vec<u8>, CodegenError> {
-    compile_llvm_ir_to_object_bytes_with_pipeline(source_text, target_triple, Some(pipeline))
+    compile_llvm_ir_to_object_bytes_with_pipeline(source_text, target_triple, Some(pipeline), None)
+}
+
+/// The object for an executable, optimised as `clang -O<level>` optimises it
+/// for the build: the `default<O<level>>` pipeline, and on x86-64 the AVX2
+/// and FMA instructions clang is given (`IRIS_NO_AVX2` turns them off;
+/// `IRIS_TARGET_FEATURES` overrides). In process, so a small program needs no
+/// compiler process: about 15 ms instead of clang's 200.
+pub fn compile_llvm_ir_to_executable_object(
+    source_text: &str,
+    output_path: &Path,
+    target_triple: &str,
+    opt_level: u8,
+) -> Result<(), CodegenError> {
+    let pipeline = format!("default<O{}>", opt_level.min(3));
+    let features = if std::env::var_os("IRIS_TARGET_FEATURES").is_some() {
+        None
+    } else if target_triple.starts_with("x86_64") && std::env::var_os("IRIS_NO_AVX2").is_none() {
+        Some("+avx2,+fma")
+    } else {
+        Some("")
+    };
+    let data = compile_llvm_ir_to_object_bytes_with_pipeline(
+        source_text,
+        Some(target_triple),
+        Some(&pipeline),
+        features,
+    )?;
+    std::fs::write(output_path, data).map_err(|e| CodegenError::Unsupported {
+        backend: "llvm_c_api".into(),
+        detail: format!("failed to write object file: {}", e),
+    })
 }
 
 fn compile_llvm_ir_to_object_bytes_with_pipeline(
     source_text: &str,
     target_triple: Option<&str>,
     pipeline: Option<&str>,
+    features: Option<&str>,
 ) -> Result<Vec<u8>, CodegenError> {
-    // Keep the dynamically loaded LLVM library alive for the process lifetime.
-    // LLVM's global context and target registry retain code/data owned by the
-    // library; unloading it after a single emission can crash at process exit.
-    let api = llvm_c_api()?;
-
     let triple = target_triple.unwrap_or({
         if cfg!(target_os = "windows") {
             "x86_64-pc-windows-msvc"
@@ -438,6 +552,10 @@ fn compile_llvm_ir_to_object_bytes_with_pipeline(
             "x86_64-unknown-linux-gnu"
         }
     });
+    // Keep the dynamically loaded LLVM library alive for the process lifetime.
+    // LLVM's global context and target registry retain code/data owned by the
+    // library; unloading it after a single emission can crash at process exit.
+    let api = llvm_c_api_for(triple)?;
 
     let context = unsafe { (api.context_create)() };
     if context.is_null() {
@@ -504,7 +622,12 @@ fn compile_llvm_ir_to_object_bytes_with_pipeline(
         "generic".to_string()
     };
     let cpu = CString::new(cpu_name).unwrap();
-    let features = CString::new(std::env::var("IRIS_TARGET_FEATURES").unwrap_or_default()).unwrap();
+    let features = CString::new(
+        features
+            .map(str::to_string)
+            .unwrap_or_else(|| std::env::var("IRIS_TARGET_FEATURES").unwrap_or_default()),
+    )
+    .unwrap_or_default();
     // LLVMRelocPIC (2) is required for the ASLR-enabled executables produced by
     // the MinGW linker. LLVMRelocStatic (1) can emit absolute references that
     // happen to work under a debugger (which commonly fixes the image base) but
@@ -659,7 +782,7 @@ pub fn loaded_llvm_version() -> Result<(u32, u32, u32), CodegenError> {
 /// particular, the stock Windows package exposes LLVM-C but omits AVR. A
 /// library-level availability check cannot distinguish that case.
 pub fn is_llvm_target_available(triple: &str) -> bool {
-    llvm_c_api()
+    llvm_c_api_for(triple)
         .and_then(|api| api.initialize_target(triple))
         .is_ok()
 }

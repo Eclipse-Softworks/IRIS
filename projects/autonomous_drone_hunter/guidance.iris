@@ -1,0 +1,215 @@
+// projects/autonomous_drone_hunter/guidance.iris
+// Autonomous flight guidance laws, tactical state machine, and aerodynamic propulsion power model.
+
+bring "types.iris"
+bring "math_3d.iris"
+bring "environment.iris"
+
+pub def default_drone_kinematics(init_pos: Vector3) -> DroneKinematics {
+    DroneKinematics {
+        pos: init_pos,
+        vel: v3_zero(),
+        heading_rad: 0.0,
+        speed_ms: 0.0,
+        climb_rate_ms: 0.0,
+    }
+}
+
+pub def default_drone_power() -> DronePower {
+    DronePower {
+        battery_mah: 5000.0,
+        max_mah: 5000.0,
+        voltage_v: 22.2, // 6S LiPo battery
+        avg_power_w: 180.0,
+        energy_consumed_wh: 0.0,
+    }
+}
+
+/// Updates battery discharge based on mechanical flight power and sensor avionics.
+pub def step_power_model(power: DronePower, speed: f64, climb_rate: f64, dt: f64) -> DronePower {
+    // Aerodynamic model: hover base power (160W) + drag (v^2) + climb work
+    val p_hover = 160.0;
+    val p_drag = 0.22 * speed * speed * speed;
+    val p_climb = if climb_rate > 0.0 { climb_rate * 35.0 } else { 0.0 };
+    val p_avionics = 25.0; // Multi-spectral radar/FLIR computing
+    val total_w = p_hover + p_drag + p_climb + p_avionics;
+
+    val dt_hours = dt / 3600.0;
+    val delta_wh = total_w * dt_hours;
+    val delta_mah = (delta_wh / power.voltage_v) * 1000.0;
+
+    val rem_mah = clamp_f64(power.battery_mah - delta_mah, 0.0, power.max_mah);
+
+    DronePower {
+        battery_mah: rem_mah,
+        max_mah: power.max_mah,
+        voltage_v: power.voltage_v,
+        avg_power_w: total_w,
+        energy_consumed_wh: power.energy_consumed_wh + delta_wh,
+    }
+}
+
+/// Computes desired 3D velocity vector and tactical phase transition for active mission state.
+pub def step_hunt_state_machine(
+    drone: DroneKinematics,
+    phase: HuntPhase,
+    track: TargetTrack,
+    home_pos: Vector3,
+    dt: f64,
+    t: f64
+) -> GuidanceStepResult {
+    var next_phase = phase;
+    var desired_vel = v3_zero();
+    var event_log = "";
+
+    when phase {
+        HuntPhase.AreaSearch(radius, angle) => {
+            // Archimedean spiral search pattern
+            val spiral_b = 6.5; // Radial expansion per radian
+            val current_r = 40.0 + (spiral_b * angle);
+            val search_alt = 60.0; // Cruise altitude in meters
+
+            val target_x = home_pos.x + current_r * cos(angle);
+            val target_y = home_pos.y + current_r * sin(angle);
+            val wp = v3_new(target_x, target_y, search_alt);
+
+            val to_wp = v3_sub(wp, drone.pos);
+            val cruise_speed = 12.0; // 12 m/s search sweep
+            desired_vel = v3_scale(v3_norm(to_wp), cruise_speed);
+
+            // Step spiral angle forward with constant linear arc length
+            val next_angle = angle + (cruise_speed / (current_r + 10.0)) * dt;
+            next_phase = HuntPhase.AreaSearch(current_r, next_angle);
+
+            // Phase Transition: Target track acquired with sufficient confidence
+            if track.confidence >= 0.35 {
+                next_phase = HuntPhase.SignalTriangulation(track.estimated_pos, track.confidence);
+                event_log = f"[T+{t}s] CONTACT: RF/Thermal Beacon acquired! Transitioning to Signal Triangulation (Conf: {track.confidence})";
+            };
+        }
+
+        HuntPhase.SignalTriangulation(est_pos, conf) => {
+            // Intercept vector toward estimated signal source at safe recon altitude above terrain
+            val recon_alt = terrain_elevation(track.estimated_pos.x, track.estimated_pos.y) + 38.0;
+            val nav_target = v3_new(track.estimated_pos.x, track.estimated_pos.y, recon_alt);
+            val to_target = v3_sub(nav_target, drone.pos);
+            val approach_speed = 16.0;
+            desired_vel = v3_scale(v3_norm(to_target), approach_speed);
+
+            next_phase = HuntPhase.SignalTriangulation(track.estimated_pos, track.confidence);
+
+            // If confidence dropped significantly (lost signal), fall back to area search
+            if track.confidence < 0.20 {
+                next_phase = HuntPhase.AreaSearch(v3_dist_2d(drone.pos, home_pos), 0.0);
+                event_log = f"[T+{t}s] SIGNAL LOST: Reverting to Area Search pattern";
+            } else if track.confidence >= 0.65 {
+                next_phase = HuntPhase.InterceptPursuit(track.estimated_pos, approach_speed);
+                event_log = f"[T+{t}s] FLIR CONFIRMATION: Visual contact confirmed! Initiating Proportional Navigation Intercept";
+            };
+        }
+
+        HuntPhase.InterceptPursuit(last_pos, closing_speed) => {
+            // Proportional Navigation intercept at 25m above ground
+            val pursue_alt = terrain_elevation(track.estimated_pos.x, track.estimated_pos.y) + 24.0;
+            val nav_target = v3_new(track.estimated_pos.x, track.estimated_pos.y, pursue_alt);
+            val to_target = v3_sub(nav_target, drone.pos);
+            val los_dir = v3_norm(to_target);
+
+            // Lead the target: combine line-of-sight vector with target velocity feedforward
+            val intercept_vel = v3_add(v3_scale(los_dir, 22.0), track.estimated_vel);
+            desired_vel = v3_scale(v3_norm(intercept_vel), 22.0);
+
+            next_phase = HuntPhase.InterceptPursuit(track.estimated_pos, 22.0);
+
+            val dist_to_target = v3_dist(drone.pos, track.estimated_pos);
+            // Terminal transition: within 50m with high sensor confidence
+            if dist_to_target <= 52.0 && track.confidence >= 0.85 {
+                next_phase = HuntPhase.TerminalLaserLock(1, track.estimated_pos);
+                event_log = f"[T+{t}s] TERMINAL LOCK: Target in optical boresight! Engaging Laser Target Designator";
+            };
+        }
+
+        HuntPhase.TerminalLaserLock(target_id, locked_coord) => {
+            // Standoff orbit: maintain 28m circle at 20m relative altitude above target
+            val orbit_radius = 28.0;
+            val orbit_alt = track.estimated_pos.z + 20.0;
+            val orbit_rate = 0.55; // rad/s
+            val orbit_angle = t * orbit_rate;
+
+            val desired_orbit_pos = v3_new(
+                track.estimated_pos.x + orbit_radius * cos(orbit_angle),
+                track.estimated_pos.y + orbit_radius * sin(orbit_angle),
+                orbit_alt
+            );
+
+            val to_orbit = v3_sub(desired_orbit_pos, drone.pos);
+            desired_vel = v3_scale(v3_norm(to_orbit), 14.0);
+
+            next_phase = HuntPhase.TerminalLaserLock(target_id, track.estimated_pos);
+
+            // Maintain lock until sufficient telemetry confirmed (e.g. 50 observation cycles)
+            if track.observation_count >= 50 {
+                next_phase = HuntPhase.ReturnToBase(home_pos);
+                event_log = f"[T+{t}s] TARGET NEUTRALIZED: Target telemetry 100% verified. Disengaging & Returning to Base";
+            };
+        }
+
+        HuntPhase.ReturnToBase(base_coord) => {
+            // Direct economic transit back to launch coordinate
+            val rtb_alt = 50.0;
+            val rtb_target = v3_new(base_coord.x, base_coord.y, rtb_alt);
+            val to_base = v3_sub(rtb_target, drone.pos);
+            val dist_to_base = v3_dist_2d(drone.pos, base_coord);
+
+            if dist_to_base <= 15.0 {
+                desired_vel = v3_new(0.0, 0.0, -2.5); // Gentle landing descent
+                if drone.pos.z <= 3.0 {
+                    next_phase = HuntPhase.MissionDebrief;
+                    event_log = f"[T+{t}s] TOUCHDOWN: Drone recovered at Base. Initiating Mission Debriefing";
+                };
+            } else {
+                desired_vel = v3_scale(v3_norm(to_base), 16.0);
+            };
+        }
+
+        HuntPhase.MissionDebrief => {
+            desired_vel = v3_zero();
+        }
+    };
+
+    GuidanceStepResult {
+        next_phase: next_phase,
+        desired_vel: desired_vel,
+        log_msg: event_log,
+    }
+}
+
+/// Integrates drone 3D position and velocity with acceleration limits.
+pub def step_drone_kinematics(drone: DroneKinematics, desired_vel: Vector3, dt: f64) -> DroneKinematics {
+    val max_accel = 8.5; // Max horizontal/vertical acceleration in m/s^2
+    val delta_vel = v3_sub(desired_vel, drone.vel);
+    val delta_mag = v3_mag(delta_vel);
+
+    val actual_accel = if delta_mag > (max_accel * dt) {
+        v3_scale(v3_norm(delta_vel), max_accel * dt)
+    } else {
+        delta_vel
+    };
+
+    val next_vel = v3_add(drone.vel, actual_accel);
+    val next_pos = v3_add(drone.pos, v3_scale(next_vel, dt));
+    val speed = v3_mag(next_vel);
+
+    var next_heading = drone.heading_rad;
+    if speed > 0.5 {
+        next_heading = atan2_approx(next_vel.y, next_vel.x);
+    };
+
+    DroneKinematics {
+        pos: next_pos,
+        vel: next_vel,
+        heading_rad: next_heading,
+        speed_ms: speed,
+        climb_rate_ms: next_vel.z,
+    }
+}

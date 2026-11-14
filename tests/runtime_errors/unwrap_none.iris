@@ -1,0 +1,7 @@
+// expect: E0406 at 5:20
+// message: unwrap called on none
+def main() -> i64 {
+    val x: option<i64> = none()
+    println(to_str(unwrap(x)))
+    return 0
+}

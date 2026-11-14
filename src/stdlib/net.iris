@@ -2,6 +2,10 @@
 // All functions return raw i64 socket handles (unboxed, no heap allocation).
 // A return value of -1 indicates error.
 
+bring std.buffer
+bring std.crypto
+
+
 pub record TcpStream {
     handle: i64,
 }
@@ -14,6 +18,7 @@ extern def iris_tcp_set_timeout(handle: i64, read_timeout_ms: i64, write_timeout
 extern def iris_tcp_write_all(handle: i64, data: str) -> i64 effect net
 extern def iris_tcp_read_max(handle: i64, max_bytes: i64) -> str effect net, alloc
 extern def iris_tcp_shutdown(handle: i64) -> i64 effect net
+extern def iris_tcp_listen_loopback(port: i64) -> i64 effect net
 
 /// Connect and configure bounded blocking I/O. Errors are explicit rather than
 /// encoded as a raw negative handle.
@@ -35,6 +40,14 @@ pub def tcp_listen_checked(port: i64) -> result<TcpListener, str> effect net {
     return ok(TcpListener { handle: handle })
 }
 
+/// Like `tcp_listen_checked`, but reachable from this machine only
+/// (127.0.0.1) rather than on every interface.
+pub def tcp_listen_local_checked(port: i64) -> result<TcpListener, str> effect net {
+    val handle = iris_tcp_listen_loopback(port)
+    if handle < 0 { return err("tcp listen failed") }
+    return ok(TcpListener { handle: handle })
+}
+
 pub def tcp_accept_checked(listener: TcpListener, read_timeout_ms: i64, write_timeout_ms: i64) -> result<TcpStream, str> effect net {
     val handle = tcp_accept(listener.handle)
     if handle < 0 { return err("tcp accept failed") }
@@ -43,6 +56,21 @@ pub def tcp_accept_checked(listener: TcpListener, read_timeout_ms: i64, write_ti
         return err("accepted stream timeout configuration failed")
     }
     return ok(TcpStream { handle: handle })
+}
+
+/// Accept the next connection without blocking the thread: other tasks run
+/// until one arrives. Use from an `async def` (`await tcp_accept_async(..)`),
+/// so one thread can wait on many sockets and timers at once.
+pub async def tcp_accept_async(listener: TcpListener, read_timeout_ms: i64, write_timeout_ms: i64) -> result<TcpStream, str> effect net {
+    await async_readable(listener.handle);
+    tcp_accept_checked(listener, read_timeout_ms, write_timeout_ms)
+}
+
+/// Read up to `max_bytes` once some are available, without blocking the
+/// thread meanwhile. `ok("")` means the peer closed the connection.
+pub async def tcp_read_async(stream: TcpStream, max_bytes: i64) -> result<str, str> effect net, alloc {
+    await async_readable(stream.handle);
+    tcp_read_bounded(stream, max_bytes)
 }
 
 pub def tcp_write_all_checked(stream: TcpStream, data: str) -> result<i64, str> effect net {
@@ -57,6 +85,216 @@ pub def tcp_read_bounded(stream: TcpStream, max_bytes: i64) -> result<str, str> 
     }
     return ok(iris_tcp_read_max(stream.handle, max_bytes))
 }
+
+/// Attempt bounded read with an explicit millisecond timeout.
+pub def tcp_read_with_timeout(stream: TcpStream, timeout_ms: i64, max_bytes: i64) -> result<str, str> effect net, alloc {
+    if iris_tcp_set_timeout(stream.handle, timeout_ms, timeout_ms) != 0 {
+        return err("failed to configure timeout")
+    }
+    val res = iris_tcp_read_max(stream.handle, max_bytes);
+    if len(res) == 0 {
+        return err("timeout or connection closed")
+    }
+    return ok(res)
+}
+
+/// Read binary ByteBuffer directly from stream within timeout.
+pub def tcp_read_bytes(stream: TcpStream, timeout_ms: i64, max_bytes: i64) -> result<ByteBuffer, str> effect net, alloc {
+    val res = tcp_read_with_timeout(stream, timeout_ms, max_bytes);
+    if is_ok(res) {
+        val s = unwrap(res);
+        ok(byte_buffer_from_str(s))
+    } else {
+        err(unwrap_err(res))
+    }
+}
+
+/// Write a binary ByteBuffer directly to the stream.
+pub def tcp_write_bytes(stream: TcpStream, buf: ByteBuffer) -> result<i64, str> effect net {
+    val s = byte_buffer_to_ascii_lossy(buf);
+    tcp_write_all_checked(stream, s)
+}
+
+// ── WebSocket Protocol (RFC 6455) ──────────────────────────────────────────
+
+pub record WebSocketFrame {
+    fin: bool,
+    opcode: i64,
+    is_masked: bool,
+    mask_key: list<i64>,
+    payload: ByteBuffer,
+}
+
+/// Unmask payload with 4-byte masking key: byte[i] ^ mask_key[i % 4]
+pub def ws_unmask_payload(payload: ByteBuffer, mask_key: list<i64>) -> ByteBuffer {
+    val out = byte_buffer_zeros(payload.len);
+    for i in 0 .. payload.len {
+        val b = byte_buffer_get(payload, i);
+        val m = list_get(mask_key, i % 4);
+        byte_buffer_set(out, i, bxor(b, m));
+    }
+    out
+}
+
+/// Encode RFC 6455 WebSocket frame (supports standard payloads <= 125 bytes, and 16-bit payloads <= 65535)
+pub def ws_encode_frame(fin: bool, opcode: i64, payload: ByteBuffer, is_masked: bool, mask_key: list<i64>) -> ByteBuffer {
+    var buf = byte_buffer_new();
+    var b0 = opcode % 16;
+    if fin {
+        b0 = bor(b0, 0x80);
+    }
+    buf = byte_buffer_push(buf, b0);
+
+    val mask_bit = if is_masked { 0x80 } else { 0x00 };
+    if payload.len <= 125 {
+        buf = byte_buffer_push(buf, bor(mask_bit, payload.len));
+    } else {
+        buf = byte_buffer_push(buf, bor(mask_bit, 126));
+        buf = byte_buffer_push(buf, shr(payload.len, 8));
+        buf = byte_buffer_push(buf, band(payload.len, 0xff));
+    }
+
+    if is_masked {
+        for i in 0 .. 4 {
+            buf = byte_buffer_push(buf, list_get(mask_key, i));
+        }
+        val masked_payload = ws_unmask_payload(payload, mask_key);
+        buf = byte_buffer_concat(buf, masked_payload);
+    } else {
+        buf = byte_buffer_concat(buf, payload);
+    }
+    buf
+}
+
+/// Decode RFC 6455 WebSocket frame from raw ByteBuffer
+pub def ws_decode_frame(buf: ByteBuffer) -> result<WebSocketFrame, str> {
+    if buf.len < 2 {
+        return err("frame too short (< 2 bytes)")
+    }
+    val b0 = byte_buffer_get(buf, 0);
+    val fin = band(b0, 0x80) != 0;
+    val opcode = band(b0, 0x0f);
+
+    val b1 = byte_buffer_get(buf, 1);
+    val masked = band(b1, 0x80) != 0;
+    var raw_len = band(b1, 0x7f);
+
+    var offset: i64 = 2;
+    if raw_len == 126 {
+        if buf.len < 4 {
+            return err("frame truncated in 16-bit length")
+        }
+        raw_len = bor(shl(byte_buffer_get(buf, 2), 8), byte_buffer_get(buf, 3));
+        offset = 4;
+    }
+
+    val mask_key: list<i64> = list();
+    if masked {
+        if buf.len < offset + 4 {
+            return err("frame truncated in masking key")
+        }
+        for i in 0 .. 4 {
+            list_push(mask_key, byte_buffer_get(buf, offset + i));
+        }
+        offset = offset + 4;
+    }
+
+    if buf.len < offset + raw_len {
+        return err("frame payload truncated")
+    }
+
+    val raw_payload = byte_buffer_slice(buf, offset, offset + raw_len);
+    val payload = if masked {
+        ws_unmask_payload(raw_payload, mask_key)
+    } else {
+        raw_payload
+    };
+
+    ok(WebSocketFrame {
+        fin: fin,
+        opcode: opcode,
+        is_masked: masked,
+        mask_key: mask_key,
+        payload: payload,
+    })
+}
+
+/// Parse Sec-WebSocket-Key from an HTTP Upgrade request header string.
+pub def ws_extract_key(header: str) -> option<str> {
+    val key_prefix = "Sec-WebSocket-Key: ";
+    val idx = find(header, key_prefix);
+    if is_some(idx) {
+        val start = unwrap(idx) + len(key_prefix);
+        val crlf_idx = find(slice(header, start, len(header)), "\r\n");
+        if is_some(crlf_idx) {
+            val end = start + unwrap(crlf_idx);
+            return some(slice(header, start, end))
+        } else {
+            return some(slice(header, start, len(header)))
+        }
+    }
+    none
+}
+
+/// Generate RFC 6455 101 Switching Protocols response for a WebSocket upgrade request.
+pub def ws_server_handshake(request: str) -> result<str, str> {
+    val key_opt = ws_extract_key(request);
+    match key_opt {
+        some(key) => {
+            val accept = websocket_accept_key(key);
+            val resp = "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: " + accept + "\r\n\r\n";
+            ok(resp)
+        },
+        none => err("missing Sec-WebSocket-Key header in handshake request"),
+    }
+}
+
+/// Send a WebSocket text message over a TcpStream.
+pub def ws_send_text(stream: TcpStream, text: str, is_masked: bool) -> result<i64, str> effect net {
+    val payload = byte_buffer_from_str(text);
+    val mask_key: list<i64> = list();
+    list_push(mask_key, 0x11);
+    list_push(mask_key, 0x22);
+    list_push(mask_key, 0x33);
+    list_push(mask_key, 0x44);
+    val frame = ws_encode_frame(true, 1, payload, is_masked, mask_key);
+    tcp_write_bytes(stream, frame)
+}
+
+/// Send a WebSocket binary message over a TcpStream.
+pub def ws_send_binary(stream: TcpStream, payload: ByteBuffer, is_masked: bool) -> result<i64, str> effect net {
+    val mask_key: list<i64> = list();
+    list_push(mask_key, 0x55);
+    list_push(mask_key, 0x66);
+    list_push(mask_key, 0x77);
+    list_push(mask_key, 0x88);
+    val frame = ws_encode_frame(true, 2, payload, is_masked, mask_key);
+    tcp_write_bytes(stream, frame)
+}
+
+/// Send a WebSocket Ping frame over a TcpStream.
+pub def ws_send_ping(stream: TcpStream, payload: ByteBuffer, is_masked: bool) -> result<i64, str> effect net {
+    val mask_key: list<i64> = list();
+    list_push(mask_key, 0xaa);
+    list_push(mask_key, 0xbb);
+    list_push(mask_key, 0xcc);
+    list_push(mask_key, 0xdd);
+    val frame = ws_encode_frame(true, 9, payload, is_masked, mask_key);
+    tcp_write_bytes(stream, frame)
+}
+
+/// Send a WebSocket Pong frame over a TcpStream.
+pub def ws_send_pong(stream: TcpStream, payload: ByteBuffer, is_masked: bool) -> result<i64, str> effect net {
+    val mask_key: list<i64> = list();
+    list_push(mask_key, 0x00);
+    list_push(mask_key, 0x00);
+    list_push(mask_key, 0x00);
+    list_push(mask_key, 0x00);
+    val frame = ws_encode_frame(true, 10, payload, is_masked, mask_key);
+    tcp_write_bytes(stream, frame)
+}
+
+
 
 pub def tcp_shutdown_checked(stream: TcpStream) -> result<i64, str> effect net {
     val status = iris_tcp_shutdown(stream.handle)
@@ -101,10 +339,16 @@ pub def tcp_close_conn(handle: i64) -> bool effect net {
 
 // ── TCP Server ───────────────────────────────────────────────────────────────
 
-/// Listen on a local TCP port for incoming connections.
+/// Listen on a TCP port on every interface (0.0.0.0).
 /// Returns server socket handle on success, or -1 on failure.
 pub def tcp_listen_on(port: i64) -> i64 effect net {
     tcp_listen(port)
+}
+
+/// Listen on a TCP port on 127.0.0.1 only, unreachable from other machines.
+/// Returns server socket handle on success, or -1 on failure.
+pub def tcp_listen_local(port: i64) -> i64 effect net {
+    iris_tcp_listen_loopback(port)
 }
 
 /// Accept an incoming client connection on a TCP server.

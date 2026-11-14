@@ -10,5 +10,6 @@ def fib(n: i64) -> i64 {
 def main() -> i64 {
     val result = fib(38);
     print(result);
+    assert(result == 39088169);
     0
 }

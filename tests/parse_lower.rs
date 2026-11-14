@@ -94,8 +94,8 @@ fn test_compile_add_emit_llvm() {
     let output = compile(ADD_SRC, "add_module", EmitKind::Llvm).expect("llvm stub should succeed");
     assert!(output.contains("define"));
     assert!(output.contains("@add"));
-    assert!(output.contains("float %x"));
-    assert!(output.contains("float %y"));
+    assert!(output.contains("float %p.x"));
+    assert!(output.contains("float %p.y"));
     assert!(output.contains("ret float"));
 }
 
@@ -104,7 +104,7 @@ fn test_compile_identity_emit_llvm() {
     let output = compile(ID_SRC, "id_module", EmitKind::Llvm).expect("llvm stub should succeed");
     assert!(output.contains("define"));
     assert!(output.contains("@identity"));
-    assert!(output.contains("i64 %x"));
+    assert!(output.contains("i64 %p.x"));
 }
 
 #[test]

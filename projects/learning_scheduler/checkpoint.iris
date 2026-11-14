@@ -1,0 +1,25 @@
+bring "domain.iris" 
+bring std.fs 
+bring std.string
+
+// Save and load a cost model to/from a text file. The format is simple: four lines, first line is a version string, next three lines are the weights as decimal numbers. The file is named "iris-scheduler-model.txt" in the current working directory.
+pub def save_weights(weights: CostModel) -> result<bool, str> effect fs, io, alloc {
+    if !valid_model(weights) { return err("invalid model cannot be saved") };
+    val content = concat("IRIS-SCHEDULER-1\n", concat(to_str(weights.first), concat("\n", concat(to_str(weights.second), concat("\n", concat(to_str(weights.bias), "\n"))))));
+    return write_text("iris-scheduler-model.txt", content)
+}
+
+// Load a cost model from a text file. The format is simple: four lines, first line is a version string, next three lines are the weights as decimal numbers. The file is named "iris-scheduler-model.txt" in the current working directory.
+pub def load_weights() -> result<CostModel, str> effect fs, io, alloc, throw {
+    val content = read_text("iris-scheduler-model.txt")?;
+    val fields = lines(content);
+    if list_len(fields) != 4 { return err("checkpoint needs exactly four lines") };
+    if list_get(fields, 0) != "IRIS-SCHEDULER-1" { return err("unsupported checkpoint version") };
+    val a = parse_f64(list_get(fields, 1));
+    val b = parse_f64(list_get(fields, 2));
+    val bias = parse_f64(list_get(fields, 3));
+    if !is_some(a) || !is_some(b) || !is_some(bias) { return err("invalid checkpoint number") };
+    val weights = CostModel { first: unwrap(a), second: unwrap(b), bias: unwrap(bias) };
+    if !valid_model(weights) { return err("checkpoint parameters outside bounds") };
+    return ok(weights)
+}

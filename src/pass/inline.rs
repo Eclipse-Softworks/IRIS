@@ -122,11 +122,16 @@ impl super::Pass for InlinePass {
                 // inlined call result must be globally replaced everywhere.
                 if !alias_map.is_empty() {
                     let other_blocks = module.functions[caller_idx].blocks.len();
-                    for other_idx in 0..other_blocks {
+                    for (other_idx, block) in module.functions[caller_idx]
+                        .blocks
+                        .iter_mut()
+                        .take(other_blocks)
+                        .enumerate()
+                    {
                         if other_idx == block_idx {
                             continue;
                         }
-                        for instr in &mut module.functions[caller_idx].blocks[other_idx].instrs {
+                        for instr in &mut block.instrs {
                             apply_replacements(instr, &alias_map);
                         }
                         // Also update block params (their args in Br/CondBr are
@@ -178,8 +183,29 @@ fn inline_call(
         .unwrap_or_default();
 
     let callee_vt = module.functions[callee_idx].value_types.clone();
+    // Positions for runtime errors: an inlined instruction keeps its own, in
+    // the callee's file; one from the standard library, or without one,
+    // takes the call's, as a failure in a function that was not inlined does.
+    let callee_spans = module.functions[callee_idx].span_table.value_spans.clone();
+    let call_site =
+        call_result.and_then(|r| module.functions[caller_idx].span_table.get_for_val(r));
+    let reported = |byte: &u32| {
+        module
+            .source
+            .as_deref()
+            .map_or(true, |src| src.locate(*byte).is_some())
+    };
+    let positions: Vec<Option<u32>> = callee_instrs
+        .iter()
+        .map(|ci| {
+            ci.result()
+                .and_then(|r| callee_spans.get(&r).copied())
+                .filter(reported)
+                .or(call_site)
+        })
+        .collect();
     let mut emitted: Vec<IrInstr> = Vec::new();
-    for mut ci in callee_instrs {
+    for (mut ci, position) in callee_instrs.into_iter().zip(positions) {
         if let Some(old_result) = ci.result() {
             let fresh = module.functions[caller_idx].fresh_value();
             val_map.insert(old_result, fresh);
@@ -188,6 +214,12 @@ fn inline_call(
                 module.functions[caller_idx]
                     .value_types
                     .insert(fresh, ty.clone());
+            }
+            if let Some(byte) = position {
+                module.functions[caller_idx]
+                    .span_table
+                    .value_spans
+                    .insert(fresh, byte);
             }
         }
         apply_replacements(&mut ci, &val_map);
@@ -229,6 +261,9 @@ pub(crate) fn set_result(instr: &mut IrInstr, v: ValueId) {
         IrInstr::MakeClosure { result, .. } => *result = v,
         IrInstr::AllocArray { result, .. } => *result = v,
         IrInstr::ArrayLoad { result, .. } => *result = v,
+        IrInstr::Borrow { result, .. } => *result = v,
+        IrInstr::Move { result, .. } => *result = v,
+        IrInstr::EnterScope { .. } | IrInstr::ExitScope { .. } | IrInstr::Drop { .. } => {}
         IrInstr::ChanNew { result, .. } => *result = v,
         IrInstr::ChanRecv { result, .. } => *result = v,
         IrInstr::TaskGroupNew { result, .. } => *result = v,

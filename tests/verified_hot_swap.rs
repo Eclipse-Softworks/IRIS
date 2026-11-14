@@ -1,4 +1,6 @@
-use iris::codegen::hot_swap::{AbiFingerprint, HotSwapEngine, ProgramGateway};
+use iris::codegen::hot_swap::{
+    parse_retention_spec, AbiFingerprint, HotSwapConfig, HotSwapEngine, ProgramGateway,
+};
 use iris::codegen::llvm_orc::is_orc_jit_available;
 use iris::compile_to_module;
 use std::sync::Mutex;
@@ -214,4 +216,63 @@ fn program_gateways_switch_atomically_and_old_lease_remains_coherent() {
     let restored = swaps.lease_program("calculator").unwrap();
     assert_eq!(restored.call_i64_0("left").unwrap(), 10);
     assert_eq!(restored.call_i64_0("right").unwrap(), 11);
+}
+
+#[test]
+fn hot_swap_retention_and_external_archive_track_evictions() {
+    let _guard = ORC_TEST_LOCK.lock().unwrap();
+    if !is_orc_jit_available() {
+        eprintln!("LLVM ORC is unavailable; retention/archive test skipped");
+        return;
+    }
+
+    assert_eq!(parse_retention_spec("unlimited").unwrap(), None);
+    assert_eq!(parse_retention_spec("0").unwrap(), None);
+    assert_eq!(parse_retention_spec("12").unwrap(), Some(12));
+    assert!(parse_retention_spec("bad").is_err());
+
+    let mut archive_dir = std::env::temp_dir();
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    archive_dir.push(format!("iris_hs_archive_{}_{}", std::process::id(), nonce));
+
+    let swaps = HotSwapEngine::with_config(HotSwapConfig {
+        history_limit: Some(2),
+        archive_dir: Some(archive_dir.clone()),
+    });
+    for val in [10, 20, 30, 40] {
+        let module = compile_to_module(
+            &format!("def policy() -> i64 {{ {val} }}"),
+            &format!("hs_{val}"),
+        )
+        .unwrap();
+        swaps
+            .install_verified(&module, "policy", |_| Ok(()))
+            .unwrap();
+    }
+    assert_eq!(swaps.retained_generations("policy"), vec![4, 3]);
+    assert_eq!(swaps.evicted_count(), 2);
+
+    let archived = swaps.archived_generations().unwrap();
+    assert_eq!(archived.len(), 4);
+    assert_eq!(archived[0].status, "evicted");
+    assert_eq!(archived[1].status, "evicted");
+    assert_eq!(archived[2].status, "installed");
+    assert_eq!(archived[3].status, "installed");
+    let _ = std::fs::remove_dir_all(&archive_dir);
+
+    // Unlimited retention never evicts in-memory generations.
+    let unlimited = HotSwapEngine::with_config(HotSwapConfig::unlimited());
+    for i in 0..10 {
+        let module =
+            compile_to_module(&format!("def policy() -> i64 {{ {i} }}"), &format!("u_{i}"))
+                .unwrap();
+        unlimited
+            .install_verified(&module, "policy", |_| Ok(()))
+            .unwrap();
+    }
+    assert_eq!(unlimited.retained_generations("policy").len(), 10);
+    assert_eq!(unlimited.evicted_count(), 0);
 }

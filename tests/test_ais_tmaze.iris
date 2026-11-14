@@ -1,0 +1,128 @@
+// std.ais: the T-maze, the standard test of active inference.
+//
+// The agent starts at the centre of a T. One arm holds a reward, the other a
+// punishment, and which is which -- the context -- changes from trial to
+// trial. At the bottom of the T a cue shows the context. The arms are
+// absorbing: once in one, the trial is decided.
+//
+// From the centre every first move has the same expected reward, since the
+// context is a coin flip. An agent that values information (the epistemic
+// term of expected free energy) goes to the cue, learns the context, then
+// takes the rewarded arm. One that only seeks reward is indifferent, and is
+// right about half the time. Both run the same Bayesian filtering; only the
+// weight on information differs.
+bring std.ais
+
+// States: location (0 centre, 1 cue, 2 left, 3 right) x context (0: reward
+// left, 1: reward right), s = location * 2 + context.
+// Observations: 0 centre, 1 cue says left, 2 cue says right, 3 left win,
+// 4 left loss, 5 right win, 6 right loss.
+def tmaze(reward_prob: f64) -> Pomdp {
+    val m = pomdp_new(8, 7, 4)
+    val p = reward_prob
+    val q = 1.0 - reward_prob
+    for ctx in 0..2 {
+        val c = to_f64(ctx)
+        pomdp_set_likelihood(m, 0 * 2 + ctx, list(1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0), 100.0)
+        pomdp_set_likelihood(m, 1 * 2 + ctx, list(0.0, 1.0 - c, c, 0.0, 0.0, 0.0, 0.0), 100.0)
+        val left_win = if ctx == 0 { p } else { q }
+        pomdp_set_likelihood(m, 2 * 2 + ctx, list(0.0, 0.0, 0.0, left_win, 1.0 - left_win, 0.0, 0.0), 100.0)
+        val right_win = if ctx == 1 { p } else { q }
+        pomdp_set_likelihood(m, 3 * 2 + ctx, list(0.0, 0.0, 0.0, 0.0, 0.0, right_win, 1.0 - right_win), 100.0)
+        for act in 0..4 {
+            for loc in 0..4 {
+                // From the centre or the cue an action goes where it says;
+                // an arm is absorbing.
+                val dest = if loc >= 2 { loc } else { act }
+                val probs: list<f64> = list()
+                for s2 in 0..8 { list_push(probs, if s2 == dest * 2 + ctx { 1.0 } else { 0.0 }) }
+                pomdp_set_transition(m, act, loc * 2 + ctx, probs, 100.0)
+            }
+        }
+    }
+    pomdp_set_preferences(m, list(0.0, 0.0, 0.0, 3.0, 0.0 - 3.0, 3.0, 0.0 - 3.0))
+    pomdp_set_prior(m, list(0.5, 0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0))
+    m
+}
+
+// An observation of state s, drawn from the model's likelihood.
+def emit(m: Pomdp, s: i64) -> i64 effect random {
+    val col: list<f64> = list()
+    for o in 0..m.n_obs { list_push(col, list_get(m.a, o * m.n_states + s)) }
+    probs_sample(col)
+}
+
+// One trial: (reached the rewarded arm, was rewarded, first move).
+def trial(agent: AifAgent, world: Pomdp, ctx: i64) -> (bool, bool, i64) effect random {
+    var ag = aif_reset(agent)
+    var loc = 0
+    var first = 0 - 1
+    var rewarded = false
+    for t in 0..3 {
+        val obs = emit(world, loc * 2 + ctx)
+        if obs == 3 || obs == 5 { rewarded = true }
+        ag = aif_observe(ag, obs)
+        if t < 2 {
+            val step = aif_decide(ag)
+            ag = step.0
+            val act = step.1.action
+            if t == 0 { first = act }
+            if loc < 2 { loc = act }
+        }
+    }
+    val correct = (ctx == 0 && loc == 2) || (ctx == 1 && loc == 3)
+    (correct, rewarded, first)
+}
+
+def run(agent: AifAgent, world: Pomdp, trials: i64) -> (i64, i64, i64) effect random {
+    var correct = 0
+    var rewarded = 0
+    var cue_first = 0
+    for i in 0..trials {
+        val r = trial(agent, world, i % 2)
+        if r.0 { correct = correct + 1 }
+        if r.1 { rewarded = rewarded + 1 }
+        if r.2 == 1 { cue_first = cue_first + 1 }
+    }
+    (correct, rewarded, cue_first)
+}
+
+def main() -> i64 {
+    val world = tmaze(0.8)
+    seed(20261020)
+    val curious = aif_with_sampling(aif_agent_new(tmaze(0.8), 2, 16.0), true)
+    val greedy = aif_with_drives(curious, 0.0, 0.0)
+    val trials = 100
+    val c = run(curious, world, trials)
+    val g = run(greedy, world, trials)
+    println("epistemic:   rewarded arm " + to_str(c.0) + "/100, rewards " + to_str(c.1) + ", cue first " + to_str(c.2))
+    println("reward only: rewarded arm " + to_str(g.0) + "/100, rewards " + to_str(g.1) + ", cue first " + to_str(g.2))
+
+    // The agent that values information checks the cue, then acts on it.
+    assert(c.2 >= 95, "cue first " + to_str(c.2))
+    assert(c.0 >= 95, "rewarded arm " + to_str(c.0))
+    // The one that does not is indifferent from the centre.
+    assert(g.2 <= 50, "cue first " + to_str(g.2))
+    assert(g.0 <= 80, "rewarded arm " + to_str(g.0))
+    assert(c.0 - g.0 >= 20)
+    // Reaching the rewarded arm pays 80% of the time, the other arm 20%.
+    assert(c.1 > g.1)
+
+    // From the centre, information gain is what separates the moves: going to
+    // the cue gains log 2 nats about the context, and no move changes the
+    // expected reward.
+    val ag = aif_observe(curious, 0)
+    val cue = pomdp_policy_value(ag.model, ag.belief, list(1), 1.0, 0.0)
+    val left = pomdp_policy_value(ag.model, ag.belief, list(2), 1.0, 0.0)
+    val stay = pomdp_policy_value(ag.model, ag.belief, list(0), 1.0, 0.0)
+    println("info gain: cue " + to_str(cue.info_gain) + ", left arm " + to_str(left.info_gain) + ", stay " + to_str(stay.info_gain))
+    assert(abs(cue.info_gain - log(2.0)) < 1.0e-9)
+    assert(left.info_gain > 0.0 && left.info_gain < cue.info_gain)
+    assert(abs(stay.info_gain) < 1.0e-9)
+    assert(abs(cue.utility - left.utility) < 1.0e-9 && abs(cue.utility - stay.utility) < 1.0e-9)
+    // G = risk + ambiguity when information is weighted 1.
+    assert(abs(cue.efe - (cue.risk + cue.ambiguity)) < 1.0e-9)
+    assert(abs(left.efe - (left.risk + left.ambiguity)) < 1.0e-9)
+    println("std.ais tmaze: ok")
+    return 0
+}

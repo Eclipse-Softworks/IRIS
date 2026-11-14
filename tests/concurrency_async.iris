@@ -315,3 +315,68 @@ def test_par_for_atomic_6() -> i64 {
     barrier();
     check(atomic_load(a) == 5)
 }
+
+def main() -> i64 {
+    test_channel_send_recv_1();
+    test_channel_send_recv_2();
+    test_channel_send_recv_3();
+    test_channel_send_recv_4();
+    test_channel_send_recv_5();
+    test_channel_send_recv_6();
+    test_channel_send_recv_7();
+    test_channel_send_recv_8();
+    test_channel_send_recv_9();
+    test_channel_send_recv_10();
+    test_spawn_send_recv_1();
+    test_spawn_send_recv_2();
+    test_spawn_send_recv_3();
+    test_spawn_send_recv_4();
+    test_spawn_send_recv_5();
+    test_spawn_send_recv_6();
+    test_spawn_send_recv_7();
+    test_spawn_send_recv_8();
+    test_spawn_send_recv_9();
+    test_spawn_send_recv_10();
+    test_atomic_load_initial();
+    test_atomic_store();
+    test_atomic_add_1();
+    test_atomic_add_2();
+    test_atomic_add_3();
+    test_atomic_add_4();
+    test_atomic_add_5();
+    test_atomic_add_6();
+    test_atomic_add_7();
+    test_atomic_add_8();
+    test_async_add1_1();
+    test_async_add1_2();
+    test_async_add1_3();
+    test_async_add1_4();
+    test_async_add1_5();
+    test_async_add1_6();
+    test_async_add1_7();
+    test_async_add1_8();
+    test_async_chain_1();
+    test_async_chain_2();
+    test_async_chain_3();
+    test_async_chain_4();
+    test_async_chain_5();
+    test_async_chain_6();
+    test_async_chain_7();
+    test_async_chain_8();
+    test_async_multi_await();
+    test_async_sum3();
+    test_async_await_loop();
+    test_async_no_await_recv();
+    test_barrier_basic();
+    test_barrier_value();
+    test_barrier_conditional();
+    test_barrier_loop();
+    test_par_for_atomic_1();
+    test_par_for_atomic_2();
+    test_par_for_atomic_3();
+    test_par_for_atomic_4();
+    test_par_for_atomic_5();
+    test_par_for_atomic_6();
+    0
+}
+

@@ -25,6 +25,18 @@ pub fn lower_graph_to_ir(
     graph: &GraphIr,
     shapes: &HashMap<NodeId, IrType>,
 ) -> Result<IrFunction, LowerError> {
+    // Shape inference types every node; a missing one is its defect.
+    let shape = |id: NodeId| -> Result<IrType, LowerError> {
+        shapes
+            .get(&id)
+            .cloned()
+            .ok_or_else(|| LowerError::UnknownOp {
+                op: format!(
+                    "internal compiler error: no shape inferred for node {id:?} of `{}`",
+                    graph.name
+                ),
+            })
+    };
     // Determine the function return type from the first output node's source.
     let first_output = graph
         .outputs()
@@ -33,18 +45,20 @@ pub fn lower_graph_to_ir(
             op: "model has no outputs".into(),
         })?;
     let return_ty = match first_output {
-        GraphNode::Output { from, .. } => shapes.get(from).cloned().unwrap_or(IrType::Infer),
+        GraphNode::Output { from, .. } => shape(*from)?,
         _ => unreachable!(),
     };
 
     // Build function parameter list from input nodes (in NodeId order).
     let params: Vec<Param> = graph
         .inputs()
-        .map(|n| Param {
-            name: n.name().to_owned(),
-            ty: shapes.get(&n.id()).cloned().unwrap_or(IrType::Infer),
+        .map(|n| {
+            Ok(Param {
+                name: n.name().to_owned(),
+                ty: shape(n.id())?,
+            })
         })
-        .collect();
+        .collect::<Result<_, LowerError>>()?;
 
     let mut builder = IrFunctionBuilder::new(&graph.name, params, return_ty);
     let entry = builder.create_block(Some("entry"));
@@ -52,7 +66,7 @@ pub fn lower_graph_to_ir(
     // Add one block parameter per input node and record the mapping.
     let mut node_values: HashMap<NodeId, ValueId> = HashMap::new();
     for input in graph.inputs() {
-        let ty = shapes.get(&input.id()).cloned().unwrap_or(IrType::Infer);
+        let ty = shape(input.id())?;
         let v = builder.add_block_param(entry, Some(input.name()), ty);
         node_values.insert(input.id(), v);
     }
@@ -62,7 +76,7 @@ pub fn lower_graph_to_ir(
     // Lower each layer to a Call instruction.
     for layer in graph.layers() {
         if let GraphNode::Layer { id, op, inputs, .. } = layer {
-            let result_ty = shapes.get(id).cloned().unwrap_or(IrType::Infer);
+            let result_ty = shape(*id)?;
             let args: Vec<ValueId> = inputs
                 .iter()
                 .filter_map(|pid| node_values.get(pid).copied())

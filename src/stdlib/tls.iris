@@ -1,0 +1,400 @@
+// src/stdlib/tls.iris -- TLS ClientHello dissection and JA3/JA4 fingerprints
+//
+// Dissects TLS 1.0-1.3 handshake records, extracts ClientHello parameters
+// (SNI, ALPN, cipher suites, extensions, groups, point formats, signature
+// algorithms, supported versions), drops GREASE values (RFC 8701), and
+// computes JA3 (Salesforce: MD5 of version,ciphers,extensions,groups,formats)
+// and JA4 (FoxIO: version from supported_versions, sorted and hashed lists).
+//
+// `matched_threat` is a coarse heuristic over the cipher and extension lists,
+// not a lookup in a fingerprint database; match fingerprints against a list
+// you trust instead.
+
+bring std.buffer
+bring std.crypto
+
+pub record TlsRecord {
+    content_type: i64,
+    version: i64,
+    length: i64,
+    payload: ByteBuffer,
+}
+
+pub record TlsClientHello {
+    client_version: i64,
+    ciphers: list<i64>,
+    extensions: list<i64>,
+    sni: str,
+    alpn: str,
+    // The first ALPN protocol's raw bytes (JA4 needs them when not printable).
+    alpn_bytes: list<i64>,
+    supported_groups: list<i64>,
+    ec_point_formats: list<i64>,
+    // In the order sent.
+    signature_algorithms: list<i64>,
+    supported_versions: list<i64>,
+}
+
+/// A GREASE value (RFC 8701): 0x0a0a, 0x1a1a, ... 0xfafa.
+pub def tls_is_grease(value: i64) -> bool {
+    val hi = shr(value, 8);
+    hi == band(value, 0xff) && band(hi, 0x0f) == 0x0a
+}
+
+// `count` big-endian u16 values starting at `offset`, without GREASE.
+def tls_u16_list(payload: ByteBuffer, offset: i64, count: i64) -> list<i64> {
+    val values: list<i64> = list();
+    for i in 0 .. count {
+        val value = byte_buffer_read_u16_be(payload, offset + i * 2);
+        if tls_is_grease(value) == false {
+            list_push(values, value);
+        }
+    }
+    values
+}
+
+pub record Ja3Result {
+    ja3_str: str,
+    ja3_hash: str,
+    matched_threat: str,
+}
+
+pub record Ja4Result {
+    ja4: str,
+    ja4_a: str,
+    ja4_b: str,
+    ja4_c: str,
+    matched_threat: str,
+}
+
+/// Parse TLS Record Header (5 bytes: Content-Type, Version, Length)
+pub def tls_parse_record(buf: ByteBuffer) -> result<TlsRecord, str> {
+    if buf.len < 5 {
+        return err("tls record too short (< 5 bytes)")
+    }
+    val content_type = byte_buffer_get(buf, 0);
+    val version = byte_buffer_read_u16_be(buf, 1);
+    val length = byte_buffer_read_u16_be(buf, 3);
+    if buf.len < 5 + length {
+        return err("tls record payload truncated")
+    }
+    val payload = byte_buffer_slice(buf, 5, 5 + length);
+    ok(TlsRecord {
+        content_type: content_type,
+        version: version,
+        length: length,
+        payload: payload,
+    })
+}
+
+/// Parse TLS ClientHello Handshake message
+pub def tls_parse_client_hello(payload: ByteBuffer) -> result<TlsClientHello, str> {
+    if payload.len < 38 {
+        return err("client hello too short (< 38 bytes)")
+    }
+    val hs_type = byte_buffer_get(payload, 0);
+    if hs_type != 1 {
+        return err("not a ClientHello handshake (type != 1)")
+    }
+    val client_version = byte_buffer_read_u16_be(payload, 4);
+
+    // Skip 32-byte client random (bytes 6..37)
+    val sid_len = byte_buffer_get(payload, 38);
+    var offset = 39 + sid_len;
+    if payload.len < offset + 2 {
+        return err("client hello truncated before cipher suites")
+    }
+
+    // Cipher Suites
+    val cs_len = byte_buffer_read_u16_be(payload, offset);
+    offset = offset + 2;
+    if payload.len < offset + cs_len {
+        return err("client hello cipher suites truncated")
+    }
+
+    val ciphers = tls_u16_list(payload, offset, cs_len / 2);
+    offset = offset + cs_len;
+
+    // Compression Methods
+    if payload.len < offset + 1 {
+        return err("client hello truncated before compression")
+    }
+    val comp_len = byte_buffer_get(payload, offset);
+    offset = offset + 1 + comp_len;
+
+    // Extensions
+    val extensions: list<i64> = list();
+    var sni = "";
+    var alpn = "";
+    var alpn_bytes: list<i64> = list();
+    var groups: list<i64> = list();
+    val point_formats: list<i64> = list();
+    var signature_algorithms: list<i64> = list();
+    var versions: list<i64> = list();
+    if payload.len >= offset + 2 {
+        val ext_total_len = byte_buffer_read_u16_be(payload, offset);
+        offset = offset + 2;
+        val ext_end = offset + ext_total_len;
+        while offset + 4 <= ext_end && offset + 4 <= payload.len {
+            val ext_type = byte_buffer_read_u16_be(payload, offset);
+            val ext_len = byte_buffer_read_u16_be(payload, offset + 2);
+            offset = offset + 4;
+            if tls_is_grease(ext_type) == false {
+                list_push(extensions, ext_type);
+            }
+            val fits = offset + ext_len <= payload.len;
+            // supported_groups (10): u16 length, then u16 groups
+            if ext_type == 10 && ext_len >= 2 && fits {
+                val n = byte_buffer_read_u16_be(payload, offset) / 2;
+                if 2 + n * 2 <= ext_len {
+                    groups = tls_u16_list(payload, offset + 2, n);
+                }
+            }
+            // ec_point_formats (11): u8 length, then u8 formats
+            if ext_type == 11 && ext_len >= 1 && fits {
+                val n = byte_buffer_get(payload, offset);
+                if 1 + n <= ext_len {
+                    for i in 0 .. n {
+                        list_push(point_formats, byte_buffer_get(payload, offset + 1 + i));
+                    }
+                }
+            }
+            // signature_algorithms (13): u16 length, then u16 schemes
+            if ext_type == 13 && ext_len >= 2 && fits {
+                val n = byte_buffer_read_u16_be(payload, offset) / 2;
+                if 2 + n * 2 <= ext_len {
+                    signature_algorithms = tls_u16_list(payload, offset + 2, n);
+                }
+            }
+            // supported_versions (43), ClientHello form: u8 length, then u16 versions
+            if ext_type == 43 && ext_len >= 1 && fits {
+                val n = byte_buffer_get(payload, offset) / 2;
+                if 1 + n * 2 <= ext_len {
+                    versions = tls_u16_list(payload, offset + 1, n);
+                }
+            }
+            // Check SNI (extension 0x0000)
+            if ext_type == 0 && ext_len >= 5 && offset + ext_len <= payload.len {
+                val server_name_len = byte_buffer_read_u16_be(payload, offset + 3);
+                if offset + 5 + server_name_len <= payload.len {
+                    val sni_buf = byte_buffer_slice(payload, offset + 5, offset + 5 + server_name_len);
+                    sni = byte_buffer_to_ascii_lossy(sni_buf);
+                }
+            }
+            // Check ALPN (extension 0x0010 / 16)
+            if ext_type == 16 && ext_len >= 3 && offset + ext_len <= payload.len {
+                val alpn_list_len = byte_buffer_read_u16_be(payload, offset);
+                if alpn_list_len > 0 && offset + 2 < payload.len {
+                    val proto_len = byte_buffer_get(payload, offset + 2);
+                    if offset + 3 + proto_len <= payload.len {
+                        val alpn_buf = byte_buffer_slice(payload, offset + 3, offset + 3 + proto_len);
+                        alpn = byte_buffer_to_ascii_lossy(alpn_buf);
+                        alpn_bytes = alpn_buf.data;
+                    }
+                }
+            }
+            offset = offset + ext_len;
+        }
+    }
+
+    ok(TlsClientHello {
+        client_version: client_version,
+        ciphers: ciphers,
+        extensions: extensions,
+        sni: sni,
+        alpn: alpn,
+        alpn_bytes: alpn_bytes,
+        supported_groups: groups,
+        ec_point_formats: point_formats,
+        signature_algorithms: signature_algorithms,
+        supported_versions: versions,
+    })
+}
+
+// Decimal values joined with '-'.
+def tls_join_decimal(values: list<i64>) -> str {
+    var out = "";
+    for i in 0 .. list_len(values) {
+        val item = to_str(list_get(values, i));
+        out = if i == 0 { item } else { out + "-" + item };
+    }
+    out
+}
+
+/// JA3 (Salesforce): "version,ciphers,extensions,groups,point_formats" in
+/// decimal, GREASE removed, and its MD5.
+pub def tls_calculate_ja3(hello: TlsClientHello) -> Ja3Result {
+    val head = to_str(hello.client_version) + "," + tls_join_decimal(hello.ciphers) + ",";
+    val tail = tls_join_decimal(hello.extensions) + "," + tls_join_decimal(hello.supported_groups) + ",";
+    val ja3 = head + tail + tls_join_decimal(hello.ec_point_formats);
+    val hash = md5_str(ja3);
+
+    // Threat Signature Lookup
+    var label = "BENIGN: Standard Client";
+    if contains(ja3, "49195-49199-49196") && contains(ja3, "0-23-65281") {
+        label = "ATTACK_SCANNER: Metasploit Framework / Cobalt Strike";
+    }
+    if contains(ja3, "49171-49172") && list_len(hello.extensions) == 1 {
+        label = "EXPLOIT_TOOL: sqlmap Automated Injector";
+    }
+    if list_len(hello.extensions) == 0 {
+        label = "BOTNET_SCRAPER: Raw Automated Botnet / No Extensions";
+    }
+
+    Ja3Result {
+        ja3_str: ja3,
+        ja3_hash: hash,
+        matched_threat: label,
+    }
+}
+
+def sort_i64_list(items: list<i64>) -> list<i64> {
+    val res: list<i64> = list();
+    val n = list_len(items);
+    for i in 0 .. n {
+        list_push(res, list_get(items, i));
+    }
+    for i in 1 .. n {
+        val key = list_get(res, i);
+        var j = i - 1;
+        while j >= 0 && list_get(res, j) > key {
+            list_set(res, j + 1, list_get(res, j));
+            j = j - 1;
+        }
+        list_set(res, j + 1, key);
+    }
+    res
+}
+
+def to_hex4(val_u16: i64) -> str {
+    val hex_chars = "0123456789abcdef";
+    val b0 = band(shr(val_u16, 12), 0x0f);
+    val b1 = band(shr(val_u16, 8), 0x0f);
+    val b2 = band(shr(val_u16, 4), 0x0f);
+    val b3 = band(val_u16, 0x0f);
+    slice(hex_chars, b0, b0 + 1) + slice(hex_chars, b1, b1 + 1) + slice(hex_chars, b2, b2 + 1) + slice(hex_chars, b3, b3 + 1)
+}
+
+// JA4's two-character TLS version.
+def tls_ja4_version(version: i64) -> str {
+    if version == 0x0304 { "13" }
+    else if version == 0x0303 { "12" }
+    else if version == 0x0302 { "11" }
+    else if version == 0x0301 { "10" }
+    else if version == 0x0300 { "s3" }
+    else if version == 0x0002 { "s2" }
+    else if version == 0xfeff { "d1" }
+    else if version == 0xfefd { "d2" }
+    else if version == 0xfefc { "d3" }
+    else { "00" }
+}
+
+def tls_alphanumeric(byte: i64) -> bool {
+    (byte >= 48 && byte <= 57) || (byte >= 65 && byte <= 90) || (byte >= 97 && byte <= 122)
+}
+
+// JA4's ALPN pair: the first and last characters of the first protocol, or of
+// its hex form when either byte is not alphanumeric; "00" without ALPN.
+def tls_ja4_alpn(alpn: list<i64>) -> str {
+    val n = list_len(alpn);
+    if n == 0 {
+        return "00"
+    }
+    val first = list_get(alpn, 0);
+    val last = list_get(alpn, n - 1);
+    if tls_alphanumeric(first) && tls_alphanumeric(last) {
+        val pair: list<i64> = list();
+        list_push(pair, first);
+        list_push(pair, last);
+        return byte_buffer_to_ascii_lossy(ByteBuffer { data: pair, len: 2 })
+    }
+    val digits = "0123456789abcdef";
+    val hi = shr(first, 4);
+    val lo = band(last, 0x0f);
+    slice(digits, hi, hi + 1) + slice(digits, lo, lo + 1)
+}
+
+/// JA4 (FoxIO) for a TLS ClientHello (`is_quic` for QUIC). Part a: protocol,
+/// highest supported version, SNI, cipher and extension counts, ALPN; part b:
+/// SHA-256 of the sorted ciphers; part c: SHA-256 of the sorted extensions
+/// without SNI and ALPN, then the signature algorithms in order.
+pub def tls_calculate_ja4(hello: TlsClientHello, is_quic: bool) -> Ja4Result {
+    // 1. Part A (10 characters): [proto][ver][sni][ciphers][extensions][alpn]
+    val proto = if is_quic { "q" } else { "t" };
+    var version = hello.client_version;
+    for v in 0 .. list_len(hello.supported_versions) {
+        val offered = list_get(hello.supported_versions, v);
+        if v == 0 || offered > version {
+            version = offered;
+        }
+    }
+    val ver_str = tls_ja4_version(version);
+    // "d" when the SNI extension is present (a domain), "i" otherwise.
+    var has_sni = false;
+    for x in 0 .. list_len(hello.extensions) {
+        if list_get(hello.extensions, x) == 0 {
+            has_sni = true;
+        }
+    }
+    val sni_char = if has_sni { "d" } else { "i" };
+    val c_cnt = list_len(hello.ciphers);
+    val c_str = if c_cnt < 10 { "0" + to_str(c_cnt) } else if c_cnt > 99 { "99" } else { to_str(c_cnt) };
+    val e_cnt = list_len(hello.extensions);
+    val e_str = if e_cnt < 10 { "0" + to_str(e_cnt) } else if e_cnt > 99 { "99" } else { to_str(e_cnt) };
+    val alpn_str = tls_ja4_alpn(hello.alpn_bytes);
+    val ja4_a = proto + ver_str + sni_char + c_str + e_str + alpn_str;
+
+    // 2. Part B: 12-char SHA-256 hash of sorted hex cipher suites
+    val sorted_ciphers = sort_i64_list(hello.ciphers);
+    var ciphers_hex = "";
+    for i in 0 .. list_len(sorted_ciphers) {
+        val cid = to_hex4(list_get(sorted_ciphers, i));
+        ciphers_hex = if i == 0 { cid } else { ciphers_hex + "," + cid };
+    }
+    val ja4_b = if list_len(sorted_ciphers) == 0 { "000000000000" } else { slice(sha256(ciphers_hex), 0, 12) };
+
+    // 3. Part C: 12-char SHA-256 hash of sorted hex extensions (excluding SNI 0x0000 and ALPN 0x0010)
+    val filtered_exts: list<i64> = list();
+    for j in 0 .. list_len(hello.extensions) {
+        val ext_id = list_get(hello.extensions, j);
+        if ext_id != 0 && ext_id != 16 {
+            list_push(filtered_exts, ext_id);
+        }
+    }
+    val sorted_exts = sort_i64_list(filtered_exts);
+    var exts_hex = "";
+    for k in 0 .. list_len(sorted_exts) {
+        val eid = to_hex4(list_get(sorted_exts, k));
+        exts_hex = if k == 0 { eid } else { exts_hex + "," + eid };
+    }
+    var sigalgs_hex = "";
+    for k in 0 .. list_len(hello.signature_algorithms) {
+        val sid = to_hex4(list_get(hello.signature_algorithms, k));
+        sigalgs_hex = if k == 0 { sid } else { sigalgs_hex + "," + sid };
+    }
+    val exts_and_sigalgs = if len(sigalgs_hex) > 0 { exts_hex + "_" + sigalgs_hex } else { exts_hex };
+    val ja4_c = if list_len(sorted_exts) == 0 { "000000000000" } else { slice(sha256(exts_and_sigalgs), 0, 12) };
+
+    val full_ja4 = ja4_a + "_" + ja4_b + "_" + ja4_c;
+
+    // Threat Signature Catalog
+    var threat = "BENIGN: Standard TLS Client";
+    if contains(ja4_a, "i030300") || contains(ja4_a, "t12i0303") {
+        threat = "ATTACK_SCANNER: Metasploit Framework / Cobalt Strike (JA4 Threat Profile)";
+    }
+    if contains(ja4_a, "i020100") {
+        threat = "EXPLOIT_TOOL: sqlmap Automated Injector (JA4 Threat Profile)";
+    }
+    if sni_char == "d" && alpn_str == "h2" {
+        threat = "BENIGN_BROWSER: Chrome / Edge / Modern HTTP/2 Client (JA4 Threat Profile)";
+    }
+
+    Ja4Result {
+        ja4: full_ja4,
+        ja4_a: ja4_a,
+        ja4_b: ja4_b,
+        ja4_c: ja4_c,
+        matched_threat: threat,
+    }
+}
+

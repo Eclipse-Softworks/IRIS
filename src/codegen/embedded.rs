@@ -10,9 +10,11 @@ use std::path::{Path, PathBuf};
 
 use crate::error::CodegenError;
 use crate::ir::block::BlockId;
+use crate::ir::function::IrFunction;
 use crate::ir::instr::IrInstr;
-use crate::ir::module::IrModule;
+use crate::ir::module::{IrModule, STATE_INIT_FN};
 use crate::ir::types::IrType;
+use crate::ir::value::ValueId;
 
 use super::llvm_c_api::compile_llvm_ir_to_object_bytes_optimized;
 use super::llvm_ir::emit_llvm_ir_with_target;
@@ -243,6 +245,44 @@ fn instruction_kind(instr: &IrInstr) -> &'static str {
     }
 }
 
+/// Target-independent result of [`prove_allocation_free`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AllocationFreeProof {
+    pub entry: String,
+    pub reachable_functions: Vec<String>,
+    pub fixed_array_bytes: u64,
+}
+
+/// Prove that `entry`'s complete direct call graph uses only scalar
+/// arithmetic, control flow, fixed stack arrays and acyclic calls -- no heap,
+/// no host services, no recursion.  Unlike [`validate_embedded_module`] it
+/// accepts any scalar entry signature and applies no board-specific limits,
+/// so hosted callers (the evolution coordinator) can require the same proof
+/// the embedded backend relies on.
+pub fn prove_allocation_free(
+    module: &IrModule,
+    entry: &str,
+) -> Result<AllocationFreeProof, CodegenError> {
+    let functions = module
+        .functions()
+        .iter()
+        .map(|function| (function.name.as_str(), function))
+        .collect::<HashMap<_, _>>();
+    if !functions.contains_key(entry) {
+        return Err(codegen_error(format!(
+            "entry function '{}' was not found",
+            entry
+        )));
+    }
+    let (reachable_functions, fixed_array_bytes) =
+        walk_allocation_free(&functions, None, None, entry)?;
+    Ok(AllocationFreeProof {
+        entry: entry.to_owned(),
+        reachable_functions,
+        fixed_array_bytes,
+    })
+}
+
 /// Prove that the entry's complete direct call graph stays within the
 /// allocation-free embedded subset.  The proof is intentionally independent
 /// of source effect annotations, so an annotation bug cannot certify heap use.
@@ -268,6 +308,88 @@ pub fn validate_embedded_module(
         )));
     }
 
+    let state: StateTable<'_> = module
+        .state_vars()
+        .iter()
+        .map(|(name, ty)| (name.as_str(), ty))
+        .collect();
+    let (mut reachable_functions, mut fixed_array_bytes) =
+        walk_allocation_free(&functions, Some(target), Some(&state), entry)?;
+    // The device initialises program state itself (the entry wrapper runs
+    // `__iris_state_init` before the first step), so that function is part
+    // of the proof too.
+    if !state.is_empty() && functions.contains_key(STATE_INIT_FN) {
+        let (init_functions, init_bytes) =
+            walk_allocation_free(&functions, Some(target), Some(&state), STATE_INIT_FN)?;
+        for name in init_functions {
+            if !reachable_functions.contains(&name) {
+                reachable_functions.push(name);
+            }
+        }
+        reachable_functions.sort();
+        fixed_array_bytes = fixed_array_bytes
+            .checked_add(init_bytes)
+            .ok_or_else(|| codegen_error("fixed-array footprint overflow"))?;
+    }
+    let mut semantic_ir = String::new();
+    for name in &reachable_functions {
+        let function = functions[name.as_str()];
+        semantic_ir.push_str(&format!(
+            "fn:{};params:{:?};ret:{};",
+            function.name, function.params, function.return_ty
+        ));
+        for block in function.blocks() {
+            semantic_ir.push_str(&format!("block:{:?};params:{:?};", block.id, block.params));
+            for instr in &block.instrs {
+                semantic_ir.push_str(&format!("instr:{instr:?};"));
+            }
+        }
+    }
+    let fingerprint = proof_fingerprint(
+        target,
+        entry,
+        &reachable_functions,
+        fixed_array_bytes,
+        &semantic_ir,
+    );
+    Ok(EmbeddedProof {
+        target,
+        entry: entry.to_owned(),
+        reachable_functions,
+        fixed_array_bytes,
+        fingerprint,
+    })
+}
+
+type FunctionTable<'a> = HashMap<&'a str, &'a crate::ir::function::IrFunction>;
+
+/// Program state variables by name. Embedded targets keep scalar state in
+/// plain globals; `state_get`/`state_set` are then a load and a store.
+type StateTable<'a> = HashMap<&'a str, &'a IrType>;
+
+/// The text of the string constant `value`, if `function` defines one.
+fn const_str(function: &IrFunction, value: ValueId) -> Option<&str> {
+    function
+        .blocks()
+        .iter()
+        .flat_map(|block| &block.instrs)
+        .find_map(|instr| match instr {
+            IrInstr::ConstStr {
+                result,
+                value: text,
+            } if *result == value => Some(text.as_str()),
+            _ => None,
+        })
+}
+
+/// `state` is `None` where program state is not allowed (the target-free
+/// proof that hosted callers rely on).
+fn walk_allocation_free(
+    functions: &FunctionTable<'_>,
+    target: Option<EmbeddedTarget>,
+    state: Option<&StateTable<'_>>,
+    entry: &str,
+) -> Result<(Vec<String>, u64), CodegenError> {
     let mut reachable = HashSet::new();
     let mut stack = vec![entry.to_owned()];
     let mut edges: HashMap<String, Vec<String>> = HashMap::new();
@@ -280,7 +402,7 @@ pub fn validate_embedded_module(
         let function = functions
             .get(name.as_str())
             .ok_or_else(|| codegen_error(format!("reachable function '{}' is undefined", name)))?;
-        if target == EmbeddedTarget::ArduinoUno && function_has_cfg_cycle(function) {
+        if target == Some(EmbeddedTarget::ArduinoUno) && function_has_cfg_cycle(function) {
             return Err(codegen_error(format!(
                 "function '{}' contains a loop; the LLVM 17 Arduino Uno profile rejects cyclic control flow because its AVR optimizer can miscompile i64 induction values",
                 name
@@ -298,10 +420,54 @@ pub fn validate_embedded_module(
             )));
         }
 
+        // String constants are accepted only as state variable names.
+        let state_names: HashSet<ValueId> = if state.is_some() {
+            function
+                .blocks()
+                .iter()
+                .flat_map(|block| &block.instrs)
+                .filter_map(|instr| match instr {
+                    IrInstr::BuiltinCall { name, args, .. }
+                        if matches!(name.as_str(), "state_get" | "state_set") =>
+                    {
+                        args.first().copied()
+                    }
+                    _ => None,
+                })
+                .collect()
+        } else {
+            HashSet::new()
+        };
         let mut callees = Vec::new();
         for block in function.blocks() {
             for instr in &block.instrs {
                 match instr {
+                    IrInstr::ConstStr { result, .. } if state_names.contains(result) => {}
+                    IrInstr::BuiltinCall {
+                        name: builtin,
+                        args,
+                        ..
+                    } if state.is_some()
+                        && matches!(builtin.as_str(), "state_get" | "state_set") =>
+                    {
+                        let var = args.first().and_then(|value| const_str(function, *value));
+                        let ty = var.and_then(|var| state.and_then(|state| state.get(var)));
+                        match (var, ty) {
+                            (Some(_), Some(IrType::Scalar(_))) => {}
+                            (Some(var), Some(ty)) => {
+                                return Err(codegen_error(format!(
+                                    "function '{}' uses program state '{}' of type {}; the embedded profile keeps scalar state only",
+                                    name, var, ty
+                                )))
+                            }
+                            _ => {
+                                return Err(codegen_error(format!(
+                                    "function '{}' uses program state that the module does not declare",
+                                    name
+                                )))
+                            }
+                        }
+                    }
                     IrInstr::BinOp { .. }
                     | IrInstr::ConstFloat { .. }
                     | IrInstr::ConstInt { .. }
@@ -314,7 +480,7 @@ pub fn validate_embedded_module(
                     | IrInstr::ArrayLoad { .. }
                     | IrInstr::ArrayStore { .. } => {}
                     IrInstr::AllocArray { elem_ty, size, .. } => {
-                        if target == EmbeddedTarget::ArduinoUno {
+                        if target == Some(EmbeddedTarget::ArduinoUno) {
                             return Err(codegen_error(format!(
                                 "function '{}' uses a fixed array; the LLVM 17 Arduino Uno profile supports scalar stack values only",
                                 name
@@ -361,34 +527,7 @@ pub fn validate_embedded_module(
     reject_recursion(entry, &edges)?;
     let mut reachable_functions = reachable.into_iter().collect::<Vec<_>>();
     reachable_functions.sort();
-    let mut semantic_ir = String::new();
-    for name in &reachable_functions {
-        let function = functions[name.as_str()];
-        semantic_ir.push_str(&format!(
-            "fn:{};params:{:?};ret:{};",
-            function.name, function.params, function.return_ty
-        ));
-        for block in function.blocks() {
-            semantic_ir.push_str(&format!("block:{:?};params:{:?};", block.id, block.params));
-            for instr in &block.instrs {
-                semantic_ir.push_str(&format!("instr:{instr:?};"));
-            }
-        }
-    }
-    let fingerprint = proof_fingerprint(
-        target,
-        entry,
-        &reachable_functions,
-        fixed_array_bytes,
-        &semantic_ir,
-    );
-    Ok(EmbeddedProof {
-        target,
-        entry: entry.to_owned(),
-        reachable_functions,
-        fixed_array_bytes,
-        fingerprint,
-    })
+    Ok((reachable_functions, fixed_array_bytes))
 }
 
 fn function_has_cfg_cycle(function: &crate::ir::function::IrFunction) -> bool {
@@ -503,10 +642,17 @@ pub fn build_embedded_bundle(
     // source-level IRIS entry name in the proof while giving its object symbol
     // a collision-free ABI name that the generated validation harness calls.
     let embedded_entry = embedded_entry_symbol(&proof);
-    llvm_ir = llvm_ir.replace(
-        &format!("@{}(", proof.entry),
-        &format!("@{}(", embedded_entry),
-    );
+    let has_state =
+        !module.state_vars().is_empty() && module.function_by_name(STATE_INIT_FN).is_some();
+    let step = if has_state {
+        format!("{embedded_entry}.step")
+    } else {
+        embedded_entry.clone()
+    };
+    llvm_ir = llvm_ir.replace(&format!("@{}(", proof.entry), &format!("@{}(", step));
+    if has_state {
+        llvm_ir.push_str(&embedded_state_entry(&embedded_entry, &step));
+    }
     if contains_allocator_reference(&llvm_ir) {
         return Err(codegen_error(
             "generated reachable code references a hosted allocator despite passing embedded validation",
@@ -746,6 +892,31 @@ fn llvm_c_string(value: &str) -> String {
 
 fn embedded_entry_symbol(proof: &EmbeddedProof) -> String {
     format!("iris_embedded_entry_{}", proof.entry)
+}
+
+/// Bare-metal startup code runs no constructors, so a program with state
+/// initialises it on the entry's first call; the board's repeated calls then
+/// share it. The flag lives in `.bss`, which the C startup code clears.
+fn embedded_state_entry(entry: &str, step: &str) -> String {
+    format!(
+        r#"
+@iris_embedded_state_ready = internal global i8 0
+
+define i64 @{entry}() {{
+entry:
+  %ready = load volatile i8, ptr @iris_embedded_state_ready, align 1
+  %initialised = icmp ne i8 %ready, 0
+  br i1 %initialised, label %step, label %init
+init:
+  %status = call i64 @{STATE_INIT_FN}()
+  store volatile i8 1, ptr @iris_embedded_state_ready, align 1
+  br label %step
+step:
+  %result = call i64 @{step}()
+  ret i64 %result
+}}
+"#
+    )
 }
 
 fn embedded_harness_ir(proof: &EmbeddedProof) -> String {

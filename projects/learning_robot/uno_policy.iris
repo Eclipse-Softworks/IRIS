@@ -1,0 +1,16 @@
+bring "uno_control.iris"
+// Board preparation: fixed-point scalar control self-test, no hardware writes.
+// Inputs and output use scale 1000. Coefficients are the reference plant values;
+// they are not a checkpoint automatically deployed from desktop training.
+def main() -> i64 {
+    assert(fixed_command(800, 250, 0, 0, 2000) == 1000);
+    assert(fixed_command(800, 250, 0, 0, -2000) == -1000);
+    assert(fixed_command(800, 250, 1000, 0, 1000) == 0);
+    assert(fixed_command(800, 250, 0, 100, 200) == 80);
+    assert(fixed_command(800, 0, 0, 0, 2000) == 0);
+    assert(fixed_command(800, 250, 100001, 0, 0) == 0);
+    assert(fixed_command(990, 250, 0, 0, 1000) == 0);
+    assert(fixed_command(-1, 250, 0, 0, 1000) == 0);
+    assert(fixed_command(800, 250, 0, -100, 200) == 720);
+    return 0
+}

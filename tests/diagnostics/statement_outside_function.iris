@@ -1,0 +1,6 @@
+// expect: E0005 at 4:1
+// message: inside a function
+
+println("hi");
+
+def main() -> i64 { 0 }

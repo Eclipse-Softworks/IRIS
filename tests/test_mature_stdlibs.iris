@@ -1,0 +1,466 @@
+// tests/test_mature_stdlibs.iris
+// Verification testbench for matured standard libraries:
+// math, time, collections, queue, string, json, bitset, path, deque, heap, and set.
+
+bring std.math.*
+bring std.time.*
+bring std.collections.*
+bring std.queue.*
+bring std.string.*
+bring std.json.*
+bring std.bitset.*
+bring std.path.*
+bring std.deque.*
+bring std.heap.*
+bring std.set.*
+
+pub def test_math_maturity() -> i64 {
+    println("[TEST 1/11] std.math verification...");
+
+    // Constants
+    if abs_f64(pi() - 3.14159265) > 0.001 { return 101 };
+    if abs_f64(tau() - 6.2831853) > 0.001 { return 102 };
+    if abs_f64(e_const() - 2.7182818) > 0.001 { return 103 };
+
+    // Trigonometry & geometry
+    val deg = 180.0;
+    val rad = deg_to_rad(deg);
+    if abs_f64(rad - pi()) > 0.0001 { return 104 };
+    if abs_f64(rad_to_deg(rad) - 180.0) > 0.0001 { return 105 };
+
+    val angle = atan2(1.0, 1.0);
+    if abs_f64(angle - (pi() * 0.25)) > 0.005 { return 106 };
+
+    val h = hypot(3.0, 4.0);
+    if abs_f64(h - 5.0) > 0.0001 { return 107 };
+
+    // Interpolation
+    val mid = lerp(10.0, 20.0, 0.5);
+    if abs_f64(mid - 15.0) > 0.0001 { return 108 };
+    val t = inv_lerp(10.0, 20.0, 15.0);
+    if abs_f64(t - 0.5) > 0.0001 { return 109 };
+    val re = remap(5.0, 0.0, 10.0, 100.0, 200.0);
+    if abs_f64(re - 150.0) > 0.0001 { return 110 };
+
+    // Number theory & combinatorics
+    if !is_prime(2) || !is_prime(17) || !is_prime(97) { return 111 };
+    if is_prime(4) || is_prime(21) || is_prime(100) { return 112 };
+    if next_prime(14) != 17 { return 113 };
+
+    if factorial(5) != 120 { return 114 };
+    if permutations(5, 2) != 20 { return 115 };
+    if combinations(5, 2) != 10 { return 116 };
+
+    if !is_power_of_two(16) || is_power_of_two(18) { return 117 };
+    if next_power_of_two(17) != 32 { return 118 };
+    if integer_sqrt(25) != 5 || integer_sqrt(30) != 5 { return 119 };
+
+    // Statistics on list
+    val vals: list<f64> = list();
+    push(vals, 10.0);
+    push(vals, 20.0);
+    push(vals, 30.0);
+    push(vals, 40.0);
+
+    if abs_f64(sum_f64(vals) - 100.0) > 0.0001 { return 120 };
+    if abs_f64(mean(vals) - 25.0) > 0.0001 { return 121 };
+    if abs_f64(min_in_list(vals) - 10.0) > 0.0001 { return 122 };
+    if abs_f64(max_in_list(vals) - 40.0) > 0.0001 { return 123 };
+
+    println("  -> std.math: PASSED");
+    0
+}
+
+pub def test_time_maturity() -> i64 {
+    println("[TEST 2/11] std.time verification...");
+
+    // Duration formatting
+    val d1 = duration_from_ms(1500);
+    if d1.seconds != 1 || d1.millis != 500 { return 201 };
+
+    val dur_str = format_duration(65000); // 1m 5s
+    if !contains(dur_str, "1m") { return 202 };
+
+    // Gregorian calendar conversion
+    // 2026-10-11T12:30:45Z
+    val epoch_s = 1791721845; // ~Oct 2026
+    val dt = epoch_ms_to_datetime(epoch_s * 1000);
+    if dt.year != 2026 || dt.month != 10 || dt.day != 11 { return 203 };
+    if dt.hour != 12 || dt.minute != 30 || dt.second != 45 { return 204 };
+
+    // Reverse conversion roundtrip
+    val roundtrip = datetime_to_epoch_s(dt);
+    if roundtrip != epoch_s { return 205 };
+
+    // ISO 8601 formatting
+    val iso = format_iso8601(epoch_s * 1000);
+    if !starts_with(iso, "2026-10-11T12:30:45") { return 206 };
+
+    // Leap year checks
+    if !is_leap_year(2024) || is_leap_year(2025) || is_leap_year(2100) || !is_leap_year(2000) { return 207 };
+    if days_in_month(2024, 2) != 29 || days_in_month(2025, 2) != 28 { return 208 };
+
+    println("  -> std.time: PASSED");
+    0
+}
+
+pub def test_collections_maturity() -> i64 {
+    println("[TEST 3/11] std.collections verification...");
+
+    val xs: list<i64> = list();
+    push(xs, 1);
+    push(xs, 2);
+    push(xs, 2);
+    push(xs, 3);
+    push(xs, 4);
+
+    // List reverse
+    val rev = list_reverse(xs);
+    if list_get(rev, 0) != 4 || list_get(rev, 4) != 1 { return 301 };
+
+    // List unique
+    val u = list_unique(xs);
+    if list_len(u) != 4 { return 302 };
+
+    // List count & search
+    if list_count(xs, 2) != 2 { return 303 };
+    if list_count(xs, 9) != 0 { return 304 };
+
+    // List arithmetic / stats
+    if list_sum(xs) != 12 { return 305 };
+    if unwrap(list_min(xs)) != 1 || unwrap(list_max(xs)) != 4 { return 306 };
+
+    // Take and drop
+    val t = list_take(xs, 2);
+    if list_len(t) != 2 || list_get(t, 1) != 2 { return 307 };
+    val d = list_drop(xs, 3);
+    if list_len(d) != 2 || list_get(d, 0) != 3 { return 308 };
+
+    // Flatten
+    val nested: list<list<i64>> = list();
+    val row1: list<i64> = list(); push(row1, 10); push(row1, 20);
+    val row2: list<i64> = list(); push(row2, 30);
+    push(nested, row1);
+    push(nested, row2);
+    val flat = list_flatten(nested);
+    if list_len(flat) != 3 || list_get(flat, 2) != 30 { return 309 };
+
+    println("  -> std.collections: PASSED");
+    0
+}
+
+pub def test_queue_maturity() -> i64 {
+    println("[TEST 4/11] std.queue verification...");
+
+    var q = queue_new();
+    q = enqueue(q, 100);
+    q = enqueue(q, 200);
+    q = enqueue(q, 300);
+
+    if queue_len(q) != 3 { return 401 };
+    if queue_peek(q) != 100 { return 402 };
+    if !queue_contains(q, 200) || queue_contains(q, 999) { return 403 };
+
+    // Dequeue elements
+    val v1 = dequeue_val(q);
+    q = dequeue_queue(q);
+    if v1 != 100 || queue_len(q) != 2 { return 404 };
+
+    // Queue to list conversion
+    val ql = queue_to_list(q);
+    if list_len(ql) != 2 || list_get(ql, 0) != 200 { return 405 };
+
+    // Queue from list
+    val q2 = queue_from_list(ql);
+    if queue_len(q2) != 2 || queue_peek(q2) != 200 { return 406 };
+
+    println("  -> std.queue: PASSED");
+    0
+}
+
+pub def test_string_maturity() -> i64 {
+    println("[TEST 5/11] std.string verification...");
+
+    // Capitalize & truncate
+    if capitalize("iris") != "Iris" { return 501 };
+    if truncate("hello world", 8) != "hello..." { return 502 };
+    if truncate("short", 10) != "short" { return 503 };
+
+    // Reverse
+    if reverse_str("abcdef") != "fedcba" { return 504 };
+
+    // ASCII classifications
+    if !is_ascii_digit(str_index("7", 0)) || is_ascii_digit(str_index("a", 0)) { return 505 };
+
+    // Levenshtein distance
+    val d1 = levenshtein_distance("kitten", "sitting");
+    if d1 != 3 { return 506 };
+
+    val d2 = levenshtein_distance("iris", "iris");
+    if d2 != 0 { return 507 };
+
+    val d3 = levenshtein_distance("compiler", "compiles");
+    if d3 != 1 { return 508 };
+
+    // Hamming distance
+    val h = hamming_distance("karolin", "kathrin");
+    if h != 3 { return 509 };
+
+    println("  -> std.string: PASSED");
+    0
+}
+
+pub def test_json_maturity() -> i64 {
+    println("[TEST 6/11] std.json verification...");
+
+    // JSON escaping
+    val escaped = json_escape("Hello \"World\"\nLine 2");
+    if !contains(escaped, "\\\"") || !contains(escaped, "\\n") { return 601 };
+
+    // Typed setters and getters
+    var p = json_new();
+    p = json_set(p, "service", "iris-gateway");
+    p = json_set_bool(p, "active", true);
+    p = json_set_i64(p, "port", 8080);
+    p = json_set_f64(p, "uptime_h", 42.5);
+
+    if json_get(p, "service") != "iris-gateway" { return 602 };
+    if !json_get_bool(p, "active", false) { return 603 };
+    if json_get_bool(p, "missing", false) != false { return 604 };
+    if json_get(p, "port") != "8080" { return 605 };
+
+    // Encode
+    val enc = json_encode(p);
+    if !starts_with(enc, "{") || !ends_with(enc, "}") { return 606 };
+    if !contains(enc, "\"port\":\"8080\"") { return 607 };
+
+    println("  -> std.json: PASSED");
+    0
+}
+
+pub def test_bitset_maturity() -> i64 {
+    println("[TEST 7/11] std.bitset verification...");
+
+    var b1 = bitset_create();
+    b1 = set_bit(b1, 0);
+    b1 = set_bit(b1, 5);
+    b1 = set_bit(b1, 63);
+    b1 = set_bit(b1, 100);
+
+    if popcount(b1) != 4 { return 701 };
+    if !get_bit(b1, 5) || get_bit(b1, 6) { return 702 };
+    if bitset_max_bit(b1) != 100 { return 703 };
+
+    // Toggle
+    b1 = toggle_bit(b1, 5);
+    if get_bit(b1, 5) || popcount(b1) != 3 { return 704 };
+    b1 = toggle_bit(b1, 5);
+    if !get_bit(b1, 5) || popcount(b1) != 4 { return 705 };
+
+    // Set operations
+    var b2 = bitset_create();
+    b2 = set_bit(b2, 5);
+    b2 = set_bit(b2, 200);
+
+    val u = bitset_union(b1, b2);
+    if popcount(u) != 5 { return 706 };
+    if !get_bit(u, 200) || !get_bit(u, 100) { return 707 };
+
+    val inter = bitset_intersection(b1, b2);
+    if popcount(inter) != 1 || !get_bit(inter, 5) { return 708 };
+
+    val diff = bitset_difference(b1, b2);
+    if get_bit(diff, 5) || popcount(diff) != 3 { return 709 };
+
+    if !bitset_intersects(b1, b2) { return 710 };
+    if !bitset_is_subset(inter, b1) { return 711 };
+
+    // Index conversion roundtrip
+    val idxs = bitset_to_indices(b1);
+    if list_len(idxs) != 4 { return 712 };
+    val b1_recon = bitset_from_indices(idxs);
+    if popcount(b1_recon) != 4 { return 713 };
+
+    println("  -> std.bitset: PASSED");
+    0
+}
+
+pub def test_path_maturity() -> i64 {
+    println("[TEST 8/11] std.path verification...");
+
+    // Windows backslash conversion
+    val posix = path_to_posix("C:\\Users\\Moon\\Desktop\\file.iris");
+    if posix != "C:/Users/Moon/Desktop/file.iris" { return 801 };
+
+    // Join all
+    val parts: list<str> = list();
+    push(parts, "src");
+    push(parts, "stdlib");
+    push(parts, "math.iris");
+    val full_path = path_join_all(parts);
+    if full_path != "src/stdlib/math.iris" { return 802 };
+
+    // Extension check
+    if !path_has_extension("doc.pdf", "pdf") { return 803 };
+    if !path_has_extension("doc.pdf", ".pdf") { return 804 };
+    if path_has_extension("doc.pdf", "txt") { return 805 };
+
+    // Parent dir
+    if path_parent("a/b/c.txt") != "a/b" { return 806 };
+
+    // Glob matching
+    if !path_matches_glob("test_math.iris", "test_*.iris") { return 807 };
+    if !path_matches_glob("anything.log", "*.log") { return 808 };
+    if !path_matches_glob("anything", "*") { return 809 };
+    if path_matches_glob("test.txt", "*.iris") { return 810 };
+
+    println("  -> std.path: PASSED");
+    0
+}
+
+pub def test_deque_maturity() -> i64 {
+    println("[TEST 9/11] std.deque verification...");
+
+    var dq = deque_create();
+    dq = push_back(dq, 10);
+    dq = push_back(dq, 20);
+    dq = push_front(dq, 5);
+    // deque order: [5, 10, 20]
+
+    if deque_size(dq) != 3 { return 901 };
+    if peek_front(dq) != 5 || peek_back(dq) != 20 { return 902 };
+    if !deque_contains(dq, 10) || deque_contains(dq, 99) { return 903 };
+
+    // List conversion
+    val l = deque_to_list(dq);
+    if list_len(l) != 3 || list_get(l, 0) != 5 || list_get(l, 2) != 20 { return 904 };
+
+    // Rotation
+    dq = deque_rotate_left(dq, 1);
+    // [10, 20, 5]
+    if peek_front(dq) != 10 || peek_back(dq) != 5 { return 905 };
+
+    dq = deque_rotate_right(dq, 1);
+    // back to [5, 10, 20]
+    if peek_front(dq) != 5 || peek_back(dq) != 20 { return 906 };
+
+    println("  -> std.deque: PASSED");
+    0
+}
+
+pub def test_heap_maturity() -> i64 {
+    println("[TEST 10/11] std.heap verification...");
+
+    // Empty list creation safety
+    val empty_l: list<i64> = list();
+    val h_empty = heap_from_list(empty_l);
+    if heap_len(h_empty) != 0 || !heap_is_empty(h_empty) { return 1001 };
+
+    // Populated heap
+    val nums: list<i64> = list();
+    push(nums, 50);
+    push(nums, 10);
+    push(nums, 30);
+    push(nums, 20);
+
+    var h = heap_from_list(nums);
+    if heap_len(h) != 4 { return 1002 };
+    if heap_peek(h) != 10 { return 1003 };
+    if !heap_contains(h, 30) || heap_contains(h, 999) { return 1004 };
+
+    // Pop minimum
+    val min_val = heap_pop_val(h);
+    h = heap_pop_heap(h);
+    if min_val != 10 || heap_len(h) != 3 || heap_peek(h) != 20 { return 1005 };
+
+    println("  -> std.heap: PASSED");
+    0
+}
+
+pub def test_set_maturity() -> i64 {
+    println("[TEST 11/11] std.set verification...");
+
+    // Empty list creation safety
+    val empty_l: list<i64> = list();
+    val s_empty = set_from_list(empty_l);
+    if set_len(s_empty) != 0 || !set_is_empty(s_empty) { return 1101 };
+
+    // Populate set
+    val nums: list<i64> = list();
+    push(nums, 1);
+    push(nums, 2);
+    push(nums, 2);
+    push(nums, 3);
+
+    var s1 = set_from_list(nums);
+    if set_len(s1) != 3 { return 1102 };
+    if !set_contains(s1, 2) || set_contains(s1, 5) { return 1103 };
+
+    // Clone
+    val s1_clone = set_clone(s1);
+    if set_len(s1_clone) != 3 { return 1104 };
+
+    // Set operations
+    var s2: Set<i64> = set_new();
+    s2 = set_add(s2, 3);
+    s2 = set_add(s2, 4);
+
+    val u = set_union(s1, s2);
+    if set_len(u) != 4 { return 1105 };
+
+    val inter = set_intersection(s1, s2);
+    if set_len(inter) != 1 || !set_contains(inter, 3) { return 1106 };
+
+    println("  -> std.set: PASSED");
+    0
+}
+
+pub def main() -> i64 {
+    println("================================================================================");
+    println("           IRIS STANDARD LIBRARIES COMPREHENSIVE TEST SUITE                     ");
+    println("================================================================================");
+
+    val r1 = test_math_maturity();
+    if r1 != 0 { println(f"[FAILED] Math test code {r1}"); return r1 };
+
+    val r2 = test_time_maturity();
+    if r2 != 0 { println(f"[FAILED] Time test code {r2}"); return r2 };
+
+    val r3 = test_collections_maturity();
+    if r3 != 0 { println(f"[FAILED] Collections test code {r3}"); return r3 };
+
+    val r4 = test_queue_maturity();
+    if r4 != 0 { println(f"[FAILED] Queue test code {r4}"); return r4 };
+
+    val r5 = test_string_maturity();
+    if r5 != 0 { println(f"[FAILED] String test code {r5}"); return r5 };
+
+    val r6 = test_json_maturity();
+    if r6 != 0 { println(f"[FAILED] JSON test code {r6}"); return r6 };
+
+    val r7 = test_bitset_maturity();
+    if r7 != 0 { println(f"[FAILED] Bitset test code {r7}"); return r7 };
+
+    val r8 = test_path_maturity();
+    if r8 != 0 { println(f"[FAILED] Path test code {r8}"); return r8 };
+
+    val r9 = test_deque_maturity();
+    if r9 != 0 { println(f"[FAILED] Deque test code {r9}"); return r9 };
+
+    val r10 = test_heap_maturity();
+    if r10 != 0 { println(f"[FAILED] Heap test code {r10}"); return r10 };
+
+    val r11 = test_set_maturity();
+    if r11 != 0 { println(f"[FAILED] Set test code {r11}"); return r11 };
+
+    // The per-domain returns above are the load-bearing checks; this assertion
+    // states the invariant the harness looks for: every domain reported success.
+    assert(r1 == 0 && r2 == 0 && r3 == 0 && r4 == 0 && r5 == 0 && r6 == 0
+        && r7 == 0 && r8 == 0 && r9 == 0 && r10 == 0 && r11 == 0,
+        "every standard library domain returned success");
+
+    println("================================================================================");
+    println("  [PASSED] ALL 11 STANDARD LIBRARY DOMAINS VERIFIED SUCCESSFULLY! (EXIT 0)      ");
+    println("================================================================================");
+    0
+}

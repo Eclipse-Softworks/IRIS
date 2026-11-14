@@ -1,0 +1,148 @@
+// projects/jit_superoptimizer/synthesizer.iris
+// Cost-Guided Peephole Transformation & Evolutionary Superoptimizer
+
+bring "ir.iris"
+bring "verifier.iris"
+
+/// Helper to determine if an integer is a power of 2: returns shift amount k or -1
+pub def get_power_of_two_exponent(val_c: i64) -> i64 {
+    if val_c <= 0 { return -1; }
+    var k: i64 = 0;
+    var v = val_c;
+    while v > 1 {
+        if v % 2 != 0 { return -1; }
+        v = v / 2;
+        k = k + 1;
+    }
+    k
+}
+
+/// Apply optimization pass to simplify an expression tree
+pub def superoptimize_program(prog: IrProgram) -> IrProgram {
+    val nodes: list<IrNode> = list();
+    // Copy nodes
+    for i in 0 .. list_len(prog.nodes) {
+        list_push(nodes, list_get(prog.nodes, i));
+    }
+
+    var changed = true;
+    var passes = 0;
+
+    while changed && passes < 10 {
+        changed = false;
+        passes = passes + 1;
+
+        for i in 0 .. list_len(nodes) {
+            val node = list_get(nodes, i);
+
+            // 1. Redundant Identity: x ^ x -> CONST 0
+            if node.op == 8 && node.left_id >= 0 && node.right_id >= 0 {
+                val l_node = list_get(nodes, node.left_id);
+                val r_node = list_get(nodes, node.right_id);
+                if l_node.op == 2 && r_node.op == 2 { // x ^ x
+                    list_set(nodes, i, IrNode {
+                        id: node.id,
+                        op: 1, // CONST
+                        val_const: 0,
+                        var_idx: 0,
+                        left_id: -1,
+                        right_id: -1,
+                    });
+                    changed = true;
+                }
+            }
+
+            // 2. Identity: x + 0 -> x, or 0 + x -> x
+            if node.op == 3 && node.left_id >= 0 && node.right_id >= 0 {
+                val l_node = list_get(nodes, node.left_id);
+                val r_node = list_get(nodes, node.right_id);
+                if r_node.op == 1 && r_node.val_const == 0 { // x + 0
+                    list_set(nodes, i, l_node);
+                    changed = true;
+                } else if l_node.op == 1 && l_node.val_const == 0 { // 0 + x
+                    list_set(nodes, i, r_node);
+                    changed = true;
+                }
+            }
+
+            // 3. Identity: x * 1 -> x, or 1 * x -> x
+            if node.op == 5 && node.left_id >= 0 && node.right_id >= 0 {
+                val l_node = list_get(nodes, node.left_id);
+                val r_node = list_get(nodes, node.right_id);
+                if r_node.op == 1 && r_node.val_const == 1 { // x * 1
+                    list_set(nodes, i, l_node);
+                    changed = true;
+                } else if l_node.op == 1 && l_node.val_const == 1 { // 1 * x
+                    list_set(nodes, i, r_node);
+                    changed = true;
+                }
+            }
+
+            // 4. Strength Reduction: x * 2^k -> x << k
+            if node.op == 5 && node.left_id >= 0 && node.right_id >= 0 {
+                val l_node = list_get(nodes, node.left_id);
+                val r_node = list_get(nodes, node.right_id);
+                if r_node.op == 1 { // multiply by constant
+                    val k = get_power_of_two_exponent(r_node.val_const);
+                    if k >= 0 {
+                        // Create const node for k
+                        val k_id = list_len(nodes);
+                        list_push(nodes, IrNode {
+                            id: k_id,
+                            op: 1, // CONST
+                            val_const: k,
+                            var_idx: 0,
+                            left_id: -1,
+                            right_id: -1,
+                        });
+                        // Rewrite MUL node into SHL
+                        list_set(nodes, i, IrNode {
+                            id: node.id,
+                            op: 6, // SHL
+                            val_const: 0,
+                            var_idx: 0,
+                            left_id: node.left_id,
+                            right_id: k_id,
+                        });
+                        changed = true;
+                    }
+                }
+            }
+
+            // 5. Shift Coalescing: (x << a) << b -> x << (a + b)
+            if node.op == 6 && node.left_id >= 0 && node.right_id >= 0 {
+                val l_node = list_get(nodes, node.left_id);
+                val r_node = list_get(nodes, node.right_id);
+                if l_node.op == 6 && r_node.op == 1 && l_node.right_id >= 0 {
+                    val inner_shift = list_get(nodes, l_node.right_id);
+                    if inner_shift.op == 1 {
+                        val total_shift = inner_shift.val_const + r_node.val_const;
+                        val new_c_id = list_len(nodes);
+                        list_push(nodes, IrNode {
+                            id: new_c_id,
+                            op: 1,
+                            val_const: total_shift,
+                            var_idx: 0,
+                            left_id: -1,
+                            right_id: -1,
+                        });
+                        list_set(nodes, i, IrNode {
+                            id: node.id,
+                            op: 6, // SHL
+                            val_const: 0,
+                            var_idx: 0,
+                            left_id: l_node.left_id,
+                            right_id: new_c_id,
+                        });
+                        changed = true;
+                    }
+                }
+            }
+        }
+    }
+
+    IrProgram {
+        nodes: nodes,
+        root_id: prog.root_id,
+    }
+}

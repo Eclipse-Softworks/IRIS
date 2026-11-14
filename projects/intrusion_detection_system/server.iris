@@ -1,0 +1,299 @@
+// ============================================================================
+// Aegis-IRIS: Standalone Production HTTP Server with Inline IDS/IPS Engine
+// ============================================================================
+//
+// Listens on a real OS TCP network socket (127.0.0.1:18088).
+// All incoming HTTP traffic passes through the inline Aegis-IRIS inspection
+// gateway before reaching any application route.
+//
+// Features:
+// - Stage 0: Dynamic Zero-Trust Quarantine Early Drop
+// - Stage 1: URL and comment normalization
+// - Stage 2: Deep packet & header inspection for known CVE signatures
+// - Stage 3: Dynamic IP blacklisting upon exploit detection
+// - Stage 4: Protected application backend router
+// ============================================================================
+
+bring std.net
+bring std.http
+bring std.os
+
+pub record CveRule {
+    cve_id: str,
+    name: str,
+    pattern: str,
+    target_field: str,
+    threat_score: f64
+}
+
+pub record InspectionResult {
+    is_blocked: bool,
+    rule_id: str,
+    threat_score: f64,
+    reason: str
+}
+
+def hex_val(ch: i64) -> i64 {
+    if ch >= 48 && ch <= 57 { return ch - 48 }
+    if ch >= 65 && ch <= 70 { return ch - 65 + 10 }
+    if ch >= 97 && ch <= 102 { return ch - 97 + 10 }
+    return -1
+}
+
+def parse_positive_int(s: str, fallback: i64) -> i64 {
+    val n = len(s);
+    if n == 0 { return fallback }
+    var acc = 0;
+    for i in 0 .. n {
+        val ch = str_index(s, i);
+        if ch < 48 || ch > 57 { return fallback }
+        acc = acc * 10 + (ch - 48);
+    }
+    return acc
+}
+
+pub def decode_url_percent(s: str) -> str {
+    var out = "";
+    val n = len(s);
+    var i = 0;
+    while i < n {
+        val b = str_index(s, i);
+        if b == 37 && i + 2 < n {
+            val h1 = hex_val(str_index(s, i + 1));
+            val h2 = hex_val(str_index(s, i + 2));
+            if h1 >= 0 && h2 >= 0 {
+                val byte_val = h1 * 16 + h2;
+                var ch = slice(s, i, i + 3);
+                if byte_val == 46 { ch = "."; };
+                if byte_val == 47 { ch = "/"; };
+                if byte_val == 39 { ch = "'"; };
+                if byte_val == 32 { ch = " "; };
+                if byte_val == 61 { ch = "="; };
+                out = out + ch;
+                i = i + 3;
+                continue;
+            }
+        };
+        out = out + slice(s, i, i + 1);
+        i = i + 1;
+    }
+    return out
+}
+
+pub def normalize_input(raw: str) -> str {
+    val decoded = decode_url_percent(raw);
+    val comment_stripped = str_replace(decoded, "/**/", " ");
+    return comment_stripped
+}
+
+pub def init_cve_catalog() -> list<CveRule> {
+    val rules: list<CveRule> = list();
+
+    list_push(rules, CveRule {
+        cve_id: "CVE-2021-44228",
+        name: "Apache Log4j2 JNDI Lookup RCE (Log4Shell)",
+        pattern: "${jndi:",
+        target_field: "ANY",
+        threat_score: 10.0
+    });
+
+    list_push(rules, CveRule {
+        cve_id: "CVE-2017-5638",
+        name: "Apache Struts2 OGNL Expression RCE",
+        pattern: "%{(#_=",
+        target_field: "HEADER_CT",
+        threat_score: 10.0
+    });
+
+    list_push(rules, CveRule {
+        cve_id: "CVE-2014-6271",
+        name: "GNU Bash Function Export RCE (Shellshock)",
+        pattern: "() { :;};",
+        target_field: "HEADER_UA",
+        threat_score: 10.0
+    });
+
+    list_push(rules, CveRule {
+        cve_id: "CVE-2022-22965",
+        name: "Spring DataBinder ClassLoader RCE (Spring4Shell)",
+        pattern: "class.module.classLoader",
+        target_field: "BODY",
+        threat_score: 9.8
+    });
+
+    list_push(rules, CveRule {
+        cve_id: "CVE-2021-41773",
+        name: "Apache HTTP Server Path Traversal File Disclosure",
+        pattern: "/etc/passwd",
+        target_field: "URI",
+        threat_score: 9.0
+    });
+
+    list_push(rules, CveRule {
+        cve_id: "CWE-22",
+        name: "Relative Directory Path Traversal",
+        pattern: "../../",
+        target_field: "URI",
+        threat_score: 8.5
+    });
+
+    return rules
+}
+
+pub def inspect_http_request(raw_req: str, rules: list<CveRule>) -> InspectionResult {
+    val uri = normalize_input(http_request_path(raw_req));
+    val user_agent = normalize_input(http_header(raw_req, "User-Agent"));
+    val content_type = normalize_input(http_header(raw_req, "Content-Type"));
+    val body = normalize_input(http_body(raw_req));
+
+    val n = list_len(rules);
+    for i in 0 .. n {
+        val r = list_get(rules, i);
+        var hit = false;
+
+        if r.target_field == "URI" {
+            if contains(uri, r.pattern) { hit = true; };
+        } else {
+            if r.target_field == "HEADER_UA" {
+                if contains(user_agent, r.pattern) { hit = true; };
+            } else {
+                if r.target_field == "HEADER_CT" {
+                    if contains(content_type, r.pattern) { hit = true; };
+                } else {
+                    if r.target_field == "BODY" {
+                        if contains(body, r.pattern) { hit = true; };
+                    } else {
+                        if contains(uri, r.pattern) || contains(user_agent, r.pattern) || contains(body, r.pattern) || contains(content_type, r.pattern) {
+                            hit = true;
+                        };
+                    };
+                };
+            };
+        };
+
+        if hit {
+            return InspectionResult {
+                is_blocked: true,
+                rule_id: r.cve_id,
+                threat_score: r.threat_score,
+                reason: r.name
+            };
+        }
+    }
+
+    return InspectionResult {
+        is_blocked: false,
+        rule_id: "NONE",
+        threat_score: 0.0,
+        reason: "BENIGN_CLEAN"
+    }
+}
+
+def build_http_200(body: str) -> str {
+    val len_str = to_str(len(body));
+    return "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nX-Aegis-IDS: INSPECTED_CLEAN\r\nContent-Length: " + len_str + "\r\n\r\n" + body
+}
+
+def build_http_403_blocked(cve_id: str, reason: str, score: f64) -> str {
+    val body = "{\"error\":\"ACCESS_DENIED\",\"ids_status\":\"BLOCKED_BY_AEGIS_IDS\",\"matched_cve\":\"" + cve_id + "\",\"threat_score\":" + to_str(score) + ",\"reason\":\"" + reason + "\"}";
+    val len_str = to_str(len(body));
+    return "HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nX-Aegis-IDS: THREAT_BLOCKED\r\nX-Aegis-Rule: " + cve_id + "\r\nContent-Length: " + len_str + "\r\n\r\n" + body
+}
+
+def build_http_403_quarantine(ip: str) -> str {
+    val body = "{\"error\":\"HOST_QUARANTINED\",\"firewall_action\":\"STAGE_0_EARLY_DROP\",\"client_ip\":\"" + ip + "\"}";
+    val len_str = to_str(len(body));
+    return "HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nX-Aegis-Firewall: BLOCKED_QUARANTINED_IP\r\nContent-Length: " + len_str + "\r\n\r\n" + body
+}
+
+pub def handle_transaction(raw_req: str, quarantine: list<str>, rules: list<CveRule>) -> (str, str, str) {
+    val fwd_ip = http_header(raw_req, "X-Forwarded-For");
+    val client_ip = if len(fwd_ip) > 0 { fwd_ip } else { "127.0.0.1" };
+
+    // Stage 0: Dynamic Firewall Early Drop
+    val q_len = list_len(quarantine);
+    for q in 0 .. q_len {
+        val bad_ip = list_get(quarantine, q);
+        if bad_ip == client_ip {
+            return ("QUARANTINE_DROP", client_ip, build_http_403_quarantine(client_ip));
+        }
+    }
+
+    // Stage 1 to 2: IDS Deep Packet & Header Inspection
+    val result = inspect_http_request(raw_req, rules);
+    if result.is_blocked {
+        list_push(quarantine, client_ip);
+        val resp = build_http_403_blocked(result.rule_id, result.reason, result.threat_score);
+        return ("ATTACK_BLOCKED:" + result.rule_id, client_ip, resp);
+    }
+
+    // Stage 4: Protected Backend Handler
+    val path = http_request_path(raw_req);
+    val body = if contains(path, "/health") {
+        "{\"status\":\"HEALTHY\",\"service\":\"Aegis-IRIS Protected Server\",\"aegis_firewall\":\"ACTIVE\"}"
+    } else {
+        if contains(path, "/search") {
+            "{\"results\":[\"asset_report.json\",\"telemetry.log\"],\"status\":\"SUCCESS\"}"
+        } else {
+            "{\"service\":\"Aegis Protected API\",\"endpoints\":[\"/health\",\"/search\"]}"
+        }
+    };
+    return ("BENIGN_SERVED", client_ip, build_http_200(body))
+}
+
+def main() -> i64 {
+    val port = parse_positive_int(getenv("AEGIS_PORT"), 18088);
+    val listener = tcp_listen(port);
+    if listener < 0 {
+        println("[ERROR] Failed to bind TCP socket on port " + to_str(port));
+        return 1
+    }
+
+    println("================================================================================");
+    println("          AEGIS-IRIS: LIVE NETWORK SERVER WITH EMBEDDED IDS/WAF                 ");
+    println("================================================================================");
+    println("[+] Listening on http://127.0.0.1:" + to_str(port));
+    println("[+] Embedded Aegis-IRIS Deep Packet & Header Inspection: ENGAGED");
+    println("[+] Zero-Trust Dynamic Quarantine Table: INITIALIZED (0 Blocked Hosts)");
+    println("[+] Server ready to accept incoming TCP connections...");
+    println("================================================================================");
+    println("");
+
+    val rules = init_cve_catalog();
+    val quarantine: list<str> = list();
+
+    // Check optional max requests limit from env (e.g. for scripted benchmarks)
+    val max_env = getenv("AEGIS_MAX_REQUESTS");
+    val max_requests = parse_positive_int(max_env, 0);
+
+    var req_count = 0;
+    var keep_running = true;
+
+    while keep_running {
+        val conn = tcp_accept(listener);
+        if conn >= 0 {
+            val raw_req = tcp_read(conn);
+            if len(raw_req) > 0 {
+                req_count = req_count + 1;
+                val (verdict, client_ip, resp) = handle_transaction(raw_req, quarantine, rules);
+                tcp_write(conn, resp);
+
+                val method = http_request_method(raw_req);
+                val path = http_request_path(raw_req);
+                println("[REQ #" + to_str(req_count) + "] " + method + " " + path + " | From: " + client_ip);
+                println("  -> IDS Verdict:   [" + verdict + "]");
+                println("  -> Firewall Posture: " + to_str(list_len(quarantine)) + " Host(s) in Quarantine Table");
+                println("");
+            }
+            tcp_close(conn);
+        }
+
+        if max_requests > 0 && req_count >= max_requests {
+            keep_running = false;
+        }
+    }
+
+    tcp_close(listener);
+    println("[+] Server gracefully stopped after " + to_str(req_count) + " requests.");
+    0
+}

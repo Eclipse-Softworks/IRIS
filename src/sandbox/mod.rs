@@ -116,12 +116,12 @@ impl NativeSandbox {
     /// Validate a launch request and refuse to start unless the complete
     /// platform boundary is active.
     ///
-    /// The worker bootstrap is intentionally not implemented as an ordinary
-    /// `std::process::Command`: on Windows that would create the process before
-    /// it was assigned to a Job Object and would permit a child-process escape.
-    /// The future backend must create it suspended with
-    /// `PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES`, assign it to the Job, and
-    /// only then resume its primary thread.
+    /// The worker is deliberately not started with `std::process::Command`:
+    /// on Windows that would create the process before it was assigned to a
+    /// Job Object and would permit a child-process escape. `PreparedLaunch::run`
+    /// (the platform backend, `windows.rs`) creates it suspended with
+    /// `PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES`, assigns it to the Job, and
+    /// only then resumes its primary thread.
     pub fn prepare_launch(
         &self,
         command: &CommandSpec,
@@ -206,28 +206,42 @@ impl std::error::Error for SandboxError {}
 
 #[cfg(windows)]
 mod windows;
-
 #[cfg(windows)]
-mod platform {
-    use super::{CommandSpec, ResourceLimits, SandboxAvailability, SandboxError, SandboxRunOutput};
+use windows as platform;
 
-    pub(super) fn detect() -> SandboxAvailability {
-        super::windows::detect()
-    }
+#[cfg(any(
+    target_os = "macos",
+    all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    )
+))]
+mod unix;
 
-    pub(super) fn run(
-        command: &CommandSpec,
-        limits: ResourceLimits,
-    ) -> Result<SandboxRunOutput, SandboxError> {
-        super::windows::run(command, limits)
-    }
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+mod linux;
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+use linux as platform;
 
-    pub(super) fn current_process_is_appcontainer() -> Result<bool, SandboxError> {
-        super::windows::current_process_is_appcontainer()
-    }
-}
+#[cfg(target_os = "macos")]
+mod macos;
+#[cfg(target_os = "macos")]
+use macos as platform;
 
-#[cfg(not(windows))]
+#[cfg(not(any(
+    windows,
+    target_os = "macos",
+    all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    )
+)))]
 mod platform {
     use super::{CommandSpec, ResourceLimits, SandboxAvailability, SandboxError, SandboxRunOutput};
 

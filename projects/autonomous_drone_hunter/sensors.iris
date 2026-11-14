@@ -1,0 +1,218 @@
+// projects/autonomous_drone_hunter/sensors.iris
+// Multi-spectral perception suite (RF, FLIR, LiDAR/EO) and Bayesian track fusion.
+
+bring "types.iris"
+bring "math_3d.iris"
+bring "environment.iris"
+
+pub def default_sensors() -> SensorPayload {
+    SensorPayload {
+        rf_sensitivity_dbm: -95.0,
+        flir_fov_rad: 0.785398, // 45 degrees half-angle
+        flir_range_m: 350.0,
+        lidar_range_m: 90.0,
+        optical_zoom: 10.0,
+    }
+}
+
+pub def initial_target_track() -> TargetTrack {
+    TargetTrack {
+        id: -1,
+        estimated_pos: v3_zero(),
+        estimated_vel: v3_zero(),
+        confidence: 0.0,
+        last_contact_time: -1.0,
+        observation_count: 0,
+        has_los: false,
+    }
+}
+
+/// Simulates RF Direction Finder (RDF) measurement.
+/// Can sense beacon even through non-line-of-sight, but with higher bearing variance.
+pub def sense_rf_beacon(drone_pos: Vector3, drone_heading: f64, target: TargetEntity, payload: SensorPayload) -> SensorContact {
+    val dist = v3_dist(drone_pos, target.pos);
+    if dist > 850.0 {
+        return SensorContact.NoSignal;
+    };
+
+    // Free-space path loss approximation: RSSI decreases with log(dist)
+    // At 10m: -40 dBm; at 100m: -60 dBm; at 500m: -74 dBm
+    val safe_dist = if dist < 1.0 { 1.0 } else { dist };
+    val path_loss = 20.0 * (log(safe_dist) / log(10.0));
+    val rssi = -30.0 - path_loss;
+
+    if rssi < payload.rf_sensitivity_dbm {
+        return SensorContact.NoSignal;
+    };
+
+    // Calculate true azimuth bearing relative to drone heading
+    val dx = target.pos.x - drone_pos.x;
+    val dy = target.pos.y - drone_pos.y;
+    val world_bearing = atan2_approx(dy, dx);
+    val rel_bearing = normalize_angle(world_bearing - drone_heading);
+
+    SensorContact.RFBearing(rel_bearing, rssi)
+}
+
+/// Simulates Forward-Looking Infrared (FLIR) optical camera.
+/// Requires line-of-sight and target to fall within forward conical FOV.
+pub def sense_thermal_flir(drone_pos: Vector3, drone_heading: f64, target: TargetEntity, has_los: bool, payload: SensorPayload) -> SensorContact {
+    if !has_los {
+        return SensorContact.NoSignal;
+    };
+
+    val dist = v3_dist(drone_pos, target.pos);
+    if dist > payload.flir_range_m {
+        return SensorContact.NoSignal;
+    };
+
+    val dx = target.pos.x - drone_pos.x;
+    val dy = target.pos.y - drone_pos.y;
+    val bearing = atan2_approx(dy, dx);
+    val angle_off_boresight = abs_f64(normalize_angle(bearing - drone_heading));
+
+    if angle_off_boresight > payload.flir_fov_rad {
+        return SensorContact.NoSignal;
+    };
+
+    val dir = v3_norm(v3_sub(target.pos, drone_pos));
+    val temp_delta = 22.5; // Engine heat exhaust
+    SensorContact.ThermalHotspot(dir, temp_delta)
+}
+
+/// Simulates high-precision Laser LiDAR and Electro-Optical (EO) tracker.
+/// Delivers direct 3D bounding-box localization when within terminal range.
+pub def sense_optical_lidar(drone_pos: Vector3, target: TargetEntity, has_los: bool, payload: SensorPayload) -> SensorContact {
+    if !has_los {
+        return SensorContact.NoSignal;
+    };
+
+    val dist = v3_dist(drone_pos, target.pos);
+    if dist > payload.lidar_range_m {
+        return SensorContact.NoSignal;
+    };
+
+    // High confidence optical solution with centimeter-level precision
+    val conf = 0.95 + 0.04 * (1.0 - (dist / payload.lidar_range_m));
+    SensorContact.OpticalLock(target.pos, target.vel, conf)
+}
+
+/// Fuses multi-spectral contacts using Bayesian recursive estimation into a coherent TargetTrack.
+pub def update_track_estimate(
+    prev_track: TargetTrack,
+    drone_pos: Vector3,
+    drone_heading: f64,
+    rf_contact: SensorContact,
+    flir_contact: SensorContact,
+    lidar_contact: SensorContact,
+    has_los: bool,
+    t: f64,
+    dt: f64
+) -> TargetTrack {
+    var track = prev_track;
+    track.has_los = has_los;
+
+    // Prior prediction step: propagate previous velocity estimate
+    if track.observation_count > 0 {
+        val pred_pos = v3_add(track.estimated_pos, v3_scale(track.estimated_vel, dt));
+        track.estimated_pos = pred_pos;
+    };
+
+    // Priority 1: Direct LiDAR / EO Lock (Highest fidelity)
+    var processed_lidar = false;
+    when lidar_contact {
+        SensorContact.OpticalLock(pos, vel, conf) => {
+            track.id = 1;
+            track.estimated_pos = pos;
+            track.estimated_vel = vel;
+            track.confidence = conf;
+            track.last_contact_time = t;
+            track.observation_count = track.observation_count + 1;
+            processed_lidar = true;
+        }
+        _ => {}
+    };
+
+    if processed_lidar {
+        return track;
+    };
+
+    // Priority 2: FLIR Thermal Hotspot (Medium fidelity, ray line of sight)
+    var processed_flir = false;
+    when flir_contact {
+        SensorContact.ThermalHotspot(dir, temp) => {
+            track.id = 1;
+            // Approximate distance projection using prior or nominal standoff
+            val est_dist = if track.confidence > 0.4 {
+                v3_dist_2d(drone_pos, track.estimated_pos)
+            } else {
+                150.0 // Default search horizon
+            };
+            val flir_x = drone_pos.x + dir.x * est_dist;
+            val flir_y = drone_pos.y + dir.y * est_dist;
+            val flir_z = terrain_elevation(flir_x, flir_y) + 1.2;
+            val measured_pos = v3_new(flir_x, flir_y, flir_z);
+
+            // Alpha-Beta filter update on position
+            val alpha = 0.50;
+            if track.observation_count == 0 {
+                track.estimated_pos = measured_pos;
+            } else {
+                track.estimated_pos = v3_add(
+                    v3_scale(track.estimated_pos, 1.0 - alpha),
+                    v3_scale(measured_pos, alpha)
+                );
+            };
+
+            track.confidence = clamp_f64(track.confidence + 0.18, 0.0, 0.92);
+            track.last_contact_time = t;
+            track.observation_count = track.observation_count + 1;
+            processed_flir = true;
+        }
+        _ => {}
+    };
+
+    if processed_flir {
+        return track;
+    };
+
+    // Priority 3: RF Bearing Triangulation (Coarse bearing only)
+    when rf_contact {
+        SensorContact.RFBearing(bearing, rssi) => {
+            track.id = 1;
+            // Invert free-space path loss to estimate range: RSSI = -30 - 20*log10(d)
+            // log10(d) = (-30 - RSSI) / 20 => d = 10^(( -30 - RSSI) / 20)
+            val exponent = (-30.0 - rssi) / 20.0;
+            val est_range = pow(10.0, exponent);
+
+            val abs_bearing = normalize_angle(drone_heading + bearing);
+            val rf_dx = est_range * cos(abs_bearing);
+            val rf_dy = est_range * sin(abs_bearing);
+            val rf_x = drone_pos.x + rf_dx;
+            val rf_y = drone_pos.y + rf_dy;
+            val rf_z = terrain_elevation(rf_x, rf_y) + 1.2;
+            val rf_pos = v3_new(rf_x, rf_y, rf_z);
+
+            val alpha_rf = 0.25;
+            if track.observation_count == 0 {
+                track.estimated_pos = rf_pos;
+            } else {
+                track.estimated_pos = v3_add(
+                    v3_scale(track.estimated_pos, 1.0 - alpha_rf),
+                    v3_scale(rf_pos, alpha_rf)
+                );
+            };
+
+            track.confidence = clamp_f64(track.confidence + 0.10, 0.0, 0.70);
+            track.last_contact_time = t;
+            track.observation_count = track.observation_count + 1;
+        }
+        SensorContact.NoSignal => {
+            // Decay confidence when no contacts are received
+            track.confidence = track.confidence * 0.97;
+        }
+        _ => {}
+    };
+
+    track
+}

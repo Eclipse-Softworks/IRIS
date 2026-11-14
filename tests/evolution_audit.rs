@@ -2,8 +2,8 @@
 mod audit;
 
 use audit::{
-    read_verified_records, verify_file, AuditError, EvolutionAuditLog, EvolutionEvent,
-    EvolutionEventKind,
+    read_verified_records, verify_file, AuditError, AuditTrustPolicy, EvolutionAuditLog,
+    EvolutionEvent, EvolutionEventKind,
 };
 use std::path::PathBuf;
 
@@ -186,4 +186,128 @@ fn append_fails_closed_if_log_changes_after_open() {
     assert_eq!(read_verified_records(&path).unwrap().len(), 1);
 
     std::fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn trusted_checkpoint_enforces_hmac_mirrors_and_separate_trust_domain() {
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let base =
+        std::env::temp_dir().join(format!("iris_audit_trust_{}_{}", std::process::id(), nonce));
+    let log_dir = base.join("logs");
+    let cp_dir = base.join("trusted_heads");
+    let mirror_dir = base.join("mirror_heads");
+    std::fs::create_dir_all(&log_dir).unwrap();
+
+    let log_path = log_dir.join("audit.jsonl");
+    let same_dir_head = log_dir.join("audit.head.json");
+    let sep_head = cp_dir.join("audit.head.json");
+    let mirror_head = mirror_dir.join("audit.head.json");
+
+    // 1. Same directory is rejected when require_separate_domain is enabled.
+    let same_domain_policy = AuditTrustPolicy {
+        hmac_key: Some(b"super-secret-hmac-key".to_vec()),
+        checkpoint_mirrors: vec![mirror_head.clone()],
+        require_separate_domain: true,
+    };
+    let same_err = match EvolutionAuditLog::open_with_trusted_checkpoint(
+        &log_path,
+        &same_dir_head,
+        same_domain_policy.clone(),
+    ) {
+        Ok(_) => panic!("same-directory checkpoint must be rejected"),
+        Err(err) => err,
+    };
+    assert!(matches!(same_err, AuditError::SameTrustDomain { .. }));
+
+    // 2. Separate trust domains + HMAC-SHA256 + mirror succeed and stay synced.
+    let mut log = EvolutionAuditLog::open_with_trusted_checkpoint(
+        &log_path,
+        &sep_head,
+        same_domain_policy.clone(),
+    )
+    .expect("open audit across separate trust domains");
+    assert_eq!(log.checkpoint_path(), Some(sep_head.as_path()));
+    assert!(log.trust_policy().require_separate_domain);
+    log.append_at(event(EvolutionEventKind::Promoted, "cand-1"), 42)
+        .unwrap();
+    drop(log);
+
+    assert!(sep_head.exists());
+    assert!(mirror_head.exists());
+    let cp_text = std::fs::read_to_string(&sep_head).unwrap();
+    assert!(cp_text.contains("iris-evolution-audit-head/2"));
+    assert!(cp_text.contains("hmac_sha256"));
+
+    // Reopen with wrong HMAC key fails closed.
+    let wrong_key = AuditTrustPolicy {
+        hmac_key: Some(b"wrong-key".to_vec()),
+        checkpoint_mirrors: Vec::new(),
+        require_separate_domain: true,
+    };
+    let wrong_err =
+        match EvolutionAuditLog::open_with_trusted_checkpoint(&log_path, &sep_head, wrong_key) {
+            Ok(_) => panic!("wrong HMAC key must be rejected"),
+            Err(err) => err,
+        };
+    assert!(matches!(
+        wrong_err,
+        AuditError::InvalidCheckpointSignature { .. }
+    ));
+
+    // Reopen without key when checkpoint is signed also fails closed.
+    let no_key = AuditTrustPolicy {
+        hmac_key: None,
+        checkpoint_mirrors: Vec::new(),
+        require_separate_domain: true,
+    };
+    let missing_key_err =
+        match EvolutionAuditLog::open_with_trusted_checkpoint(&log_path, &sep_head, no_key) {
+            Ok(_) => panic!("signed checkpoint without key must fail closed"),
+            Err(err) => err,
+        };
+    assert!(matches!(
+        missing_key_err,
+        AuditError::MissingCheckpointKey { .. }
+    ));
+
+    // Unsigned v1 checkpoint is rejected when HMAC key is required.
+    let unsigned_head = cp_dir.join("unsigned.head.json");
+    std::fs::write(
+        &unsigned_head,
+        serde_json::json!({
+            "schema": "iris-evolution-audit-head/1",
+            "head": { "sequence": 1, "hash": verify_file(&log_path).unwrap().hash }
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let v1_err = match EvolutionAuditLog::open_with_trusted_checkpoint(
+        &log_path,
+        &unsigned_head,
+        same_domain_policy.clone(),
+    ) {
+        Ok(_) => panic!("unsigned v1 checkpoint must be rejected under HMAC policy"),
+        Err(err) => err,
+    };
+    assert!(matches!(
+        v1_err,
+        AuditError::InvalidCheckpointSignature { .. }
+    ));
+
+    // Corrupted mirror fails closed even when primary checkpoint is intact.
+    std::fs::write(&mirror_head, "{}\n").unwrap();
+    let mirror_err = match EvolutionAuditLog::open_with_trusted_checkpoint(
+        &log_path,
+        &sep_head,
+        same_domain_policy,
+    ) {
+        Ok(_) => panic!("corrupted mirror must fail closed"),
+        Err(err) => err,
+    };
+    assert!(matches!(mirror_err, AuditError::Json { .. }));
+
+    let _ = std::fs::remove_dir_all(&base);
 }

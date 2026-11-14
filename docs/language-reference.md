@@ -541,6 +541,9 @@ iris lsp                        # start LSP server (for editors)
 iris pkg init                   # create iris.toml manifest
 iris pkg add <name>             # add dependency
 iris pkg install                # install dependencies
+iris pkg publish --registry DIR # publish this version to a registry
+iris pkg search <text>          # find registry packages
+iris upgrade                    # install the latest release (SHA-256 checked)
 ```
 
 `iris test` discovers zero-argument `test_*` functions. Integer tests pass on

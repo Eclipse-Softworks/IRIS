@@ -1,0 +1,93 @@
+// projects/quadrotor_autopilot/controller.iris
+// Cascaded Position & Attitude Autopilot with Adaptive Motor Compensation
+
+bring "math_utils.iris"
+bring "physics.iris"
+bring "ekf.iris"
+
+pub record AutopilotGains {
+    kp_pos: f64,
+    kd_pos: f64,
+    kp_alt: f64,
+    kd_alt: f64,
+    kp_att: f64,
+    kd_att: f64,
+    kp_yaw: f64,
+    kd_yaw: f64,
+}
+
+pub def default_autopilot_gains() -> AutopilotGains {
+    AutopilotGains {
+        kp_pos: 1.40,
+        kd_pos: 1.80,
+        kp_alt: 2.20,
+        kd_alt: 2.80,
+        kp_att: 8.00,
+        kd_att: 2.00,
+        kp_yaw: 3.00,
+        kd_yaw: 1.20,
+    }
+}
+
+/// Compute 4-rotor motor thrust commands from target waypoint and current state
+pub def compute_autopilot_commands(
+    ekf: EkfState,
+    omega: Vec3,
+    target_pos: Vec3,
+    target_yaw: f64,
+    gains: AutopilotGains,
+    params: QuadParams,
+    motor1_health: f64, // 1.0 = healthy, 0.75 = 25% degraded
+) -> MotorCommands {
+    // 1. Position & Altitude Control (Outer Loop)
+    val err_x = target_pos.x - ekf.est_pos.x;
+    val err_y = target_pos.y - ekf.est_pos.y;
+    val err_z = target_pos.z - ekf.est_pos.z;
+
+    val des_ax = gains.kp_pos * err_x - gains.kd_pos * ekf.est_vel.x;
+    val des_ay = gains.kp_pos * err_y - gains.kd_pos * ekf.est_vel.y;
+    val des_az = gains.kp_alt * err_z - gains.kd_alt * ekf.est_vel.z;
+
+    // Convert desired horizontal accelerations to desired attitude angles (clamped to +/- 25 degrees)
+    val max_tilt = 0.436; // 25 degrees in radians
+    val des_pitch = clamp_f64(des_ax / params.gravity, -max_tilt, max_tilt);
+    val des_roll  = clamp_f64(-des_ay / params.gravity, -max_tilt, max_tilt);
+
+    // Compute required total collective thrust
+    val hover_thrust = params.mass * params.gravity;
+    var total_thrust = params.mass * (params.gravity + des_az);
+    total_thrust = clamp_f64(total_thrust, 0.2 * hover_thrust, 2.5 * hover_thrust);
+
+    // 2. Attitude Control (Inner Loop with Angular Rate Damping)
+    val err_roll = des_roll - ekf.est_angles.x;
+    val err_pitch = des_pitch - ekf.est_angles.y;
+    val err_yaw = target_yaw - ekf.est_angles.z;
+
+    val tau_x = gains.kp_att * err_roll - gains.kd_att * omega.x;
+    val tau_y = gains.kp_att * err_pitch - gains.kd_att * omega.y;
+    val tau_z = gains.kp_yaw * err_yaw - gains.kd_yaw * omega.z;
+
+    // 3. Motor Mixer Matrix
+    val base_m = total_thrust / 4.0;
+    val l = params.arm_length;
+
+    var m1 = base_m + (tau_y / (2.0 * l)) + (tau_z * 5.0);
+    var m2 = base_m - (tau_x / (2.0 * l)) - (tau_z * 5.0);
+    var m3 = base_m - (tau_y / (2.0 * l)) + (tau_z * 5.0);
+    var m4 = base_m + (tau_x / (2.0 * l)) - (tau_z * 5.0);
+
+    // Adaptive Motor Health Compensation
+    if motor1_health < 0.99 && motor1_health > 0.1 {
+        // Boost command to degraded motor 1 to match commanded torque
+        m1 = m1 / motor1_health;
+    }
+
+    // Clamp motor thrusts between 0.0 N and 12.0 N max physical limit
+    val max_motor = 12.0;
+    MotorCommands {
+        m1: clamp_f64(m1, 0.0, max_motor),
+        m2: clamp_f64(m2, 0.0, max_motor),
+        m3: clamp_f64(m3, 0.0, max_motor),
+        m4: clamp_f64(m4, 0.0, max_motor),
+    }
+}

@@ -1,0 +1,13 @@
+// expect: E0210 at 7:5
+// message: `Color.Blue`
+
+choice Color { Red, Green, Blue }
+
+def code(c: Color) -> i64 {
+    when c {
+        Color.Red => 1,
+        Color.Green => 2
+    }
+}
+
+def main() -> i64 { code(Color.Red) }

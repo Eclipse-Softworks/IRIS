@@ -1,0 +1,78 @@
+// csvq: filter, select, group and convert CSV (RFC 4180) and JSON Lines.
+//
+//   iris run projects/cli_tools/csvq.iris -- orders.csv --where region=EU --select order_id,amount
+//   iris run projects/cli_tools/csvq.iris -- orders.csv --group-by region --sum amount
+//   iris run projects/cli_tools/csvq.iris -- orders.csv --json
+//   iris run projects/cli_tools/csvq.iris -- events.jsonl --jsonl --select user,ms,meta.ok --where ms>=500
+//
+// --where takes name=value, name!=value, or a numeric name>=n, name<=n,
+// name>n, name<n, and may repeat. Sums are exact (money in cents).
+
+bring "csvkit.iris"
+
+def usage() -> i64 {
+    println("usage: csvq FILE [--jsonl] [--select a,b] [--where COND]... [--group-by COL --sum COL] [--json]");
+    2
+}
+
+def main() -> i64 {
+    val argv = args();
+    var file = "";
+    var jsonl = false;
+    var as_json = false;
+    var columns = "";
+    var group_by = "";
+    var sum = "";
+    var bad = false;
+    val conditions: list<str> = list();
+    var i = 1;
+    while i < list_len(argv) {
+        val a = list_get(argv, i);
+        val takes_value = a == "--select" || a == "--where" || a == "--group-by" || a == "--sum";
+        if a == "--jsonl" {
+            jsonl = true
+        } else if a == "--json" {
+            as_json = true
+        } else if takes_value && i + 1 < list_len(argv) {
+            val v = list_get(argv, i + 1);
+            if a == "--select" {
+                columns = v
+            } else if a == "--where" {
+                push(conditions, v)
+            } else if a == "--group-by" {
+                group_by = v
+            } else {
+                sum = v
+            };
+            i = i + 1
+        } else if starts_with(a, "--") || len(file) > 0 {
+            bad = true
+        } else {
+            file = a
+        };
+        i = i + 1
+    };
+    if bad || len(file) == 0 || (len(group_by) > 0) != (len(sum) > 0) || (jsonl && len(columns) == 0) {
+        return usage()
+    };
+    val text = file_read_all(file);
+    if is_ok(text) == false {
+        println("csvq: cannot read " + file);
+        return 1
+    };
+    val rows = if jsonl { jsonl_rows(unwrap(text), split(columns, ",")) } else { csv_records(unwrap(text)) };
+    if list_len(rows) == 0 {
+        println("csvq: " + file + " has no header row");
+        return 1
+    };
+    var result = filter_rows(rows, conditions);
+    if len(group_by) > 0 {
+        result = group_sum(result, group_by, sum)
+    } else if len(columns) > 0 && jsonl == false {
+        result = select_columns(result, split(columns, ","))
+    };
+    // Every result keeps its header row.
+    assert(list_len(result) >= 1);
+    print(if as_json { to_json(result) } else { to_csv(result) });
+    return 0
+}

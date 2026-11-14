@@ -1,0 +1,90 @@
+// projects/quantum_simulator/algorithms.iris
+// Implementation of Bell State Entanglement & Grover's Search Algorithm
+
+bring "complex.iris"
+bring "circuit.iris"
+
+/// Generate maximally entangled Bell state |Phi+> = (|00> + |11>) / sqrt(2)
+pub def generate_bell_state() -> QubitRegister {
+    var reg = create_register(2);
+    // 1. Apply Hadamard on qubit 0
+    reg = apply_hadamard(reg, 0);
+    // 2. Apply CNOT with control=0, target=1
+    reg = apply_cnot(reg, 0, 1);
+    reg
+}
+
+/// Apply Grover phase oracle marking state |target_state> by flipping its phase: |w> -> -|w>
+pub def apply_grover_oracle(reg: QubitRegister, target_state: i64) -> QubitRegister {
+    val next_state: list<Complex> = list();
+    for s in 0 .. reg.num_states {
+        val amp = list_get(reg.state, s);
+        if s == target_state {
+            list_push(next_state, c_scale(amp, -1.0));
+        } else {
+            list_push(next_state, amp);
+        }
+    }
+    QubitRegister {
+        num_qubits: reg.num_qubits,
+        num_states: reg.num_states,
+        state: next_state,
+    }
+}
+
+/// Apply Grover Diffusion Operator D = 2|s><s| - I = H (2|0><0| - I) H
+pub def apply_grover_diffusion(reg: QubitRegister) -> QubitRegister {
+    var r = reg;
+    // 1. H on all qubits
+    for q in 0 .. r.num_qubits {
+        r = apply_hadamard(r, q);
+    }
+
+    // 2. Invert phase of all states EXCEPT |0...0>
+    // i.e., 2|0><0| - I
+    val next_state: list<Complex> = list();
+    for s in 0 .. r.num_states {
+        val amp = list_get(r.state, s);
+        if s == 0 {
+            list_push(next_state, amp);
+        } else {
+            list_push(next_state, c_scale(amp, -1.0));
+        }
+    }
+    r = QubitRegister {
+        num_qubits: r.num_qubits,
+        num_states: r.num_states,
+        state: next_state,
+    };
+
+    // 3. H on all qubits
+    for q in 0 .. r.num_qubits {
+        r = apply_hadamard(r, q);
+    }
+    r
+}
+
+/// Execute Grover's Search Algorithm on 3 Qubits (N=8) to find target_state
+pub def run_grovers_algorithm(target_state: i64) -> (QubitRegister, f64) {
+    // 1. Initialize 3 qubits in |000>
+    var reg = create_register(3);
+
+    // 2. Uniform superposition: H on all 3 qubits
+    for q in 0 .. 3 {
+        reg = apply_hadamard(reg, q);
+    }
+
+    // 3. For N = 8, optimal Grover iterations k = round(pi/4 * sqrt(8)) = 2
+    for iter in 0 .. 2 {
+        // Oracle marks the target
+        reg = apply_grover_oracle(reg, target_state);
+        // Diffusion amplifies amplitude
+        reg = apply_grover_diffusion(reg);
+    }
+
+    // Calculate probability of measuring the target state
+    val probs = measure_probabilities(reg);
+    val target_prob = list_get(probs, target_state);
+
+    (reg, target_prob)
+}

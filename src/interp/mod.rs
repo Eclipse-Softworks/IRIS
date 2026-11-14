@@ -9,6 +9,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 
+pub mod async_exec;
+
 use crate::error::InterpError;
 use crate::ir::block::BlockId;
 use crate::ir::function::IrFunction;
@@ -19,6 +21,92 @@ use crate::ir::value::ValueId;
 use crate::security;
 use rusqlite::{params_from_iter, types::Value as SqlValue};
 
+// Program state (`var` at the top level) of every module running in this
+// process, by module address and variable name. Process-wide, so spawned
+// threads share it just as they share a native program's globals.
+static PROGRAM_STATE: Mutex<std::collections::BTreeMap<(usize, String), IrValue>> =
+    Mutex::new(std::collections::BTreeMap::new());
+// Modules whose state has been initialised.
+static PROGRAM_STATE_READY: Mutex<std::collections::BTreeSet<usize>> =
+    Mutex::new(std::collections::BTreeSet::new());
+
+fn lock_ignoring_poison<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn module_key(module: &IrModule) -> usize {
+    (module as *const IrModule) as usize
+}
+
+/// Run the module's state initializer. The module is marked ready first, so
+/// the initializer's own reads and writes do not start it again.
+fn run_state_init(module: &IrModule, opts: InterpOptions) -> Result<(), InterpError> {
+    lock_ignoring_poison(&PROGRAM_STATE_READY).insert(module_key(module));
+    if let Some(init) = module.function_by_name(crate::ir::module::STATE_INIT_FN) {
+        Interpreter::new(Some(module), opts, 0).run(init, &[])?;
+    }
+    Ok(())
+}
+
+/// Forget `module`'s program state; the next access initialises it again.
+/// A module's state lives as long as the process unless reset, so reset a
+/// module before dropping it if another may later reuse its address.
+pub fn reset_program_state(module: &IrModule) {
+    let key = module_key(module);
+    lock_ignoring_poison(&PROGRAM_STATE_READY).remove(&key);
+    lock_ignoring_poison(&PROGRAM_STATE).retain(|(owner, _), _| *owner != key);
+}
+
+/// Give every program state variable of `module` its initial value now.
+pub fn init_program_state(module: &IrModule, opts: InterpOptions) -> Result<(), InterpError> {
+    reset_program_state(module);
+    run_state_init(module, opts)
+}
+
+/// The current value of each of `module`'s state variables, in declaration
+/// order (`None`: never given a value).
+pub fn program_state(module: &IrModule) -> Vec<(String, Option<IrValue>)> {
+    let key = module_key(module);
+    let state = lock_ignoring_poison(&PROGRAM_STATE);
+    module
+        .state_vars()
+        .iter()
+        .map(|(name, _)| (name.clone(), state.get(&(key, name.clone())).cloned()))
+        .collect()
+}
+
+/// Set one of `module`'s state variables (initialising the state first if
+/// nothing has touched it yet).
+pub fn set_program_state(
+    module: &IrModule,
+    name: &str,
+    value: IrValue,
+    opts: InterpOptions,
+) -> Result<(), InterpError> {
+    if module.state_slot(name).is_none() {
+        return Err(InterpError::Unsupported {
+            detail: format!("the program has no state variable '{name}'"),
+        });
+    }
+    let key = module_key(module);
+    let ready = lock_ignoring_poison(&PROGRAM_STATE_READY).contains(&key);
+    if !ready {
+        run_state_init(module, opts)?;
+    }
+    lock_ignoring_poison(&PROGRAM_STATE).insert((key, name.to_owned()), value);
+    Ok(())
+}
+
+/// The tensor a tape node records, for indexing; any other value as it is.
+fn tensor_of(v: IrValue) -> IrValue {
+    match v {
+        IrValue::TapeNode { primal, .. } => tensor_of(*primal),
+        other => other,
+    }
+}
+
 /// A runtime value produced or consumed by the interpreter.
 #[derive(Debug, Clone)]
 pub enum IrValue {
@@ -27,8 +115,10 @@ pub enum IrValue {
     I32(i32),
     I64(i64),
     Bool(bool),
-    /// Flat tensor: data in row-major order, shape as dimension sizes.
-    Tensor(Vec<f32>, Vec<usize>),
+    /// Flat tensor: data in row-major order, shape as dimension sizes. The
+    /// data is shared, as the native runtime's tensor is: a write through
+    /// one handle is seen through every other.
+    Tensor(Arc<Mutex<Vec<f32>>>, Vec<usize>),
     /// Struct value: ordered field values matching the struct definition.
     Struct(Vec<IrValue>),
     /// Enum variant value: tag index (0-indexed) and payload field values.
@@ -51,6 +141,8 @@ pub enum IrValue {
     ResultVal(std::result::Result<Box<IrValue>, Box<IrValue>>),
     /// A channel value: a shared FIFO queue (thread-safe for Spawn).
     Chan(Arc<SharedChannel>),
+    /// An asynchronous task (`task<T>`), run by `async_exec`.
+    Task(async_exec::TaskRef),
     /// A TaskGroup for structured concurrency.
     TaskGroup(Arc<Mutex<TaskGroupState>>),
     /// An atomic/mutex value: a shared mutable cell (thread-safe for Spawn).
@@ -76,7 +168,7 @@ pub enum IrValue {
     /// A dynamic growable list (shared mutable).
     List(std::sync::Arc<std::sync::Mutex<Vec<IrValue>>>),
     /// A hash map (shared mutable). Keys are displayed as strings for comparison.
-    Map(std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, IrValue>>>),
+    Map(std::sync::Arc<std::sync::Mutex<MapStore>>),
     /// A weak reference pointing to a heap cell.
     WeakRef(std::sync::Weak<std::sync::Mutex<Option<IrValue>>>),
     /// A trait object: trait name + boxed concrete value + vtable of impl
@@ -97,11 +189,110 @@ pub enum IrValue {
 
 static NEXT_TAPE_NODE_ID: AtomicU64 = AtomicU64::new(1);
 
+/// The text IRIS prints for a float, the same on both backends (the native
+/// runtime runs the same steps in `iris_format_float`): the fewest
+/// significant digits that read back as the same value, each precision tried
+/// with a correctly rounded conversion, written without an exponent. NaN, inf
+/// and -inf by name; `single` checks the round trip as an f32.
+pub fn format_float(value: f64, single: bool) -> String {
+    if value.is_nan() {
+        return "NaN".into();
+    }
+    if value.is_infinite() {
+        return if value > 0.0 {
+            "inf".into()
+        } else {
+            "-inf".into()
+        };
+    }
+    if value == 0.0 {
+        return if value.is_sign_negative() {
+            "-0".into()
+        } else {
+            "0".into()
+        };
+    }
+    let max = if single { 9 } else { 17 };
+    let mut sci = format!("{:.*e}", max - 1, value);
+    for p in 1..=max {
+        let candidate = format!("{:.*e}", p - 1, value);
+        let same = if single {
+            candidate.parse::<f32>().ok() == Some(value as f32)
+        } else {
+            candidate.parse::<f64>().ok() == Some(value)
+        };
+        if same {
+            sci = candidate;
+            break;
+        }
+    }
+    let negative = sci.starts_with('-');
+    let (mantissa, exp) = sci
+        .trim_start_matches('-')
+        .split_once('e')
+        .unwrap_or(("0", "0"));
+    let exp: i32 = exp.parse().unwrap_or(0);
+    let mut digits: Vec<char> = mantissa.chars().filter(|c| *c != '.').collect();
+    while digits.len() > 1 && digits.last() == Some(&'0') {
+        digits.pop();
+    }
+    let mut text = String::new();
+    if negative {
+        text.push('-');
+    }
+    if exp >= 0 {
+        let whole = exp as usize + 1;
+        for i in 0..whole {
+            text.push(*digits.get(i).unwrap_or(&'0'));
+        }
+        if digits.len() > whole {
+            text.push('.');
+            text.extend(&digits[whole..]);
+        }
+    } else {
+        text.push_str("0.");
+        for _ in 0..(-exp - 1) {
+            text.push('0');
+        }
+        text.extend(&digits);
+    }
+    text
+}
+
+/// A map's entries. Iteration (`map_keys`, `map_values`, entries) is in key
+/// order, the same on both backends: a hash map's order changed from run to
+/// run in the interpreter and differed from the native runtime's.
+pub type MapStore = std::collections::BTreeMap<String, IrValue>;
+
+/// A value as text, as `to_str` gives it: a string's own text (`Display`
+/// quotes strings), anything else displayed.
+fn value_text(value: &IrValue) -> String {
+    match value {
+        IrValue::Str(s) => s.clone(),
+        other => other.to_string(),
+    }
+}
+
+/// The key a map stores for `key`: its text, as the native runtime stores
+/// it. Displaying the key quoted strings (`"ab"`), so `map_keys` returned the
+/// quotes, and a map from `json_parse`, whose keys are plain, could not be
+/// read with `map_get`.
+fn map_key(key: &IrValue) -> String {
+    value_text(key)
+}
+
+impl IrValue {
+    /// A tensor owning `data`.
+    pub fn tensor(data: Vec<f32>, shape: Vec<usize>) -> IrValue {
+        IrValue::Tensor(Arc::new(Mutex::new(data)), shape)
+    }
+}
+
 impl fmt::Display for IrValue {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            IrValue::F32(x) => write!(f, "{}", x),
-            IrValue::F64(x) => write!(f, "{}", x),
+            IrValue::F32(x) => write!(f, "{}", format_float(*x as f64, true)),
+            IrValue::F64(x) => write!(f, "{}", format_float(*x, false)),
             IrValue::I32(n) => write!(f, "{}", n),
             IrValue::I64(n) => write!(f, "{}", n),
             IrValue::Bool(b) => write!(f, "{}", b),
@@ -114,7 +305,7 @@ impl fmt::Display for IrValue {
                         .map(|d| d.to_string())
                         .collect::<Vec<_>>()
                         .join("x"),
-                    data.len()
+                    data.lock().map(|d| d.len()).unwrap_or(0)
                 )
             }
             IrValue::Struct(fields) => {
@@ -165,6 +356,7 @@ impl fmt::Display for IrValue {
             IrValue::ResultVal(Ok(v)) => write!(f, "ok({})", v),
             IrValue::ResultVal(Err(e)) => write!(f, "err({})", e),
             IrValue::Chan(_) => write!(f, "<channel>"),
+            IrValue::Task(_) => write!(f, "<task>"),
             IrValue::TaskGroup(_) => write!(f, "<task_group>"),
             IrValue::Atomic(cell) => write!(f, "atomic({})", cell.lock().unwrap()),
             IrValue::Unit => write!(f, "()"),
@@ -194,7 +386,9 @@ impl PartialEq for IrValue {
             (IrValue::I32(a), IrValue::I32(b)) => a == b,
             (IrValue::I64(a), IrValue::I64(b)) => a == b,
             (IrValue::Bool(a), IrValue::Bool(b)) => a == b,
-            (IrValue::Tensor(da, sa), IrValue::Tensor(db, sb)) => da == db && sa == sb,
+            (IrValue::Tensor(da, sa), IrValue::Tensor(db, sb)) => {
+                sa == sb && (Arc::ptr_eq(da, db) || *da.lock().unwrap() == *db.lock().unwrap())
+            }
             (IrValue::Struct(a), IrValue::Struct(b)) => a == b,
             (IrValue::Enum(a, da), IrValue::Enum(b, db)) => a == b && da == db,
             (IrValue::Tuple(a), IrValue::Tuple(b)) => a == b,
@@ -268,8 +462,8 @@ enum TransactionSnapshot {
         before: Vec<IrValue>,
     },
     Map {
-        target: Arc<Mutex<HashMap<String, IrValue>>>,
-        before: HashMap<String, IrValue>,
+        target: Arc<Mutex<MapStore>>,
+        before: MapStore,
     },
     Atomic {
         target: Arc<Mutex<IrValue>>,
@@ -344,7 +538,7 @@ fn transaction_record_list(target: &Arc<Mutex<Vec<IrValue>>>) {
     }
 }
 
-fn transaction_record_map(target: &Arc<Mutex<HashMap<String, IrValue>>>) {
+fn transaction_record_map(target: &Arc<Mutex<MapStore>>) {
     if transaction_depth() != 0 {
         transaction_record(TransactionSnapshot::Map {
             target: target.clone(),
@@ -422,39 +616,19 @@ fn transaction_commit() -> i64 {
             return 1;
         }
 
-        // Writes are invisible until the outermost commit. Each file is first
-        // written beside its destination and then atomically renamed.
-        let mut prepared = Vec::new();
-        for (index, (path, contents)) in frame.staged_files.into_iter().enumerate() {
-            let destination = std::path::PathBuf::from(&path);
-            let Some(file_name) = destination.file_name() else {
+        let mut staged: Vec<(std::path::PathBuf, Vec<u8>)> = frame
+            .staged_files
+            .into_iter()
+            .map(|(path, contents)| (std::path::PathBuf::from(path), contents.into_bytes()))
+            .collect();
+        staged.sort_by(|a, b| a.0.cmp(&b.0));
+        match crate::tx_journal::commit_staged_files(&staged) {
+            Ok(()) => 1,
+            Err(_) => {
                 transaction_restore_snapshots(frame.snapshots);
-                return 0;
-            };
-            let temp_name = format!(
-                ".{}.iris-txn-{}-{}",
-                file_name.to_string_lossy(),
-                std::process::id(),
-                index
-            );
-            let temp = destination.with_file_name(temp_name);
-            if std::fs::write(&temp, contents).is_err() {
-                for (temp, _) in prepared {
-                    let _ = std::fs::remove_file(temp);
-                }
-                transaction_restore_snapshots(frame.snapshots);
-                return 0;
-            }
-            prepared.push((temp, destination));
-        }
-        for (temp, destination) in prepared {
-            if std::fs::rename(&temp, &destination).is_err() {
-                let _ = std::fs::remove_file(temp);
-                transaction_restore_snapshots(frame.snapshots);
-                return 0;
+                0
             }
         }
-        1
     })
 }
 
@@ -653,8 +827,30 @@ pub fn collect_trace_function(
 // Interpreter state
 // ---------------------------------------------------------------------------
 
+/// A function frame's SSA values, indexed by `ValueId`. Value ids are small
+/// dense integers, so a vector serves where a `HashMap` made every operand
+/// read and every result write hash its key.
+#[derive(Default)]
+struct ValueStore {
+    slots: Vec<Option<IrValue>>,
+}
+
+impl ValueStore {
+    fn get(&self, id: &ValueId) -> Option<&IrValue> {
+        self.slots.get(id.0 as usize).and_then(Option::as_ref)
+    }
+
+    fn insert(&mut self, id: ValueId, value: IrValue) -> Option<IrValue> {
+        let index = id.0 as usize;
+        if index >= self.slots.len() {
+            self.slots.resize_with(index + 1, || None);
+        }
+        self.slots[index].replace(value)
+    }
+}
+
 pub(crate) struct Interpreter<'m> {
-    values: HashMap<ValueId, IrValue>,
+    values: ValueStore,
     module: Option<&'m IrModule>,
     opts: InterpOptions,
     /// Current call-stack depth (0 = top-level).
@@ -677,6 +873,15 @@ pub(crate) struct Interpreter<'m> {
     tape_nodes: HashMap<ValueId, IrValue>,
     /// Byte offset of the most-recently executed instruction (for error location).
     last_byte: Option<u32>,
+    /// The instruction executing: (block, index). Its source position is
+    /// looked up only when an error is reported, not on every instruction.
+    pos: (u32, usize),
+    /// `last_byte` was set by the failing instruction itself (a `panic`
+    /// carries its own position) and must not be recomputed from `pos`.
+    span_pinned: bool,
+    /// Reused for branch arguments, which must all be read before any block
+    /// parameter is written (a loop can swap two variables).
+    arg_scratch: Vec<IrValue>,
     /// Name of the function currently executing (for error location).
     cur_func: String,
     pub(crate) profiler: Option<std::rc::Rc<std::cell::RefCell<crate::profiler::Profiler>>>,
@@ -686,10 +891,19 @@ pub(crate) struct Interpreter<'m> {
     handler_stack: Vec<Vec<HandlerArm>>,
 }
 
+/// The source position of the instruction at `pos`, or of the nearest one
+/// before it in the same block that has one.
+fn span_at_or_before(func: &IrFunction, pos: (u32, usize)) -> Option<u32> {
+    (0..=pos.1).rev().find_map(|i| {
+        func.error_span(pos.0, i)
+            .or_else(|| func.get_instr_span(pos.0, i))
+    })
+}
+
 impl<'m> Interpreter<'m> {
     pub(crate) fn new(module: Option<&'m IrModule>, opts: InterpOptions, depth: usize) -> Self {
         Self {
-            values: HashMap::new(),
+            values: ValueStore::default(),
             module,
             opts,
             depth,
@@ -700,6 +914,9 @@ impl<'m> Interpreter<'m> {
             tensor_tape_grads: HashMap::new(),
             tape_nodes: HashMap::new(),
             last_byte: None,
+            pos: (0, 0),
+            span_pinned: false,
+            arg_scratch: Vec::new(),
             cur_func: String::new(),
             profiler: None,
             spawn_handles: Vec::new(),
@@ -748,8 +965,32 @@ impl<'m> Interpreter<'m> {
         entry_args: &[IrValue],
     ) -> Result<Vec<IrValue>, InterpError> {
         self.cur_func = func.name.clone();
-        self.run_inner(func, entry_args)
-            .map_err(|e| self.located(e))
+        self.span_pinned = false;
+        match self.run_inner(func, entry_args) {
+            Ok(values) => Ok(values),
+            Err(e) => {
+                // Located already, by the frame it failed in.
+                if matches!(e, InterpError::Located { .. }) {
+                    return Err(e);
+                }
+                if !self.span_pinned {
+                    if let Some(byte) = span_at_or_before(func, self.pos) {
+                        self.last_byte = Some(byte);
+                    }
+                }
+                // A failure inside the standard library is reported where
+                // it was called, as natively: the caller's frame locates it.
+                let in_stdlib = self.last_byte.is_some_and(|byte| {
+                    self.module
+                        .and_then(|m| m.source.as_deref())
+                        .is_some_and(|src| src.locate(byte).is_none())
+                });
+                if in_stdlib {
+                    return Err(e);
+                }
+                Err(self.located(e))
+            }
+        }
     }
 
     fn join_all_spawns(&mut self) -> Result<(), InterpError> {
@@ -799,10 +1040,10 @@ impl<'m> Interpreter<'m> {
                     });
                 }
 
-                // Track the source span of the current instruction for error reporting.
-                if let Some(byte) = func.get_instr_span(current.0, instr_idx) {
-                    self.last_byte = Some(byte);
-                }
+                // Where we are, for error reporting. The source position is
+                // looked up from this only if an error occurs: a span lookup
+                // on every instruction was a measurable share of run time.
+                self.pos = (current.0, instr_idx);
 
                 // Emit a trace entry whenever this instruction has a recorded span.
                 if let Some(ref trace) = self.trace_out {
@@ -843,8 +1084,10 @@ impl<'m> Interpreter<'m> {
                 // alias left by the preceding iteration before computing
                 // the new result; TapeRecord installs the new association
                 // after it has captured its parents.
-                if let Some(result) = instr.result() {
-                    self.tape_nodes.remove(&result);
+                if !self.tape_nodes.is_empty() {
+                    if let Some(result) = instr.result() {
+                        self.tape_nodes.remove(&result);
+                    }
                 }
 
                 match instr {
@@ -923,12 +1166,19 @@ impl<'m> Interpreter<'m> {
                         result,
                         tensor,
                         indices,
-                        ..
+                        result_ty,
                     } => {
-                        let tv = self.get(*tensor)?;
+                        let tv = tensor_of(self.get(*tensor)?);
                         let flat = self.compute_flat_index(&tv, indices)?;
                         if let IrValue::Tensor(data, _) = tv {
-                            self.values.insert(*result, IrValue::F32(data[flat]));
+                            // Stored as `f32`; read as the type declared.
+                            let e = data.lock().unwrap()[flat];
+                            let x = match result_ty {
+                                IrType::Scalar(DType::F64) => IrValue::F64(e as f64),
+                                IrType::Scalar(DType::I64) => IrValue::I64(e as i64),
+                                _ => IrValue::F32(e),
+                            };
+                            self.values.insert(*result, x);
                         } else {
                             return Err(InterpError::TypeError {
                                 detail: "load from non-tensor".into(),
@@ -941,13 +1191,12 @@ impl<'m> Interpreter<'m> {
                         indices,
                         value,
                     } => {
-                        let tv = self.get(*tensor)?;
+                        let tv = tensor_of(self.get(*tensor)?);
                         let val = self.get(*value)?;
                         let flat = self.compute_flat_index(&tv, indices)?;
                         let val_f32 = to_f32_val(&val)?;
-                        if let IrValue::Tensor(mut data, shape) = tv {
-                            data[flat] = val_f32;
-                            self.values.insert(*tensor, IrValue::Tensor(data, shape));
+                        if let IrValue::Tensor(data, _) = tv {
+                            data.lock().unwrap()[flat] = val_f32;
                         } else {
                             return Err(InterpError::TypeError {
                                 detail: "store to non-tensor".into(),
@@ -962,12 +1211,13 @@ impl<'m> Interpreter<'m> {
                             if inputs.len() == 1 {
                                 let tv = self.get(inputs[0])?;
                                 if let IrValue::Tensor(data, shape) = tv {
+                                    let data = data.lock().unwrap().clone();
                                     let new_data = data
                                         .iter()
                                         .map(|&x| apply_unary_f32(unary_op, x))
                                         .collect();
                                     self.values
-                                        .insert(*result, IrValue::Tensor(new_data, shape));
+                                        .insert(*result, IrValue::tensor(new_data, shape));
                                 } else {
                                     return Err(InterpError::TypeError {
                                         detail: "TensorOp::Unary on non-tensor".into(),
@@ -988,6 +1238,8 @@ impl<'m> Interpreter<'m> {
                                     IrValue::Tensor(b_data, b_shape),
                                 ) = (a, b)
                                 {
+                                    let a_data = a_data.lock().unwrap().clone();
+                                    let b_data = b_data.lock().unwrap().clone();
                                     let result_val = eval_einsum(
                                         notation, &a_data, &a_shape, &b_data, &b_shape,
                                     )?;
@@ -1001,6 +1253,7 @@ impl<'m> Interpreter<'m> {
                                 // Trace/diagonal einsum on single tensor
                                 let a = self.get(inputs[0])?;
                                 if let IrValue::Tensor(data, shape) = a {
+                                    let data = data.lock().unwrap().clone();
                                     let result_val = eval_einsum_single(notation, &data, &shape)?;
                                     self.values.insert(*result, result_val);
                                 } else {
@@ -1023,6 +1276,7 @@ impl<'m> Interpreter<'m> {
                             if !inputs.is_empty() {
                                 let tv = self.get(inputs[0])?;
                                 if let IrValue::Tensor(data, old_shape) = tv {
+                                    let data = data.lock().unwrap().clone();
                                     // Extract new shape from result_ty or from
                                     // additional shape inputs
                                     let new_shape = if inputs.len() > 1 {
@@ -1057,7 +1311,7 @@ impl<'m> Interpreter<'m> {
                                         });
                                     }
                                     self.values
-                                        .insert(*result, IrValue::Tensor(data, new_shape));
+                                        .insert(*result, IrValue::tensor(data, new_shape));
                                 } else {
                                     return Err(InterpError::TypeError {
                                         detail: "reshape on non-tensor".into(),
@@ -1073,6 +1327,7 @@ impl<'m> Interpreter<'m> {
                             if inputs.len() == 1 {
                                 let tv = self.get(inputs[0])?;
                                 if let IrValue::Tensor(data, shape) = tv {
+                                    let data = data.lock().unwrap().clone();
                                     let ndim = shape.len();
                                     let perm = if axes.is_empty() {
                                         // Default: reverse axes
@@ -1123,7 +1378,7 @@ impl<'m> Interpreter<'m> {
                                     }
 
                                     self.values
-                                        .insert(*result, IrValue::Tensor(new_data, new_shape));
+                                        .insert(*result, IrValue::tensor(new_data, new_shape));
                                 } else {
                                     return Err(InterpError::TypeError {
                                         detail: "transpose on non-tensor".into(),
@@ -1143,6 +1398,7 @@ impl<'m> Interpreter<'m> {
                             if inputs.len() == 1 {
                                 let tv = self.get(inputs[0])?;
                                 if let IrValue::Tensor(data, shape) = tv {
+                                    let data = data.lock().unwrap().clone();
                                     let result_val = eval_reduce(
                                         &data,
                                         &shape,
@@ -1183,11 +1439,8 @@ impl<'m> Interpreter<'m> {
                         if let Some(module) = self.module {
                             if let Some(callee_func) = module.function_by_name(callee) {
                                 if self.depth >= self.opts.max_depth {
-                                    return Err(InterpError::Unsupported {
-                                        detail: format!(
-                                            "call depth exceeded {} (infinite recursion?); raise it with --max-depth",
-                                            self.opts.max_depth
-                                        ),
+                                    return Err(InterpError::StackOverflow {
+                                        limit: self.opts.max_depth,
                                     });
                                 }
                                 let mut sub =
@@ -1485,6 +1738,19 @@ impl<'m> Interpreter<'m> {
                         }
                     }
 
+                    IrInstr::EnterScope { .. }
+                    | IrInstr::ExitScope { .. }
+                    | IrInstr::Drop { .. } => {
+                        // Explicit scope markers are metadata-only; `DropElaborationPass`
+                        // lowers `IrInstr::Drop` into `IrInstr::Call` before execution.
+                    }
+
+                    IrInstr::Borrow { result, place, .. } | IrInstr::Move { result, place } => {
+                        // Pure marker: the borrowed/moved value is the place's value.
+                        let v = self.get(*place)?;
+                        self.values.insert(*result, v);
+                    }
+
                     IrInstr::AllocArray { result, init, .. } => {
                         let vals: Vec<IrValue> = init
                             .iter()
@@ -1514,15 +1780,12 @@ impl<'m> Interpreter<'m> {
                         };
                         match arr {
                             IrValue::Array(elems) => {
-                                let val = elems.get(idx).cloned().ok_or_else(|| {
-                                    InterpError::Unsupported {
-                                        detail: format!(
-                                            "array index {} out of bounds ({} elements)",
-                                            idx,
-                                            elems.len()
-                                        ),
-                                    }
-                                })?;
+                                let val = elems.get(idx).cloned().ok_or(
+                                    InterpError::IndexOutOfBounds {
+                                        idx: idx as i64,
+                                        len: elems.len(),
+                                    },
+                                )?;
                                 self.values.insert(*result, val);
                             }
                             other => {
@@ -1555,12 +1818,9 @@ impl<'m> Interpreter<'m> {
                         match arr {
                             IrValue::Array(mut elems) => {
                                 if idx >= elems.len() {
-                                    return Err(InterpError::Unsupported {
-                                        detail: format!(
-                                            "array index {} out of bounds ({} elements)",
-                                            idx,
-                                            elems.len()
-                                        ),
+                                    return Err(InterpError::IndexOutOfBounds {
+                                        idx: idx as i64,
+                                        len: elems.len(),
                                     });
                                 }
                                 elems[idx] = val;
@@ -1871,6 +2131,8 @@ impl<'m> Interpreter<'m> {
                                 }
                                 queue.push_back(v);
                                 q.not_empty.notify_one();
+                                drop(queue);
+                                async_exec::notify_channel_activity();
                             }
                             other => {
                                 return Err(InterpError::TypeError {
@@ -1884,12 +2146,7 @@ impl<'m> Interpreter<'m> {
                         let ch = self.get(*chan)?;
                         match ch {
                             IrValue::Chan(q) => {
-                                let mut queue = q.queue.lock().unwrap();
-                                while queue.is_empty() {
-                                    queue = q.not_empty.wait(queue).unwrap();
-                                }
-                                let val = queue.pop_front().unwrap();
-                                q.not_full.notify_one();
+                                let val = self.recv_running_tasks(&q)?;
                                 self.values.insert(*result, val);
                             }
                             other => {
@@ -2155,6 +2412,8 @@ impl<'m> Interpreter<'m> {
                                 .map(|(i, e)| (i, e.clone()))
                                 .collect(),
                             IrValue::Tensor(data, _shape) => data
+                                .lock()
+                                .unwrap()
                                 .iter()
                                 .enumerate()
                                 .filter(|(_, &val)| val != 0.0)
@@ -2555,8 +2814,8 @@ impl<'m> Interpreter<'m> {
                             self.values.insert(*result, *inner);
                         }
                         IrValue::OptionVal(None) => {
-                            return Err(InterpError::Unsupported {
-                                detail: "unwrap called on none".into(),
+                            return Err(InterpError::Panic {
+                                msg: "unwrap called on none".into(),
                             });
                         }
                         other => {
@@ -2590,9 +2849,9 @@ impl<'m> Interpreter<'m> {
                         IrValue::ResultVal(Ok(inner)) => {
                             self.values.insert(*result, *inner);
                         }
-                        IrValue::ResultVal(Err(_)) => {
-                            return Err(InterpError::Unsupported {
-                                detail: "result_unwrap called on err".into(),
+                        IrValue::ResultVal(Err(e)) => {
+                            return Err(InterpError::Panic {
+                                msg: format!("unwrap called on err: {}", value_text(&e)),
                             });
                         }
                         other => {
@@ -2670,11 +2929,8 @@ impl<'m> Interpreter<'m> {
                             call_args.push(self.get(*a)?);
                         }
                         if self.depth >= self.opts.max_depth {
-                            return Err(InterpError::Unsupported {
-                                detail: format!(
-                                    "call depth exceeded {} (infinite recursion?)",
-                                    self.opts.max_depth
-                                ),
+                            return Err(InterpError::StackOverflow {
+                                limit: self.opts.max_depth,
                             });
                         }
                         let mut sub = Interpreter::new(self.module, self.opts, self.depth + 1);
@@ -2758,6 +3014,7 @@ impl<'m> Interpreter<'m> {
                         // succeeded. See known-issues #20.
                         if let Some(byte) = span_byte {
                             self.last_byte = Some(*byte);
+                            self.span_pinned = true;
                         }
                         let msg_val = self
                             .values
@@ -2985,7 +3242,7 @@ impl<'m> Interpreter<'m> {
                         let lv = self.get(*list)?;
                         let iv = self.get(*index)?;
                         let idx = match iv {
-                            IrValue::I64(n) => n as usize,
+                            IrValue::I64(n) => n,
                             _ => {
                                 return Err(InterpError::TypeError {
                                     detail: "list_get: index must be i64".into(),
@@ -2993,11 +3250,16 @@ impl<'m> Interpreter<'m> {
                             }
                         };
                         if let IrValue::List(cells) = lv {
-                            let raw = cells.lock().unwrap().get(idx).cloned().ok_or_else(|| {
-                                InterpError::TypeError {
-                                    detail: format!("list_get: index {} out of bounds", idx),
-                                }
-                            })?;
+                            let raw = {
+                                let items = cells.lock().unwrap();
+                                usize::try_from(idx)
+                                    .ok()
+                                    .and_then(|i| items.get(i).cloned())
+                                    .ok_or(InterpError::IndexOutOfBounds {
+                                        idx,
+                                        len: items.len(),
+                                    })?
+                            };
                             // Coerce to declared element type (e.g. f32 stored → f64 expected)
                             let elem = eval_cast(&raw, elem_ty).unwrap_or(raw);
                             self.values.insert(*result, elem);
@@ -3012,7 +3274,7 @@ impl<'m> Interpreter<'m> {
                         let iv = self.get(*index)?;
                         let v = self.get(*value)?;
                         let idx = match iv {
-                            IrValue::I64(n) => n as usize,
+                            IrValue::I64(n) => n,
                             _ => {
                                 return Err(InterpError::TypeError {
                                     detail: "list_set: index must be i64".into(),
@@ -3023,12 +3285,11 @@ impl<'m> Interpreter<'m> {
                             transaction_record_list(&cells);
                             {
                                 let mut borrow = cells.lock().unwrap();
-                                if idx >= borrow.len() {
-                                    return Err(InterpError::TypeError {
-                                        detail: format!("list_set: index {} out of bounds", idx),
-                                    });
+                                let len = borrow.len();
+                                match usize::try_from(idx).ok().filter(|i| *i < len) {
+                                    Some(i) => borrow[i] = v,
+                                    None => return Err(InterpError::IndexOutOfBounds { idx, len }),
                                 }
-                                borrow[idx] = v;
                             }
                             self.values.insert(*list, IrValue::List(cells));
                         } else {
@@ -3056,16 +3317,14 @@ impl<'m> Interpreter<'m> {
                     }
 
                     IrInstr::MapNew { result, .. } => {
-                        let map = std::sync::Arc::new(std::sync::Mutex::new(
-                            std::collections::HashMap::new(),
-                        ));
+                        let map = std::sync::Arc::new(std::sync::Mutex::new(MapStore::new()));
                         self.values.insert(*result, IrValue::Map(map));
                     }
                     IrInstr::MapSet { map, key, value } => {
                         let mv = self.get(*map)?;
                         let kv = self.get(*key)?;
                         let v = self.get(*value)?;
-                        let key_str = format!("{}", kv);
+                        let key_str = map_key(&kv);
                         if let IrValue::Map(entries) = mv {
                             transaction_record_map(&entries);
                             entries.lock().unwrap().insert(key_str, v);
@@ -3081,7 +3340,7 @@ impl<'m> Interpreter<'m> {
                     } => {
                         let mv = self.get(*map)?;
                         let kv = self.get(*key)?;
-                        let key_str = format!("{}", kv);
+                        let key_str = map_key(&kv);
                         if let IrValue::Map(entries) = mv {
                             let opt = entries.lock().unwrap().get(&key_str).cloned().map(Box::new);
                             self.values.insert(*result, IrValue::OptionVal(opt));
@@ -3094,7 +3353,7 @@ impl<'m> Interpreter<'m> {
                     IrInstr::MapContains { result, map, key } => {
                         let mv = self.get(*map)?;
                         let kv = self.get(*key)?;
-                        let key_str = format!("{}", kv);
+                        let key_str = map_key(&kv);
                         if let IrValue::Map(entries) = mv {
                             let contains = entries.lock().unwrap().contains_key(&key_str);
                             self.values.insert(*result, IrValue::Bool(contains));
@@ -3107,7 +3366,7 @@ impl<'m> Interpreter<'m> {
                     IrInstr::MapRemove { map, key } => {
                         let mv = self.get(*map)?;
                         let kv = self.get(*key)?;
-                        let key_str = format!("{}", kv);
+                        let key_str = map_key(&kv);
                         if let IrValue::Map(entries) = mv {
                             transaction_record_map(&entries);
                             entries.lock().unwrap().remove(&key_str);
@@ -3174,7 +3433,7 @@ impl<'m> Interpreter<'m> {
                         } else {
                             String::new()
                         };
-                        security::check_fs_write(&path_str)?;
+                        security::check_fs_write_bytes(&path_str, content_str.len() as u64)?;
                         if transaction_stage_file(path_str.clone(), content_str.clone()) {
                             let written_len = content_str.len() as i64;
                             self.values.insert(
@@ -3530,7 +3789,11 @@ impl<'m> Interpreter<'m> {
                         std::process::exit(code_val);
                     }
                     IrInstr::ProcessArgs { result } => {
-                        let args: Vec<IrValue> = std::env::args().map(IrValue::Str).collect();
+                        let args: Vec<IrValue> = crate::program_args()
+                            .unwrap_or_else(|| std::env::args().collect())
+                            .into_iter()
+                            .map(IrValue::Str)
+                            .collect();
                         self.values.insert(
                             *result,
                             IrValue::List(std::sync::Arc::new(std::sync::Mutex::new(args))),
@@ -3804,6 +4067,10 @@ impl<'m> Interpreter<'m> {
                             "list_filter" => self.builtin_list_filter(&arg_vals)?,
                             "list_reduce" => self.builtin_list_reduce(&arg_vals)?,
                             "par_map" => self.builtin_par_map(&arg_vals)?,
+                            name if name.starts_with("async_") => {
+                                self.builtin_async(name, &arg_vals)?
+                            }
+                            "state_get" | "state_set" => self.builtin_state(name, &arg_vals)?,
                             _ => interp_builtin(name, &arg_vals)?,
                         };
                         self.values.insert(*result, ret);
@@ -3816,6 +4083,225 @@ impl<'m> Interpreter<'m> {
             return Err(InterpError::Unsupported {
                 detail: format!("block {} has no terminator", current),
             });
+        }
+    }
+
+    /// Program state (`var` at the top level): `state_get(name)` and
+    /// `state_set(name, value)`. The state is initialised on first use, as a
+    /// native program initialises it before `main`.
+    fn builtin_state(&mut self, name: &str, args: &[IrValue]) -> Result<IrValue, InterpError> {
+        let module = self.module.ok_or_else(|| InterpError::Unsupported {
+            detail: "program state needs module context".into(),
+        })?;
+        let Some(IrValue::Str(var)) = args.first() else {
+            return Err(InterpError::TypeError {
+                detail: format!(
+                    "{name} expects a state variable name, got {:?}",
+                    args.first()
+                ),
+            });
+        };
+        let key = module_key(module);
+        let ready = lock_ignoring_poison(&PROGRAM_STATE_READY).contains(&key);
+        if !ready {
+            run_state_init(module, self.opts)?;
+        }
+        if name == "state_set" {
+            let value = args.get(1).cloned().unwrap_or(IrValue::Unit);
+            lock_ignoring_poison(&PROGRAM_STATE).insert((key, var.clone()), value);
+            return Ok(IrValue::I64(0));
+        }
+        lock_ignoring_poison(&PROGRAM_STATE)
+            .get(&(key, var.clone()))
+            .cloned()
+            .ok_or_else(|| InterpError::Panic {
+                msg: format!(
+                    "program state '{var}' was read before it was given a value \
+                     (an initializer may read a variable declared after it)"
+                ),
+            })
+    }
+
+    /// The task runtime behind `async def` / `await` (see `async_exec`).
+    fn builtin_async(&mut self, name: &str, args: &[IrValue]) -> Result<IrValue, InterpError> {
+        fn task(value: Option<&IrValue>, name: &str) -> Result<async_exec::TaskRef, InterpError> {
+            match value {
+                Some(IrValue::Task(task)) => Ok(Arc::clone(task)),
+                other => Err(InterpError::TypeError {
+                    detail: format!("{name} expects a task, got {other:?}"),
+                }),
+            }
+        }
+        fn int(value: Option<&IrValue>, name: &str) -> Result<i64, InterpError> {
+            match value {
+                Some(IrValue::I64(n)) => Ok(*n),
+                Some(IrValue::I32(n)) => Ok(i64::from(*n)),
+                other => Err(InterpError::TypeError {
+                    detail: format!("{name} expects an integer, got {other:?}"),
+                }),
+            }
+        }
+        let unit = IrValue::I64(0);
+        Ok(match name {
+            "async_task_new" => match args.first() {
+                Some(IrValue::Str(poll_fn)) => IrValue::Task(async_exec::task_new(poll_fn)),
+                other => {
+                    return Err(InterpError::TypeError {
+                        detail: format!("async_task_new expects a function name, got {other:?}"),
+                    })
+                }
+            },
+            // Spill slots share the frame: a cloned `IrValue` keeps the value
+            // alive exactly as a register would.
+            "async_frame_set" | "async_spill" => {
+                let value = args.get(2).cloned().unwrap_or(IrValue::Unit);
+                async_exec::frame_set(&task(args.first(), name)?, int(args.get(1), name)?, value)?;
+                unit
+            }
+            "async_frame_get" | "async_reload" => {
+                async_exec::frame_get(&task(args.first(), name)?, int(args.get(1), name)?)?
+            }
+            "async_state" => IrValue::I64(async_exec::state(&task(args.first(), name)?)),
+            "async_set_state" => {
+                async_exec::set_state(&task(args.first(), name)?, int(args.get(1), name)?);
+                unit
+            }
+            "async_schedule" => {
+                async_exec::schedule(&task(args.first(), name)?);
+                unit
+            }
+            "async_is_done" => IrValue::Bool(async_exec::is_done(&task(args.first(), name)?)),
+            "async_cancel" => {
+                async_exec::cancel(&task(args.first(), name)?);
+                unit
+            }
+            // Tasks here are reference counted already: dropping the handle
+            // is enough.
+            "async_release" => unit,
+            "async_is_cancelled" => {
+                IrValue::Bool(async_exec::is_cancelled(&task(args.first(), name)?))
+            }
+            // Either several tasks, or one list of tasks.
+            "async_any" => {
+                let mut inputs = Vec::new();
+                let items: Vec<IrValue> = match args {
+                    [IrValue::List(list)] => list.lock().unwrap_or_else(|p| p.into_inner()).clone(),
+                    _ => args.to_vec(),
+                };
+                for item in &items {
+                    inputs.push(task(Some(item), name)?);
+                }
+                IrValue::Task(async_exec::any(inputs))
+            }
+            "async_wait" => {
+                async_exec::wait(&task(args.first(), name)?, &task(args.get(1), name)?);
+                unit
+            }
+            "async_complete" => {
+                let value = args.get(1).cloned().unwrap_or(IrValue::Unit);
+                async_exec::complete(&task(args.first(), name)?, value);
+                unit
+            }
+            "async_result" => async_exec::result(&task(args.first(), name)?)?,
+            "async_sleep" => IrValue::Task(async_exec::sleep(int(args.first(), name)?)),
+            "async_yield" => IrValue::Task(async_exec::yield_now()),
+            "async_readable" => {
+                let handle = int(args.first(), name)?;
+                IrValue::Task(async_exec::readable(tcp_store::raw_socket(handle)))
+            }
+            "async_writable" => {
+                let handle = int(args.first(), name)?;
+                IrValue::Task(async_exec::writable(tcp_store::raw_socket(handle)))
+            }
+            "async_recv" => match args.first() {
+                Some(IrValue::Chan(channel)) => {
+                    IrValue::Task(async_exec::recv(Arc::clone(channel)))
+                }
+                other => {
+                    return Err(InterpError::TypeError {
+                        detail: format!("async_recv expects a channel, got {other:?}"),
+                    })
+                }
+            },
+            "async_block_on" => {
+                let target = task(args.first(), name)?;
+                let module = self.module.ok_or_else(|| InterpError::Unsupported {
+                    detail: "await needs module context to run tasks".into(),
+                })?;
+                async_exec::block_on(&target, self.task_poller(module))?
+            }
+            "async_await" => {
+                return Err(InterpError::Unsupported {
+                    detail: "internal error: an await was not lowered into a state machine".into(),
+                })
+            }
+            other => {
+                return Err(InterpError::Unsupported {
+                    detail: format!("unknown async builtin '{other}'"),
+                })
+            }
+        })
+    }
+
+    /// Polls a task by running its poll function in a nested interpreter.
+    fn task_poller<'p>(
+        &self,
+        module: &'p IrModule,
+    ) -> impl FnMut(&async_exec::TaskRef, &str) -> Result<(), InterpError> + 'p {
+        let opts = self.opts;
+        let depth = self.depth;
+        move |task, poll_fn| {
+            let function =
+                module
+                    .function_by_name(poll_fn)
+                    .ok_or_else(|| InterpError::Unsupported {
+                        detail: format!("task poll function '{poll_fn}' is undefined"),
+                    })?;
+            let mut sub = Interpreter::new(Some(module), opts, depth + 1);
+            sub.run(function, &[IrValue::Task(Arc::clone(task))])?;
+            Ok(())
+        }
+    }
+
+    /// A blocking channel receive that keeps this thread's tasks running
+    /// while it waits, so a task created here can send the awaited value.
+    fn recv_running_tasks(&self, q: &Arc<SharedChannel>) -> Result<IrValue, InterpError> {
+        let take = |q: &SharedChannel| {
+            let value = q
+                .queue
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .pop_front();
+            if value.is_some() {
+                q.not_full.notify_one();
+            }
+            value
+        };
+        loop {
+            let epoch = async_exec::wake_epoch();
+            if let Some(value) = take(q) {
+                return Ok(value);
+            }
+            let step = match self.module {
+                Some(module) => async_exec::step(&mut self.task_poller(module))?,
+                None => async_exec::Step::Empty,
+            };
+            match step {
+                async_exec::Step::Progress => {}
+                async_exec::Step::Idle(wait) => async_exec::idle_wait(epoch, wait),
+                async_exec::Step::Empty => {
+                    // No task here can produce the value: wait for another thread.
+                    let mut queue = q.queue.lock().unwrap_or_else(|p| p.into_inner());
+                    while queue.is_empty() {
+                        queue = q.not_empty.wait(queue).unwrap_or_else(|p| p.into_inner());
+                    }
+                    let value = queue.pop_front();
+                    q.not_full.notify_one();
+                    if let Some(value) = value {
+                        return Ok(value);
+                    }
+                }
+            }
         }
     }
 
@@ -3837,28 +4323,34 @@ impl<'m> Interpreter<'m> {
         let block_ref = func
             .block(block)
             .ok_or(InterpError::UndefinedValue { id: block.0 })?;
-        let arg_vals: Vec<IrValue> = args
-            .iter()
-            .map(|&v| {
-                self.values
-                    .get(&v)
-                    .cloned()
-                    .ok_or(InterpError::UndefinedValue { id: v.0 })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+        // Read every argument before writing any parameter (parallel copy),
+        // into a buffer kept between branches instead of a new vector each.
+        let mut arg_vals = std::mem::take(&mut self.arg_scratch);
+        arg_vals.clear();
+        for &v in args {
+            match self.values.get(&v) {
+                Some(val) => arg_vals.push(val.clone()),
+                None => {
+                    self.arg_scratch = arg_vals;
+                    return Err(InterpError::UndefinedValue { id: v.0 });
+                }
+            }
+        }
+        let tracking_tape = !self.tape_nodes.is_empty();
         for ((param, arg), val) in block_ref
             .params
             .iter()
             .zip(args.iter())
-            .zip(arg_vals.into_iter())
+            .zip(arg_vals.drain(..))
         {
             let tape_node = match &val {
                 IrValue::TapeNode { .. } => Some(val.clone()),
-                _ => self.tape_nodes.get(arg).cloned(),
+                _ if tracking_tape => self.tape_nodes.get(arg).cloned(),
+                _ => None,
             };
             if let Some(node) = tape_node {
                 self.tape_nodes.insert(param.id, node);
-            } else {
+            } else if tracking_tape {
                 // Block parameter IDs are reused on every loop iteration.  A
                 // stale alias from the preceding edge must not be mistaken for
                 // the current argument's graph.
@@ -3866,12 +4358,42 @@ impl<'m> Interpreter<'m> {
             }
             self.values.insert(param.id, val);
         }
+        self.arg_scratch = arg_vals;
         Ok(())
     }
 
     /// Computes a flat row-major index into a tensor from multi-dimensional indices.
     fn compute_flat_index(&self, tv: &IrValue, indices: &[ValueId]) -> Result<usize, InterpError> {
-        if let IrValue::Tensor(data, shape) = tv {
+        if let IrValue::Tensor(cell, shape) = tv {
+            let len = cell.lock().unwrap().len();
+            // One index is a flat, row-major position; otherwise every
+            // dimension is indexed -- the native backend's rule. Fewer used to
+            // fill the rest with 0, and more indexed past the shape.
+            if indices.len() == 1 {
+                let idx = match self.values.get(&indices[0]) {
+                    Some(IrValue::I64(n)) => *n,
+                    Some(IrValue::I32(n)) => *n as i64,
+                    _ => {
+                        return Err(InterpError::TypeError {
+                            detail: "tensor index must be integer".into(),
+                        })
+                    }
+                };
+                if idx < 0 || idx as usize >= len {
+                    return Err(InterpError::IndexOutOfBounds { idx, len });
+                }
+                return Ok(idx as usize);
+            }
+            if !indices.is_empty() && indices.len() != shape.len() {
+                return Err(InterpError::TensorIndex {
+                    detail: format!(
+                        "a tensor of rank {} takes {} indices, or one flat index, but {} were given",
+                        shape.len(),
+                        shape.len(),
+                        indices.len()
+                    ),
+                });
+            }
             // Compute row-major strides.
             let mut strides = vec![1usize; shape.len()];
             for i in (0..shape.len().saturating_sub(1)).rev() {
@@ -3894,14 +4416,18 @@ impl<'m> Interpreter<'m> {
                 };
                 let dim_size = shape[dim_idx];
                 if idx < 0 || idx as usize >= dim_size {
-                    return Err(InterpError::IndexOutOfBounds { idx, len: dim_size });
+                    return Err(InterpError::TensorIndex {
+                        detail: format!(
+                            "index {idx} is out of bounds for dimension {dim_idx} of length {dim_size}"
+                        ),
+                    });
                 }
                 flat += (idx as usize) * strides[dim_idx];
             }
-            if flat >= data.len() {
+            if flat >= len {
                 return Err(InterpError::IndexOutOfBounds {
                     idx: flat as i64,
-                    len: data.len(),
+                    len,
                 });
             }
             Ok(flat)
@@ -3942,11 +4468,8 @@ impl<'m> Interpreter<'m> {
         let mut args_full: Vec<IrValue> = captured;
         args_full.extend_from_slice(call_args);
         if self.depth >= self.opts.max_depth {
-            return Err(InterpError::Unsupported {
-                detail: format!(
-                    "call depth exceeded {} (infinite recursion?)",
-                    self.opts.max_depth
-                ),
+            return Err(InterpError::StackOverflow {
+                limit: self.opts.max_depth,
             });
         }
         let mut sub = Interpreter::new(self.module, self.opts, self.depth + 1);
@@ -3959,7 +4482,7 @@ impl<'m> Interpreter<'m> {
     fn builtin_tensor_ad(&mut self, name: &str, args: &[IrValue]) -> Result<IrValue, InterpError> {
         fn tensor(value: &IrValue) -> Option<(Vec<f32>, Vec<usize>)> {
             match value {
-                IrValue::Tensor(data, shape) => Some((data.clone(), shape.clone())),
+                IrValue::Tensor(data, shape) => Some((data.lock().unwrap().clone(), shape.clone())),
                 IrValue::TapeNode { primal, .. } => tensor(primal),
                 _ => None,
             }
@@ -3971,7 +4494,7 @@ impl<'m> Interpreter<'m> {
             shape: Vec<usize>,
             parents: &[IrValue],
         ) -> IrValue {
-            let primal = IrValue::Tensor(data, shape);
+            let primal = IrValue::tensor(data, shape);
             if parents
                 .iter()
                 .any(|parent| matches!(parent, IrValue::TapeNode { .. }))
@@ -4022,7 +4545,7 @@ impl<'m> Interpreter<'m> {
                         _ => 0,
                     })
                     .collect();
-                Ok(IrValue::Tensor(data, shape))
+                Ok(IrValue::tensor(data, shape))
             }
             "tensor_to_list" => {
                 let (data, _) = tensor(&args[0]).ok_or_else(|| tensor_error(name))?;
@@ -4034,7 +4557,7 @@ impl<'m> Interpreter<'m> {
                 let (data, shape) = tensor(&args[0]).ok_or_else(|| tensor_error(name))?;
                 Ok(IrValue::TapeNode {
                     id: NEXT_TAPE_NODE_ID.fetch_add(1, Ordering::Relaxed),
-                    primal: Box::new(IrValue::Tensor(data, shape)),
+                    primal: Box::new(IrValue::tensor(data, shape)),
                     op: "tensor_leaf".into(),
                     parents: Vec::new(),
                 })
@@ -4284,7 +4807,7 @@ impl<'m> Interpreter<'m> {
                     .get(id)
                     .cloned()
                     .unwrap_or_else(|| vec![0.0; shape.iter().copied().product()]);
-                Ok(IrValue::Tensor(data, shape))
+                Ok(IrValue::tensor(data, shape))
             }
             _ => Err(InterpError::Unsupported {
                 detail: format!("unknown tensor AD builtin {name}"),
@@ -4512,8 +5035,8 @@ impl<'m> Interpreter<'m> {
         ret_ty: &IrType,
     ) -> Result<IrValue, InterpError> {
         match name {
-            // The reference interpreter currently executes async bodies on
-            // managed join handles; expose its bounded logical executor view.
+            // `spawn` bodies run on threads here; report the logical worker
+            // count the native pool would use.
             "iris_async_worker_count" => Ok(IrValue::I64(
                 std::thread::available_parallelism()
                     .map(|count| count.get() as i64)
@@ -4612,6 +5135,16 @@ impl<'m> Interpreter<'m> {
                     tcp_store::write_stream_all(handle, &data)
                         .map(|count| count as i64)
                         .unwrap_or(-1),
+                ))
+            }
+            "iris_tcp_listen_loopback" => {
+                let port = i64_arg(&args[0]);
+                security::check_network("127.0.0.1")?;
+                Ok(IrValue::I64(
+                    match std::net::TcpListener::bind(format!("127.0.0.1:{port}")) {
+                        Ok(listener) => tcp_store::store_listener(listener),
+                        Err(_) => -1,
+                    },
                 ))
             }
             "iris_tcp_read_max" => {
@@ -5060,7 +5593,7 @@ fn eval_einsum(
         // Scalar output (e.g., "i,i->")
         Ok(IrValue::F32(result[0]))
     } else {
-        Ok(IrValue::Tensor(result, out_shape))
+        Ok(IrValue::tensor(result, out_shape))
     }
 }
 
@@ -5150,7 +5683,7 @@ fn eval_einsum_single(
     if out_shape.is_empty() {
         Ok(IrValue::F32(result[0]))
     } else {
-        Ok(IrValue::Tensor(result, out_shape))
+        Ok(IrValue::tensor(result, out_shape))
     }
 }
 
@@ -5274,7 +5807,7 @@ fn eval_reduce(
     if out_shape.is_empty() {
         Ok(IrValue::F32(result[0]))
     } else {
-        Ok(IrValue::Tensor(result, out_shape))
+        Ok(IrValue::tensor(result, out_shape))
     }
 }
 
@@ -5323,8 +5856,21 @@ fn eval_unary(op: ScalarUnaryOp, v: &IrValue) -> Result<IrValue, InterpError> {
         (ScalarUnaryOp::Round, IrValue::F64(x)) => Ok(IrValue::F64(x.round())),
         (ScalarUnaryOp::Round, IrValue::F32(x)) => Ok(IrValue::F32(x.round())),
         // Sign function
-        (ScalarUnaryOp::Sign, IrValue::F64(x)) => Ok(IrValue::F64(x.signum())),
-        (ScalarUnaryOp::Sign, IrValue::F32(x)) => Ok(IrValue::F32(x.signum())),
+        // -1, 0 or 1 (`signum` gives 1 for 0.0); 0 for NaN.
+        (ScalarUnaryOp::Sign, IrValue::F64(x)) => Ok(IrValue::F64(if *x > 0.0 {
+            1.0
+        } else if *x < 0.0 {
+            -1.0
+        } else {
+            0.0
+        })),
+        (ScalarUnaryOp::Sign, IrValue::F32(x)) => Ok(IrValue::F32(if *x > 0.0 {
+            1.0
+        } else if *x < 0.0 {
+            -1.0
+        } else {
+            0.0
+        })),
         (ScalarUnaryOp::Sign, IrValue::I64(n)) => Ok(IrValue::I64(n.signum())),
         (ScalarUnaryOp::Sign, IrValue::I32(n)) => Ok(IrValue::I32(n.signum())),
         _ => Err(InterpError::TypeError {
@@ -5340,6 +5886,7 @@ fn eval_cast(v: &IrValue, to_ty: &IrType) -> Result<IrValue, InterpError> {
             IrValue::F64(x) => Ok(IrValue::F32(*x as f32)),
             IrValue::I32(n) => Ok(IrValue::F32(*n as f32)),
             IrValue::I64(n) => Ok(IrValue::F32(*n as f32)),
+            IrValue::Bool(b) => Ok(IrValue::F32(*b as u8 as f32)),
             _ => Err(InterpError::TypeError {
                 detail: "cannot cast to f32".into(),
             }),
@@ -5349,6 +5896,7 @@ fn eval_cast(v: &IrValue, to_ty: &IrType) -> Result<IrValue, InterpError> {
             IrValue::F32(x) => Ok(IrValue::F64(*x as f64)),
             IrValue::I32(n) => Ok(IrValue::F64(*n as f64)),
             IrValue::I64(n) => Ok(IrValue::F64(*n as f64)),
+            IrValue::Bool(b) => Ok(IrValue::F64(*b as u8 as f64)),
             _ => Err(InterpError::TypeError {
                 detail: "cannot cast to f64".into(),
             }),
@@ -5432,6 +5980,7 @@ fn eval_binop(op: BinOp, lv: &IrValue, rv: &IrValue) -> Result<IrValue, InterpEr
         (BinOp::Mul, F32(a), F32(b)) => Ok(F32(a * b)),
         (BinOp::Div, F32(a), F32(b)) => Ok(F32(a / b)),
         (BinOp::Mod, F32(a), F32(b)) => Ok(F32(a % b)),
+        (BinOp::FloorDiv, F32(a), F32(b)) => Ok(F32((a / b).floor())),
         // F32 comparisons
         (BinOp::CmpEq, F32(a), F32(b)) => Ok(Bool(a == b)),
         (BinOp::CmpNe, F32(a), F32(b)) => Ok(Bool(a != b)),
@@ -5445,6 +5994,7 @@ fn eval_binop(op: BinOp, lv: &IrValue, rv: &IrValue) -> Result<IrValue, InterpEr
         (BinOp::Mul, F64(a), F64(b)) => Ok(F64(a * b)),
         (BinOp::Div, F64(a), F64(b)) => Ok(F64(a / b)),
         (BinOp::Mod, F64(a), F64(b)) => Ok(F64(a % b)),
+        (BinOp::FloorDiv, F64(a), F64(b)) => Ok(F64((a / b).floor())),
         // F64 comparisons
         (BinOp::CmpEq, F64(a), F64(b)) => Ok(Bool(a == b)),
         (BinOp::CmpNe, F64(a), F64(b)) => Ok(Bool(a != b)),
@@ -5455,33 +6005,48 @@ fn eval_binop(op: BinOp, lv: &IrValue, rv: &IrValue) -> Result<IrValue, InterpEr
         // I32 arithmetic
         (BinOp::Add, I32(a), I32(b)) => a
             .checked_add(*b)
-            .ok_or_else(|| InterpError::Panic {
-                msg: format!("integer overflow in addition ({} + {})", a, b),
+            .ok_or_else(|| InterpError::IntegerOverflow {
+                detail: format!("addition ({} + {})", a, b),
             })
             .map(I32),
         (BinOp::Sub, I32(a), I32(b)) => a
             .checked_sub(*b)
-            .ok_or_else(|| InterpError::Panic {
-                msg: format!("integer overflow in subtraction ({} - {})", a, b),
+            .ok_or_else(|| InterpError::IntegerOverflow {
+                detail: format!("subtraction ({} - {})", a, b),
             })
             .map(I32),
         (BinOp::Mul, I32(a), I32(b)) => a
             .checked_mul(*b)
-            .ok_or_else(|| InterpError::Panic {
-                msg: format!("integer overflow in multiplication ({} * {})", a, b),
+            .ok_or_else(|| InterpError::IntegerOverflow {
+                detail: format!("multiplication ({} * {})", a, b),
             })
             .map(I32),
         (BinOp::Div, I32(a), I32(b)) => {
             if *b == 0 {
                 return Err(InterpError::DivisionByZero);
             }
-            Ok(I32(a.wrapping_div(*b)))
+            a.checked_div(*b)
+                .ok_or_else(|| InterpError::IntegerOverflow {
+                    detail: format!("division ({} / {})", a, b),
+                })
+                .map(I32)
         }
         (BinOp::FloorDiv, I32(a), I32(b)) => {
             if *b == 0 {
                 return Err(InterpError::DivisionByZero);
             }
-            Ok(I32((*a as f64 / *b as f64).floor() as i32))
+            // Exact: through f64 it lost precision past 2^53.
+            let q = a
+                .checked_div(*b)
+                .ok_or_else(|| InterpError::IntegerOverflow {
+                    detail: format!("division ({} / {})", a, b),
+                })?;
+            let r = a.wrapping_rem(*b);
+            Ok(I32(if r != 0 && ((r < 0) != (*b < 0)) {
+                q - 1
+            } else {
+                q
+            }))
         }
         (BinOp::Mod, I32(a), I32(b)) => {
             if *b == 0 {
@@ -5499,33 +6064,48 @@ fn eval_binop(op: BinOp, lv: &IrValue, rv: &IrValue) -> Result<IrValue, InterpEr
         // I64 arithmetic
         (BinOp::Add, I64(a), I64(b)) => a
             .checked_add(*b)
-            .ok_or_else(|| InterpError::Panic {
-                msg: format!("integer overflow in addition ({} + {})", a, b),
+            .ok_or_else(|| InterpError::IntegerOverflow {
+                detail: format!("addition ({} + {})", a, b),
             })
             .map(I64),
         (BinOp::Sub, I64(a), I64(b)) => a
             .checked_sub(*b)
-            .ok_or_else(|| InterpError::Panic {
-                msg: format!("integer overflow in subtraction ({} - {})", a, b),
+            .ok_or_else(|| InterpError::IntegerOverflow {
+                detail: format!("subtraction ({} - {})", a, b),
             })
             .map(I64),
         (BinOp::Mul, I64(a), I64(b)) => a
             .checked_mul(*b)
-            .ok_or_else(|| InterpError::Panic {
-                msg: format!("integer overflow in multiplication ({} * {})", a, b),
+            .ok_or_else(|| InterpError::IntegerOverflow {
+                detail: format!("multiplication ({} * {})", a, b),
             })
             .map(I64),
         (BinOp::Div, I64(a), I64(b)) => {
             if *b == 0 {
                 return Err(InterpError::DivisionByZero);
             }
-            Ok(I64(a.wrapping_div(*b)))
+            a.checked_div(*b)
+                .ok_or_else(|| InterpError::IntegerOverflow {
+                    detail: format!("division ({} / {})", a, b),
+                })
+                .map(I64)
         }
         (BinOp::FloorDiv, I64(a), I64(b)) => {
             if *b == 0 {
                 return Err(InterpError::DivisionByZero);
             }
-            Ok(I64((*a as f64 / *b as f64).floor() as i64))
+            // Exact: through f64 it lost precision past 2^53.
+            let q = a
+                .checked_div(*b)
+                .ok_or_else(|| InterpError::IntegerOverflow {
+                    detail: format!("division ({} / {})", a, b),
+                })?;
+            let r = a.wrapping_rem(*b);
+            Ok(I64(if r != 0 && ((r < 0) != (*b < 0)) {
+                q - 1
+            } else {
+                q
+            }))
         }
         (BinOp::Mod, I64(a), I64(b)) => {
             if *b == 0 {
@@ -5656,12 +6236,18 @@ fn eval_binop(op: BinOp, lv: &IrValue, rv: &IrValue) -> Result<IrValue, InterpEr
         (BinOp::BitXor, I64(a), I64(b)) => Ok(I64(a ^ b)),
         (BinOp::Shl, I64(a), I64(b)) => Ok(I64(a.wrapping_shl(*b as u32))),
         (BinOp::Shr, I64(a), I64(b)) => Ok(I64(a.wrapping_shr(*b as u32))),
+        (BinOp::WrapAdd, I64(a), I64(b)) => Ok(I64(a.wrapping_add(*b))),
+        (BinOp::WrapSub, I64(a), I64(b)) => Ok(I64(a.wrapping_sub(*b))),
+        (BinOp::WrapMul, I64(a), I64(b)) => Ok(I64(a.wrapping_mul(*b))),
         // Bitwise ops — I32
         (BinOp::BitAnd, I32(a), I32(b)) => Ok(I32(a & b)),
         (BinOp::BitOr, I32(a), I32(b)) => Ok(I32(a | b)),
         (BinOp::BitXor, I32(a), I32(b)) => Ok(I32(a ^ b)),
         (BinOp::Shl, I32(a), I32(b)) => Ok(I32(a.wrapping_shl(*b as u32))),
         (BinOp::Shr, I32(a), I32(b)) => Ok(I32(a.wrapping_shr(*b as u32))),
+        (BinOp::WrapAdd, I32(a), I32(b)) => Ok(I32(a.wrapping_add(*b))),
+        (BinOp::WrapSub, I32(a), I32(b)) => Ok(I32(a.wrapping_sub(*b))),
+        (BinOp::WrapMul, I32(a), I32(b)) => Ok(I32(a.wrapping_mul(*b))),
         // Equality on aggregates.
         //
         // `IrValue` already implements `PartialEq` structurally for every one of
@@ -5729,6 +6315,33 @@ mod tcp_store {
         let id = next_handle();
         listeners().lock().unwrap().insert(id, Arc::new(l));
         id
+    }
+    /// The OS socket behind a stream or listener handle, for readiness
+    /// polling (`async_readable`); -1 for an unknown handle.
+    pub fn raw_socket(id: i64) -> i64 {
+        #[cfg(unix)]
+        use std::os::unix::io::AsRawFd as AsRaw;
+        #[cfg(windows)]
+        use std::os::windows::io::AsRawSocket as AsRaw;
+        #[cfg(windows)]
+        fn raw(s: &impl AsRaw) -> i64 {
+            s.as_raw_socket() as i64
+        }
+        #[cfg(unix)]
+        fn raw(s: &impl AsRaw) -> i64 {
+            s.as_raw_fd() as i64
+        }
+        #[cfg(any(windows, unix))]
+        {
+            if let Some(stream) = streams().lock().unwrap().get(&id) {
+                return raw(&**stream);
+            }
+            if let Some(listener) = listeners().lock().unwrap().get(&id) {
+                return raw(&**listener);
+            }
+        }
+        let _ = id;
+        -1
     }
     pub fn read_stream(id: i64) -> Result<String, ()> {
         use std::io::Read;
@@ -6337,6 +6950,17 @@ fn interp_builtin(name: &str, args: &[IrValue]) -> Result<IrValue, InterpError> 
                 Err(_) => Ok(IrValue::I64(-1)),
             }
         }
+        "tcp_connect_async" => {
+            let host = str_arg(&args[0]);
+            let port = i64_arg(&args[1]);
+            security::check_network(&host)?;
+            Ok(IrValue::Task(async_exec::spawn_io(
+                move || match std::net::TcpStream::connect(format!("{}:{}", host, port)) {
+                    Ok(stream) => IrValue::I64(tcp_store::store_stream(stream)),
+                    Err(_) => IrValue::I64(-1),
+                },
+            )))
+        }
         "tcp_listen" => {
             let port = i64_arg(&args[0]);
             security::check_network("0.0.0.0")?;
@@ -6358,6 +6982,14 @@ fn interp_builtin(name: &str, args: &[IrValue]) -> Result<IrValue, InterpError> 
             let data = str_arg(&args[1]);
             tcp_store::write_stream(id, &data);
             Ok(IrValue::I64(0))
+        }
+        "tcp_write_async" => {
+            let id = i64_arg(&args[0]);
+            let data = str_arg(&args[1]);
+            Ok(IrValue::Task(async_exec::spawn_io(move || {
+                tcp_store::write_stream(id, &data);
+                IrValue::I64(0)
+            })))
         }
         "tcp_close" => {
             let id = i64_arg(&args[0]);
@@ -6401,6 +7033,13 @@ fn interp_builtin(name: &str, args: &[IrValue]) -> Result<IrValue, InterpError> 
             let url = str_arg(&args[0]);
             security::check_network(&url)?;
             Ok(IrValue::Str(http_request("GET", &url, "")))
+        }
+        "http_get_async" => {
+            let url = str_arg(&args[0]);
+            security::check_network(&url)?;
+            Ok(IrValue::Task(async_exec::spawn_io(move || {
+                IrValue::Str(http_request("GET", &url, ""))
+            })))
         }
         "http_post" => {
             let url = str_arg(&args[0]);
@@ -6681,6 +7320,7 @@ fn interp_builtin(name: &str, args: &[IrValue]) -> Result<IrValue, InterpError> 
                 IrValue::OptionVal(_) => "option",
                 IrValue::ResultVal(_) => "result",
                 IrValue::Chan(_) => "chan",
+                IrValue::Task(_) => "task",
                 IrValue::TaskGroup(_) => "task_group",
                 IrValue::Atomic(_) => "atomic",
                 IrValue::Unit => "unit",
@@ -6881,7 +7521,7 @@ fn interp_builtin(name: &str, args: &[IrValue]) -> Result<IrValue, InterpError> 
         }
         "gc_collect" | "gc_collect_call" => Ok(IrValue::Bool(true)),
         "gc_stats" | "gc_stats_map" => {
-            let mut map = std::collections::HashMap::new();
+            let mut map = MapStore::new();
             map.insert("allocated".to_string(), IrValue::I64(0));
             map.insert("freed".to_string(), IrValue::I64(0));
             map.insert("cycles_collected".to_string(), IrValue::I64(0));
@@ -7049,19 +7689,19 @@ fn interp_builtin(name: &str, args: &[IrValue]) -> Result<IrValue, InterpError> 
             {
                 use std::ffi::CString;
 
-                // Automatically inject known dependency paths to PATH for LoadLibrary search
+                // Automatically inject known dependency paths to PATH for LoadLibrary search.
+                //
+                // ROS 2 is not among them, and AMENT_PREFIX_PATH is left alone:
+                // this used to force both to one machine's install -- and
+                // overwrote a sourced environment's AMENT_PREFIX_PATH in the CRT
+                // environment, hiding every overlay workspace from the ROS 2
+                // bridge. The bridge needs a sourced environment (or the ROS 2
+                // bin directory on PATH) and finds the rest of its install itself.
                 static INJECT_PATHS: std::sync::Once = std::sync::Once::new();
                 INJECT_PATHS.call_once(|| {
-                    if std::env::var("AMENT_PREFIX_PATH").is_err() {
-                        std::env::set_var(
-                            "AMENT_PREFIX_PATH",
-                            "C:\\dev\\ros2_humble\\ros2-windows",
-                        );
-                    }
                     if let Ok(old_path) = std::env::var("PATH") {
                         let new_path = format!(
-                            "C:\\dev\\ros2_humble\\ros2-windows\\bin;\
-                             C:\\onnxruntime\\lib;\
+                            "C:\\onnxruntime\\lib;\
                              C:\\tensorflow\\lib;\
                              C:\\libtorch\\lib;\
                              C:\\openblas\\bin;{}",
@@ -7080,10 +7720,6 @@ fn interp_builtin(name: &str, args: &[IrValue]) -> Result<IrValue, InterpError> 
                             if !p_putenv.is_null() {
                                 let putenv: unsafe extern "C" fn(*const i8, *const i8) -> i32 =
                                     std::mem::transmute(p_putenv);
-                                putenv(
-                                    b"AMENT_PREFIX_PATH\0".as_ptr() as *const i8,
-                                    b"C:\\dev\\ros2_humble\\ros2-windows\0".as_ptr() as *const i8,
-                                );
                                 if let Ok(new_path) = std::env::var("PATH") {
                                     let c_new_path =
                                         std::ffi::CString::new(new_path).unwrap_or_default();
@@ -7628,6 +8264,7 @@ fn interp_builtin(name: &str, args: &[IrValue]) -> Result<IrValue, InterpError> 
         "env_set" => {
             let key = str_arg(&args[0]);
             let val = str_arg(&args[1]);
+            security::check_process(&format!("env_set:{key}"))?;
             unsafe {
                 std::env::set_var(&key, &val);
             }
@@ -7635,10 +8272,12 @@ fn interp_builtin(name: &str, args: &[IrValue]) -> Result<IrValue, InterpError> 
         }
         "exit_code" => {
             let code = i64_arg(&args[0]);
+            security::check_process("exit")?;
             std::process::exit(code as i32);
         }
         "exec_cmd" => {
             let cmd = str_arg(&args[0]);
+            security::check_process(&cmd)?;
             #[cfg(windows)]
             let output = std::process::Command::new("cmd")
                 .args(["/C", &cmd])
@@ -7740,6 +8379,18 @@ fn interp_builtin(name: &str, args: &[IrValue]) -> Result<IrValue, InterpError> 
             let chars: Vec<IrValue> = s.chars().map(|c| IrValue::Str(c.to_string())).collect();
             Ok(IrValue::List(std::sync::Arc::new(std::sync::Mutex::new(
                 chars,
+            ))))
+        }
+        "file_read_bytes" => {
+            let path = str_arg(&args[0]);
+            security::check_fs_read(&path)?;
+            let bytes: Vec<IrValue> = std::fs::read(&path)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|b| IrValue::I64(b as i64))
+                .collect();
+            Ok(IrValue::List(std::sync::Arc::new(std::sync::Mutex::new(
+                bytes,
             ))))
         }
         "str_bytes" => {
@@ -8031,12 +8682,9 @@ fn interp_builtin(name: &str, args: &[IrValue]) -> Result<IrValue, InterpError> 
                     let removed = list.remove(idx);
                     Ok(removed)
                 } else {
-                    Err(InterpError::Panic {
-                        msg: format!(
-                            "list_remove: index {} out of bounds (len {})",
-                            idx,
-                            list.len()
-                        ),
+                    Err(InterpError::IndexOutOfBounds {
+                        idx: idx as i64,
+                        len: list.len(),
                     })
                 }
             } else {
@@ -8055,12 +8703,9 @@ fn interp_builtin(name: &str, args: &[IrValue]) -> Result<IrValue, InterpError> 
                     list.insert(idx, val);
                     Ok(IrValue::I64(0))
                 } else {
-                    Err(InterpError::Panic {
-                        msg: format!(
-                            "list_insert: index {} out of bounds (len {})",
-                            idx,
-                            list.len()
-                        ),
+                    Err(InterpError::IndexOutOfBounds {
+                        idx: idx as i64,
+                        len: list.len(),
                     })
                 }
             } else {
@@ -8106,6 +8751,8 @@ fn interp_builtin(name: &str, args: &[IrValue]) -> Result<IrValue, InterpError> 
                 }
                 queue.push_back(v);
                 rc.not_empty.notify_one();
+                drop(queue);
+                async_exec::notify_channel_activity();
                 Ok(IrValue::I64(0))
             } else {
                 Err(InterpError::TypeError {
@@ -8278,7 +8925,7 @@ fn json_to_irvalue(v: &serde_json::Value) -> IrValue {
             IrValue::List(std::sync::Arc::new(std::sync::Mutex::new(items)))
         }
         serde_json::Value::Object(obj) => {
-            let mut map = std::collections::HashMap::new();
+            let mut map = MapStore::new();
             for (k, v) in obj {
                 map.insert(k.clone(), json_to_irvalue(v));
             }
@@ -8292,8 +8939,8 @@ fn irvalue_to_json(v: &IrValue) -> String {
         match v {
             IrValue::I64(n) => n.to_string(),
             IrValue::I32(n) => n.to_string(),
-            IrValue::F64(f) => format!("{}", f),
-            IrValue::F32(f) => format!("{}", f),
+            IrValue::F64(f) => format_float(*f, false),
+            IrValue::F32(f) => format_float(*f as f64, true),
             IrValue::Bool(b) => {
                 if *b {
                     "true".into()

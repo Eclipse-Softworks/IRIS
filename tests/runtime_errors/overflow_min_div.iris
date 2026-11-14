@@ -1,0 +1,8 @@
+// expect: E0409 at 6:20
+// message: integer overflow in division
+def main() -> i64 {
+    val min = 0 - 9223372036854775807 - 1
+    val d = 0 - 1
+    println(to_str(min / d))
+    return 0
+}

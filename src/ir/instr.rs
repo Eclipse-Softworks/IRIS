@@ -1,4 +1,5 @@
 use crate::ir::block::BlockId;
+use crate::ir::function::ScopeId;
 use crate::ir::types::IrType;
 use crate::ir::value::ValueId;
 
@@ -33,6 +34,11 @@ pub enum BinOp {
     Shl,
     /// Arithmetic right shift: `a >> b`
     Shr,
+    /// Two's-complement wrap-around arithmetic: `wrapping_add(a, b)` and
+    /// friends. `Add`, `Sub` and `Mul` stop the program on overflow (E0409).
+    WrapAdd,
+    WrapSub,
+    WrapMul,
     /// Element-wise comparisons: yield a bool scalar.
     CmpEq,
     CmpNe,
@@ -59,6 +65,9 @@ impl std::fmt::Display for BinOp {
             BinOp::BitXor => "bxor",
             BinOp::Shl => "shl",
             BinOp::Shr => "shr",
+            BinOp::WrapAdd => "wrapping_add",
+            BinOp::WrapSub => "wrapping_sub",
+            BinOp::WrapMul => "wrapping_mul",
             BinOp::CmpEq => "cmpeq",
             BinOp::CmpNe => "cmpne",
             BinOp::CmpLt => "cmplt",
@@ -390,6 +399,45 @@ pub enum IrInstr {
         array: ValueId,
         index: ValueId,
         value: ValueId,
+    },
+
+    // ---- Borrow markers ----
+    /// Borrow a value's place: `&place` (immutable) or `&mut place`.
+    ///
+    /// This is a *pure marker*: at runtime `result` is the identical value as
+    /// `place`. Lowering emits it for `&x` / `&mut x` so the IR borrow checker
+    /// can track the loan through the CFG with real liveness (NLL). It must not
+    /// reach backends that do not consume markers; codegen treats it as an
+    /// alias of `place`.
+    Borrow {
+        result: ValueId,
+        place: ValueId,
+        is_mut: bool,
+    },
+    /// Transfer ownership of a place: `move place`.
+    ///
+    /// Pure marker for the IR borrow/move checker. At runtime `result` has the
+    /// identical value as `place`; the checker treats `place`'s binding slot as
+    /// moved from this point onward and gives `result` unmoved ownership.
+    Move {
+        result: ValueId,
+        place: ValueId,
+    },
+
+    // ---- Explicit Drop Scopes ----
+    /// Marks entry into a lexical drop scope.
+    EnterScope {
+        scope: ScopeId,
+    },
+    /// Marks exit from a lexical drop scope.
+    ExitScope {
+        scope: ScopeId,
+    },
+    /// Explicit destructor invocation for `value` of type `ty`.
+    Drop {
+        value: ValueId,
+        drop_fn: String,
+        ty: IrType,
     },
 
     // ---- Option operations ----
@@ -1101,6 +1149,9 @@ impl IrInstr {
             IrInstr::MutexNew { result, .. } => Some(*result),
             IrInstr::MutexLock { result, .. } => Some(*result),
             IrInstr::MutexUnlock { .. } => None,
+            IrInstr::Borrow { result, .. } => Some(*result),
+            IrInstr::Move { result, .. } => Some(*result),
+            IrInstr::EnterScope { .. } | IrInstr::ExitScope { .. } | IrInstr::Drop { .. } => None,
             IrInstr::MakeSome { result, .. } => Some(*result),
             IrInstr::MakeNone { result, .. } => Some(*result),
             IrInstr::IsSome { result, .. } => Some(*result),
@@ -1304,6 +1355,10 @@ impl IrInstr {
             IrInstr::MutexNew { value, .. } => vec![*value],
             IrInstr::MutexLock { mutex, .. } => vec![*mutex],
             IrInstr::MutexUnlock { mutex } => vec![*mutex],
+            IrInstr::Borrow { place, .. } => vec![*place],
+            IrInstr::Move { place, .. } => vec![*place],
+            IrInstr::EnterScope { .. } | IrInstr::ExitScope { .. } => vec![],
+            IrInstr::Drop { value, .. } => vec![*value],
             IrInstr::MakeSome { value, .. } => vec![*value],
             IrInstr::MakeNone { .. } => vec![],
             IrInstr::IsSome { operand, .. } => vec![*operand],

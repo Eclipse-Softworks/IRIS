@@ -1,0 +1,46 @@
+// projects/quadrotor_autopilot/math_utils.iris
+// 3D Vector and Matrix mathematics for quadrotor flight simulation and EKF
+
+pub record Vec3 {
+    x: f64,
+    y: f64,
+    z: f64,
+}
+
+pub def vec3_new(x: f64, y: f64, z: f64) -> Vec3 {
+    Vec3 { x: x, y: y, z: z }
+}
+
+pub def vec3_add(a: Vec3, b: Vec3) -> Vec3 {
+    Vec3 { x: a.x + b.x, y: a.y + b.y, z: a.z + b.z }
+}
+
+pub def vec3_sub(a: Vec3, b: Vec3) -> Vec3 {
+    Vec3 { x: a.x - b.x, y: a.y - b.y, z: a.z - b.z }
+}
+
+pub def vec3_scale(v: Vec3, s: f64) -> Vec3 {
+    Vec3 { x: v.x * s, y: v.y * s, z: v.z * s }
+}
+
+pub def vec3_dot(a: Vec3, b: Vec3) -> f64 {
+    a.x * b.x + a.y * b.y + a.z * b.z
+}
+
+pub def vec3_mag_sq(v: Vec3) -> f64 {
+    v.x * v.x + v.y * v.y + v.z * v.z
+}
+
+pub def vec3_mag(v: Vec3) -> f64 {
+    sqrt(vec3_mag_sq(v))
+}
+
+pub def clamp_f64(val_f: f64, min_v: f64, max_v: f64) -> f64 {
+    if val_f < min_v {
+        min_v
+    } else if val_f > max_v {
+        max_v
+    } else {
+        val_f
+    }
+}

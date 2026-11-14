@@ -140,6 +140,12 @@ pub enum LimitViolation {
         observed_ms: u64,
         limit_ms: u64,
     },
+    /// Resident memory sampled by a supervisor that cannot rely on a kernel
+    /// limit to stop the worker (macOS).
+    Memory {
+        observed_bytes: u64,
+        limit_bytes: u64,
+    },
 }
 
 impl fmt::Display for LimitViolation {
@@ -160,6 +166,13 @@ impl fmt::Display for LimitViolation {
                 observed_ms,
                 limit_ms,
             } => write!(f, "sandbox CPU time {observed_ms} ms exceeds {limit_ms} ms"),
+            Self::Memory {
+                observed_bytes,
+                limit_bytes,
+            } => write!(
+                f,
+                "sandbox resident memory {observed_bytes} bytes exceeds {limit_bytes} bytes"
+            ),
         }
     }
 }

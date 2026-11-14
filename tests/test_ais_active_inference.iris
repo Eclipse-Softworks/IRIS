@@ -1,0 +1,46 @@
+// std.ais: expected free energy from a generative model chooses the action
+// that leads to the preferred observation (it used to return action 0 for
+// every model). Both backends.
+bring std.ais
+
+// Two states, two observations (each state shows its own observation), two
+// actions: action a moves to state a. Preferring observation 1 must choose 1;
+// preferring 0 must choose 0.
+def two_state_model() -> GenerativeModel {
+    val gm = genmodel_new(2, 2, 2);
+    val sure = 0.0;
+    val never = 0.0 - 30.0;
+    list_set(gm.likelihood, 0 * 2 + 0, sure);
+    list_set(gm.likelihood, 0 * 2 + 1, never);
+    list_set(gm.likelihood, 1 * 2 + 0, never);
+    list_set(gm.likelihood, 1 * 2 + 1, sure);
+    var a = 0;
+    while a < 2 {
+        var s = 0;
+        while s < 2 {
+            list_set(gm.transitions, (a * 2 + s) * 2 + a, sure);
+            list_set(gm.transitions, (a * 2 + s) * 2 + (1 - a), never);
+            s = s + 1
+        };
+        a = a + 1
+    };
+    gm
+}
+
+def main() -> i64 {
+    val gm = two_state_model();
+    val probs: list<f64> = list();
+    push(probs, 0.5);
+    push(probs, 0.5);
+    val beliefs = BeliefState { probs: probs, entropy: 0.69, confidence: 0.5 };
+    val want_one: list<f64> = list();
+    push(want_one, log(0.1));
+    push(want_one, log(0.9));
+    val want_zero: list<f64> = list();
+    push(want_zero, log(0.9));
+    push(want_zero, log(0.1));
+    assert(active_inference_choose(gm, beliefs, want_one) == 1);
+    assert(active_inference_choose(gm, beliefs, want_zero) == 0);
+    println("std.ais efe: ok");
+    return 0
+}

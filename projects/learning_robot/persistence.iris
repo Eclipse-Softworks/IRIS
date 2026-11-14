@@ -1,0 +1,38 @@
+bring "checkpoint.iris"
+
+// Run in a scratch directory. Creates checkpoint and malformed-input fixtures.
+def main() -> i64 {
+    val plant = Plant { dynamics: Dynamics { retention: 0.8, gain: 0.25 }, drag: 0.0, noise: 0.0 };
+    val initial = Dynamics { retention: 0.1, gain: 0.5 };
+    val trained = train(collect(plant, 96, 43), initial);
+    assert(is_ok(save_checkpoint("iris-robot-checkpoint.txt", trained)));
+    val loaded = load_checkpoint("iris-robot-checkpoint.txt");
+    assert(is_ok(loaded));
+    val restored = unwrap(loaded);
+    val original_score = episode(plant, trained, 1, false).mse;
+    val restored_score = episode(plant, restored, 1, false).mse;
+    val difference = original_score - restored_score;
+    // Decimal serialization can round parameters; test behavioral equivalence.
+    assert(difference * difference < 0.00000001);
+    assert(prediction_loss(collect(plant, 64, 59), restored, 0, 64) < 0.0001);
+    val malformed: list<str> = list(
+        "", "IRIS-ROBOT-2\n0.8\n0.25\n", "IRIS-ROBOT-1\n0.8\n",
+        "IRIS-ROBOT-1\n0.8\n0.25\nextra\n", "IRIS-ROBOT-1\ninvalid\n0.25\n",
+        "IRIS-ROBOT-1\n0.8\n0.0\n", "IRIS-ROBOT-1\n1.2\n0.25\n",
+        "IRIS-ROBOT-1\nNaN\n0.25\n", "IRIS-ROBOT-1\n0.8\ninf\n"
+    );
+    for index in 0 .. list_len(malformed) {
+        assert(is_ok(write_text("iris-robot-invalid.txt", list_get(malformed, index))));
+        assert(!is_ok(load_checkpoint("iris-robot-invalid.txt")));
+    };
+    assert(!is_ok(load_checkpoint("iris-robot-no-such-directory/missing.txt")));
+    assert(!is_ok(save_checkpoint("iris-robot-no-such-directory/model.txt", trained)));
+    assert(!is_ok(save_checkpoint("iris-robot-invalid.txt", Dynamics { retention: 1.2, gain: 0.0 })));
+    // A rejected checkpoint leaves the active model in use.
+    var active = trained;
+    val broken = load_checkpoint("iris-robot-invalid.txt");
+    if is_ok(broken) { active = unwrap(broken) };
+    assert(active.retention == trained.retention && active.gain == trained.gain);
+    println("learning robot: checkpoint roundtrip and rejection verified");
+    return 0
+}

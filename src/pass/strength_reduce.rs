@@ -1,18 +1,21 @@
 //! Strength reduction optimizer: replaces expensive ops with cheaper equivalents.
 //!
 //! Transformations:
-//! - `x * 2^n` → `x << n`  (multiply by power-of-2 → shift left)
-//! - `x / 2^n` → `x >> n`  (integer divide by power-of-2 → logical shift right)
 //! - `x - x`   → `0`       (subtraction of identical values)
-
-use std::collections::HashMap;
+//!
+//! `x * 2^n → x << n` and `x / 2^n → x >> n` were removed: the shift drops
+//! the overflow check, and floors where division truncates. LLVM does both
+//! reductions itself where they are sound.
+//!
+//! Integers only. For floats `x - x` is NaN when `x` is NaN or infinite, and
+//! the zero this pass wrote was an integer constant of a float type, which
+//! the LLVM backend emitted as `double 0` and clang rejected.
 
 use crate::error::PassError;
 use crate::ir::function::IrFunction;
 use crate::ir::instr::{BinOp, IrInstr};
 use crate::ir::module::IrModule;
 use crate::ir::types::IrType;
-use crate::ir::value::ValueId;
 use crate::pass::Pass;
 
 pub struct StrengthReducePass;
@@ -30,35 +33,11 @@ impl Pass for StrengthReducePass {
     }
 }
 
-fn is_power_of_two(n: i64) -> bool {
-    n > 0 && (n & (n - 1)) == 0
-}
-
-fn log2_exact(n: i64) -> i64 {
-    debug_assert!(is_power_of_two(n));
-    (n as u64).trailing_zeros() as i64
-}
-
 fn strength_reduce_func(func: &mut IrFunction) {
-    // Map from ValueId → known integer constant.
-    let mut known_consts: HashMap<ValueId, i64> = HashMap::new();
-
-    // Use a local counter to avoid borrowing func while func.blocks is borrowed.
-    let mut next_id = func.next_value;
-    let mut fresh = || {
-        let id = ValueId(next_id);
-        next_id += 1;
-        id
-    };
-
     for block in &mut func.blocks {
         let mut new_instrs = Vec::new();
         for instr in block.instrs.drain(..) {
             match &instr {
-                IrInstr::ConstInt { result, value, .. } => {
-                    known_consts.insert(*result, *value);
-                    new_instrs.push(instr);
-                }
                 IrInstr::BinOp {
                     result,
                     op,
@@ -66,8 +45,11 @@ fn strength_reduce_func(func: &mut IrFunction) {
                     rhs,
                     ty,
                 } => {
-                    let lhs_const = known_consts.get(lhs).copied();
-                    let rhs_const = known_consts.get(rhs).copied();
+                    let integer = matches!(ty, IrType::Scalar(d) if d.is_integer());
+                    if !integer {
+                        new_instrs.push(instr);
+                        continue;
+                    }
                     let ty = ty.clone();
                     let result = *result;
                     let lhs = *lhs;
@@ -75,45 +57,14 @@ fn strength_reduce_func(func: &mut IrFunction) {
 
                     match op {
                         BinOp::Mul => {
-                            // x * 2^n → x << n
-                            if let Some(c) = rhs_const {
-                                if is_power_of_two(c) {
-                                    let shift = log2_exact(c);
-                                    let shift_val = fresh();
-                                    new_instrs.push(IrInstr::ConstInt {
-                                        result: shift_val,
-                                        value: shift,
-                                        ty: IrType::Scalar(crate::ir::types::DType::I64),
-                                    });
-                                    new_instrs.push(IrInstr::BinOp {
-                                        result,
-                                        op: BinOp::Shl,
-                                        lhs,
-                                        rhs: shift_val,
-                                        ty,
-                                    });
-                                    continue;
-                                }
-                            }
-                            if let Some(c) = lhs_const {
-                                if is_power_of_two(c) {
-                                    let shift = log2_exact(c);
-                                    let shift_val = fresh();
-                                    new_instrs.push(IrInstr::ConstInt {
-                                        result: shift_val,
-                                        value: shift,
-                                        ty: IrType::Scalar(crate::ir::types::DType::I64),
-                                    });
-                                    new_instrs.push(IrInstr::BinOp {
-                                        result,
-                                        op: BinOp::Shl,
-                                        lhs: rhs, // commutative
-                                        rhs: shift_val,
-                                        ty,
-                                    });
-                                    continue;
-                                }
-                            }
+                            // `x * 2^n → x << n` has been removed, like the
+                            // division rewrite below. Integer multiplication is
+                            // checked -- an overflow stops the program with
+                            // E0409 -- and a shift wraps silently, so the
+                            // rewrite turned `BIG * 2` into a wrong answer
+                            // whenever the factor was a visible constant.
+                            // LLVM reduces a checked multiply by a constant
+                            // itself.
                             new_instrs.push(IrInstr::BinOp {
                                 result,
                                 op: BinOp::Mul,
@@ -190,9 +141,6 @@ fn strength_reduce_func(func: &mut IrFunction) {
         }
         block.instrs = new_instrs;
     }
-
-    // Sync the counter back so any subsequent passes see unique IDs.
-    func.next_value = next_id;
 }
 
 // ---------------------------------------------------------------------------
@@ -331,22 +279,20 @@ mod tests {
     }
 
     #[test]
-    fn mul_by_power_of_two_reduced_to_shl() {
-        let mut m = build_mul_module(8); // 8 = 2^3
+    fn mul_by_power_of_two_is_not_reduced_to_shl() {
+        // A shift would drop the overflow check: `x * 8` must stay a multiply.
+        let mut m = build_mul_module(8);
         StrengthReducePass.run(&mut m).unwrap();
 
         let block = &m.functions()[0].blocks()[0];
-        // Should have: ConstInt(7), ConstInt(8), ConstInt(3), Shl, Return
-        let has_shl = block
+        assert!(block
             .instrs
             .iter()
-            .any(|i| matches!(i, IrInstr::BinOp { op: BinOp::Shl, .. }));
-        assert!(has_shl, "mul by 8 should be reduced to shl");
-        let no_mul = !block
+            .any(|i| matches!(i, IrInstr::BinOp { op: BinOp::Mul, .. })));
+        assert!(!block
             .instrs
             .iter()
-            .any(|i| matches!(i, IrInstr::BinOp { op: BinOp::Mul, .. }));
-        assert!(no_mul, "mul should be removed");
+            .any(|i| matches!(i, IrInstr::BinOp { op: BinOp::Shl, .. })));
     }
 
     #[test]
@@ -364,16 +310,14 @@ mod tests {
 
     #[test]
     fn mul_by_one_not_reduced() {
-        // 1 is 2^0, so it should be reduced to shl by 0
         let mut m = build_mul_module(1);
         StrengthReducePass.run(&mut m).unwrap();
 
         let block = &m.functions()[0].blocks()[0];
-        let has_shl = block
+        assert!(!block
             .instrs
             .iter()
-            .any(|i| matches!(i, IrInstr::BinOp { op: BinOp::Shl, .. }));
-        assert!(has_shl, "mul by 1 is 2^0, should become shl by 0");
+            .any(|i| matches!(i, IrInstr::BinOp { op: BinOp::Shl, .. })));
     }
 
     #[test]
@@ -444,24 +388,47 @@ mod tests {
     }
 
     #[test]
-    fn is_power_of_two_basic() {
-        assert!(is_power_of_two(1));
-        assert!(is_power_of_two(2));
-        assert!(is_power_of_two(4));
-        assert!(is_power_of_two(1024));
-        assert!(!is_power_of_two(0));
-        assert!(!is_power_of_two(3));
-        assert!(!is_power_of_two(6));
-        assert!(!is_power_of_two(-1));
-    }
+    fn float_sub_self_is_kept() {
+        // x - x is NaN for a NaN or infinite x, and the integer zero the pass
+        // used to write had a float type that LLVM rejected (`double 0`).
+        let f64_ty = IrType::Scalar(DType::F64);
+        let mut m = IrModule::new("test");
+        let mut builder = IrFunctionBuilder::new("f", vec![], f64_ty.clone());
+        let entry = builder.create_block(Some("entry"));
+        builder.set_current_block(entry);
+        let x = builder.fresh_value();
+        builder.push_instr(
+            IrInstr::ConstFloat {
+                result: x,
+                value: f64::INFINITY,
+                ty: f64_ty.clone(),
+            },
+            Some(f64_ty.clone()),
+        );
+        let r = builder.fresh_value();
+        builder.push_instr(
+            IrInstr::BinOp {
+                result: r,
+                op: BinOp::Sub,
+                lhs: x,
+                rhs: x,
+                ty: f64_ty.clone(),
+            },
+            Some(f64_ty),
+        );
+        builder.push_instr(IrInstr::Return { values: vec![r] }, None);
+        m.add_function(builder.build()).unwrap();
+        StrengthReducePass.run(&mut m).unwrap();
 
-    #[test]
-    fn log2_exact_values() {
-        assert_eq!(log2_exact(1), 0);
-        assert_eq!(log2_exact(2), 1);
-        assert_eq!(log2_exact(4), 2);
-        assert_eq!(log2_exact(8), 3);
-        assert_eq!(log2_exact(1024), 10);
+        let block = &m.functions()[0].blocks()[0];
+        assert!(block
+            .instrs
+            .iter()
+            .any(|i| matches!(i, IrInstr::BinOp { op: BinOp::Sub, .. })));
+        assert!(!block
+            .instrs
+            .iter()
+            .any(|i| matches!(i, IrInstr::ConstInt { .. })));
     }
 
     #[test]

@@ -355,6 +355,10 @@ impl std::fmt::Display for Token {
 pub struct Spanned<T> {
     pub node: T,
     pub span: Span,
+    /// A line break separates this token from the one before it. The parser
+    /// ends a statement there, and does not continue a call or index onto a
+    /// new line.
+    pub newline_before: bool,
 }
 
 pub struct Lexer<'src> {
@@ -379,6 +383,7 @@ impl<'src> Lexer<'src> {
                     self.pos as u32,
                 );
                 tokens.push(Spanned {
+                    newline_before: false,
                     node: Token::DocComment(text),
                     span,
                 });
@@ -387,12 +392,23 @@ impl<'src> Lexer<'src> {
             if self.pos >= self.src.len() {
                 let end = self.pos as u32;
                 tokens.push(Spanned {
+                    newline_before: false,
                     node: Token::Eof,
                     span: Span::at(end),
                 });
                 break;
             }
-            let tok = self.next_token()?;
+            let mut tok = self.next_token()?;
+            let previous_end = tokens
+                .iter()
+                .rev()
+                .find(|t: &&Spanned<Token>| !matches!(t.node, Token::DocComment(_)))
+                .map(|t| t.span.end.0 as usize)
+                .unwrap_or(0);
+            tok.newline_before = self
+                .src
+                .get(previous_end..tok.span.start.0 as usize)
+                .is_some_and(|gap| gap.contains('\n'));
             tokens.push(tok);
         }
         Ok(tokens)
@@ -488,6 +504,7 @@ impl<'src> Lexer<'src> {
         if ch == b'-' && self.peek2() == Some(b'>') {
             self.pos += 2;
             return Ok(Spanned {
+                newline_before: false,
                 node: Token::Arrow,
                 span: Span::new(start, self.pos as u32),
             });
@@ -495,6 +512,7 @@ impl<'src> Lexer<'src> {
         if ch == b'=' && self.peek2() == Some(b'=') {
             self.pos += 2;
             return Ok(Spanned {
+                newline_before: false,
                 node: Token::EqEq,
                 span: Span::new(start, self.pos as u32),
             });
@@ -502,6 +520,7 @@ impl<'src> Lexer<'src> {
         if ch == b'=' && self.peek2() == Some(b'>') {
             self.pos += 2;
             return Ok(Spanned {
+                newline_before: false,
                 node: Token::FatArrow,
                 span: Span::new(start, self.pos as u32),
             });
@@ -509,6 +528,7 @@ impl<'src> Lexer<'src> {
         if ch == b'!' && self.peek2() == Some(b'=') {
             self.pos += 2;
             return Ok(Spanned {
+                newline_before: false,
                 node: Token::NotEq,
                 span: Span::new(start, self.pos as u32),
             });
@@ -516,6 +536,7 @@ impl<'src> Lexer<'src> {
         if ch == b'<' && self.peek2() == Some(b'=') {
             self.pos += 2;
             return Ok(Spanned {
+                newline_before: false,
                 node: Token::LtEq,
                 span: Span::new(start, self.pos as u32),
             });
@@ -523,6 +544,7 @@ impl<'src> Lexer<'src> {
         if ch == b'>' && self.peek2() == Some(b'=') {
             self.pos += 2;
             return Ok(Spanned {
+                newline_before: false,
                 node: Token::GtEq,
                 span: Span::new(start, self.pos as u32),
             });
@@ -530,6 +552,7 @@ impl<'src> Lexer<'src> {
         if ch == b'<' && self.peek2() == Some(b'>') {
             self.pos += 2;
             return Ok(Spanned {
+                newline_before: false,
                 node: Token::LtGt,
                 span: Span::new(start, self.pos as u32),
             });
@@ -539,6 +562,7 @@ impl<'src> Lexer<'src> {
         if ch == b'&' && self.peek2() == Some(b'&') {
             self.pos += 2;
             return Ok(Spanned {
+                newline_before: false,
                 node: Token::AmpAmp,
                 span: Span::new(start, self.pos as u32),
             });
@@ -547,6 +571,7 @@ impl<'src> Lexer<'src> {
         if ch == b'&' {
             self.pos += 1;
             return Ok(Spanned {
+                newline_before: false,
                 node: Token::Amp,
                 span: Span::new(start, self.pos as u32),
             });
@@ -555,6 +580,7 @@ impl<'src> Lexer<'src> {
         if ch == b'|' && self.peek2() == Some(b'|') {
             self.pos += 2;
             return Ok(Spanned {
+                newline_before: false,
                 node: Token::PipePipe,
                 span: Span::new(start, self.pos as u32),
             });
@@ -564,6 +590,7 @@ impl<'src> Lexer<'src> {
         if ch == b'+' && self.peek2() == Some(b'=') {
             self.pos += 2;
             return Ok(Spanned {
+                newline_before: false,
                 node: Token::PlusEq,
                 span: Span::new(start, self.pos as u32),
             });
@@ -571,6 +598,7 @@ impl<'src> Lexer<'src> {
         if ch == b'-' && self.peek2() == Some(b'=') {
             self.pos += 2;
             return Ok(Spanned {
+                newline_before: false,
                 node: Token::MinusEq,
                 span: Span::new(start, self.pos as u32),
             });
@@ -578,6 +606,7 @@ impl<'src> Lexer<'src> {
         if ch == b'*' && self.peek2() == Some(b'=') {
             self.pos += 2;
             return Ok(Spanned {
+                newline_before: false,
                 node: Token::StarEq,
                 span: Span::new(start, self.pos as u32),
             });
@@ -585,6 +614,7 @@ impl<'src> Lexer<'src> {
         if ch == b'/' && self.peek2() == Some(b'=') {
             self.pos += 2;
             return Ok(Spanned {
+                newline_before: false,
                 node: Token::SlashEq,
                 span: Span::new(start, self.pos as u32),
             });
@@ -592,6 +622,7 @@ impl<'src> Lexer<'src> {
         if ch == b'%' && self.peek2() == Some(b'=') {
             self.pos += 2;
             return Ok(Spanned {
+                newline_before: false,
                 node: Token::PercentEq,
                 span: Span::new(start, self.pos as u32),
             });
@@ -604,6 +635,7 @@ impl<'src> Lexer<'src> {
         {
             self.pos += 3;
             return Ok(Spanned {
+                newline_before: false,
                 node: Token::DotDotEq,
                 span: Span::new(start, self.pos as u32),
             });
@@ -612,6 +644,7 @@ impl<'src> Lexer<'src> {
         if ch == b'.' && self.peek2() == Some(b'.') {
             self.pos += 2;
             return Ok(Spanned {
+                newline_before: false,
                 node: Token::DotDot,
                 span: Span::new(start, self.pos as u32),
             });
@@ -621,6 +654,7 @@ impl<'src> Lexer<'src> {
         if ch == b':' && self.peek2() == Some(b':') {
             self.pos += 2;
             return Ok(Spanned {
+                newline_before: false,
                 node: Token::DoubleColon,
                 span: Span::new(start, self.pos as u32),
             });
@@ -662,6 +696,7 @@ impl<'src> Lexer<'src> {
         if let Some(tok) = maybe_punct {
             self.pos += 1;
             return Ok(Spanned {
+                newline_before: false,
                 node: tok,
                 span: Span::new(start, self.pos as u32),
             });
@@ -693,6 +728,20 @@ impl<'src> Lexer<'src> {
             return Ok(self.lex_ident_or_keyword(start));
         }
 
+        // `# comment` from Python or shell: offer the IRIS comment.
+        if ch == b'#' {
+            return Err(ParseError::rich(
+                "E0001",
+                crate::diagnostics::Diagnostic::error("comments in IRIS start with `//`, not `#`")
+                    .with_primary_span(start, start + 1, None)
+                    .with_fix(crate::diagnostics::Fix::replace(
+                        "use `//`",
+                        start,
+                        start + 1,
+                        "//",
+                    )),
+            ));
+        }
         Err(ParseError::UnexpectedChar {
             ch: self.current_char().unwrap_or(ch as char),
             pos: start,
@@ -748,6 +797,7 @@ impl<'src> Lexer<'src> {
             }
         }
         Ok(Spanned {
+            newline_before: false,
             node: Token::StringLit(s),
             span: Span::new(start, self.pos as u32),
         })
@@ -772,6 +822,7 @@ impl<'src> Lexer<'src> {
             }
         }
         Ok(Spanned {
+            newline_before: false,
             node: Token::StringLit(s),
             span: Span::new(start, self.pos as u32),
         })
@@ -819,14 +870,21 @@ impl<'src> Lexer<'src> {
             Some(_c) => self.advance_char().unwrap_or(' ') as i64,
         };
         if self.peek() != Some(b'\'') {
+            if let Some(e) = crate::parser::hints::single_quoted_string(self.src, start) {
+                return Err(e);
+            }
             return Err(ParseError::UnexpectedToken {
-                expected: "'".to_owned(),
-                found: format!("{:?}", self.peek().map(|b| b as char)),
+                expected: "a closing `'`".to_owned(),
+                found: self
+                    .peek()
+                    .map(|b| (b as char).to_string())
+                    .unwrap_or_else(|| "<eof>".into()),
                 span: Span::new(start, self.pos as u32),
             });
         }
         self.advance(); // consume closing `'`
         Ok(Spanned {
+            newline_before: false,
             node: Token::CharLit(ch),
             span: Span::new(start, self.pos as u32),
         })
@@ -883,20 +941,85 @@ impl<'src> Lexer<'src> {
             }
         }
         Ok(Spanned {
+            newline_before: false,
             node: Token::FStringLit(raw),
             span: Span::new(start, self.pos as u32),
         })
     }
 
     fn lex_number(&mut self, start: u32) -> Result<Spanned<Token>, ParseError> {
-        while self.peek().is_some_and(|b| b.is_ascii_digit()) {
+        // Hexadecimal integer literal: 0x... or 0X...
+        if self.peek() == Some(b'0') && (self.peek2() == Some(b'x') || self.peek2() == Some(b'X')) {
+            self.advance(); // consume '0'
+            self.advance(); // consume 'x'/'X'
+            let hex_start = self.pos;
+            while self
+                .peek()
+                .is_some_and(|b| b.is_ascii_hexdigit() || b == b'_')
+            {
+                self.advance();
+            }
+            let raw_hex = &self.src[hex_start..self.pos];
+            let clean_hex: String = raw_hex.chars().filter(|c| *c != '_').collect();
+            if clean_hex.is_empty() {
+                return Err(ParseError::InvalidLiteral {
+                    text: format!("0x{}", raw_hex),
+                    span: Span::new(start, self.pos as u32),
+                });
+            }
+            let value = u64::from_str_radix(&clean_hex, 16)
+                .map(|u| u as i64)
+                .map_err(|_| ParseError::InvalidLiteral {
+                    text: self.src[start as usize..self.pos].to_owned(),
+                    span: Span::new(start, self.pos as u32),
+                })?;
+            return Ok(Spanned {
+                newline_before: false,
+                node: Token::IntLit(value),
+                span: Span::new(start, self.pos as u32),
+            });
+        }
+
+        // Binary integer literal: 0b... or 0B...
+        if self.peek() == Some(b'0') && (self.peek2() == Some(b'b') || self.peek2() == Some(b'B')) {
+            self.advance(); // consume '0'
+            self.advance(); // consume 'b'/'B'
+            let bin_start = self.pos;
+            while self
+                .peek()
+                .is_some_and(|b| b == b'0' || b == b'1' || b == b'_')
+            {
+                self.advance();
+            }
+            let raw_bin = &self.src[bin_start..self.pos];
+            let clean_bin: String = raw_bin.chars().filter(|c| *c != '_').collect();
+            if clean_bin.is_empty() {
+                return Err(ParseError::InvalidLiteral {
+                    text: format!("0b{}", raw_bin),
+                    span: Span::new(start, self.pos as u32),
+                });
+            }
+            let value = u64::from_str_radix(&clean_bin, 2)
+                .map(|u| u as i64)
+                .map_err(|_| ParseError::InvalidLiteral {
+                    text: self.src[start as usize..self.pos].to_owned(),
+                    span: Span::new(start, self.pos as u32),
+                })?;
+            return Ok(Spanned {
+                newline_before: false,
+                node: Token::IntLit(value),
+                span: Span::new(start, self.pos as u32),
+            });
+        }
+
+        while self.peek().is_some_and(|b| b.is_ascii_digit() || b == b'_') {
             self.advance();
         }
         let is_float =
             self.peek() == Some(b'.') && self.peek2().is_some_and(|b| b.is_ascii_digit());
         if is_float {
             self.advance(); // consume '.'
-            while self.peek().is_some_and(|b| b.is_ascii_digit()) {
+            while self.peek().is_some_and(|b| b.is_ascii_digit() || b == b'_') {
                 self.advance();
             }
             // Optional exponent: e/E followed by optional +/- and digits
@@ -905,26 +1028,30 @@ impl<'src> Lexer<'src> {
                 if self.peek().is_some_and(|b| b == b'+' || b == b'-') {
                     self.advance();
                 }
-                while self.peek().is_some_and(|b| b.is_ascii_digit()) {
+                while self.peek().is_some_and(|b| b.is_ascii_digit() || b == b'_') {
                     self.advance();
                 }
             }
             let text = &self.src[start as usize..self.pos];
-            let value: f64 = text.parse().map_err(|_| ParseError::InvalidLiteral {
+            let clean_text: String = text.chars().filter(|c| *c != '_').collect();
+            let value: f64 = clean_text.parse().map_err(|_| ParseError::InvalidLiteral {
                 text: text.to_owned(),
                 span: Span::new(start, self.pos as u32),
             })?;
             Ok(Spanned {
+                newline_before: false,
                 node: Token::FloatLit(value),
                 span: Span::new(start, self.pos as u32),
             })
         } else {
             let text = &self.src[start as usize..self.pos];
-            let value: i64 = text.parse().map_err(|_| ParseError::InvalidLiteral {
+            let clean_text: String = text.chars().filter(|c| *c != '_').collect();
+            let value: i64 = clean_text.parse().map_err(|_| ParseError::InvalidLiteral {
                 text: text.to_owned(),
                 span: Span::new(start, self.pos as u32),
             })?;
             Ok(Spanned {
+                newline_before: false,
                 node: Token::IntLit(value),
                 span: Span::new(start, self.pos as u32),
             })
@@ -1004,6 +1131,7 @@ impl<'src> Lexer<'src> {
             _ => Token::Ident(text.to_owned()),
         };
         Spanned {
+            newline_before: false,
             node: tok,
             span: Span::new(start, self.pos as u32),
         }
@@ -1100,10 +1228,14 @@ mod tests {
 
     #[test]
     fn lex_integer_literals() {
-        let tokens = toks("0 42 1000000");
+        let tokens = toks("0 42 1_000_000 0x16 0xDEADBEEF 0b1010 0x0539");
         assert_eq!(tokens[0], Token::IntLit(0));
         assert_eq!(tokens[1], Token::IntLit(42));
         assert_eq!(tokens[2], Token::IntLit(1000000));
+        assert_eq!(tokens[3], Token::IntLit(0x16));
+        assert_eq!(tokens[4], Token::IntLit(0xDEADBEEF));
+        assert_eq!(tokens[5], Token::IntLit(10));
+        assert_eq!(tokens[6], Token::IntLit(1337));
     }
 
     #[test]

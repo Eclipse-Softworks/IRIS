@@ -1,0 +1,55 @@
+// A PID controller in fixed point: integer arithmetic only (the Uno has no
+// floating-point unit). Setpoint and measurement are ADC counts (0..1023);
+// gains are in thousandths; the output is a PWM duty in 0..255.
+//
+// The derivative acts on the measurement, so a setpoint change gives no
+// kick. The integral is clamped, and it stops accumulating while the output
+// is pinned at a limit in the direction the error pushes (anti-windup).
+
+pub const PID_SCALE: i64 = 1000
+pub const PID_KP: i64 = 1500
+pub const PID_KI: i64 = 60
+pub const PID_KD: i64 = 6000
+pub const PID_DUTY_MAX: i64 = 255
+pub const PID_I_LIMIT: i64 = 255000
+
+var pid_integral: i64 = 0
+var pid_previous: i64 = -1
+
+pub def pid_limit(x: i64, low: i64, high: i64) -> i64 {
+    if x < low {
+        low
+    } else if x > high {
+        high
+    } else {
+        x
+    }
+}
+
+// One control step: the duty to apply until the next one.
+pub def pid_step(setpoint: i64, measurement: i64) -> i64 {
+    val error = setpoint - measurement;
+    val previous = if pid_previous < 0 { measurement } else { pid_previous };
+    pid_previous = measurement;
+    val p = PID_KP * error;
+    val d = PID_KD * (previous - measurement);
+    val integral = pid_limit(pid_integral + PID_KI * error, 0 - PID_I_LIMIT, PID_I_LIMIT);
+    val raw = (p + integral + d) / PID_SCALE;
+    val duty = pid_limit(raw, 0, PID_DUTY_MAX);
+    val pinned_high = raw > PID_DUTY_MAX && error > 0;
+    val pinned_low = raw < 0 && error < 0;
+    if pinned_high == false && pinned_low == false {
+        pid_integral = integral
+    };
+    duty
+}
+
+pub def pid_integral_term() -> i64 {
+    pid_integral
+}
+
+pub def pid_reset() -> i64 {
+    pid_integral = 0;
+    pid_previous = -1;
+    0
+}

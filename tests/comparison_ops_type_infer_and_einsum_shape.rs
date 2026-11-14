@@ -86,7 +86,8 @@ def ge(a: f32, b: f32) -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// 4. LLVM emitter emits `fcmp one` for f32 !=  (not `fcmp oeq`)
+// 4. LLVM emitter emits `fcmp une` for f32 != (NaN != NaN is true, as in
+//    the interpreter; `one` would make it false)
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -98,8 +99,8 @@ def neq(a: f32, b: f32) -> bool {
 "#;
     let output = compile(src, "test", EmitKind::Llvm).expect("compile");
     assert!(
-        output.contains("fcmp one"),
-        "LLVM must contain 'fcmp one' for f32 !=\n{}",
+        output.contains("fcmp une"),
+        "LLVM must contain 'fcmp une' for f32 !=\n{}",
         output
     );
 }
@@ -318,7 +319,8 @@ fn test_einsum_shape_check_wrong_input_count() {
 }
 
 // ---------------------------------------------------------------------------
-// 10. LLVM Load with single index emits getelementptr + load (not undef)
+// 10. LLVM Load with a single index reads through the runtime's bounds-checked
+//     `iris_tensor_get_at` (not undef, not the tensor header)
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -366,8 +368,8 @@ fn test_llvm_load_no_undef() {
 
     let output = emit_llvm_ir(&module).expect("emit");
     assert!(
-        output.contains("getelementptr"),
-        "LLVM load with index must emit getelementptr\n{}",
+        output.contains("@iris_tensor_get_at(ptr"),
+        "LLVM load with index must call iris_tensor_get_at\n{}",
         output
     );
     assert!(

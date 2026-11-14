@@ -1,0 +1,10 @@
+// Arms that borrow the same place with the same mutability may both flow into
+// one binding; they agree, so this must compile and run.
+def main() -> i64 {
+    val x: i64 = 40
+    val c = 1 + 1
+    val y = if c == 2 { &x } else { &x }
+    assert(*y == 40)
+    println("branch arm borrow ok")
+    0
+}

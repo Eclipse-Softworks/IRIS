@@ -15,12 +15,120 @@ use crate::cache::BuildCache;
 use crate::error::Error;
 use crate::lower::substitute_ast_type;
 use crate::parser::ast::{
-    AstBlock, AstExpr, AstFunction, AstMacroDef, AstModule, AstModuleDef, AstStmt, AstTraitDef,
-    AstType, AstWhenPattern, BringPath, Ident,
+    AstBlock, AstExpr, AstFunction, AstHandlerArm, AstMacroDef, AstModule, AstModuleDef, AstStmt,
+    AstTraitDef, AstType, AstWhenPattern, BringPath, Ident,
 };
-use crate::parser::lexer::Lexer;
 use crate::parser::lexer::Span;
 use crate::parser::parse::Parser;
+
+/// One file's text as the lexer saw it, placed at `base` in a [`SourceMap`].
+#[derive(Debug, Clone)]
+pub struct SourceFile {
+    pub base: u32,
+    /// Path on disk, or `<stdlib>/<name>.iris` for an embedded module.
+    pub path: PathBuf,
+    /// Preprocessed text; spans index into it after subtracting `base`.
+    pub text: String,
+}
+
+/// Gives every file of a multi-file program its own disjoint span range, so
+/// a byte offset in the merged program identifies one file and position.
+/// The main file is first, at base 0, so its offsets are its own; a brought
+/// file's diagnostics are rendered in that file (`diagnostics::localize`).
+#[derive(Debug, Clone, Default)]
+pub struct SourceMap {
+    files: Vec<SourceFile>,
+    next_base: u32,
+}
+
+impl SourceMap {
+    fn add(&mut self, path: PathBuf, text: String) -> u32 {
+        let base = self.next_base;
+        // A one-byte gap keeps a file's end-of-text span out of the next file.
+        self.next_base = base.saturating_add(text.len() as u32).saturating_add(1);
+        self.files.push(SourceFile { base, path, text });
+        base
+    }
+
+    /// The file containing `byte`, and the offset within that file's text.
+    pub fn lookup(&self, byte: u32) -> Option<(&SourceFile, u32)> {
+        let index = self.files.partition_point(|file| file.base <= byte);
+        let file = self.files.get(index.checked_sub(1)?)?;
+        let offset = byte - file.base;
+        (offset as usize <= file.text.len()).then_some((file, offset))
+    }
+
+    pub fn files(&self) -> &[SourceFile] {
+        &self.files
+    }
+
+    /// The lines of every file, for native runtime errors. The standard
+    /// library's are not reported: a failure inside it is reported at the
+    /// line that called it.
+    pub fn lines(&self) -> crate::ir::module::SourceLines {
+        crate::ir::module::SourceLines::from_files(
+            self.files
+                .iter()
+                .map(|f| {
+                    let reported = !f.path.starts_with("<stdlib>");
+                    crate::ir::module::SourceFileLines::new(
+                        display_path(&f.path),
+                        f.base,
+                        &f.text,
+                        reported,
+                    )
+                })
+                .collect(),
+        )
+    }
+
+    /// A map holding just one file at base 0, for single-source compiles.
+    pub fn single(path: PathBuf, text: String) -> Self {
+        let mut map = Self::default();
+        map.add(path, text);
+        map
+    }
+}
+
+/// The source maps of recent compiles, by canonical main-file path, so an
+/// error can be rendered in the file it is in after the compiler is gone.
+/// Bounded: each holds every file's text.
+static SOURCE_MAPS: std::sync::Mutex<Vec<(PathBuf, std::sync::Arc<SourceMap>)>> =
+    std::sync::Mutex::new(Vec::new());
+const SOURCE_MAPS_KEPT: usize = 16;
+
+fn register_source_map(main: &Path, map: SourceMap) {
+    let Ok(mut maps) = SOURCE_MAPS.lock() else {
+        return;
+    };
+    maps.retain(|(path, _)| path != main);
+    if maps.len() >= SOURCE_MAPS_KEPT {
+        maps.remove(0);
+    }
+    maps.push((main.to_path_buf(), std::sync::Arc::new(map)));
+}
+
+/// The files of the latest compile of `main`, if it is one of the recent ones.
+pub fn source_map_for(main: &Path) -> Option<std::sync::Arc<SourceMap>> {
+    let key = main.canonicalize().unwrap_or_else(|_| main.to_path_buf());
+    let maps = SOURCE_MAPS.lock().ok()?;
+    maps.iter()
+        .rev()
+        .find(|(path, _)| *path == key)
+        .map(|(_, map)| map.clone())
+}
+
+/// A path as a message shows it: relative to the working directory when it is
+/// inside it, without Windows' `\\?\` prefix, with `/` separators.
+pub(crate) fn display_path(path: &Path) -> String {
+    let text = path.to_string_lossy();
+    let plain = PathBuf::from(text.strip_prefix(r"\\?\").unwrap_or(&text));
+    let shown = std::env::current_dir()
+        .ok()
+        .and_then(|cwd| plain.strip_prefix(&cwd).ok().map(Path::to_path_buf))
+        .unwrap_or(plain);
+    shown.to_string_lossy().replace('\\', "/")
+}
 
 /// Compiles `.iris` files from disk, resolving all `bring` declarations.
 pub struct FileCompiler {
@@ -28,6 +136,11 @@ pub struct FileCompiler {
     search_paths: Vec<PathBuf>,
     /// Incremental build cache.
     cache: BuildCache,
+    /// When set, each parsed file is placed at its own base offset and
+    /// recorded here (see [`SourceMap`]).
+    source_map: Option<std::cell::RefCell<SourceMap>>,
+    /// Demand-driven incremental query engine for memoized compilation.
+    query: std::cell::RefCell<crate::query::QueryEngine>,
 }
 
 impl FileCompiler {
@@ -41,6 +154,8 @@ impl FileCompiler {
         Self {
             search_paths: Vec::new(),
             cache,
+            source_map: Some(std::cell::RefCell::new(SourceMap::default())),
+            query: std::cell::RefCell::new(crate::query::QueryEngine::new()),
         }
     }
 
@@ -49,6 +164,8 @@ impl FileCompiler {
         Self {
             search_paths: Vec::new(),
             cache,
+            source_map: Some(std::cell::RefCell::new(SourceMap::default())),
+            query: std::cell::RefCell::new(crate::query::QueryEngine::new()),
         }
     }
 
@@ -56,7 +173,20 @@ impl FileCompiler {
         Self {
             search_paths: paths,
             cache: BuildCache::disabled(),
+            source_map: Some(std::cell::RefCell::new(SourceMap::default())),
+            query: std::cell::RefCell::new(crate::query::QueryEngine::new()),
         }
+    }
+
+    /// Give every parsed file a disjoint span range and record it. Always
+    /// on now; kept so a caller that needs the map says so.
+    pub fn enable_source_map(&mut self) {
+        self.source_map = Some(std::cell::RefCell::new(SourceMap::default()));
+    }
+
+    /// The files parsed so far, if [`Self::enable_source_map`] was called.
+    pub fn take_source_map(&mut self) -> Option<SourceMap> {
+        self.source_map.take().map(std::cell::RefCell::into_inner)
     }
 
     /// Set extra search paths (used by LSP / builder to find packages/libraries).
@@ -90,9 +220,17 @@ impl FileCompiler {
         search.extend(extra_paths.iter().map(|p| p.to_path_buf()));
         search.extend(self.search_paths.iter().cloned());
 
-        let main_ast = self.parse_source(source)?;
-
-        self.resolve_brings(main_ast, &canonical, &base_dir, &search)
+        // The main file first, at base 0, whatever this compiler parsed before.
+        if let Some(map) = &self.source_map {
+            *map.borrow_mut() = SourceMap::default();
+        }
+        let result = self
+            .parse_source_from(source, &canonical)
+            .and_then(|main_ast| self.resolve_brings(main_ast, &canonical, &base_dir, &search));
+        if let Some(map) = &self.source_map {
+            register_source_map(&canonical, map.borrow().clone());
+        }
+        result
     }
 
     /// Disable the incremental cache for this compiler instance.
@@ -108,6 +246,24 @@ impl FileCompiler {
     /// Flush the build cache manifest to disk.
     pub fn flush_cache(&mut self) {
         self.cache.flush();
+    }
+
+    /// Incrementally compiles `source` under `name`, reusing memoized AST/IR/emit
+    /// results when content or AST structure is unchanged.
+    pub fn compile_incremental(
+        &self,
+        name: &str,
+        source: &str,
+        emit: crate::EmitKind,
+    ) -> Result<String, Error> {
+        let mut qe = self.query.borrow_mut();
+        let sid = qe.set_source(name, source);
+        qe.compile(sid, name, emit)
+    }
+
+    /// Returns cumulative incremental query statistics for this compiler instance.
+    pub fn query_stats(&self) -> crate::query::QueryStats {
+        self.query.borrow().stats()
     }
 
     /// BFS-resolve all `bring` declarations and merge dependencies into `main_ast`.
@@ -141,7 +297,7 @@ impl FileCompiler {
                     if !visited.contains(&resolved) {
                         visited.insert(resolved.clone());
                         let dep_src = std::fs::read_to_string(&resolved)?;
-                        let mut dep_ast = self.parse_source(&dep_src)?;
+                        let mut dep_ast = self.parse_source_from(&dep_src, &resolved)?;
                         let dep_dir = resolved.parent().unwrap_or(Path::new(".")).to_path_buf();
                         for dep_bring in &dep_ast.brings {
                             queue.push_back((dep_bring.path.clone(), dep_dir.clone()));
@@ -178,7 +334,10 @@ impl FileCompiler {
                     if !visited.contains(&key_path) {
                         visited.insert(key_path);
                         if let Some(src) = crate::stdlib::stdlib_source(name) {
-                            let mut dep_ast = self.parse_source(src)?;
+                            let mut dep_ast = self.parse_source_from(
+                                src,
+                                &PathBuf::from(format!("<stdlib>/{name}.iris")),
+                            )?;
                             for dep_bring in &dep_ast.brings {
                                 queue.push_back((dep_bring.path.clone(), base_dir.to_path_buf()));
                             }
@@ -194,30 +353,43 @@ impl FileCompiler {
         Ok(merged)
     }
 
-    fn parse_source(&self, src: &str) -> Result<AstModule, Error> {
-        // Run preprocessor to resolve #if/#ifdef/#define directives.
+    /// Parse one file. With a source map enabled, its tokens are shifted to
+    /// the file's base offset so its spans stay distinct after merging.
+    fn parse_source_from(&self, src: &str, path: &Path) -> Result<AstModule, Error> {
+        // Run preprocessor to resolve #if/#ifdef/#define directives; its
+        // tokens carry the macros' values.
         let pp = crate::preprocessor::Preprocessor::new();
-        let processed = pp.process(src, "<source>").map_err(Error::Preprocessor)?;
-        let tokens = Lexer::new(&processed).tokenize()?;
-        let mut parser = Parser::new(&tokens);
+        let processed = pp
+            .process_full(src, &display_path(path))
+            .map_err(Error::Preprocessor)?;
+        let mut tokens = processed.tokenize()?;
+        let processed = processed.text;
+        let mut base = 0;
+        if let Some(map) = &self.source_map {
+            base = map.borrow_mut().add(path.to_path_buf(), processed.clone());
+            for token in &mut tokens {
+                token.span.start.0 += base;
+                token.span.end.0 += base;
+            }
+        }
+        let mut parser = Parser::new(&tokens).with_source(display_path(path), &processed, base);
         let (module, errors) = parser.parse_module_recovering();
         if errors.is_empty() {
             return Ok(module);
         }
-        for e in &errors {
-            eprintln!("\x1b[1;31merror\x1b[0m: {}", e);
-        }
-        if errors.len() > 1 {
-            eprintln!(
-                "\x1b[1;31merror\x1b[0m: aborting due to {} parse error(s)",
-                errors.len()
-            );
-        }
-        Err(Error::Parse(
+        // Every independent error travels in the result; the caller renders
+        // them. Printing here put raw, unlocated copies on stderr ahead of the
+        // rendered diagnostic -- and into the language server's and JSON
+        // output, which must contain nothing else.
+        // Spans of brought files are shifted by the file's base offset; the
+        // hints index this file's own text, so they apply to the main file.
+        let errors = if base == 0 {
+            crate::parser::hints::improve(&processed, &tokens, errors)
+        } else {
             errors
-                .into_iter()
-                .next()
-                .expect("errors is non-empty, checked above"),
+        };
+        Err(Error::Parse(
+            crate::error::ParseError::collect(errors).expect("errors is non-empty, checked above"),
         ))
     }
 
@@ -244,6 +416,12 @@ impl FileCompiler {
                 let named = dir.join(format!("{}.iris", name));
                 if named.exists() {
                     return Some(named);
+                }
+            }
+            if dir.extension().is_none() {
+                let with_ext = dir.with_extension("iris");
+                if with_ext.is_file() {
+                    return Some(with_ext);
                 }
             }
             None
@@ -300,6 +478,8 @@ impl FileCompiler {
         main_ast.structs.extend(dep.structs);
         main_ast.enums.extend(dep.enums);
         main_ast.consts.extend(dep.consts);
+        // Program state is merged by name; a clash is reported by the lowerer.
+        main_ast.state_vars.extend(dep.state_vars);
         main_ast.type_aliases.extend(dep.type_aliases);
         main_ast.traits.extend(dep.traits);
         main_ast.impls.extend(dep.impls);
@@ -430,12 +610,135 @@ fn rewrite_type(ty: &mut AstType, symbols: &HashSet<String>, prefix: &str) {
     }
 }
 
-fn rewrite_expr(expr: &mut AstExpr, symbols: &HashSet<String>, prefix: &str) {
+/// Names bound by the local scopes enclosing the code being rewritten.
+///
+/// Merging a brought module renames its items to `module__name`, but only
+/// where a name still refers to the item: a parameter or local named like one
+/// of the module's functions shadows it, as it does during lowering
+/// (`resolve_unqualified_name` consults the scope first). Rewriting the
+/// shadowed uses too turned `std.ros2`'s `msg_type: str` parameters into
+/// references to its `msg_type` function.
+///
+/// Each binding records whether it is callable -- a parameter of function
+/// type, or a `val`/`var` annotated with one or initialised by a lambda --
+/// because a call `name(...)` only reaches the local when it holds a closure;
+/// otherwise the lowerer calls the function of that name, and so must find
+/// it under its mangled name.
+type BoundNames = Vec<(String, bool)>;
+
+fn is_bound(bound: &BoundNames, name: &str) -> bool {
+    bound.iter().any(|(b, _)| b == name)
+}
+
+/// Whether the innermost binding of `name` holds a function value.
+fn is_callable_binding(bound: &BoundNames, name: &str) -> bool {
+    bound
+        .iter()
+        .rev()
+        .find(|(b, _)| b == name)
+        .is_some_and(|(_, callable)| *callable)
+}
+
+fn is_fn_type(ty: &AstType) -> bool {
+    matches!(ty, AstType::Fn { .. })
+}
+
+fn plain(name: &str) -> (String, bool) {
+    (name.to_string(), false)
+}
+
+fn qualify(name: &mut String, symbols: &HashSet<String>, prefix: &str, bound: &BoundNames) {
+    if symbols.contains(name.as_str()) && !is_bound(bound, name) {
+        *name = format!("{}__{}", prefix, name);
+    }
+}
+
+fn qualify_callee(name: &mut String, symbols: &HashSet<String>, prefix: &str, bound: &BoundNames) {
+    if symbols.contains(name.as_str()) && !is_callable_binding(bound, name) {
+        *name = format!("{}__{}", prefix, name);
+    }
+}
+
+/// The scope a function body starts in: its parameters.
+fn param_bindings(params: &[crate::parser::ast::AstParam]) -> BoundNames {
+    params
+        .iter()
+        .map(|p| (p.name.name.clone(), is_fn_type(&p.ty)))
+        .collect()
+}
+
+/// The variables a `when` pattern binds.
+fn pattern_bindings(pat: &AstWhenPattern, out: &mut BoundNames) {
+    match pat {
+        AstWhenPattern::EnumVariant { bindings, .. } => {
+            out.extend(bindings.iter().map(|b| plain(b)))
+        }
+        AstWhenPattern::OptionSome { binding }
+        | AstWhenPattern::ResultOk { binding }
+        | AstWhenPattern::ResultErr { binding } => {
+            if let Some(b) = binding {
+                out.push(plain(b));
+            }
+        }
+        AstWhenPattern::Tuple(pats) | AstWhenPattern::Or(pats) => {
+            for p in pats {
+                pattern_bindings(p, out);
+            }
+        }
+        AstWhenPattern::Slice { prefix, rest } => {
+            for p in prefix {
+                pattern_bindings(p, out);
+            }
+            if let Some(r) = rest {
+                out.push(plain(r));
+            }
+        }
+        AstWhenPattern::Binding { name, pattern, .. } => {
+            out.push(plain(name));
+            pattern_bindings(pattern, out);
+        }
+        AstWhenPattern::Struct { fields, .. } => {
+            for (_, p) in fields {
+                pattern_bindings(p, out);
+            }
+        }
+        AstWhenPattern::OptionNone
+        | AstWhenPattern::Wildcard
+        | AstWhenPattern::IntLit(_)
+        | AstWhenPattern::FloatLit(_)
+        | AstWhenPattern::BoolLit(_)
+        | AstWhenPattern::StringLit(_)
+        | AstWhenPattern::Range { .. } => {}
+    }
+}
+
+fn rewrite_handler_arms(
+    arms: &mut [AstHandlerArm],
+    symbols: &HashSet<String>,
+    prefix: &str,
+    bound: &mut BoundNames,
+) {
+    for arm in arms {
+        let mark = bound.len();
+        bound.extend(arm.params.iter().map(|p| plain(&p.name)));
+        if let Some(resume) = &arm.resume_param {
+            // `resume(v)` calls it, so it is callable.
+            bound.push((resume.name.clone(), true));
+        }
+        rewrite_expr(&mut arm.body, symbols, prefix, bound);
+        bound.truncate(mark);
+    }
+}
+
+fn rewrite_expr(
+    expr: &mut AstExpr,
+    symbols: &HashSet<String>,
+    prefix: &str,
+    bound: &mut BoundNames,
+) {
     match expr {
         AstExpr::Ident(ref mut ident) => {
-            if symbols.contains(&ident.name) {
-                ident.name = format!("{}__{}", prefix, ident.name);
-            }
+            qualify(&mut ident.name, symbols, prefix, bound);
         }
         AstExpr::IntLit { .. }
         | AstExpr::FloatLit { .. }
@@ -446,23 +749,22 @@ fn rewrite_expr(expr: &mut AstExpr, symbols: &HashSet<String>, prefix: &str) {
             ref mut rhs,
             ..
         } => {
-            rewrite_expr(lhs, symbols, prefix);
-            rewrite_expr(rhs, symbols, prefix);
+            rewrite_expr(lhs, symbols, prefix, bound);
+            rewrite_expr(rhs, symbols, prefix, bound);
         }
         AstExpr::Call {
             ref mut callee,
             ref mut args,
             ..
         } => {
-            if symbols.contains(&callee.name) {
-                callee.name = format!("{}__{}", prefix, callee.name);
-            }
+            // Only a local holding a closure shadows a module function here.
+            qualify_callee(&mut callee.name, symbols, prefix, bound);
             for arg in args {
-                rewrite_expr(arg, symbols, prefix);
+                rewrite_expr(arg, symbols, prefix, bound);
             }
         }
         AstExpr::UnaryOp { ref mut expr, .. } => {
-            rewrite_expr(expr, symbols, prefix);
+            rewrite_expr(expr, symbols, prefix, bound);
         }
         AstExpr::If {
             ref mut cond,
@@ -470,23 +772,23 @@ fn rewrite_expr(expr: &mut AstExpr, symbols: &HashSet<String>, prefix: &str) {
             ref mut else_block,
             ..
         } => {
-            rewrite_expr(cond, symbols, prefix);
-            rewrite_block(then_block, symbols, prefix);
+            rewrite_expr(cond, symbols, prefix, bound);
+            rewrite_block(then_block, symbols, prefix, bound);
             if let Some(ref mut else_b) = else_block {
-                rewrite_block(else_b, symbols, prefix);
+                rewrite_block(else_b, symbols, prefix, bound);
             }
         }
         AstExpr::Block(ref mut block) => {
-            rewrite_block(block, symbols, prefix);
+            rewrite_block(block, symbols, prefix, bound);
         }
         AstExpr::Index {
             ref mut base,
             ref mut indices,
             ..
         } => {
-            rewrite_expr(base, symbols, prefix);
+            rewrite_expr(base, symbols, prefix, bound);
             for idx in indices {
-                rewrite_expr(idx, symbols, prefix);
+                rewrite_expr(idx, symbols, prefix, bound);
             }
         }
         AstExpr::Cast {
@@ -494,7 +796,7 @@ fn rewrite_expr(expr: &mut AstExpr, symbols: &HashSet<String>, prefix: &str) {
             ref mut ty,
             ..
         } => {
-            rewrite_expr(expr, symbols, prefix);
+            rewrite_expr(expr, symbols, prefix, bound);
             rewrite_type(ty, symbols, prefix);
         }
         AstExpr::StructLit {
@@ -504,45 +806,49 @@ fn rewrite_expr(expr: &mut AstExpr, symbols: &HashSet<String>, prefix: &str) {
             ..
         } => {
             if let Some(ref mut s) = spread {
-                rewrite_expr(s, symbols, prefix);
+                rewrite_expr(s, symbols, prefix, bound);
             }
+            // A type name, which no local can shadow.
             if symbols.contains(name) {
                 *name = format!("{}__{}", prefix, name);
             }
             for (_, ref mut val) in fields {
-                rewrite_expr(val, symbols, prefix);
+                rewrite_expr(val, symbols, prefix, bound);
             }
         }
         AstExpr::FieldAccess { ref mut base, .. } => {
-            rewrite_expr(base, symbols, prefix);
+            rewrite_expr(base, symbols, prefix, bound);
         }
         AstExpr::When {
             ref mut scrutinee,
             ref mut arms,
             ..
         } => {
-            rewrite_expr(scrutinee, symbols, prefix);
+            rewrite_expr(scrutinee, symbols, prefix, bound);
             for arm in arms {
                 rewrite_when_pattern(&mut arm.pattern, symbols, prefix);
+                let mark = bound.len();
+                pattern_bindings(&arm.pattern, bound);
                 if let Some(ref mut guard) = arm.guard {
-                    rewrite_expr(guard, symbols, prefix);
+                    rewrite_expr(guard, symbols, prefix, bound);
                 }
-                rewrite_expr(&mut arm.body, symbols, prefix);
+                rewrite_expr(&mut arm.body, symbols, prefix, bound);
+                bound.truncate(mark);
             }
         }
         AstExpr::Tuple {
             ref mut elements, ..
         } => {
             for elem in elements {
-                rewrite_expr(elem, symbols, prefix);
+                rewrite_expr(elem, symbols, prefix, bound);
             }
         }
         AstExpr::TupleIndex { ref mut base, .. } => {
-            rewrite_expr(base, symbols, prefix);
+            rewrite_expr(base, symbols, prefix, bound);
         }
         AstExpr::ArrayLit { ref mut elems, .. } => {
             for elem in elems {
-                rewrite_expr(elem, symbols, prefix);
+                rewrite_expr(elem, symbols, prefix, bound);
             }
         }
         AstExpr::Lambda {
@@ -550,89 +856,94 @@ fn rewrite_expr(expr: &mut AstExpr, symbols: &HashSet<String>, prefix: &str) {
             ref mut body,
             ..
         } => {
-            for param in params {
+            for param in params.iter_mut() {
                 rewrite_type(&mut param.ty, symbols, prefix);
                 if let Some(ref mut def_val) = param.default {
-                    rewrite_expr(def_val, symbols, prefix);
+                    rewrite_expr(def_val, symbols, prefix, bound);
                 }
             }
-            rewrite_expr(body, symbols, prefix);
+            let mark = bound.len();
+            bound.extend(param_bindings(params));
+            rewrite_expr(body, symbols, prefix, bound);
+            bound.truncate(mark);
         }
         AstExpr::Await { ref mut expr, .. } => {
-            rewrite_expr(expr, symbols, prefix);
+            rewrite_expr(expr, symbols, prefix, bound);
         }
         AstExpr::Try { ref mut expr, .. } => {
-            rewrite_expr(expr, symbols, prefix);
+            rewrite_expr(expr, symbols, prefix, bound);
         }
         AstExpr::MethodCall {
             ref mut base,
             ref mut args,
             ..
         } => {
-            rewrite_expr(base, symbols, prefix);
+            rewrite_expr(base, symbols, prefix, bound);
             for arg in args {
-                rewrite_expr(arg, symbols, prefix);
+                rewrite_expr(arg, symbols, prefix, bound);
             }
         }
         AstExpr::Mask { ref mut body, .. } => {
-            rewrite_block(body, symbols, prefix);
+            rewrite_block(body, symbols, prefix, bound);
         }
         AstExpr::Handle {
             ref mut expr,
             ref mut arms,
             ..
         } => {
-            rewrite_expr(expr, symbols, prefix);
-            for arm in arms {
-                rewrite_expr(&mut arm.body, symbols, prefix);
-            }
+            rewrite_expr(expr, symbols, prefix, bound);
+            rewrite_handler_arms(arms, symbols, prefix, bound);
         }
         AstExpr::NullCoal {
             ref mut expr,
             ref mut default,
             ..
         } => {
-            rewrite_expr(expr, symbols, prefix);
-            rewrite_expr(default, symbols, prefix);
+            rewrite_expr(expr, symbols, prefix, bound);
+            rewrite_expr(default, symbols, prefix, bound);
         }
         AstExpr::MapLiteral {
             ref mut entries, ..
         } => {
             for (k, v) in entries {
-                rewrite_expr(k, symbols, prefix);
-                rewrite_expr(v, symbols, prefix);
+                rewrite_expr(k, symbols, prefix, bound);
+                rewrite_expr(v, symbols, prefix, bound);
             }
         }
         AstExpr::Ref { ref mut expr, .. } => {
-            rewrite_expr(expr, symbols, prefix);
+            rewrite_expr(expr, symbols, prefix, bound);
         }
         AstExpr::RefMut { ref mut expr, .. } => {
-            rewrite_expr(expr, symbols, prefix);
+            rewrite_expr(expr, symbols, prefix, bound);
         }
         AstExpr::TryCatch {
             ref mut body,
+            ref catch_param,
             ref mut catch_body,
             ..
         } => {
-            rewrite_expr(body, symbols, prefix);
-            rewrite_expr(catch_body, symbols, prefix);
+            rewrite_expr(body, symbols, prefix, bound);
+            let mark = bound.len();
+            bound.push(plain(catch_param));
+            rewrite_expr(catch_body, symbols, prefix, bound);
+            bound.truncate(mark);
         }
         AstExpr::Raise { ref mut args, .. } => {
             for a in args {
-                rewrite_expr(a, symbols, prefix);
+                rewrite_expr(a, symbols, prefix, bound);
             }
         }
         AstExpr::Deref { ref mut expr, .. } => {
-            rewrite_expr(expr, symbols, prefix);
+            rewrite_expr(expr, symbols, prefix, bound);
         }
         AstExpr::Move { ref mut expr, .. } => {
-            rewrite_expr(expr, symbols, prefix);
+            rewrite_expr(expr, symbols, prefix, bound);
         }
         AstExpr::Unsafe { ref mut body, .. } => {
-            rewrite_expr(body, symbols, prefix);
+            rewrite_expr(body, symbols, prefix, bound);
         }
         AstExpr::Splat { ref mut expr, .. } => {
-            rewrite_expr(expr, symbols, prefix);
+            rewrite_expr(expr, symbols, prefix, bound);
         }
         AstExpr::MacroCall { .. } => {
             // Macro calls should have been expanded before rewriting;
@@ -687,18 +998,34 @@ fn rewrite_when_pattern(pat: &mut AstWhenPattern, symbols: &HashSet<String>, pre
     }
 }
 
-fn rewrite_block(block: &mut AstBlock, symbols: &HashSet<String>, prefix: &str) {
+/// A block is a scope: its `val`/`var` bindings end with it.
+fn rewrite_block(
+    block: &mut AstBlock,
+    symbols: &HashSet<String>,
+    prefix: &str,
+    bound: &mut BoundNames,
+) {
+    let mark = bound.len();
     for stmt in &mut block.stmts {
-        rewrite_stmt(stmt, symbols, prefix);
+        rewrite_stmt(stmt, symbols, prefix, bound);
     }
     if let Some(ref mut tail) = block.tail {
-        rewrite_expr(tail, symbols, prefix);
+        rewrite_expr(tail, symbols, prefix, bound);
     }
+    bound.truncate(mark);
 }
 
-fn rewrite_stmt(stmt: &mut AstStmt, symbols: &HashSet<String>, prefix: &str) {
+/// Rewrites one statement; a binding it introduces stays in `bound` for the
+/// rest of the enclosing block.
+fn rewrite_stmt(
+    stmt: &mut AstStmt,
+    symbols: &HashSet<String>,
+    prefix: &str,
+    bound: &mut BoundNames,
+) {
     match stmt {
         AstStmt::Let {
+            ref name,
             ref mut ty,
             ref mut init,
             ..
@@ -706,90 +1033,121 @@ fn rewrite_stmt(stmt: &mut AstStmt, symbols: &HashSet<String>, prefix: &str) {
             if let Some(ref mut t) = ty {
                 rewrite_type(t, symbols, prefix);
             }
-            rewrite_expr(init, symbols, prefix);
+            rewrite_expr(init, symbols, prefix, bound);
+            let callable = ty.as_ref().is_some_and(is_fn_type)
+                || matches!(init.as_ref(), AstExpr::Lambda { .. });
+            bound.push((name.name.clone(), callable));
         }
         AstStmt::Expr(ref mut expr) => {
-            rewrite_expr(expr, symbols, prefix);
+            rewrite_expr(expr, symbols, prefix, bound);
         }
         AstStmt::While {
             ref mut cond,
             ref mut body,
             ..
         } => {
-            rewrite_expr(cond, symbols, prefix);
-            rewrite_block(body, symbols, prefix);
+            rewrite_expr(cond, symbols, prefix, bound);
+            rewrite_block(body, symbols, prefix, bound);
         }
         AstStmt::Loop { ref mut body, .. } => {
-            rewrite_block(body, symbols, prefix);
+            rewrite_block(body, symbols, prefix, bound);
         }
         AstStmt::Break { .. } | AstStmt::Continue { .. } => {}
         AstStmt::Yield { ref mut expr, .. } => {
-            rewrite_expr(expr, symbols, prefix);
+            rewrite_expr(expr, symbols, prefix, bound);
         }
         AstStmt::ForRange {
+            ref var,
             ref mut start,
             ref mut end,
+            ref mut step,
             ref mut body,
             ..
         } => {
-            rewrite_expr(start, symbols, prefix);
-            rewrite_expr(end, symbols, prefix);
-            rewrite_block(body, symbols, prefix);
+            rewrite_expr(start, symbols, prefix, bound);
+            rewrite_expr(end, symbols, prefix, bound);
+            if let Some(ref mut s) = step {
+                rewrite_expr(s, symbols, prefix, bound);
+            }
+            let mark = bound.len();
+            bound.push(plain(&var.name));
+            rewrite_block(body, symbols, prefix, bound);
+            bound.truncate(mark);
         }
         AstStmt::Assign {
             ref mut target,
             ref mut value,
             ..
         } => {
-            rewrite_expr(target, symbols, prefix);
-            rewrite_expr(value, symbols, prefix);
+            rewrite_expr(target, symbols, prefix, bound);
+            rewrite_expr(value, symbols, prefix, bound);
         }
-        AstStmt::LetTuple { ref mut init, .. } => {
-            rewrite_expr(init, symbols, prefix);
+        AstStmt::LetTuple {
+            ref names,
+            ref mut init,
+            ..
+        } => {
+            rewrite_expr(init, symbols, prefix, bound);
+            bound.extend(names.iter().map(|n| plain(&n.name)));
         }
         AstStmt::Return { ref mut value, .. } => {
             if let Some(ref mut val) = value {
-                rewrite_expr(val, symbols, prefix);
+                rewrite_expr(val, symbols, prefix, bound);
             }
         }
-        AstStmt::Spawn { ref mut body, .. } => {
-            for s in body {
-                rewrite_stmt(s, symbols, prefix);
+        AstStmt::Spawn {
+            ref mut body,
+            ref mut group,
+            ..
+        } => {
+            if let Some(ref mut g) = group {
+                rewrite_expr(g, symbols, prefix, bound);
             }
+            let mark = bound.len();
+            for s in body {
+                rewrite_stmt(s, symbols, prefix, bound);
+            }
+            bound.truncate(mark);
         }
         AstStmt::ParFor {
+            ref var,
             ref mut start,
             ref mut end,
             ref mut body,
             ..
         } => {
-            rewrite_expr(start, symbols, prefix);
-            rewrite_expr(end, symbols, prefix);
-            rewrite_block(body, symbols, prefix);
+            rewrite_expr(start, symbols, prefix, bound);
+            rewrite_expr(end, symbols, prefix, bound);
+            let mark = bound.len();
+            bound.push(plain(&var.name));
+            rewrite_block(body, symbols, prefix, bound);
+            bound.truncate(mark);
         }
         AstStmt::ForEach {
+            ref var,
             ref mut iter,
             ref mut body,
             ..
         } => {
-            rewrite_expr(iter, symbols, prefix);
-            rewrite_block(body, symbols, prefix);
+            rewrite_expr(iter, symbols, prefix, bound);
+            let mark = bound.len();
+            bound.push(plain(&var.name));
+            rewrite_block(body, symbols, prefix, bound);
+            bound.truncate(mark);
         }
         AstStmt::MaskStmt { ref mut body, .. } => {
-            rewrite_block(body, symbols, prefix);
+            rewrite_block(body, symbols, prefix, bound);
         }
         AstStmt::HandleStmt {
             ref mut expr,
             ref mut arms,
             ..
         } => {
-            rewrite_expr(expr, symbols, prefix);
-            for arm in arms {
-                rewrite_expr(&mut arm.body, symbols, prefix);
-            }
+            rewrite_expr(expr, symbols, prefix, bound);
+            rewrite_handler_arms(arms, symbols, prefix, bound);
         }
         AstStmt::Defer { ref mut expr, .. } => {
-            rewrite_expr(expr, symbols, prefix);
+            rewrite_expr(expr, symbols, prefix, bound);
         }
         AstStmt::Select {
             ref mut arms,
@@ -797,11 +1155,14 @@ fn rewrite_stmt(stmt: &mut AstStmt, symbols: &HashSet<String>, prefix: &str) {
             ..
         } => {
             for arm in arms {
-                rewrite_expr(&mut arm.channel, symbols, prefix);
-                rewrite_block(&mut arm.body, symbols, prefix);
+                rewrite_expr(&mut arm.channel, symbols, prefix, bound);
+                let mark = bound.len();
+                bound.push(plain(&arm.binding));
+                rewrite_block(&mut arm.body, symbols, prefix, bound);
+                bound.truncate(mark);
             }
             if let Some(ref mut d) = default {
-                rewrite_block(d, symbols, prefix);
+                rewrite_block(d, symbols, prefix, bound);
             }
         }
     }
@@ -866,11 +1227,12 @@ pub(crate) fn mangle_module_symbols(ast: &mut AstModule, mod_name: &str) {
         if symbols.contains(&f.name.name) {
             f.name.name = format!("{}__{}", mod_name, f.name.name);
         }
-        rewrite_block(&mut f.body, &symbols, mod_name);
+        let mut bound = param_bindings(&f.params);
+        rewrite_block(&mut f.body, &symbols, mod_name, &mut bound);
         for p in &mut f.params {
             rewrite_type(&mut p.ty, &symbols, mod_name);
             if let Some(ref mut def_val) = p.default {
-                rewrite_expr(def_val, &symbols, mod_name);
+                rewrite_expr(def_val, &symbols, mod_name, &mut BoundNames::new());
             }
         }
         rewrite_type(&mut f.return_ty, &symbols, mod_name);
@@ -903,7 +1265,7 @@ pub(crate) fn mangle_module_symbols(ast: &mut AstModule, mod_name: &str) {
         if let Some(ref mut t) = c.ty {
             rewrite_type(t, &symbols, mod_name);
         }
-        rewrite_expr(&mut c.value, &symbols, mod_name);
+        rewrite_expr(&mut c.value, &symbols, mod_name, &mut BoundNames::new());
     }
 
     for ta in &mut ast.type_aliases {
@@ -942,11 +1304,12 @@ pub(crate) fn mangle_module_symbols(ast: &mut AstModule, mod_name: &str) {
             if symbols.contains(&f.name.name) {
                 f.name.name = format!("{}__{}", mod_name, f.name.name);
             }
-            rewrite_block(&mut f.body, &symbols, mod_name);
+            let mut bound = param_bindings(&f.params);
+            rewrite_block(&mut f.body, &symbols, mod_name, &mut bound);
             for p in &mut f.params {
                 rewrite_type(&mut p.ty, &symbols, mod_name);
                 if let Some(ref mut def_val) = p.default {
-                    rewrite_expr(def_val, &symbols, mod_name);
+                    rewrite_expr(def_val, &symbols, mod_name, &mut BoundNames::new());
                 }
             }
             rewrite_type(&mut f.return_ty, &symbols, mod_name);
@@ -1254,13 +1617,15 @@ pub(crate) fn desugar_yield(ast: &mut AstModule) {
             span: Span::new(0, 0),
         })
     };
-    let mk_init_stmt = || -> AstStmt {
+    // The accumulator has the type the function declares it returns
+    // (`-> list<i64>`), which nothing else would tell its empty `list()`.
+    let mk_init_stmt = |ret: &AstType| -> AstStmt {
         AstStmt::Let {
             name: Ident {
                 name: acc_name.to_string(),
                 span: Span::new(0, 0),
             },
-            ty: None,
+            ty: matches!(ret, AstType::List(..)).then(|| ret.clone()),
             init: Box::new(mk_list_call()),
             is_var: false,
             span: Span::new(0, 0),
@@ -1270,7 +1635,7 @@ pub(crate) fn desugar_yield(ast: &mut AstModule) {
         if stmts_have_yield(&f.body.stmts)
             || f.body.tail.as_ref().is_some_and(|e| expr_has_yield(e))
         {
-            f.body.stmts.insert(0, mk_init_stmt());
+            f.body.stmts.insert(0, mk_init_stmt(&f.return_ty));
             replace_yield_in_stmts(&mut f.body.stmts, acc_name);
             if let Some(ref mut tail) = f.body.tail {
                 replace_yield_in_expr(tail, acc_name);
@@ -1285,7 +1650,7 @@ pub(crate) fn desugar_yield(ast: &mut AstModule) {
             if stmts_have_yield(&f.body.stmts)
                 || f.body.tail.as_ref().is_some_and(|e| expr_has_yield(e))
             {
-                f.body.stmts.insert(0, mk_init_stmt());
+                f.body.stmts.insert(0, mk_init_stmt(&f.return_ty));
                 replace_yield_in_stmts(&mut f.body.stmts, acc_name);
                 if let Some(ref mut tail) = f.body.tail {
                     replace_yield_in_expr(tail, acc_name);
@@ -1695,6 +2060,7 @@ fn substitute_macro_args(body: &AstExpr, params: &[String], args: &[AstExpr]) ->
         AstExpr::StructLit {
             name,
             fields,
+            field_spans,
             spread,
             span,
         } => AstExpr::StructLit {
@@ -1703,6 +2069,7 @@ fn substitute_macro_args(body: &AstExpr, params: &[String], args: &[AstExpr]) ->
                 .iter()
                 .map(|(n, f)| (n.clone(), substitute_macro_args(f, params, args)))
                 .collect(),
+            field_spans: field_spans.clone(),
             spread: spread
                 .as_ref()
                 .map(|s| Box::new(substitute_macro_args(s, params, args))),
@@ -2478,6 +2845,7 @@ fn flatten_inline_modules_for(m: &mut AstModuleDef) {
         extern_fns: std::mem::take(&mut m.extern_fns),
         modules: vec![],
         macros: std::mem::take(&mut m.macros),
+        state_vars: vec![],
     };
 
     mangle_module_symbols(&mut mod_ast, &m.name.name);
@@ -2528,6 +2896,7 @@ fn resolve_inline_module_bring(ast: &mut AstModule) {
                 extern_fns: std::mem::take(&mut mod_def.extern_fns),
                 modules: vec![],
                 macros: std::mem::take(&mut mod_def.macros),
+                state_vars: vec![],
             };
             mangle_module_symbols(&mut mod_ast, &mod_name);
             // Merge into parent.

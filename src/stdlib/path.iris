@@ -132,3 +132,72 @@ pub def with_extension(p: str, ext: str) -> str {
     val base = slice(p, 0, end)
     if len(ext) == 0 { base } else { concat(concat(base, "."), ext) }
 }
+
+// Convert backslashes to forward slashes for cross-platform POSIX path consistency.
+pub def path_to_posix(p: str) -> str {
+    val n = len(p)
+    var out = ""
+    var i = 0
+    while i < n {
+        val ch = slice(p, i, i + 1)
+        out = if ch == "\\" { concat(out, "/") } else { concat(out, ch) }
+        i = i + 1
+    }
+    out
+}
+
+// Join a list of path segments together sequentially.
+pub def path_join_all(parts: list<str>) -> str {
+    val n = list_len(parts)
+    if n == 0 { return "" }
+    var res = list_get(parts, 0)
+    var i = 1
+    while i < n {
+        val part = list_get(parts, i)
+        res = if len(part) == 0 { res } else {
+            if ends_with(res, "/") {
+                concat(res, part)
+            } else {
+                concat(concat(res, "/"), part)
+            }
+        }
+        i = i + 1
+    }
+    res
+}
+
+// Test whether a path has the specified file extension (with or without leading dot).
+pub def path_has_extension(p: str, ext: str) -> bool {
+    val clean_ext = if starts_with(ext, ".") { slice(ext, 1, len(ext)) } else { ext }
+    extension(p) == clean_ext
+}
+
+// Return the parent directory of a path (alias for dirname).
+pub def path_parent(p: str) -> str {
+    dirname(p)
+}
+
+// Find first offset of a character in string or -1 if not found.
+pub def path_find_char(s: str, target: str) -> i64 {
+    val n = len(s)
+    var i = 0
+    while i < n {
+        if slice(s, i, i + 1) == target {
+            return i
+        }
+        i = i + 1
+    }
+    -1
+}
+
+// Match a filename or path against a wildcard glob pattern containing '*'.
+pub def path_matches_glob(p: str, pattern: str) -> bool {
+    if pattern == "*" { return true }
+    val star_idx = path_find_char(pattern, "*")
+    if star_idx < 0 { return p == pattern }
+    val prefix = slice(pattern, 0, star_idx)
+    val suffix = slice(pattern, star_idx + 1, len(pattern))
+    if !starts_with(p, prefix) { return false }
+    if !ends_with(p, suffix) { return false }
+    len(p) >= (len(prefix) + len(suffix))
+}

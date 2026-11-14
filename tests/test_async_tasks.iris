@@ -1,0 +1,190 @@
+// Async tasks: `async def` bodies are compiled into resumable state machines
+// (pass::async_lower) and run by a cooperative executor on the awaiting
+// thread. Every check here must hold, and print the same, on the interpreter
+// and natively.
+bring std.async
+
+async def add1(x: i64) -> i64 { x + 1 }
+
+// Loop-carried values live across suspensions.
+async def sum_to(n: i64) -> i64 {
+    var total = 0;
+    var i = 0;
+    while i < n {
+        val v = await add1(i);
+        total = total + v;
+        i = i + 1;
+    }
+    total
+}
+
+// Branches around awaits; a string kept across a suspension.
+async def label(x: i64) -> str {
+    val prefix = concat("n=", to_str(x));
+    if x > 10 {
+        val big = await add1(x);
+        concat(prefix, concat(" big ", to_str(big)))
+    } else {
+        await async_yield();
+        concat(prefix, " small")
+    }
+}
+
+// A value from the previous iteration used before the next await.
+async def keep_prev(n: i64) -> str {
+    var prev = "start";
+    var out = "";
+    var i = 0;
+    while i < n {
+        val cur = to_str(i);
+        out = concat(out, prev);
+        await async_yield();
+        out = concat(out, ",");
+        prev = cur;
+        i = i + 1;
+    }
+    out
+}
+
+// Timers complete in deadline order, not start order.
+async def worker(id: i64, delay: i64, log: list<i64>) -> i64 {
+    await async_sleep(delay);
+    push(log, id);
+    id * 10
+}
+
+async def run_workers() -> str {
+    val log: list<i64> = list();
+    val a = worker(1, 60, log);
+    val b = worker(2, 20, log);
+    val c = worker(3, 40, log);
+    val total = await a + await b + await c;
+    assert(total == 60);
+    concat(to_str(list_get(log, 0)), concat(to_str(list_get(log, 1)), to_str(list_get(log, 2))))
+}
+
+// A consumer suspends on receive while the producer runs on the same thread.
+async def producer(ch: chan<i64>, n: i64) -> i64 {
+    var i = 0;
+    while i < n {
+        send(ch, i * i);
+        await async_yield();
+        i = i + 1;
+    }
+    n
+}
+
+async def consumer(ch: chan<i64>, n: i64) -> i64 {
+    var total = 0;
+    var i = 0;
+    while i < n {
+        val v = await ch;
+        total = total + v;
+        i = i + 1;
+    }
+    total
+}
+
+// Records across awaits (the caller's record must survive the task).
+record Point { x: i64, y: i64 }
+
+async def shift(p: Point, dx: i64) -> Point {
+    await async_yield();
+    Point { x: p.x + dx, y: p.y }
+}
+
+async def walk() -> i64 {
+    val start = Point { x: 1, y: 2 };
+    val a = await shift(start, 10);
+    val b = await shift(a, 100);
+    b.x + b.y + start.x
+}
+
+async def fetch(id: i64, delay: i64) -> i64 {
+    await async_sleep(delay);
+    id * 10
+}
+
+// Select: the first of several tasks to finish.
+async def first_of() -> i64 {
+    val tasks: list<task<i64>> = list();
+    push(tasks, fetch(1, 50));
+    push(tasks, fetch(2, 10));
+    push(tasks, fetch(3, 30));
+    await async_any(tasks)
+}
+
+// A receive that loses a race takes no value from its channel.
+async def recv_race(ch: chan<i64>) -> i64 {
+    await async_any(async_recv(ch), async_sleep(5))
+}
+
+async def leaf(i: i64) -> i64 {
+    await async_yield();
+    i * 2
+}
+
+async def fan_out(n: i64) -> i64 {
+    val tasks: list<task<i64>> = list();
+    var i = 0;
+    while i < n {
+        push(tasks, leaf(i));
+        i = i + 1;
+    }
+    var total = 0;
+    var j = 0;
+    while j < n {
+        total = total + await list_get(tasks, j);
+        j = j + 1;
+    }
+    total
+}
+
+// `await` inside a spawned thread and inside a closure, within an async def.
+async def nested(x: i64) -> i64 {
+    val ch: chan<i64> = channel(-1);
+    spawn { send(ch, await leaf(x)) };
+    val f = |y: i64| await leaf(y);
+    await ch + f(1)
+}
+
+def main() -> i64 {
+    assert(await sum_to(5) == 15);
+    println(await label(3));
+    println(await label(30));
+    val kept = await keep_prev(3);
+    println(kept);
+    assert(kept == "start,0,1,");
+    val order = await run_workers();
+    println(concat("timers ", order));
+    assert(order == "231");
+
+    val ch: chan<i64> = channel();
+    val c = consumer(ch, 4);
+    val p = producer(ch, 4);
+    assert(await c == 0 + 1 + 4 + 9);
+    assert(await p == 4);
+
+    assert(await walk() == 114);
+
+    assert(await first_of() == 1);
+    val raced: chan<i64> = channel();
+    assert(await recv_race(raced) == 1);
+    send(raced, 42);
+    assert(recv(raced) == 42);
+
+    assert(unwrap(await timeout_after(fetch(8, 5), 300)) == 80);
+    assert(!is_some(await timeout_after(fetch(7, 300), 10)));
+
+    val t = fetch(9, 1000);
+    task_cancel(t);
+    assert(task_cancelled(t));
+    assert(task_done(t));
+
+    assert(await fan_out(2000) == 2000 * 1999);
+    assert(await nested(21) == 44);
+    // `recv` on a task waits for it too.
+    assert(recv(add1(1)) == 2);
+    println("async tasks: ok");
+    0
+}

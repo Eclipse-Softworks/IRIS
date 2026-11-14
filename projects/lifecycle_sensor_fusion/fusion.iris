@@ -1,0 +1,71 @@
+// Two-sensor range fusion: a constant-velocity Kalman filter with an
+// innovation gate that rejects outliers, plus a deterministic noise source
+// for the simulated sensors. Pure functions, shared by the live lifecycle
+// node (main.iris) and the offline check (simulate.iris).
+bring std.math
+
+// State estimate (distance, closing speed) and its covariance.
+pub record Kf { d: f64, v: f64, p00: f64, p01: f64, p11: f64 }
+
+pub record Tuning { process_noise: f64, noise_a: f64, noise_b: f64, gate_sigma: f64 }
+
+// A wide prior: the first readings decide.
+pub def kf_new(d0: f64) -> Kf {
+    Kf { d: d0, v: 0.0, p00: 1.0, p01: 0.0, p11: 1.0 }
+}
+
+// Predict `dt` seconds ahead (white-acceleration process noise `q`).
+pub def kf_predict(k: Kf, dt: f64, q: f64) -> Kf {
+    val dt2 = dt * dt
+    Kf {
+        d: k.d + k.v * dt,
+        v: k.v,
+        p00: k.p00 + 2.0 * dt * k.p01 + dt2 * k.p11 + q * dt2 * dt2 * 0.25,
+        p01: k.p01 + dt * k.p11 + q * dt2 * dt * 0.5,
+        p11: k.p11 + q * dt2
+    }
+}
+
+// The innovation gate: whether reading `z` (std dev `sigma`) is within
+// `gate` standard deviations of the prediction.
+pub def kf_plausible(k: Kf, z: f64, sigma: f64, gate: f64) -> bool {
+    val s = k.p00 + sigma * sigma
+    val y = z - k.d
+    y * y <= gate * gate * s
+}
+
+// Fuses one range reading with standard deviation `sigma`.
+pub def kf_update(k: Kf, z: f64, sigma: f64) -> Kf {
+    val s = k.p00 + sigma * sigma
+    val k0 = k.p00 / s
+    val k1 = k.p01 / s
+    val y = z - k.d
+    Kf {
+        d: k.d + k0 * y,
+        v: k.v + k1 * y,
+        p00: (1.0 - k0) * k.p00,
+        p01: (1.0 - k0) * k.p01,
+        p11: k.p11 - k1 * k.p01
+    }
+}
+
+// The true distance of the target at time t: it drifts in and out.
+pub def truth(t: f64) -> f64 { 2.0 + 0.5 * sin(0.5 * t) }
+
+// Park-Miller minimal standard generator: state * 48271 mod (2^31 - 1).
+// Products stay below 2^47, so i64 arithmetic never overflows.
+pub record Rng { state: i64 }
+
+pub def rng_next(r: Rng) -> Rng { Rng { state: (r.state * 48271) % 2147483647 } }
+
+pub def rng_unit(r: Rng) -> f64 { (r.state to f64) / 2147483647.0 }
+
+// A standard normal sample from two uniforms (Box-Muller); returns the
+// advanced generator in `.0` and the sample in `.1`.
+pub def gaussian(r: Rng) -> (Rng, f64) {
+    val a = rng_next(r)
+    val b = rng_next(a)
+    val u1 = max(rng_unit(a), 0.000000001)
+    val u2 = rng_unit(b)
+    (b, sqrt(0.0 - 2.0 * log(u1)) * cos(TAU * u2))
+}

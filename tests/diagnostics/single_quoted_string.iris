@@ -1,0 +1,9 @@
+// expect: E0002 at 6:13
+// fix: val s = "hi"
+// fix-compiles
+
+def main() -> i64 {
+    val s = 'hi'
+    println(s);
+    return 0
+}

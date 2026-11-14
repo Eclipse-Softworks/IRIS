@@ -62,12 +62,12 @@ def check_json_struct() -> i64 {
     }
 }
 
-// Test 7: json_stringify nested types
+// Test 7: json_stringify nested types. A list holds one type: results here
+// (an option among them, as this test once pushed, is a type error).
 def check_json_nested() -> i64 {
-    val items = list();
+    val items: list<result<i64, str>> = list();
     list_push(items, ok(1));
     list_push(items, err("x"));
-    list_push(items, none());
     val sj = json_stringify(items);
     val ok_pos = find(sj, "\"ok\":1");
     val err_pos = find(sj, "\"err\":\"x\"");

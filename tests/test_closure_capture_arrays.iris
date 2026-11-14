@@ -1,0 +1,60 @@
+// Closures over fixed arrays and over other closures. Found by the
+// differential tester (tests/differential.rs); see known-issues #86-#88.
+
+// #86: a closure that captured a stack array put the array's raw address in
+// its capture list, and freeing the closure free()d the stack.
+def scalar_array_capture() -> i64 {
+    val a = [10, 20, 30];
+    val f = |z: i64| z + a[0];
+    f(1)
+}
+
+// #87: a name used only inside an index expression was not captured.
+def index_expression_capture() -> i64 {
+    val v = 3;
+    val a = [10, 20, 30];
+    val f = |z: i64| z + a[v % 3];
+    f(1)
+}
+
+// #88: one closure calling another that captures a value of another type.
+def closure_calls_closure() -> i64 {
+    val p0 = "abc";
+    val h = |z: i64| z + len(p0);
+    val k = |z: i64| h(z) * 2;
+    k(5)
+}
+
+// Arrays are values: a store after the capture is not seen by the closure.
+def capture_is_a_copy() -> f64 {
+    var a = [1.5, 2.5];
+    val f = |z: f64| z + a[1];
+    a[1] = 100.0;
+    f(1.0)
+}
+
+def string_array_capture() -> i64 {
+    var s = ["ab", "cde"];
+    val f = |z: i64| z + len(s[1]);
+    s[1] = "xxxxxxxx";
+    f(1)
+}
+
+def list_of_arrays() -> i64 {
+    val l: list<[i64; 2]> = list();
+    push(l, [4, 5]);
+    push(l, [6, 7]);
+    val e = list_get(l, 1);
+    e[0] + e[1]
+}
+
+def main() -> i64 {
+    assert(scalar_array_capture() == 11);
+    assert(index_expression_capture() == 11);
+    assert(closure_calls_closure() == 16);
+    assert(capture_is_a_copy() == 3.5);
+    assert(string_array_capture() == 4);
+    assert(list_of_arrays() == 13);
+    println("closure capture arrays ok");
+    return 0
+}

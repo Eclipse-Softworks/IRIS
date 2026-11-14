@@ -286,14 +286,9 @@ impl AstExhaustivenessPass {
             .collect();
 
         if !missing.is_empty() {
-            return Err(PassError::TypeError {
-                func: fn_name.to_string(),
-                detail: format!(
-                    "non-exhaustive match: variant{} {:?} not covered",
-                    if missing.len() == 1 { "" } else { "s" },
-                    missing
-                ),
-            });
+            let _ = fn_name;
+            let names: Vec<String> = missing.iter().map(|v| format!("`{v}`")).collect();
+            return Err(not_exhaustive(_span, &names.join(", ")));
         }
         Ok(())
     }
@@ -322,16 +317,12 @@ impl AstExhaustivenessPass {
         }
 
         if !has_some {
-            return Err(PassError::TypeError {
-                func: fn_name.to_string(),
-                detail: "non-exhaustive match: variant `Some` not covered".into(),
-            });
+            let _ = fn_name;
+            return Err(not_exhaustive(_span, "`some(...)`"));
         }
         if !has_none {
-            return Err(PassError::TypeError {
-                func: fn_name.to_string(),
-                detail: "non-exhaustive match: variant `None` not covered".into(),
-            });
+            let _ = fn_name;
+            return Err(not_exhaustive(_span, "`none`"));
         }
         Ok(())
     }
@@ -360,16 +351,12 @@ impl AstExhaustivenessPass {
         }
 
         if !has_ok {
-            return Err(PassError::TypeError {
-                func: fn_name.to_string(),
-                detail: "non-exhaustive match: variant `Ok` not covered".into(),
-            });
+            let _ = fn_name;
+            return Err(not_exhaustive(_span, "`ok(...)`"));
         }
         if !has_err {
-            return Err(PassError::TypeError {
-                func: fn_name.to_string(),
-                detail: "non-exhaustive match: variant `Err` not covered".into(),
-            });
+            let _ = fn_name;
+            return Err(not_exhaustive(_span, "`err(...)`"));
         }
         Ok(())
     }
@@ -390,4 +377,14 @@ impl Default for AstExhaustivenessPass {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// "this `when` does not handle ...", at the `when`.
+fn not_exhaustive(span: crate::parser::lexer::Span, missing: &str) -> PassError {
+    PassError::rich(
+        "E0210",
+        crate::diagnostics::Diagnostic::error(format!("this `when` does not handle {missing}"))
+            .with_primary_span(span.start.0, span.end.0.min(span.start.0 + 4), None)
+            .with_help("add an arm for each, or a `_ =>` arm for the rest"),
+    )
 }

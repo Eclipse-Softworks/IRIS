@@ -1,0 +1,7 @@
+// expect: E0005 at 5:9
+// message: `choice` is a keyword
+// fix: val choice_
+def main() -> i64 {
+    val choice = 3
+    0
+}

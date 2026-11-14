@@ -1,0 +1,70 @@
+// `par for` bodies that work element-wise, checked element by element
+// against the same arithmetic in a sequential loop. Built with `--simd`
+// they run as vector kernels (tests/simd_kernels.rs); n = 37 is not a
+// multiple of any vector width, so each range ends in scalar iterations.
+bring std.tensor
+
+def ramp(n: i64, scale: f64, offset: f64) -> list<f64> {
+    val xs: list<f64> = list()
+    var i = 0
+    while i < n {
+        list_push(xs, to_f64(i) * scale + offset)
+        i = i + 1
+    }
+    xs
+}
+
+def main() -> i64 {
+    val n = 37
+    val a = tensor_ad_from_data(ramp(n, 0.5, -3.0), list(n))
+    val b = tensor_ad_from_data(ramp(n, 1.0, 1.0), list(n))
+    val f32_out = tensor_ad_from_data(ramp(n, 0.0, 0.0), list(n))
+    val f64_out = tensor_ad_from_data(ramp(n, 0.0, 0.0), list(n))
+    val int_out = tensor_ad_from_data(ramp(n, 0.0, 0.0), list(n))
+    val cmp_out = tensor_ad_from_data(ramp(n, 0.0, 0.0), list(n))
+    val k: f32 = 1.5 to f32
+    val m: i64 = 7
+
+    // f32 lanes: arithmetic, min/max, abs, sign, a captured scalar
+    par for i in 0..n {
+        f32_out[i] = max(a[i] * k + b[i] / (b[i] + (1.0 to f32)), -(abs(a[i]))) - sign(a[i])
+    }
+    // f64 lanes from f32 storage
+    par for i in 0..n {
+        val x = a[i] to f64
+        f64_out[i] = (sqrt(x * x + 0.25) + floor(x) - x / 3.0) to f32
+    }
+    // i64 lanes: the loop variable as a number, checked arithmetic, %, shifts
+    par for i in 0..n {
+        val j = i * 3 + m
+        int_out[i] = ((j % 5) + shl(j, 2) - (j / 2)) to f32
+    }
+    // comparisons to numbers
+    par for i in 0..n {
+        cmp_out[i] = ((a[i] > k) to f32) + ((b[i] != a[i]) to f32)
+    }
+    // in place: read, then write, the same tensor
+    par for i in 0..n {
+        b[i] = b[i] * b[i]
+    }
+
+    var i = 0
+    while i < n {
+        val ai: f32 = (-3.0 + 0.5 * to_f64(i)) to f32
+        val bi: f32 = (1.0 + to_f64(i)) to f32
+        val e1 = max(ai * k + bi / (bi + (1.0 to f32)), -(abs(ai))) - sign(ai)
+        assert(f32_out[i] == e1, "f32 at " + to_str(i))
+        val x = ai to f64
+        val e2 = (sqrt(x * x + 0.25) + floor(x) - x / 3.0) to f32
+        assert(f64_out[i] == e2, "f64 at " + to_str(i))
+        val j = i * 3 + m
+        val e3 = ((j % 5) + shl(j, 2) - (j / 2)) to f32
+        assert(int_out[i] == e3, "i64 at " + to_str(i))
+        val e4 = ((ai > k) to f32) + ((bi != ai) to f32)
+        assert(cmp_out[i] == e4, "cmp at " + to_str(i))
+        assert(b[i] == bi * bi, "in place at " + to_str(i))
+        i = i + 1
+    }
+    println("simd kernels ok")
+    return 0
+}

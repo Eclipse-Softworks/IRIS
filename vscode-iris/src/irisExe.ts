@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import * as child_process from 'child_process';
 import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
 
 const IS_WIN = process.platform === 'win32';
@@ -80,9 +81,10 @@ function describeLaunchFailure(err: any): string {
 function candidatePaths(): string[] {
     const out: string[] = [];
     for (const folder of vscode.workspace.workspaceFolders ?? []) {
-        const root = folder.uri.fsPath;
-        out.push(path.join(root, 'target', 'release', EXE_NAME));
-        out.push(path.join(root, 'target', 'debug', EXE_NAME));
+        // The newer of the two builds first: a release build left over from
+        // last week must not answer for the debug build made a minute ago, or
+        // the editor reports errors the compiler no longer makes.
+        out.push(...workspaceBuilds(folder.uri.fsPath));
     }
     const home = process.env.USERPROFILE || process.env.HOME || '';
     if (home) {
@@ -98,6 +100,66 @@ function candidatePaths(): string[] {
     // ever probed, never existence-checked.
     out.push(EXE_NAME);
     return out;
+}
+
+function mtimeMs(file: string): number {
+    try {
+        return fs.statSync(file).mtimeMs;
+    } catch {
+        return -1;
+    }
+}
+
+/** A workspace's `target/release` and `target/debug` binaries, newest first. */
+export function workspaceBuilds(root: string): string[] {
+    return [
+        path.join(root, 'target', 'release', EXE_NAME),
+        path.join(root, 'target', 'debug', EXE_NAME),
+    ].sort((a, b) => mtimeMs(b) - mtimeMs(a));
+}
+
+/** Whether `exe` is a compiler built in one of the open workspace folders. */
+export function isWorkspaceBuild(exe: string): boolean {
+    const resolvedExe = path.resolve(exe).toLowerCase();
+    return (vscode.workspace.workspaceFolders ?? []).some(folder =>
+        workspaceBuilds(folder.uri.fsPath).some(b => path.resolve(b).toLowerCase() === resolvedExe)
+    );
+}
+
+/**
+ * The binary to run as the language server for `exe`.
+ *
+ * A workspace build runs from a copy in the temp directory. Windows will not
+ * replace an executable that is running, so serving from `target/` itself
+ * made every `cargo build` fail with "Access is denied" while the editor was
+ * open. The copy is named by the build's timestamp; older copies are removed
+ * when they are no longer in use.
+ */
+export function serverBinaryFor(exe: string): string {
+    if (!isWorkspaceBuild(exe)) {
+        return exe;
+    }
+    const dir = path.join(os.tmpdir(), 'iris-lsp');
+    const stamp = Math.floor(mtimeMs(exe));
+    const copy = path.join(dir, `iris-${stamp}${IS_WIN ? '.exe' : ''}`);
+    try {
+        fs.mkdirSync(dir, { recursive: true });
+        if (!fs.existsSync(copy)) {
+            fs.copyFileSync(exe, copy);
+            if (!IS_WIN) {
+                fs.chmodSync(copy, 0o755);
+            }
+        }
+        for (const old of fs.readdirSync(dir)) {
+            const full = path.join(dir, old);
+            if (full !== copy) {
+                try { fs.unlinkSync(full); } catch { /* still running */ }
+            }
+        }
+        return copy;
+    } catch {
+        return exe;
+    }
 }
 
 /**

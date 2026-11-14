@@ -285,48 +285,114 @@ impl DebugSession {
 
     // ── Breakpoints ───────────────────────────────────────────────────────
 
+    /// Checks whether a registered breakpoint at `index` should trigger a stop.
+    /// Evaluates hit-count and expression conditions, records log-points, and
+    /// returns `true` only when execution should pause at `index`.
+    fn check_breakpoint_at(&mut self, index: usize) -> bool {
+        let Some(entry) = self.trace.get(index) else {
+            return false;
+        };
+        let line = entry.line;
+        let Some(bp) = self.breakpoints.get_mut(&line) else {
+            return false;
+        };
+        bp.hit_count += 1;
+
+        // Check hit-count condition (e.g. ">5", "==3", "10" meaning ==10).
+        if let Some(ref hc) = bp.hit_condition {
+            if !check_hit_condition(bp.hit_count, hc) {
+                return false;
+            }
+        }
+
+        // Check expression condition.
+        if let Some(ref cond) = bp.condition {
+            let vars = &self.trace[index].variables;
+            if !evaluate_condition(vars, cond) {
+                return false;
+            }
+        }
+
+        // Log-point: emit message, don't stop.
+        if let Some(ref msg) = bp.log_message {
+            let vars = &self.trace[index].variables;
+            let rendered = interpolate_log_message(msg, vars);
+            self.pending_logs.push(rendered);
+            return false;
+        }
+
+        true
+    }
+
+    fn trace_site(&self, idx: usize) -> Option<(String, u32, u32)> {
+        self.trace
+            .get(idx)
+            .map(|e| (e.func_name.clone(), e.line, e.depth))
+    }
+
+    fn is_same_trace_site(site: Option<&(String, u32, u32)>, entry: &TraceEntry) -> bool {
+        site.is_some_and(|(func_name, line, depth)| {
+            *line == entry.line && *depth == entry.depth && *func_name == entry.func_name
+        })
+    }
+
     /// Advances the cursor to the next frame that matches a registered breakpoint
     /// (respecting conditions, hit counts, and log-points).
     ///
     /// Returns a reference to that frame, or `None` if no breakpoint is hit.
     pub fn continue_to_breakpoint(&mut self) -> Option<&TraceEntry> {
         self.pending_logs.clear();
+        let mut last_site = (self.cursor > 0)
+            .then(|| self.trace_site(self.cursor))
+            .flatten();
         self.cursor += 1;
-        while self.cursor < self.trace.len() {
-            let line = self.trace[self.cursor].line;
-            if let Some(bp) = self.breakpoints.get_mut(&line) {
-                bp.hit_count += 1;
-
-                // Check hit-count condition (e.g. ">5", "==3", "10" meaning ==10).
-                if let Some(ref hc) = bp.hit_condition {
-                    if !check_hit_condition(bp.hit_count, hc) {
-                        self.cursor += 1;
-                        continue;
-                    }
-                }
-
-                // Check expression condition.
-                if let Some(ref cond) = bp.condition {
-                    let vars = &self.trace[self.cursor].variables;
-                    if !evaluate_condition(vars, cond) {
-                        self.cursor += 1;
-                        continue;
-                    }
-                }
-
-                // Log-point: emit message, don't stop.
-                if let Some(ref msg) = bp.log_message {
-                    let vars = &self.trace[self.cursor].variables;
-                    let rendered = interpolate_log_message(msg, vars);
-                    self.pending_logs.push(rendered);
-                    self.cursor += 1;
-                    continue;
-                }
-
+        while let Some(entry) = self.trace.get(self.cursor) {
+            if Self::is_same_trace_site(last_site.as_ref(), entry) {
+                self.cursor += 1;
+                continue;
+            }
+            last_site = Some((entry.func_name.clone(), entry.line, entry.depth));
+            if self.check_breakpoint_at(self.cursor) {
                 return self.trace.get(self.cursor);
             }
             self.cursor += 1;
         }
+        None
+    }
+
+    /// Rewinds the cursor to the previous frame that matches a registered breakpoint
+    /// (respecting conditions, hit counts, and log-points).
+    ///
+    /// Returns a reference to that frame, or `None` if the start of the trace is
+    /// reached without hitting a breakpoint.
+    pub fn reverse_continue(&mut self) -> Option<&TraceEntry> {
+        self.pending_logs.clear();
+        if self.cursor == 0 || self.trace.is_empty() {
+            return None;
+        }
+        let mut last_site = (self.cursor < self.trace.len())
+            .then(|| self.trace_site(self.cursor))
+            .flatten();
+        let mut idx = if self.cursor < self.trace.len() {
+            self.cursor - 1
+        } else {
+            self.trace.len() - 1
+        };
+        loop {
+            let entry = &self.trace[idx];
+            if !Self::is_same_trace_site(last_site.as_ref(), entry) {
+                last_site = Some((entry.func_name.clone(), entry.line, entry.depth));
+                if self.check_breakpoint_at(idx) {
+                    self.cursor = idx;
+                    return self.trace.get(idx);
+                }
+            }
+            if idx == 0 {
+                break;
+            }
+            idx -= 1;
+        }
+        self.cursor = 0;
         None
     }
 
@@ -752,6 +818,43 @@ mod tests {
         assert!(s.exception_message.is_some());
         let msg = s.exception_message.as_ref().unwrap();
         assert!(msg.contains("panic") || msg.contains("oops"));
+    }
+
+    #[test]
+    fn test_reverse_continue_hits_earlier_breakpoint_and_stops_at_start() {
+        let src = r#"
+            def main() -> i64 {
+                var acc = 1
+                acc = acc + 2
+                acc = acc + 3
+                acc = acc + 4
+                acc
+            }
+        "#;
+        let mut s = DebugSession::new();
+        s.set_source(src);
+        s.start().unwrap();
+        s.set_breakpoint(4, None);
+        s.set_breakpoint(6, None);
+
+        let hit6 = s.continue_to_breakpoint();
+        assert!(hit6.is_some());
+        let first_hit_line = hit6.unwrap().line;
+        if first_hit_line == 4 {
+            let next_hit = s
+                .continue_to_breakpoint()
+                .expect("second breakpoint at line 6");
+            assert_eq!(next_hit.line, 6);
+        }
+
+        let rev = s
+            .reverse_continue()
+            .expect("reverse continue hits earlier breakpoint at line 4");
+        assert_eq!(rev.line, 4);
+
+        let rev_start = s.reverse_continue();
+        assert!(rev_start.is_none());
+        assert_eq!(s.cursor, 0);
     }
 }
 

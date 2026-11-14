@@ -1,0 +1,10 @@
+// expect: E0113 at 8:17
+// fix: P { x: 1 }
+// fix-compiles
+
+record P { x: i64 }
+
+def main() -> i64 {
+    val p = P { y: 1 }
+    return p.x
+}

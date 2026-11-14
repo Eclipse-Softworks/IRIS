@@ -1,0 +1,181 @@
+// Web access log analysis for logstat.iris: the combined log format
+//   ip - user [day/Mon/year:hh:mm:ss zone] "METHOD path PROTO" status bytes "referer" "agent"
+// A line that does not fit is counted as unparsed, not guessed at.
+
+pub record LogEntry {
+    ip: str,
+    // "18/Oct/2026:09:03": the timestamp to the minute
+    minute: str,
+    path: str,
+    status: i64,
+    bytes: i64,
+}
+
+pub record LogStats {
+    lines: i64,
+    parsed: i64,
+    unparsed: i64,
+    by_class: list<i64>,
+    bytes: i64,
+    top_path: str,
+    top_path_hits: i64,
+    // "ip count" for clients with at least the threshold of 404s, sorted
+    scanners: list<str>,
+    worst_minute: str,
+    worst_minute_5xx: i64,
+}
+
+def text_between(line: str, open: str, close: str) -> option<str> {
+    val start = find(line, open);
+    if is_some(start) == false {
+        return none()
+    };
+    val rest = slice(line, unwrap(start) + len(open), len(line));
+    val end = find(rest, close);
+    if is_some(end) { some(slice(rest, 0, unwrap(end))) } else { none() }
+}
+
+pub def parse_log_line(line: str) -> option<LogEntry> {
+    val first_space = find(line, " ");
+    val stamp = text_between(line, "[", "]");
+    val request = text_between(line, "\"", "\"");
+    if is_some(first_space) == false || is_some(stamp) == false || is_some(request) == false {
+        return none()
+    };
+    // Status and size follow the request's closing quote.
+    val after_open = slice(line, unwrap(find(line, "\"")) + 1, len(line));
+    val after = slice(after_open, unwrap(find(after_open, "\"")) + 1, len(after_open));
+    val fields = split(trim(after), " ");
+    if list_len(fields) < 2 {
+        return none()
+    };
+    val status = parse_i64(list_get(fields, 0));
+    val size = parse_i64(list_get(fields, 1));
+    val parts = split(unwrap(request), " ");
+    if is_some(status) == false || is_some(size) == false || list_len(parts) < 2 || len(unwrap(stamp)) < 17 {
+        return none()
+    };
+    some(LogEntry {
+        ip: slice(line, 0, unwrap(first_space)),
+        minute: slice(unwrap(stamp), 0, 17),
+        path: list_get(parts, 1),
+        status: unwrap(status),
+        bytes: unwrap(size),
+    })
+}
+
+// Add one to `key`, remembering first-seen order in `order`.
+def bump(counts: map<str, i64>, order: list<str>, key: str) -> i64 {
+    val now = map_get(counts, key).unwrap_or(0) + 1;
+    if now == 1 {
+        push(order, key)
+    };
+    map_set(counts, key, now);
+    now
+}
+
+// The key with the highest count; the first seen among equals.
+def most(counts: map<str, i64>, order: list<str>) -> str {
+    var best = "";
+    var best_count = -1;
+    var i = 0;
+    while i < list_len(order) {
+        val key = list_get(order, i);
+        val n = map_get(counts, key).unwrap_or(0);
+        if n > best_count {
+            best = key;
+            best_count = n
+        };
+        i = i + 1
+    };
+    best
+}
+
+pub def analyze(text: str, scan_threshold: i64) -> LogStats {
+    val lines = split(text, "\n");
+    // Counts by status class; index 2 is 2xx, and so on.
+    val classes: list<i64> = list();
+    var c = 0;
+    while c < 6 {
+        push(classes, 0);
+        c = c + 1
+    };
+    val path_hits: map<str, i64> = map();
+    val path_order: list<str> = list();
+    val not_found: map<str, i64> = map();
+    val nf_order: list<str> = list();
+    val errors: map<str, i64> = map();
+    val error_order: list<str> = list();
+    var total = 0;
+    var parsed = 0;
+    var bytes = 0;
+    var i = 0;
+    while i < list_len(lines) {
+        val line = list_get(lines, i);
+        if len(line) > 0 {
+            total = total + 1;
+            val entry = parse_log_line(line);
+            if is_some(entry) {
+                val e = unwrap(entry);
+                parsed = parsed + 1;
+                bytes = bytes + e.bytes;
+                val class = e.status / 100;
+                if class >= 1 && class <= 5 {
+                    list_set(classes, class, list_get(classes, class) + 1)
+                };
+                bump(path_hits, path_order, e.path);
+                if e.status == 404 {
+                    bump(not_found, nf_order, e.ip)
+                };
+                if e.status >= 500 {
+                    bump(errors, error_order, e.minute)
+                }
+            }
+        };
+        i = i + 1
+    };
+    val scanners: list<str> = list();
+    var k = 0;
+    while k < list_len(nf_order) {
+        val ip = list_get(nf_order, k);
+        val n = map_get(not_found, ip).unwrap_or(0);
+        if n >= scan_threshold {
+            push(scanners, ip + " " + to_str(n))
+        };
+        k = k + 1
+    };
+    list_sort(scanners);
+    val top = most(path_hits, path_order);
+    val worst = most(errors, error_order);
+    LogStats {
+        lines: total,
+        parsed: parsed,
+        unparsed: total - parsed,
+        by_class: classes,
+        bytes: bytes,
+        top_path: top,
+        top_path_hits: map_get(path_hits, top).unwrap_or(0),
+        scanners: scanners,
+        worst_minute: worst,
+        worst_minute_5xx: map_get(errors, worst).unwrap_or(0),
+    }
+}
+
+// The report logstat prints.
+pub def report(stats: LogStats) -> str {
+    val classes = stats.by_class;
+    var out = "lines " + to_str(stats.lines) + ", parsed " + to_str(stats.parsed) + ", unparsed " + to_str(stats.unparsed) + "\n";
+    out = out + "status 2xx " + to_str(list_get(classes, 2)) + ", 3xx " + to_str(list_get(classes, 3));
+    out = out + ", 4xx " + to_str(list_get(classes, 4)) + ", 5xx " + to_str(list_get(classes, 5)) + "\n";
+    out = out + "bytes " + to_str(stats.bytes) + "\n";
+    out = out + "top path " + stats.top_path + " (" + to_str(stats.top_path_hits) + " requests)\n";
+    var i = 0;
+    while i < list_len(stats.scanners) {
+        out = out + "404 scanner " + list_get(stats.scanners, i) + "\n";
+        i = i + 1
+    };
+    if len(stats.worst_minute) > 0 {
+        out = out + "worst minute " + stats.worst_minute + " (" + to_str(stats.worst_minute_5xx) + " 5xx)\n"
+    };
+    out
+}

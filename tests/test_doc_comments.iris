@@ -34,3 +34,11 @@ type Numeric = f64
 pub def add(a: i64, b: i64) -> i64 {
     a + b
 }
+
+def main() -> i64 {
+    assert(gcd(48, 18) == 6);
+    assert(add(10, 20) == 30);
+    assert(MAX_COUNT == 100);
+    0
+}
+

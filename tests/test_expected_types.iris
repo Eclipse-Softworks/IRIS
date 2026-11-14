@@ -1,0 +1,66 @@
+// Types the program declares reach the values it builds.
+//
+// Lowering used to give these an `i64` default whatever the annotation or
+// the use said: an annotated `u8` literal stayed `i64`, `ok(7)` under
+// `result<i64, str>` carried an `i64` error type, an empty `list()` passed
+// for a `list<f64>` became `list<i64>`, and an unannotated `map()` was
+// `map<str, i64>` whatever it held. The source type checker now solves them
+// and lowering uses its answer.
+
+record Event { name: str, at: i64 }
+
+def total(xs: list<f64>) -> f64 {
+    var t = 0.0
+    for x in xs { t = t + x }
+    t
+}
+
+def names(es: list<Event>) -> str {
+    var out = ""
+    for e in es { out = out + e.name }
+    out
+}
+
+def lookup(found: bool) -> result<i64, str> {
+    if found { ok(7) } else { err("missing") }
+}
+
+def main() -> i64 {
+    // A literal takes the width its annotation declares.
+    val ch: u8 = 'A'
+    val wide: i32 = 70000
+    println(to_str(ch) + " " + to_str(wide))
+    assert(ch == 'A')
+    assert(wide == 70000)
+
+    // The error side of `ok`, and the value side of `err`, come from the
+    // declared type.
+    val r: result<i64, str> = ok(7)
+    val fallback = r ?? 0
+    assert(fallback == 7)
+    val e = lookup(false)
+    val message = when e {
+        ok(v) => to_str(v),
+        err(m) => m,
+    }
+    assert(message == "missing")
+
+    // An empty list passed where a list of something is expected.
+    assert(total(list()) == 0.0)
+    assert(names(list()) == "")
+
+    // A list reassigned to a fresh one keeps its element type.
+    var row: list<str> = list("a")
+    row = list()
+    push(row, "b")
+    assert(list_get(row, 0) == "b")
+
+    // An unannotated map takes its types from what it holds.
+    val m = map()
+    map_set(m, 3, 2.5)
+    map_set(m, 4, 0.5)
+    val got = unwrap(map_get(m, 3))
+    assert(got * 2.0 == 5.0)
+    println("expected types: ok")
+    return 0
+}

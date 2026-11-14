@@ -1,0 +1,108 @@
+bring std.ais
+
+// One-axis discrete dynamics: v_next = retention * v + gain * command.
+record Dynamics {
+    retention: f64, gain: f64
+}
+
+def motion(dynamics: Dynamics, velocity: f64, command: f64) -> f64 {
+    return dynamics.retention * velocity + dynamics.gain * command
+}
+
+// Calibration observations come from the simulated plant, not dynamics labels.
+// Four independent probes identify both parameters; evaluation uses other inputs.
+def train(plant: Dynamics, initial: Dynamics) -> Dynamics {
+    var retention = initial.retention;
+    var gain = initial.gain;
+    for epoch in 0 .. 100 {
+        val a = tape(retention);
+        val b = tape(gain);
+        var loss = tape(0.0);
+        for sample in 0 .. 4 {
+            val velocity = if sample < 2 { -0.8 } else { 0.8 };
+            val command = if sample % 2 == 0 { -0.6 } else { 0.6 };
+            val observed = motion(plant, velocity, command);
+            val error = a * velocity + b * command - observed;
+            loss = loss + error * error;
+        };
+        backward(loss);
+        retention = retention - 0.1 * grad(a);
+        gain = gain - 0.1 * grad(b);
+    };
+    return Dynamics { retention: retention, gain: gain }
+}
+
+def prediction_error(plant: Dynamics, dynamics: Dynamics) -> f64 {
+    var loss = 0.0;
+    for sample in 0 .. 10 {
+        val velocity = to_f64(sample) * 0.13 - 0.55;
+        val command = if sample % 2 == 0 { 0.35 } else { -0.45 };
+        val error = motion(dynamics, velocity, command) - motion(plant, velocity, command);
+        loss = loss + error * error;
+    };
+    return loss / 10.0
+}
+
+// Each comparison starts from rest and uses the identical target sequence.
+def tracking_error(plant: Dynamics, dynamics: Dynamics) -> f64 {
+    var position = 0.0;
+    var velocity = 0.0;
+    var loss = 0.0;
+    for tick in 0 .. 60 {
+        val target = if tick < 30 { 2.0 } else { -1.0 };
+        val desired = 0.5 * (target - position);
+        val command = clamp((desired - dynamics.retention * velocity) / dynamics.gain, -1.0, 1.0);
+        assert(command >= -1.0 && command <= 1.0);
+        velocity = motion(plant, velocity, command);
+        position = position + velocity;
+        val error = target - position;
+        loss = loss + error * error;
+    };
+    return loss / 60.0
+}
+
+def acceptable(plant: Dynamics, active: Dynamics, candidate: Dynamics) -> bool {
+    if candidate.gain < 0.05 || candidate.gain > 2.0 { return false };
+    if candidate.retention < 0.0 || candidate.retention >= 1.0 { return false };
+    return prediction_error(plant, candidate) < prediction_error(plant, active)
+        && tracking_error(plant, candidate) < tracking_error(plant, active)
+}
+
+def main() -> i64 {
+    val nominal = Dynamics { retention: 0.5, gain: 1.0 };
+    val changed = Dynamics { retention: 0.8, gain: 0.25 };
+    val initial = Dynamics { retention: 0.1, gain: 0.5 };
+    var active = train(nominal, initial);
+    assert(prediction_error(nominal, active) < 0.000001);
+    val drift = prediction_error(changed, active);
+    assert(drift > 0.01);
+    val baseline = tracking_error(changed, active);
+    val candidate = train(changed, active);
+    assert(acceptable(changed, active, candidate));
+    assert(prediction_error(changed, candidate) < 0.000001);
+    active = candidate;
+    val adapted = tracking_error(changed, active);
+    assert(adapted < baseline);
+
+    // Reject an invalid candidate before it reaches the controller.
+    val invalid = Dynamics { retention: 1.2, gain: 0.0 };
+    assert(!acceptable(changed, active, invalid));
+    assert(!acceptable(changed, active, initial));
+    assert(!acceptable(changed, active, active));
+
+    // Fault injection exercises restoration after an already-installed bad update.
+    val previous = active;
+    active = initial;
+    val faulty = tracking_error(changed, active);
+    assert(faulty > adapted);
+    if faulty > adapted { active = previous };
+    val restored = tracking_error(changed, active);
+    assert(restored == adapted);
+    println(f"prediction MSE after drift: {drift}");
+    println(f"fixed-dynamics tracking MSE: {baseline}");
+    println(f"retrained tracking MSE: {adapted}");
+    println(f"fault-injected tracking MSE: {faulty}");
+    println(f"restored tracking MSE: {restored}");
+    println("learning robot: trained, adapted, rejected, restored");
+    return 0
+}

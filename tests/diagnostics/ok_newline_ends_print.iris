@@ -1,0 +1,6 @@
+// expect: ok
+
+def main() -> i64 {
+    print("hi")
+    return 0
+}

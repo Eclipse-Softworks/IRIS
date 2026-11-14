@@ -19,3 +19,9 @@ def test_holder() -> i64 {
     assert(h.s.count == 0);
     0
 }
+
+def main() -> i64 {
+    test_holder();
+    0
+}
+

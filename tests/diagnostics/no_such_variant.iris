@@ -1,0 +1,7 @@
+// expect: E0122 at 5:13
+// message: has no variant `Blue`
+choice Color { Red, Green }
+def main() -> i64 {
+    val c = Color.Blue
+    0
+}

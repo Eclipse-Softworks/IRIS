@@ -1,0 +1,9 @@
+// expect: E0202 at 7:18
+// message: expected `f64`, found an integer
+// fix: half(3.0)
+// fix-compiles
+def half(x: f64) -> f64 { x * 0.5 }
+def main() -> i64 {
+    val y = half(3)
+    0
+}

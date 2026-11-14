@@ -2521,6 +2521,8 @@ def main() -> i64 {
 
 The `?` operator provides a shorthand for propagating errors. Inside a function that returns `result<T, E>`, writing `expr?` means: if `expr` is `err(e)`, return `err(e)` immediately; if it is `ok(v)`, continue with `v`.
 
+The error must be the function's error type `E`. `?` anywhere else -- in a function that does not return a `result` (on an `option`, an `option`) -- is a compile error, since there is nothing to return the error as; handle the value there with `when`, `??` and a default, or `try { ... } catch e { ... }`, whose `catch` receives the error (every `?` in one `try` must carry the same error type).
+
 ```iris
 def read_positive(s: str) -> result<i64, str> {
     val parsed = parse_i64(s);
@@ -4139,6 +4141,11 @@ This automatically downloads, validates, and adds the dependency to your `iris.t
 - **`iris pkg update`**: Updates lockfile and checks for newer compatible dependency versions.
 - **`iris pkg list`**: Lists all active project dependencies.
 - **`iris pkg check`**: Rapidly parses and checks package types without full compilation.
+- **`iris pkg publish [--registry DIR] [--dry-run]`**: Adds this package's version to a registry directory as a deterministic archive with its SHA-256; a published version is never replaced.
+- **`iris pkg search TEXT`**: Lists the registry's packages whose name or description contains `TEXT`.
+- **`iris pkg serve DIR [--port N]`**: Serves a registry directory over HTTP, read-only (default port 8765).
+
+Registry dependencies (`json = { registry = "json", version = "^1.0" }`) come from the `registry/` directory of the IRIS repository by default; `IRIS_REGISTRY` or `registry` in `[package]` points elsewhere: a directory, a `file://` URL or an HTTP server. The layout and the publishing steps are in [registry/README.md](../registry/README.md).
 
 ### Try It Yourself
 
@@ -4543,9 +4550,24 @@ def is_debug() -> bool {
 #endif
 ```
 
-`#define`, `#ifdef`, `#ifndef`, `#else` and `#endif` behave as they do in C.
-Excluded branches are removed before lexing, so they need not even parse — which
-is what makes platform-specific code practical.
+`#define`, `#undef`, `#ifdef`, `#ifndef`, `#if`, `#elif`, `#else` and `#endif`
+behave as they do in C. Excluded branches are removed before lexing, so they
+need not even parse — which is what makes platform-specific code practical.
+
+- `#if` takes `defined(NAME)`, `NAME`, integer and string literals, `==` `!=`
+  `<` `<=` `>` `>=`, `!`, `&&`, `||` and parentheses, with C's precedence:
+  `#if BUILD == "alpha" && VERSION >= 2`. An undefined name compares as `0`;
+  `<` and its relatives compare integers.
+- A `#define` with a value is a macro: later uses of the name become the value
+  (`#define LIMIT 40` makes `LIMIT + 2` mean `40 + 2`) until `#undef`, but not
+  inside strings or comments. A name defined without a value is only a symbol
+  for `#ifdef`, and is never replaced.
+- The predefined symbols describe the build, not the machine compiling it:
+  `WINDOWS`, `LINUX`, `MACOS`, `WASM` or `EMBEDDED` and the architecture
+  (`X86_64`, `AARCH64`, `ARM`, `RISCV32`, `RISCV64`, `AVR`, `XTENSA`) follow
+  `--target`; `TARGET_OS` and `TARGET_ARCH` are the same as strings; `DEBUG` is
+  defined with `-g`, `RELEASE` without. `-D NAME` or `-D NAME=VALUE` adds one
+  from the command line.
 
 ### 19.4 Algebraic Effects and Handlers
 
@@ -5196,7 +5218,7 @@ The `iris` compiler provides a single, unified CLI with 10 powerful subcommands:
 9. **`test`**: Discovers and runs test cases in the workspace.
 10. **`explain <code>`**: Interactive diagnostic code explanation catalog.
 
-### 14 Emit Kinds (`--emit <kind>`)
+### 16 Emit Kinds (`--emit <kind>`)
 Specify intermediate compiler outputs:
 - **`eval`**: Direct evaluation in the AST interpreter.
 - **`tokens`**: Prints lexical tokens.
@@ -5208,9 +5230,12 @@ Specify intermediate compiler outputs:
 - **`asm`**: Target assembly code.
 - **`obj`**: Compiled object file.
 - **`binary`**: Native executable file.
-- **`onnx`**: Exported ONNX model graph.
-- **`cuda`**: Generated CUDA source code.
-- **`simd`**: Vectorized IR output.
+- **`onnx`**: Exported ONNX model graph (text); **`onnx-binary`**: the ONNX protobuf, with weights from `--weights FILE` or seeded initial values.
+- **`tensorrt`**: A serialized TensorRT engine for a `model`, built with `trtexec` (needs TensorRT; CLI invocation tested, not yet run where TensorRT is installed).
+- **`cuda`** / **`cuda-ptx`**: The device code for NVIDIA GPUs, as LLVM IR or as PTX. `--gpu cuda` on a native build runs `par for` loops on the GPU; this path is tested by running the device code on the CPU and has not yet been run on an NVIDIA GPU.
+- **`simd`**: LLVM IR with explicit vector kernels for element-wise `par for` loops (`--simd` does the same for a native build).
+- **`python-ext`**: A CPython extension module (`-o NAME.pyd` or `.so`).
+- **`pgo-instrument`** / **`pgo-optimize`**: LLVM IR with block counters, or with a recorded profile applied; `--pgo-generate` and `--pgo-use FILE` do the same for a native build.
 - **`graph`**: Generates AST or IR visual dependency dot files.
 
 ### Global Flags

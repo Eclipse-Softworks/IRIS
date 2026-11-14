@@ -1,0 +1,7 @@
+// expect: E0208 at 5:34
+// message: `str`
+
+def main() -> i64 {
+    val x = if true { 1 } else { "no" }
+    return 0
+}

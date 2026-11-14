@@ -1,0 +1,8 @@
+// expect: E0100 at 6:20
+// message: cannot find `count`
+
+def main() -> i64 {
+    val total = 3
+    println(to_str(count));
+    return total
+}

@@ -1,0 +1,8 @@
+// expect: E0209 at 5:5
+// message: returns `i64`
+
+def name() -> i64 {
+    "iris"
+}
+
+def main() -> i64 { name() }

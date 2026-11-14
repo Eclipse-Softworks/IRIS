@@ -1,0 +1,6 @@
+// expect: E0001 at 5:1
+// fix: // a comment
+// fix-compiles
+
+# a comment
+def main() -> i64 { 0 }

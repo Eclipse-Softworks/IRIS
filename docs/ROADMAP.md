@@ -1,6 +1,6 @@
 # IRIS Roadmap
 
-> **Current version: 1.0.0-rc1** — release-candidate working tree. The existing
+> **Current version: 1.0.0-rc2** — release-candidate working tree. The existing
 > `v1.0.0-rc1` tag predates the hardening work listed below and will not be
 > force-moved; a later candidate must use a new tag.
 
@@ -9,7 +9,7 @@ line through the stable 1.0 release and beyond.
 
 ---
 
-## Current State (v1.0.0-rc1)
+## Current State (v1.0.0-rc2)
 
 - Core parsing, typing, ownership/borrowing, effect analysis, SSA lowering,
   interpreter, LLVM native codegen, and ORC JIT are functional on the validated
@@ -90,7 +90,7 @@ Release status: historical RC milestone; current hardening is ahead of the exist
 | 1 | Tensor runtime — replace shape-tracking stubs with real compute | Critical | ✅ Done |
 | 2 | `einsum` codegen — generate loop nests or dispatch to BLAS | High | ✅ Done |
 | 3 | ONNX export — binary protobuf, not just text format | High | ✅ Done |
-| 4 | GPU backend — CUDA or Vulkan compute shaders for tensor ops | Medium | ✅ Done |
+| 4 | GPU backend — CUDA or Vulkan compute shaders for tensor ops | Medium | ✅ Done (CUDA, `--gpu cuda`; device code tested on the CPU, not yet run on an NVIDIA GPU) |
 | 5 | SIMD codegen — auto-vectorize tight loops on x86/ARM | Medium | ✅ Done |
 | 6 | Automatic differentiation v2 — reverse-mode AD | Medium | ✅ Done |
 | 7 | Sparse tensor ops — CSR/COO kernels, sparse matmul | Low | ✅ Done |
@@ -151,7 +151,7 @@ See the [Self-Evolving Software & AI/ML Architecture Roadmap](self-evolving-soft
 - **In-Process Reflection & Safe JIT** (`std.reflect`) — ✅ LLVM-C object emission, ORC execution, ABI validation, atomic whole-program gateway leases, eight-generation history, exact rollback and content-addressed artifacts
 - **Speculative Effect Isolation** (`std.speculation`) — ✅ nested transactional list/map/atomic rollback and staged filesystem commit/rollback across interpreter and native/JIT backends
 - **Differentiable Control Flow & Tensors** (`std.tensor`, `std.nn`) — ✅ end-to-end reverse-mode autodiff across closures, branches, loops, traits and neural-network helpers
-- **Autonomous Intelligent Systems v2** (`std.ais`, `std.ros2`) — ✅ viability prediction, homeostatic pre-emption, expected-free-energy policy selection, QoS endpoints, typed receive, deterministic executor, lifecycle state and tf2-compatible local transforms; services/actions and wire-level tf2 remain future work
+- **Autonomous Intelligent Systems v2** (`std.ais`, `std.ros2`) — ✅ viability prediction, homeostatic pre-emption, expected-free-energy policy selection, QoS endpoints, typed receive, deterministic executor, lifecycle state, tf2-compatible transforms, services, actions, parameters, and wire-level tf2 (verified on Windows and Linux; macOS unbuilt and single-threaded executor per context remain open)
 - **Embedded Microcontroller Targets** — ✅ allocation-free proof gate and freestanding object bundles for Cortex-M4F/M33, ESP32-C3 and Arduino Uno; ATmega328P/CH340 hardware execution verified on the BDD Ultimate Starter Kit V2 with an exact content fingerprint and zero allocation/fault counters. LLVM 17 AVR loops/fixed arrays are rejected pending an upstream-safe backend path.
 - **Governed Evolution Coordinator** — ✅ scalar `iris evolve` gates plus mandatory persisted audit-head verification; ✅ v2 JSON/command/scalar manifest and state contracts as library APIs; generalized CLI canary metrics remain open
 - **Native Candidate Sandbox** — ✅ Windows LPAC + Job Object launch is implemented and token-attested, with suspended startup, zero capabilities, bounded output, memory/CPU/process limits, and fail-closed unsupported hosts; scalar `iris evolve` remains interpreter-validated

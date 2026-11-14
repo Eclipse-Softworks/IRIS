@@ -12,3 +12,9 @@ def test_nested_generic() -> i64 {
     assert(mid.item == 3);
     0
 }
+
+def main() -> i64 {
+    test_nested_generic();
+    0
+}
+

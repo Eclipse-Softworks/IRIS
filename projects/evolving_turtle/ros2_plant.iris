@@ -1,0 +1,103 @@
+// The plant is a real robot in a simulator: turtlesim's turtle1, driven over
+// ROS 2. `iris evolve-live` calls `plant` once per control period, exactly as
+// it calls the cart's model; here each call publishes the controller's
+// command on /turtle1/cmd_vel, lets one period of real time pass while
+// collecting /turtle1/pose, and returns what the simulator measured.
+//
+// The turtle runs along a straight track: it starts at x = START_X facing
+// +x, the command is its forward speed (units/s), and `position` is the
+// distance travelled along the track.
+
+bring std.ros2
+
+pub record PlantInput { position: f64, velocity: f64, force: f64, dt: f64 }
+pub record PlantState { position: f64, velocity: f64 }
+
+pub const START_X: f64 = 1.0
+pub const TRACK_Y: f64 = 5.5
+
+// Connections made on the first call and kept for the run (0: not yet).
+var ctx_h: i64 = 0
+var node_h: i64 = 0
+var pose_h: i64 = 0
+var cmd_h: i64 = 0
+// The latest pose received.
+var last_x: f64 = 0.0
+var last_v: f64 = 0.0
+
+def context() -> ROS2Context { ROS2Context { handle: ctx_h } }
+
+def pose_sub() -> ROS2Sub {
+    ROS2Sub { handle: pose_h, node: node_h, ctx: ctx_h, msg_type: "turtlesim/msg/Pose" }
+}
+
+def cmd_pub() -> ROS2Publisher {
+    ROS2Publisher { handle: cmd_h, node: node_h, msg_type: "geometry_msgs/msg/Twist" }
+}
+
+// Calls a turtlesim service with an empty or prepared request.
+def call(cli: ROS2Client, req: ROS2Msg, what: str) -> i64 {
+    val reply = client_call(cli, req, 5000);
+    msg_free(req);
+    if is_none(reply) { panic("turtlesim did not answer " + what); };
+    0
+}
+
+// Join the ROS 2 graph, put the turtle at the start of the track facing +x,
+// and clear the canvas so the run's path is the only one drawn.
+def connect() -> i64 {
+    val ctx = context_create();
+    assert(ctx.handle != 0);
+    val node = node_create(ctx, "iris_evolving_turtle", "");
+    assert(node.handle != 0);
+    val teleport = client_create(node, "/turtle1/teleport_absolute", "turtlesim/srv/TeleportAbsolute");
+    if !client_wait_service(teleport, 15000) {
+        panic("no turtlesim: start it with `ros2 run turtlesim turtlesim_node`");
+    };
+    val pen = client_create(node, "/turtle1/set_pen", "turtlesim/srv/SetPen");
+    val clear = client_create(node, "/clear", "std_srvs/srv/Empty");
+    assert(client_wait_service(pen, 5000) && client_wait_service(clear, 5000));
+    val up = client_request(pen);
+    msg_set_i64(up, "off", 1);
+    call(pen, up, "set_pen");
+    val jump = client_request(teleport);
+    msg_set_f64(jump, "x", START_X);
+    msg_set_f64(jump, "y", TRACK_Y);
+    msg_set_f64(jump, "theta", 0.0);
+    call(teleport, jump, "teleport_absolute");
+    call(clear, client_request(clear), "clear");
+    val down = client_request(pen);
+    msg_set_i64(down, "r", 40);
+    msg_set_i64(down, "g", 200);
+    msg_set_i64(down, "b", 255);
+    msg_set_i64(down, "width", 3);
+    msg_set_i64(down, "off", 0);
+    call(pen, down, "set_pen");
+    val sub = subscription_create(node, "/turtle1/pose", "turtlesim/msg/Pose");
+    val cmd = publisher_create(node, "/turtle1/cmd_vel", "geometry_msgs/msg/Twist");
+    ctx_h = ctx.handle;
+    node_h = node.handle;
+    pose_h = sub.handle;
+    cmd_h = cmd.handle;
+    last_x = START_X;
+    last_v = 0.0;
+    0
+}
+
+// One control period on the simulator: command the speed, spin for `dt` of
+// real time keeping the newest pose, and report it.
+pub def plant(s: PlantInput) -> PlantState {
+    if ctx_h == 0 {
+        connect();
+    };
+    publish_twist(cmd_pub(), make_twist(s.force, 0.0, 0.0, 0.0, 0.0, 0.0));
+    val until = ros2_now_ns() + ((s.dt * 1000000000.0) to i64);
+    while ros2_now_ns() < until {
+        val ev = spin_once(context(), 5);
+        if is_message(ev, pose_sub()) {
+            last_x = msg_f64(ev.message, "x");
+            last_v = msg_f64(ev.message, "linear_velocity");
+        };
+    };
+    PlantState { position: last_x - START_X, velocity: last_v }
+}

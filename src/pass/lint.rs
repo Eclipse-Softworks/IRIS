@@ -372,9 +372,16 @@ fn stmt_uses_name(stmt: &AstStmt, name: &str) -> bool {
         }
         AstStmt::Loop { body, .. } => block_uses_name(body, name),
         AstStmt::ForRange {
-            start, end, body, ..
+            start,
+            end,
+            step,
+            body,
+            ..
         } => {
-            expr_uses_name(start, name) || expr_uses_name(end, name) || block_uses_name(body, name)
+            expr_uses_name(start, name)
+                || expr_uses_name(end, name)
+                || step.as_ref().is_some_and(|s| expr_uses_name(s, name))
+                || block_uses_name(body, name)
         }
         AstStmt::ForEach { iter, body, .. } => {
             expr_uses_name(iter, name) || block_uses_name(body, name)
@@ -392,7 +399,9 @@ fn stmt_uses_name(stmt: &AstStmt, name: &str) -> bool {
         }
         AstStmt::Break { .. } | AstStmt::Continue { .. } => false,
         AstStmt::MaskStmt { body, .. } => block_uses_name(body, name),
-        AstStmt::HandleStmt { expr, .. } => expr_uses_name(expr, name),
+        AstStmt::HandleStmt { expr, arms, .. } => {
+            expr_uses_name(expr, name) || arms.iter().any(|a| expr_uses_name(&a.body, name))
+        }
         AstStmt::Defer { expr, .. } => expr_uses_name(expr, name),
         AstStmt::Yield { expr, .. } => expr_uses_name(expr, name),
         AstStmt::Select { arms, default, .. } => {
@@ -415,8 +424,15 @@ pub(crate) fn expr_uses_name(expr: &AstExpr, name: &str) -> bool {
         | AstExpr::Cast { expr, .. }
         | AstExpr::Await { expr, .. }
         | AstExpr::Try { expr, .. } => expr_uses_name(expr, name),
-        AstExpr::Call { callee, args, .. } => {
-            callee.name == name || args.iter().any(|a| expr_uses_name(a, name))
+        AstExpr::Call {
+            callee,
+            args,
+            named_args,
+            ..
+        } => {
+            callee.name == name
+                || args.iter().any(|a| expr_uses_name(a, name))
+                || named_args.iter().any(|(_, a)| expr_uses_name(a, name))
         }
         AstExpr::If {
             cond,
@@ -434,9 +450,14 @@ pub(crate) fn expr_uses_name(expr: &AstExpr, name: &str) -> bool {
         AstExpr::When {
             scrutinee, arms, ..
         } => expr_uses_name(scrutinee, name) || arms.iter().any(|a| arm_uses_name(a, name)),
-        AstExpr::FieldAccess { base, .. }
-        | AstExpr::TupleIndex { base, .. }
-        | AstExpr::Index { base, .. } => expr_uses_name(base, name),
+        AstExpr::FieldAccess { base, .. } | AstExpr::TupleIndex { base, .. } => {
+            expr_uses_name(base, name)
+        }
+        // The index matters as much as the base: a closure over `a[v % 3]`
+        // must capture `v` as well as `a`.
+        AstExpr::Index { base, indices, .. } => {
+            expr_uses_name(base, name) || indices.iter().any(|i| expr_uses_name(i, name))
+        }
         AstExpr::ArrayLit { elems, .. } => elems.iter().any(|e| expr_uses_name(e, name)),
         AstExpr::Tuple { elements, .. } => elements.iter().any(|e| expr_uses_name(e, name)),
         AstExpr::Lambda { body, .. } => expr_uses_name(body, name),
@@ -448,7 +469,9 @@ pub(crate) fn expr_uses_name(expr: &AstExpr, name: &str) -> bool {
             expr_uses_name(base, name) || args.iter().any(|a| expr_uses_name(a, name))
         }
         AstExpr::Mask { body, .. } => block_uses_name(body, name),
-        AstExpr::Handle { expr, .. } => expr_uses_name(expr, name),
+        AstExpr::Handle { expr, arms, .. } => {
+            expr_uses_name(expr, name) || arms.iter().any(|a| expr_uses_name(&a.body, name))
+        }
         AstExpr::NullCoal { expr, default, .. } => {
             expr_uses_name(expr, name) || expr_uses_name(default, name)
         }

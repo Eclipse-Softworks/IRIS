@@ -1,0 +1,8 @@
+// expect: E0117 at 7:14
+// fix: return len(s)
+// fix-compiles
+
+def main() -> i64 {
+    val s = "abc"
+    return s.size()
+}

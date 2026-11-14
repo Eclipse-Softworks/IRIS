@@ -93,6 +93,10 @@ pub def heap_push[T](h: MinHeap<T>, v: T) -> MinHeap<T> {
 
 /// Build a heap from a list.
 pub def heap_from_list[T](lst: list<T>) -> MinHeap<T> {
+    if list_len(lst) == 0 {
+        val empty_d: list<T> = list()
+        return MinHeap { data: empty_d };
+    }
     var h: MinHeap<T> = heap_of(list_get(lst, 0))
     var i = 1
     val n = list_len(lst)
@@ -113,6 +117,25 @@ pub def heap_to_list[T](h: MinHeap<T>) -> list<T> {
         i = i + 1
     }
     result
+}
+
+/// Check if a value exists within the heap.
+pub def heap_contains[T](h: MinHeap<T>, target: T) -> bool {
+    var i = 0
+    val n = list_len(h.data)
+    while i < n {
+        if list_get(h.data, i) == target {
+            return true
+        }
+        i = i + 1
+    }
+    false
+}
+
+/// Clear all elements from the heap and return an empty heap.
+pub def heap_clear[T](h: MinHeap<T>) -> MinHeap<T> {
+    val empty_d: list<T> = list()
+    MinHeap { data: empty_d }
 }
 
 /// Merge two heaps into one.

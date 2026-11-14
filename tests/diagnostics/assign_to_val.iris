@@ -1,0 +1,10 @@
+// expect: E0112 at 8:5
+// message: declared with `val`
+// fix: var x = 1
+// fix-compiles
+
+def main() -> i64 {
+    val x = 1
+    x = 2;
+    return x
+}

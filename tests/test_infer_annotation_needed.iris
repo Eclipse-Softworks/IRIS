@@ -1,0 +1,14 @@
+// iris-test: compile-fail
+// iris-test: error=type annotations needed
+//
+// Nothing determines the element type of `names`, so the type of `first` is
+// unknown. It used to be assumed `i64` silently; now it is a compile error
+// asking for an annotation such as `val names: list<str> = list()`.
+
+def main() -> i64 {
+    val names = list();
+    val first = list_get(names, 0);
+    println(to_str(first));
+    assert(len(to_str(first)) > 0);
+    0
+}

@@ -1,0 +1,13 @@
+// Fixed-point scalar kernel shared by host quantization checks and AVR builds.
+// Inputs and output use scale 1000; this function performs no hardware writes.
+pub def fixed_command(a: i64, b: i64, position: i64, velocity: i64, target: i64) -> i64 {
+    if a < 0 || a >= 990 || b < 50 || b > 2000 { return 0 };
+    if position < -100000 || position > 100000 { return 0 };
+    if velocity < -100000 || velocity > 100000 { return 0 };
+    if target < -100000 || target > 100000 { return 0 };
+    val desired = (target - position) / 2;
+    val raw = (desired * 1000 - a * velocity) / b;
+    if raw > 1000 { return 1000 };
+    if raw < -1000 { return -1000 };
+    return raw
+}

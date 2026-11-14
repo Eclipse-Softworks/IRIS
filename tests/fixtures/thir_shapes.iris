@@ -1,0 +1,21 @@
+// THIR shape fixture: a known record field access, a tuple destructuring, an
+// annotated map literal, and an inferred map literal. `tests/thir.rs` checks
+// the THIR report for one indexed field access per `p.*`, two destructured
+// tuple components, and two maps with both key and value types, then runs the
+// program to prove it is real code.
+record Pair { a: i64, b: i64 }
+
+def main() -> i64 {
+    val p = Pair { a: 3, b: 4 };
+    val (x, y) = (p.a, p.b);
+    val m: map<str, i64> = { "x": x, "y": y };
+    val inferred = { "a": 1, "b": 2 };
+
+    assert(x == 3);
+    assert(y == 4);
+    assert(map_get(m, "x").unwrap_or(0) == 3);
+    assert(map_get(m, "y").unwrap_or(0) == 4);
+    assert(map_get(inferred, "a").unwrap_or(0) == 1);
+    assert(map_get(inferred, "b").unwrap_or(0) == 2);
+    0
+}

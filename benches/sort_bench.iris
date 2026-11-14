@@ -26,6 +26,8 @@ def main() -> i64 {
     push(data, 78); push(data, 33); push(data, 56);
     push(data, 89); push(data, 23); push(data, 67);
     val sorted = bubble_sort(data, 15)
-    print(list_get(sorted, 0));
+    val first = list_get(sorted, 0);
+    print(first);
+    assert(first == 1);
     0
 }

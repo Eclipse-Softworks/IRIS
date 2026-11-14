@@ -249,7 +249,14 @@ fn const_fold_func(func: &mut IrFunction) {
                                 ))
                             }
                             (ScalarUnaryOp::Sign, KnownVal::Float(f)) => {
-                                let v = f.signum();
+                                // -1, 0 or 1, as at run time (`signum` gives 1 for 0.0).
+                                let v = if *f > 0.0 {
+                                    1.0
+                                } else if *f < 0.0 {
+                                    -1.0
+                                } else {
+                                    0.0
+                                };
                                 Some((
                                     IrInstr::ConstFloat {
                                         result: *result,
@@ -533,6 +540,25 @@ fn eval_binop(
                 KnownVal::Int(v),
             ))
         }
+        // Wrap-around arithmetic folds only at i64, the width the
+        // constants are held at.
+        (BinOp::WrapAdd | BinOp::WrapSub | BinOp::WrapMul, KnownVal::Int(a), KnownVal::Int(b))
+            if matches!(ty, IrType::Scalar(crate::ir::types::DType::I64)) =>
+        {
+            let v = match op {
+                BinOp::WrapAdd => a.wrapping_add(*b),
+                BinOp::WrapSub => a.wrapping_sub(*b),
+                _ => a.wrapping_mul(*b),
+            };
+            Some((
+                IrInstr::ConstInt {
+                    result,
+                    value: v,
+                    ty: ty.clone(),
+                },
+                KnownVal::Int(v),
+            ))
+        }
         (BinOp::BitXor, KnownVal::Int(a), KnownVal::Int(b)) => {
             let v = a ^ b;
             Some((
@@ -741,6 +767,13 @@ fn apply_reps(instr: &mut IrInstr, reps: &HashMap<ValueId, ValueId>) {
         } => {
             replace(array);
             replace(index);
+            replace(value);
+        }
+        IrInstr::Borrow { place, .. } | IrInstr::Move { place, .. } => {
+            replace(place);
+        }
+        IrInstr::EnterScope { .. } | IrInstr::ExitScope { .. } => {}
+        IrInstr::Drop { value, .. } => {
             replace(value);
         }
         IrInstr::ConstStr { .. } => {}

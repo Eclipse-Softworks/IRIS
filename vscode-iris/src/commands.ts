@@ -14,12 +14,12 @@ export class IrisEmitProvider implements vscode.TextDocumentContentProvider {
     }
 }
 
-export function runIrisFile(
+export async function runIrisFile(
     _context: vscode.ExtensionContext,
     subcommand: 'run' | 'build',
     getIrisExe: () => string,
     outputChannel: vscode.OutputChannel
-): void {
+): Promise<void> {
     const editor = vscode.window.activeTextEditor;
     if (!editor) {
         vscode.window.showWarningMessage('No active .iris file.');
@@ -29,19 +29,20 @@ export function runIrisFile(
         vscode.window.showWarningMessage('Active file is not an .iris file.');
         return;
     }
-    editor.document.save();
+    // Await the save: otherwise the compiler can read the previous contents.
+    await editor.document.save();
     runFileAtPath(editor.document.fileName, subcommand, getIrisExe, outputChannel);
 }
 
-export function runNamedFunction(
+export async function runNamedFunction(
     uriStr: string,
     _fnName: string,
     getIrisExe: () => string,
     outputChannel: vscode.OutputChannel
-): void {
+): Promise<void> {
     const filePath = vscode.Uri.parse(uriStr).fsPath;
     const doc = vscode.workspace.textDocuments.find(d => d.uri.fsPath === filePath);
-    if (doc) { doc.save(); }
+    if (doc) { await doc.save(); }
     runFileAtPath(filePath, 'run', getIrisExe, outputChannel);
 }
 
@@ -58,25 +59,7 @@ export function runFileAtPath(
     outputChannel.appendLine(`$ iris ${subcommand} "${path.basename(filePath)}"`);
     outputChannel.appendLine('');
 
-    const cfg = vscode.workspace.getConfiguration('iris');
-    const extra: string[] = [];
-    if (cfg.get<boolean>('sandbox', false)) {
-        extra.push('--sandbox');
-    }
-    if (cfg.get<boolean>('noCache', false)) {
-        extra.push('--no-cache');
-    }
-
-    let args: string[];
-    if (subcommand === 'build') {
-        // --target only affects llvm/binary outputs, so it is a build-only flag.
-        const target = cfg.get<string>('target', '').trim();
-        const targetArgs = target ? ['--target', target] : [];
-        const outBinary = filePath.replace(/\.iris$/, '') + (process.platform === 'win32' ? '.exe' : '');
-        args = ['-o', outBinary, 'build', ...extra, ...targetArgs, filePath];
-    } else {
-        args = ['run', ...extra, filePath];
-    }
+    const args = buildRunArgs(filePath, subcommand, vscode.workspace.getConfiguration('iris'));
 
     const startTime = Date.now();
 
@@ -126,9 +109,51 @@ export function runFileAtPath(
     });
 }
 
+/**
+ * Command line for `iris run` / `iris build`.
+ *
+ * Every option goes *before* the subcommand. The compiler's `--target` and
+ * `-o` are top-level options only (subcommands such as `embedded` define
+ * their own), and IRIS 1.0.0-rc2 and earlier accepted none of the
+ * options after the subcommand -- placing them after `build` made the build
+ * fail whenever `iris.target`, `iris.sandbox` or `iris.noCache` was set.
+ */
+export function buildRunArgs(
+    filePath: string,
+    subcommand: 'run' | 'build',
+    cfg: { get<T>(key: string, defaultValue: T): T },
+): string[] {
+    const args: string[] = [];
+    if (cfg.get<boolean>('sandbox', false)) {
+        args.push('--sandbox');
+    }
+    if (cfg.get<boolean>('noCache', false)) {
+        args.push('--no-cache');
+    }
+    if (cfg.get<boolean>('strictEffects', false)) {
+        args.push('--strict-effects');
+    }
+    if (subcommand === 'build') {
+        // --target only affects llvm/binary outputs, so it is a build-only flag.
+        const target = cfg.get<string>('target', '').trim();
+        if (target) {
+            args.push('--target', target);
+        }
+        // Debug info applies to host builds only; the compiler rejects -g with --target.
+        if (cfg.get<boolean>('build.debugInfo', false) && !target) {
+            args.push('-g');
+        }
+        const outBinary = filePath.replace(/\.iris$/, '') + (process.platform === 'win32' ? '.exe' : '');
+        args.push('-o', outBinary);
+    }
+    args.push(subcommand, filePath);
+    return args;
+}
+
 export async function debugIrisFile(
     target: vscode.Uri | string | undefined,
-    getIrisExe: () => string
+    getIrisExe: () => string,
+    forceNative?: boolean,
 ): Promise<void> {
     let filePath: string | undefined;
 
@@ -149,17 +174,18 @@ export async function debugIrisFile(
     const doc = vscode.workspace.textDocuments.find(d => d.uri.fsPath === filePath);
     if (doc) { await doc.save(); }
 
-    const stopOnEntry = vscode.workspace
-        .getConfiguration('iris')
-        .get<boolean>('debug.stopOnEntry', false);
+    const cfg = vscode.workspace.getConfiguration('iris');
+    const stopOnEntry = cfg.get<boolean>('debug.stopOnEntry', false);
+    const native = forceNative ?? cfg.get<boolean>('debug.native', false);
     const uri = vscode.Uri.file(filePath);
 
     await vscode.debug.startDebugging(vscode.workspace.getWorkspaceFolder(uri), {
         type: 'iris',
         request: 'launch',
-        name: `Debug ${path.basename(filePath)}`,
+        name: `Debug ${path.basename(filePath)}${native ? ' (native)' : ''}`,
         program: filePath,
         stopOnEntry,
+        native,
     });
 }
 

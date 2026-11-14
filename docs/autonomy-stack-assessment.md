@@ -1,6 +1,6 @@
 # AIS / ML / ROS 2 assessment
 
-**Updated:** 2026-08-31
+**Updated:** 2026-10-20
 **Method:** function-level inventory plus interpreter, native MinGW and ORC
 execution; ROS 2 transport was exercised against the installed Humble SDK.
 
@@ -8,7 +8,7 @@ execution; ROS 2 transport was exercised against the installed Humble SDK.
 
 | Module | Public functions | Rating | Current verdict |
 | --- | ---: | ---: | --- |
-| `std.ais` | 74 | 8/10 | Differentiated autonomy layer with explicit viability and active inference |
+| `std.ais` | 136 | 8.5/10 | Active inference with learning, an online world model, a safety policy and an autopilot that compose, each demonstrated on both backends |
 | `std.ml` | 87 | 7/10 | Broad learning/inference layer; robotics estimation remains incomplete |
 | `std.ros2` | 57 | 6/10 | Real typed topic I/O and QoS; services/actions and wire-level tf2 remain gaps |
 
@@ -31,6 +31,32 @@ same decision in interpreter, direct MinGW native and ORC JIT execution.
 
 Remaining gaps are safety-case generation, uncertainty propagation through all
 policies, persistent world models, and hard real-time scheduling evidence.
+
+## `std.ais` v3
+
+v2 described the computations; several of its parts took the hard terms as
+arguments (ambiguity and epistemic value were supplied by the caller), and the
+constitution checked names. v3 computes them from models, learns the models,
+and composes the parts. What each does, and the evidence:
+
+| Capability | Implementation | Evidence (both backends) |
+| --- | --- | --- |
+| Belief over hidden state | exact Bayesian filtering: predict through the transition model, update on the observation | `test_ais_reference.iris`: posterior matches an independent Python implementation |
+| Choosing by expected free energy | multi-step policies; risk, ambiguity, information gain (mutual information), expected utility and parameter novelty computed from the model; policy posterior softmax(-gamma G) | 16 T-maze policies match the reference to 1e-9, both as -utility - information gain and as KL risk + ambiguity |
+| Information-seeking behaviour | the epistemic term | T-maze: 100/100 trials in the rewarded arm against 53/100 for a reward-only agent (`test_ais_tmaze.iris`) |
+| Learning the model | Dirichlet counts for likelihood and transitions, updated by the posterior | learned likelihood and transitions within 0.03 of the world's; the novelty drive covers an unexplored corridor in the minimum 5 steps against 37 for a random walk (`test_ais_learning.iris`) |
+| Continuous world model | recursive least squares with forgetting and a bounded covariance | identifies a plant to 1e-7; matches the closed-form ridge solution (`test_ais_world_model.iris`, `test_ais_reference.iris`) |
+| Viability under changing dynamics | `viability_choose` over model rollouts, with an uncertainty bonus that only breaks near-ties | an autopilot that starts knowing nothing keeps a tank in band for 280 of 280 steps through a heat wave; a thermostat is critical for 110 (`test_ais_world_model.iris`, `examples/08_ais/autopilot.iris`) |
+| Safety constraints | rules over the state and over the model's predictions, required actions, an audit trail; planning restricted to permitted actions | `test_ais_safety.iris` |
+| Autonomic governor | `software_governor_step`: rules over named metrics, constitution clearance, homeostat health in units of tolerance | `test_ais_safety.iris` |
+| Continual learning | EWC with Fisher information from per-sample gradients | a first task's loss kept at 0.011 where plain training forgets it to 2.04 (`test_ais_ewc.iris`) |
+| Persistence | save and load learned models | reloaded models identical and deciding identically (`test_ais_persistence.iris`) |
+
+Limits: discrete models are flat (one state factor, one observation
+modality), so a large problem must be encoded as their product; policies are
+enumerated, so horizon times branching must stay small; the world model is
+linear in its features; the safety policy's prediction rules are only as good
+as the model; nothing here is a certified safety case.
 
 ## Differentiable learning layer
 
@@ -62,15 +88,11 @@ checks a Vector3 round trip when the middleware is configured;
 `ros2_geometry.iris` provides the separately executable pure geometry check.
 The catalog does not treat compile-only SDK checks as fresh live validation.
 
-This is no longer a publish-only binding: IRIS can run a closed topic loop and
-consume its payload. The remaining middleware gaps are important and explicit:
+This is no longer a publish-only binding: `std.ros2` provides a comprehensive rclcpp bridge covering topics of any message type, services, actions, parameters, lifecycle nodes, and time-aware tf2 transform lookup (matching `docs/ros2-build.md` and verified on Windows and Linux). The remaining middleware boundaries are explicit:
 
-- services and actions;
-- parameters and simulated time;
-- standard sensor/nav message families;
-- `/tf` and `/tf_static` transport plus time-aware chained lookup;
-- ROS-managed lifecycle protocol interoperability;
-- multi-threaded and callback-driven executors.
+- macOS remains unbuilt (Linux Humble Fast DDS and Windows Humble Cyclone DDS verified);
+- multi-threaded and callback-driven executors (executor is strictly single-threaded per context);
+- decisions are preset policies rather than arbitrary callbacks inside rclcpp.
 
 ## Safety and deployment position
 
@@ -98,7 +120,7 @@ profile, not a general hard-real-time or safety certification.
 
 1. Add an AVR backend path that safely supports cyclic CFGs/fixed arrays, then
    expand physical validation to Cortex-M and ESP32-C3 boards.
-2. Add ROS 2 services/actions, sensor messages and real tf2 transport.
+2. Complete multi-threaded callback executor and native macOS build for `std.ros2` (services, actions, parameters, lifecycle, and tf2 transport verified on Linux and Windows).
 3. Add `std.filter`, `std.spatial`, `std.control` and `std.planning` as a coherent
    estimation/control layer.
 4. Run long-duration native/JIT soak, fuzz and sanitizer gates before a stable

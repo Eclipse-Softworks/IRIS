@@ -70,6 +70,7 @@ fn run_tensor_op(op: TensorOp, inputs: Vec<(IrValue, IrType)>, result_ty: IrType
 fn assert_tensor_close(result: &IrValue, expected_data: &[f32], expected_shape: &[usize]) {
     match result {
         IrValue::Tensor(data, shape) => {
+            let data = data.lock().unwrap().clone();
             assert_eq!(shape, expected_shape, "shape mismatch");
             assert_eq!(
                 data.len(),
@@ -115,8 +116,8 @@ fn test_einsum_matmul_2x3_3x2() {
     // A = [[1,2,3],[4,5,6]] (2x3)
     // B = [[7,8],[9,10],[11,12]] (3x2)
     // C = A @ B = [[58,64],[139,154]] (2x2)
-    let a = IrValue::Tensor(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], vec![2, 3]);
-    let b = IrValue::Tensor(vec![7.0, 8.0, 9.0, 10.0, 11.0, 12.0], vec![3, 2]);
+    let a = IrValue::tensor(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], vec![2, 3]);
+    let b = IrValue::tensor(vec![7.0, 8.0, 9.0, 10.0, 11.0, 12.0], vec![3, 2]);
     let ty_a = tensor_ty(DType::F32, &[2, 3]);
     let ty_b = tensor_ty(DType::F32, &[3, 2]);
     let ty_c = tensor_ty(DType::F32, &[2, 2]);
@@ -137,8 +138,8 @@ fn test_einsum_matmul_2x3_3x2() {
 fn test_einsum_matmul_identity() {
     // A = [[1,0],[0,1]] (identity), B = [[3,4],[5,6]]
     // C = A @ B = [[3,4],[5,6]]
-    let a = IrValue::Tensor(vec![1.0, 0.0, 0.0, 1.0], vec![2, 2]);
-    let b = IrValue::Tensor(vec![3.0, 4.0, 5.0, 6.0], vec![2, 2]);
+    let a = IrValue::tensor(vec![1.0, 0.0, 0.0, 1.0], vec![2, 2]);
+    let b = IrValue::tensor(vec![3.0, 4.0, 5.0, 6.0], vec![2, 2]);
     let ty = tensor_ty(DType::F32, &[2, 2]);
 
     let result = run_tensor_op(
@@ -158,8 +159,8 @@ fn test_einsum_matmul_identity() {
 #[test]
 fn test_einsum_dot_product() {
     // a = [1,2,3], b = [4,5,6] → dot = 32
-    let a = IrValue::Tensor(vec![1.0, 2.0, 3.0], vec![3]);
-    let b = IrValue::Tensor(vec![4.0, 5.0, 6.0], vec![3]);
+    let a = IrValue::tensor(vec![1.0, 2.0, 3.0], vec![3]);
+    let b = IrValue::tensor(vec![4.0, 5.0, 6.0], vec![3]);
     let ty_v = tensor_ty(DType::F32, &[3]);
     let ty_s = scalar_ty(DType::F32);
 
@@ -180,8 +181,8 @@ fn test_einsum_dot_product() {
 #[test]
 fn test_einsum_matvec() {
     // A = [[1,2],[3,4]] (2x2), v = [5,6] → [17, 39]
-    let a = IrValue::Tensor(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2]);
-    let v = IrValue::Tensor(vec![5.0, 6.0], vec![2]);
+    let a = IrValue::tensor(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2]);
+    let v = IrValue::tensor(vec![5.0, 6.0], vec![2]);
     let ty_a = tensor_ty(DType::F32, &[2, 2]);
     let ty_v = tensor_ty(DType::F32, &[2]);
     let ty_r = tensor_ty(DType::F32, &[2]);
@@ -204,8 +205,8 @@ fn test_einsum_matvec() {
 fn test_einsum_transpose() {
     // Test outer product: i,j->ij
     // a = [1,2,3], b = [4,5] → [[4,5],[8,10],[12,15]]
-    let a2 = IrValue::Tensor(vec![1.0, 2.0, 3.0], vec![3]);
-    let b2 = IrValue::Tensor(vec![4.0, 5.0], vec![2]);
+    let a2 = IrValue::tensor(vec![1.0, 2.0, 3.0], vec![3]);
+    let b2 = IrValue::tensor(vec![4.0, 5.0], vec![2]);
     let ty_a2 = tensor_ty(DType::F32, &[3]);
     let ty_b2 = tensor_ty(DType::F32, &[2]);
     let ty_r2 = tensor_ty(DType::F32, &[3, 2]);
@@ -227,7 +228,7 @@ fn test_einsum_transpose() {
 
 #[test]
 fn test_reshape_2d_to_1d() {
-    let t = IrValue::Tensor(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], vec![2, 3]);
+    let t = IrValue::tensor(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], vec![2, 3]);
     let ty_in = tensor_ty(DType::F32, &[2, 3]);
     let ty_out = tensor_ty(DType::F32, &[6]);
 
@@ -239,7 +240,7 @@ fn test_reshape_2d_to_1d() {
 #[test]
 fn test_reshape_1d_to_2d() {
     // Provide shape via extra i64 inputs
-    let t = IrValue::Tensor(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], vec![6]);
+    let t = IrValue::tensor(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], vec![6]);
     let dim0 = IrValue::I64(2);
     let dim1 = IrValue::I64(3);
     let ty_in = tensor_ty(DType::F32, &[6]);
@@ -261,7 +262,7 @@ fn test_reshape_1d_to_2d() {
 #[test]
 fn test_transpose_2d_default() {
     // [[1,2,3],[4,5,6]] (2x3) → [[1,4],[2,5],[3,6]] (3x2)
-    let t = IrValue::Tensor(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], vec![2, 3]);
+    let t = IrValue::tensor(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], vec![2, 3]);
     let ty_in = tensor_ty(DType::F32, &[2, 3]);
     let ty_out = tensor_ty(DType::F32, &[3, 2]);
 
@@ -276,7 +277,7 @@ fn test_transpose_2d_default() {
 #[test]
 fn test_transpose_2d_explicit() {
     // Same as default for 2D: axes = [1, 0]
-    let t = IrValue::Tensor(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], vec![2, 3]);
+    let t = IrValue::tensor(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], vec![2, 3]);
     let ty_in = tensor_ty(DType::F32, &[2, 3]);
     let ty_out = tensor_ty(DType::F32, &[3, 2]);
 
@@ -293,7 +294,7 @@ fn test_transpose_3d() {
     // Shape [2,3,4] with axes [2,0,1] → shape [4,2,3]
     // Fill with sequential values 0..24
     let data: Vec<f32> = (0..24).map(|i| i as f32).collect();
-    let t = IrValue::Tensor(data, vec![2, 3, 4]);
+    let t = IrValue::tensor(data, vec![2, 3, 4]);
     let ty_in = tensor_ty(DType::F32, &[2, 3, 4]);
     let ty_out = tensor_ty(DType::F32, &[4, 2, 3]);
 
@@ -318,6 +319,7 @@ fn test_transpose_3d() {
     // Original [0,0,1]=1 → New [1,0,0]=1 (flat: 1*6+0*3+0=6)
     // Original [1,2,3]=23 → New [3,1,2]=23 (flat: 3*6+1*3+2=23)
     if let IrValue::Tensor(data, _) = &result[0] {
+        let data = data.lock().unwrap();
         assert!((data[0] - 0.0).abs() < 1e-5, "element [0,0,0]");
         assert!(
             (data[6] - 1.0).abs() < 1e-5,
@@ -337,7 +339,7 @@ fn test_transpose_3d() {
 #[test]
 fn test_reduce_sum_axis0() {
     // [[1,2],[3,4]] → sum axis 0 → [4, 6]
-    let t = IrValue::Tensor(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2]);
+    let t = IrValue::tensor(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2]);
     let ty_in = tensor_ty(DType::F32, &[2, 2]);
     let ty_out = tensor_ty(DType::F32, &[2]);
 
@@ -356,7 +358,7 @@ fn test_reduce_sum_axis0() {
 #[test]
 fn test_reduce_sum_axis1() {
     // [[1,2],[3,4]] → sum axis 1 → [3, 7]
-    let t = IrValue::Tensor(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2]);
+    let t = IrValue::tensor(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2]);
     let ty_in = tensor_ty(DType::F32, &[2, 2]);
     let ty_out = tensor_ty(DType::F32, &[2]);
 
@@ -375,7 +377,7 @@ fn test_reduce_sum_axis1() {
 #[test]
 fn test_reduce_sum_keepdims() {
     // [[1,2],[3,4]] → sum axis 0 keepdims → [[4, 6]] (shape [1,2])
-    let t = IrValue::Tensor(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2]);
+    let t = IrValue::tensor(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2]);
     let ty_in = tensor_ty(DType::F32, &[2, 2]);
     let ty_out = tensor_ty(DType::F32, &[1, 2]);
 
@@ -398,7 +400,7 @@ fn test_reduce_sum_keepdims() {
 #[test]
 fn test_reduce_max_axis1() {
     // [[1,5],[3,2]] → max axis 1 → [5, 3]
-    let t = IrValue::Tensor(vec![1.0, 5.0, 3.0, 2.0], vec![2, 2]);
+    let t = IrValue::tensor(vec![1.0, 5.0, 3.0, 2.0], vec![2, 2]);
     let ty_in = tensor_ty(DType::F32, &[2, 2]);
     let ty_out = tensor_ty(DType::F32, &[2]);
 
@@ -421,7 +423,7 @@ fn test_reduce_max_axis1() {
 #[test]
 fn test_reduce_mean_all() {
     // [[1,2],[3,4]] → mean all → 2.5
-    let t = IrValue::Tensor(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2]);
+    let t = IrValue::tensor(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2]);
     let ty_in = tensor_ty(DType::F32, &[2, 2]);
     let ty_out = scalar_ty(DType::F32);
 
@@ -443,7 +445,7 @@ fn test_reduce_mean_all() {
 
 #[test]
 fn test_unary_relu() {
-    let t = IrValue::Tensor(vec![-2.0, -1.0, 0.0, 1.0, 2.0], vec![5]);
+    let t = IrValue::tensor(vec![-2.0, -1.0, 0.0, 1.0, 2.0], vec![5]);
     let ty = tensor_ty(DType::F32, &[5]);
 
     let result = run_tensor_op(
@@ -460,7 +462,7 @@ fn test_unary_relu() {
 
 #[test]
 fn test_unary_sigmoid() {
-    let t = IrValue::Tensor(vec![0.0], vec![1]);
+    let t = IrValue::tensor(vec![0.0], vec![1]);
     let ty = tensor_ty(DType::F32, &[1]);
 
     let result = run_tensor_op(
@@ -480,7 +482,7 @@ fn test_unary_sigmoid() {
 
 #[test]
 fn test_unary_tanh() {
-    let t = IrValue::Tensor(vec![0.0, 1.0], vec![2]);
+    let t = IrValue::tensor(vec![0.0, 1.0], vec![2]);
     let ty = tensor_ty(DType::F32, &[2]);
 
     let result = run_tensor_op(
@@ -501,8 +503,8 @@ fn test_einsum_batched_matmul() {
     // Batch of 2 matrices: each 2x2 @ 2x2
     // Batch 0: [[1,0],[0,1]] @ [[5,6],[7,8]] = [[5,6],[7,8]]
     // Batch 1: [[2,0],[0,2]] @ [[1,1],[1,1]] = [[2,2],[2,2]]
-    let a = IrValue::Tensor(vec![1.0, 0.0, 0.0, 1.0, 2.0, 0.0, 0.0, 2.0], vec![2, 2, 2]);
-    let b = IrValue::Tensor(vec![5.0, 6.0, 7.0, 8.0, 1.0, 1.0, 1.0, 1.0], vec![2, 2, 2]);
+    let a = IrValue::tensor(vec![1.0, 0.0, 0.0, 1.0, 2.0, 0.0, 0.0, 2.0], vec![2, 2, 2]);
+    let b = IrValue::tensor(vec![5.0, 6.0, 7.0, 8.0, 1.0, 1.0, 1.0, 1.0], vec![2, 2, 2]);
     let ty_a = tensor_ty(DType::F32, &[2, 2, 2]);
     let ty_b = tensor_ty(DType::F32, &[2, 2, 2]);
     let ty_c = tensor_ty(DType::F32, &[2, 2, 2]);
@@ -528,7 +530,7 @@ fn test_einsum_batched_matmul() {
 #[test]
 fn test_einsum_trace() {
     // A = [[1,2],[3,4]] → trace = 1+4 = 5
-    let a = IrValue::Tensor(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2]);
+    let a = IrValue::tensor(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2]);
     let ty_a = tensor_ty(DType::F32, &[2, 2]);
     let ty_s = scalar_ty(DType::F32);
 
@@ -573,7 +575,7 @@ fn test_einsum_trace() {
 #[test]
 fn test_reduce_sum_full_3d() {
     // shape [2,2,2], values 1..8, sum = 36
-    let t = IrValue::Tensor(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0], vec![2, 2, 2]);
+    let t = IrValue::tensor(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0], vec![2, 2, 2]);
     let ty_in = tensor_ty(DType::F32, &[2, 2, 2]);
     let ty_out = scalar_ty(DType::F32);
 
@@ -596,8 +598,8 @@ fn test_reduce_sum_full_3d() {
 #[test]
 fn test_einsum_large_matmul() {
     // A = 4x3 all ones, B = 3x5 all ones → C = 4x5 all 3.0
-    let a = IrValue::Tensor(vec![1.0; 12], vec![4, 3]);
-    let b = IrValue::Tensor(vec![1.0; 15], vec![3, 5]);
+    let a = IrValue::tensor(vec![1.0; 12], vec![4, 3]);
+    let b = IrValue::tensor(vec![1.0; 15], vec![3, 5]);
     let ty_a = tensor_ty(DType::F32, &[4, 3]);
     let ty_b = tensor_ty(DType::F32, &[3, 5]);
     let ty_c = tensor_ty(DType::F32, &[4, 5]);
@@ -618,7 +620,7 @@ fn test_einsum_large_matmul() {
 
 #[test]
 fn test_transpose_identity() {
-    let t = IrValue::Tensor(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2]);
+    let t = IrValue::tensor(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2]);
     let ty = tensor_ty(DType::F32, &[2, 2]);
 
     let result = run_tensor_op(
@@ -636,7 +638,7 @@ fn test_transpose_identity() {
 #[test]
 fn test_reduce_max_axis0() {
     // [[1,5],[3,2]] → max axis 0 → [3, 5]
-    let t = IrValue::Tensor(vec![1.0, 5.0, 3.0, 2.0], vec![2, 2]);
+    let t = IrValue::tensor(vec![1.0, 5.0, 3.0, 2.0], vec![2, 2]);
     let ty_in = tensor_ty(DType::F32, &[2, 2]);
     let ty_out = tensor_ty(DType::F32, &[2]);
 

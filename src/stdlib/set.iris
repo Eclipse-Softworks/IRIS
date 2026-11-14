@@ -115,6 +115,10 @@ pub def set_difference[T](a: Set<T>, b: Set<T>) -> Set<T> {
 
 /// Build a set from a list (removes duplicates).
 pub def set_from_list[T](lst: list<T>) -> Set<T> {
+    if list_len(lst) == 0 {
+        val empty_items: list<T> = list()
+        return Set { items: empty_items };
+    }
     var s: Set<T> = set_of(list_get(lst, 0))
     var i = 1
     val n = list_len(lst)
@@ -123,6 +127,24 @@ pub def set_from_list[T](lst: list<T>) -> Set<T> {
         i = i + 1
     }
     s
+}
+
+/// Create a shallow clone of a set.
+pub def set_clone[T](s: Set<T>) -> Set<T> {
+    var new_items: list<T> = list()
+    var i = 0
+    val n = list_len(s.items)
+    while i < n {
+        push(new_items, list_get(s.items, i));
+        i = i + 1
+    }
+    Set { items: new_items }
+}
+
+/// Clear all elements from the set and return an empty set.
+pub def set_clear[T](s: Set<T>) -> Set<T> {
+    val empty_items: list<T> = list()
+    Set { items: empty_items }
 }
 
 /// Return the elements as a list.

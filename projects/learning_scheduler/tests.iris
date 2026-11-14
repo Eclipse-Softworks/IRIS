@@ -1,0 +1,72 @@
+bring "learning.iris" 
+bring "checkpoint.iris"
+bring "commands.iris"
+
+def test_learning() -> i64 {
+    val initial = initial_model();
+    val training = workload(48, 31, 0);
+    val selection = workload(48, 53, 0);
+    val trained = fit(training, initial);
+    println(f"fit: first={trained.first} second={trained.second} bias={trained.bias}");
+    assert(valid_model(trained));
+    assert(prediction_mse(selection, trained) < prediction_mse(selection, initial) * 0.1);
+    assert(is_ok(promote(selection, initial, trained)));
+    assert(is_err(promote(selection, trained, trained)));
+    val invalid = CostModel { first: -1.0, second: 0.0, bias: 0.0 };
+    assert(is_err(promote(selection, trained, invalid)));
+    val heldout = workload(48, 79, 0);
+    val fifo = replay(heldout, trained, Policy.Fifo);
+    val size = replay(heldout, trained, Policy.Size);
+    val learned = replay(heldout, trained, Policy.Learned);
+    println(f"heldout mean: fifo={fifo.mean_turnaround} size={size.mean_turnaround} learned={learned.mean_turnaround}");
+    assert(list_len(learned.order) == 48);
+    assert(learned.makespan == fifo.makespan);
+    val seen: list<bool> = list();
+    for index in 0 .. 48 { list_push(seen, false) };
+    for index in 0 .. 48 {
+        val id = list_get(learned.order, index);
+        assert(!list_get(seen, id));
+        list_set(seen, id, true);
+    };
+    // Finite queues complete even when most jobs exceed the aging threshold.
+    assert(learned.aged > 0 && learned.max_wait < learned.makespan);
+    val fallback = replay(heldout, invalid, Policy.Learned);
+    assert(fallback.mean_turnaround == fifo.mean_turnaround);
+    val shifted = workload(48, 83, 1);
+    assert(prediction_mse(shifted, trained) > 25.0);
+    val candidate = fit(workload(48, 97, 1), trained);
+    assert(prediction_mse(shifted, candidate) < prediction_mse(shifted, trained) * 0.1);
+    val recovered = restore_if_worse(selection, invalid, trained);
+    assert(recovered.first == trained.first && recovered.second == trained.second);
+    assert(restore_if_worse(selection, initial, trained).second == trained.second);
+    assert(restore_if_worse(selection, trained, initial).second == trained.second);
+    val sparse: list<Job> = list(
+        Job { id: 0, arrival: 0, size: 1, kind: 0, work: 4 },
+        Job { id: 1, arrival: 1000, size: 2, kind: 0, work: 8 },
+        Job { id: 2, arrival: 1001, size: 1, kind: 1, work: 2 }
+    );
+    val sparse_report = replay(sparse, trained, Policy.Fifo);
+    assert(sparse_report.makespan == 1010 && sparse_report.max_wait == 7);
+    assert(is_ok(save_weights(trained)));
+    val loaded = load_weights();
+    assert(is_ok(loaded));
+    assert(prediction_mse(selection, unwrap(loaded)) < 1.0);
+    assert(is_ok(write_text("iris-scheduler-model.txt", "IRIS-SCHEDULER-1\nNaN\n0.5\n0.02\n")));
+    assert(is_err(load_weights()));
+    assert(is_ok(save_weights(trained)));
+    return 0
+}
+
+def main() -> i64 {
+    assert(is_err(parse_command("jobs 129")));
+    assert(is_err(parse_command("jobs 0")));
+    assert(is_err(parse_command("seed -1")));
+    assert(is_err(parse_command("jobs nope")));
+    assert(is_err(parse_command("inspect 128")));
+    assert(is_err(parse_command("unknown")));
+    assert(is_ok(parse_command("  jobs 8  ")));
+    assert(is_ok(parse_command("inspect 0")));
+    assert(test_learning() == 0);
+    println("learning scheduler: training, policies, aging, recovery, persistence verified");
+    return 0
+}

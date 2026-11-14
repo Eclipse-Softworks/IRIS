@@ -1,0 +1,86 @@
+// A debounced button driving a four-mode lamp. A short press advances
+// off -> on -> slow blink -> fast blink -> off when the button is released;
+// holding it for LONG_PRESS_STEPS switches the lamp off from any mode, and
+// that release does not advance.
+//
+// Time is counted in steps, one per call. uno_modes.iris paces a step with
+// one ADC conversion (104 us at the board support package's prescaler), so
+// the constants below assume roughly 8,000 steps a second.
+
+pub const MODE_OFF: i64 = 0
+pub const MODE_ON: i64 = 1
+pub const MODE_SLOW: i64 = 2
+pub const MODE_FAST: i64 = 3
+// A new level must hold this long to be accepted (about 5 ms).
+pub const DEBOUNCE_STEPS: i64 = 40
+pub const LONG_PRESS_STEPS: i64 = 8000
+pub const SLOW_HALF_PERIOD: i64 = 4000
+pub const FAST_HALF_PERIOD: i64 = 800
+
+var db_candidate: i64 = 0
+var db_count: i64 = 0
+var db_stable: i64 = 0
+var lamp_mode: i64 = 0
+var lamp_tick: i64 = 0
+var held_steps: i64 = 0
+var long_press_fired: i64 = 0
+
+// 1 when a press is accepted, -1 when a release is, 0 otherwise.
+pub def debounce_step(raw: i64) -> i64 {
+    if raw != db_candidate {
+        db_candidate = raw;
+        db_count = 0
+    } else if db_count < DEBOUNCE_STEPS {
+        db_count = db_count + 1
+    };
+    if db_count >= DEBOUNCE_STEPS && db_stable != db_candidate {
+        db_stable = db_candidate;
+        if db_stable == 1 { 1 } else { -1 }
+    } else {
+        0
+    }
+}
+
+pub def next_mode(mode: i64) -> i64 {
+    if mode == MODE_FAST { MODE_OFF } else { mode + 1 }
+}
+
+pub def lamp_output(mode: i64, tick: i64) -> i64 {
+    if mode == MODE_ON {
+        1
+    } else if mode == MODE_SLOW {
+        if tick % (2 * SLOW_HALF_PERIOD) < SLOW_HALF_PERIOD { 1 } else { 0 }
+    } else if mode == MODE_FAST {
+        if tick % (2 * FAST_HALF_PERIOD) < FAST_HALF_PERIOD { 1 } else { 0 }
+    } else {
+        0
+    }
+}
+
+// One step: the raw button level in, the lamp level out.
+pub def modes_step(raw: i64) -> i64 {
+    val edge = debounce_step(raw);
+    if edge == 1 {
+        held_steps = 0;
+        long_press_fired = 0
+    };
+    if db_stable == 1 && held_steps < LONG_PRESS_STEPS {
+        held_steps = held_steps + 1
+    };
+    if db_stable == 1 && held_steps >= LONG_PRESS_STEPS && long_press_fired == 0 {
+        lamp_mode = MODE_OFF;
+        long_press_fired = 1
+    };
+    if edge == -1 && long_press_fired == 0 {
+        lamp_mode = next_mode(lamp_mode);
+        lamp_tick = 0
+    };
+    // The slow period is a multiple of the fast one, so wrapping at it
+    // keeps both phases.
+    lamp_tick = (lamp_tick + 1) % (2 * SLOW_HALF_PERIOD);
+    lamp_output(lamp_mode, lamp_tick)
+}
+
+pub def lamp_mode_now() -> i64 {
+    lamp_mode
+}

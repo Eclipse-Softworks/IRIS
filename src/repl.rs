@@ -543,6 +543,7 @@ fn format_ir_type_for_repl(ty: &crate::ir::types::IrType) -> String {
             format_ir_type_for_repl(err)
         ),
         IrType::Chan(inner) => format!("chan<{}>", format_ir_type_for_repl(inner)),
+        IrType::Task(inner) => format!("task<{}>", format_ir_type_for_repl(inner)),
         IrType::Atomic(inner) => format!("atomic<{}>", format_ir_type_for_repl(inner)),
         IrType::Mutex(inner) => format!("mutex<{}>", format_ir_type_for_repl(inner)),
         IrType::Grad(inner) => format!("grad<{}>", format_ir_type_for_repl(inner)),

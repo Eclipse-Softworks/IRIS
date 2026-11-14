@@ -186,3 +186,69 @@ def f() -> i64 {
     let result = compile(src, "test", EmitKind::Eval).unwrap();
     assert_eq!(result.trim(), "12");
 }
+
+#[test]
+fn test_generic_trait_decl_and_arity_check() {
+    let ok_src = r#"
+trait Container[T] {
+    def get(self) -> T
+}
+record IntBox { v: i64 }
+impl Container[i64] for IntBox {
+    def get(self) -> i64 { self.v }
+}
+def main() -> i64 {
+    val b = IntBox { v: 9 }
+    b.get()
+}
+"#;
+    let res = compile(ok_src, "test", EmitKind::Eval).unwrap();
+    assert_eq!(res.trim(), "9");
+
+    let bad_src = r#"
+trait Container[T] {
+    def get(self) -> T
+}
+record IntBox { v: i64 }
+impl Container[i64, str] for IntBox {
+    def get(self) -> i64 { self.v }
+}
+def main() -> i64 { 0 }
+"#;
+    assert!(compile(bad_src, "test", EmitKind::Ir).is_err());
+}
+
+#[test]
+fn test_blanket_impl_and_hkt_via_generic_templates() {
+    let src = r#"
+trait Show {
+    def show(self) -> str
+}
+trait Wrap {
+    def wrap(self) -> str
+}
+record Item { v: i64 }
+impl Show for Item {
+    def show(self) -> str { to_str(self.v) }
+}
+impl[T where T: Show] Wrap for T {
+    def wrap(self) -> str { "<" + self.show() + ">" }
+}
+def head_len[F[_], T](xs: F<T>) -> i64 { 1 }
+def main() -> i64 {
+    val it = Item { v: 7 }
+    val w = it.wrap()
+    assert(w == "<7>")
+    val nums: list<i64> = list()
+    head_len(nums)
+}
+"#;
+    let ir = compile(src, "test", EmitKind::Ir).unwrap();
+    assert!(
+        ir.contains("Wrap__blanket_T__wrap___Item"),
+        "expected blanket impl instantiated via generic_templates:\n{}",
+        ir
+    );
+    let eval = compile(src, "test", EmitKind::Eval).unwrap();
+    assert_eq!(eval.trim(), "1");
+}

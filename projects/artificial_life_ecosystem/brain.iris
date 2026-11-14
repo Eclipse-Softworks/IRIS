@@ -1,0 +1,87 @@
+// projects/artificial_life_ecosystem/brain.iris
+// Neural Network Policy & Genetic Genome Representation for ALife Agents
+
+pub record NeuralBrain {
+    // 6 inputs -> 4 hidden nodes -> 2 outputs (thrust, steer)
+    // Total weights: 6*4 + 4 + 4*2 + 2 = 24 + 4 + 8 + 2 = 38 parameters
+    weights: list<f64>,
+}
+
+pub def tanh_approx(x: f64) -> f64 {
+    // Fast polynomial tanh approximation: x / (1 + |x|)
+    val ax = if x < 0.0 { -x } else { x };
+    x / (1.0 + ax)
+}
+
+pub def sigmoid_approx(x: f64) -> f64 {
+    0.5 * (1.0 + tanh_approx(0.5 * x))
+}
+
+pub def create_random_brain(seed: i64) -> NeuralBrain {
+    val w: list<f64> = list();
+    var s = seed;
+    for i in 0 .. 38 {
+        // Linear congruential pseudorandom generator
+        s = wrapping_add(wrapping_mul(s, 6364136223846793005), 1442695040888963407);
+        val raw = to_f64(s % 1000) / 500.0 - 1.0; // [-1.0, 1.0]
+        list_push(w, raw);
+    }
+    NeuralBrain { weights: w }
+}
+
+/// Mutate brain weights with Gaussian perturbation
+pub def mutate_brain(brain: NeuralBrain, seed: i64, rate: f64) -> NeuralBrain {
+    val new_w: list<f64> = list();
+    var s = seed;
+    for i in 0 .. list_len(brain.weights) {
+        val orig = list_get(brain.weights, i);
+        s = wrapping_add(wrapping_mul(s, 6364136223846793005), 1442695040888963407);
+        val prob = to_f64(s % 100) / 100.0;
+        if prob < rate {
+            s = wrapping_add(wrapping_mul(s, 6364136223846793005), 1442695040888963407);
+            val delta = to_f64(s % 1000) / 2500.0 - 0.2; // [-0.2, 0.2]
+            list_push(new_w, orig + delta);
+        } else {
+            list_push(new_w, orig);
+        }
+    }
+    NeuralBrain { weights: new_w }
+}
+
+/// Brain forward inference: returns (thrust, steer)
+pub def brain_forward(brain: NeuralBrain, inputs: list<f64>) -> (f64, f64) {
+    // Hidden layer activations (4 nodes)
+    val h: list<f64> = list();
+    var w_idx = 0;
+    for j in 0 .. 4 {
+        var sum = 0.0;
+        for i in 0 .. 6 {
+            sum = sum + list_get(inputs, i) * list_get(brain.weights, w_idx);
+            w_idx = w_idx + 1;
+        }
+        val bias = list_get(brain.weights, w_idx);
+        w_idx = w_idx + 1;
+        list_push(h, tanh_approx(sum + bias));
+    }
+
+    // Output 1: Thrust (forward speed 0.0 to 1.0)
+    var thrust_sum = 0.0;
+    for j in 0 .. 4 {
+        thrust_sum = thrust_sum + list_get(h, j) * list_get(brain.weights, w_idx);
+        w_idx = w_idx + 1;
+    }
+    val thrust_bias = list_get(brain.weights, w_idx);
+    w_idx = w_idx + 1;
+    val out_thrust = sigmoid_approx(thrust_sum + thrust_bias);
+
+    // Output 2: Steer (turning rate -1.0 to 1.0)
+    var steer_sum = 0.0;
+    for j in 0 .. 4 {
+        steer_sum = steer_sum + list_get(h, j) * list_get(brain.weights, w_idx);
+        w_idx = w_idx + 1;
+    }
+    val steer_bias = list_get(brain.weights, w_idx);
+    val out_steer = tanh_approx(steer_sum + steer_bias);
+
+    (out_thrust, out_steer)
+}

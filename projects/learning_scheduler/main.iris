@@ -1,0 +1,148 @@
+bring "learning.iris" 
+bring "checkpoint.iris" 
+bring "commands.iris" 
+bring "worker.iris"
+
+def help() -> i64 {
+    println("Commands");
+    println("  compare       compare FIFO / smallest-size / learned on held-out jobs");
+    println("  train         fit observed costs; evaluate before model promotion");
+    println("  auto          retrain if recent prediction MSE exceeds 25");
+    println("  normal|shift|mixed    choose workload cost regime");
+    println("  jobs 8..128   set evaluation queue size     seed 1..999000");
+    println("  execute       run bounded CPU jobs in planned order, two at a time");
+    println("  inspect 0..127 show a held-out job's features, prediction, and cost");
+    println("  fault|recover inject bad weights / run the model watchdog");
+    println("  save|load     checkpoint at ./iris-scheduler-model.txt");
+    println("  status|help|quit     blank input or EOF also exits");
+    return 0
+}
+
+def show_report(jobs: list<Job>, weights: CostModel, policy: Policy) -> i64 {
+    val report = replay(jobs, weights, policy);
+    val name = policy_name(policy);
+    val throughput = to_f64(list_len(jobs)) / to_f64(report.makespan);
+    println(f"{name}: mean={report.mean_turnaround} p95={report.p95} p99={report.p99} max_wait={report.max_wait}");
+    println(f"    makespan={report.makespan} jobs/unit={throughput} aging_dispatches={report.aged}");
+    var preview = "    first jobs:";
+    for index in 0 .. 8 { preview = concat(preview, concat(" ", to_str(list_get(report.order, index)))) };
+    println(preview);
+    return 0
+}
+
+def main() -> i64 {
+    var active = initial_model();
+    var previous = active;
+    var generation = 0;
+    var regime = 0;
+    var count = 48;
+    var seed = 17;
+    val demo = env_get("IRIS_SCHEDULER_DEMO") == "1";
+    val script: list<str> = list("status", "compare", "train", "compare", "shift", "auto", "compare", "fault", "recover", "save", "load", "execute", "quit");
+    var script_index = 0;
+    var running = true;
+    println("IRIS / LEARNING SCHEDULER");
+    println("Train a cost model. Change workloads. Compare policies. Test recovery.");
+    println("Replay metrics use logical work units; CPU execution reports wall milliseconds.");
+    help();
+    while running {
+        println("scheduler> enter command");
+        var input = "";
+        if demo {
+            input = list_get(script, script_index);
+            script_index = script_index + 1;
+            println(concat("> ", input));
+        } else { input = read_line() };
+        val parsed = parse_command(input);
+        when parsed {
+            err(reason) => { println(concat("Command rejected: ", reason)); },
+            ok(command) => {
+                when command {
+                    Command.Quit => { running = false; },
+                    Command.Help => { help(); },
+                    Command.Status => {
+                        val recent = workload(48, seed + 11, regime);
+                        val mse = prediction_mse(recent, active);
+                        println(f"generation={generation} regime={regime} jobs={count} seed={seed} prediction_MSE={mse}");
+                        println(f"weights: first={active.first} second={active.second} bias={active.bias}");
+                        if !valid_model(active) { println("Model invalid: scheduling uses FIFO fallback.") };
+                    },
+                    Command.Regime(value) => { regime = value; println(f"Workload regime={regime}; active model retained. Try auto or compare."); },
+                    Command.Count(value) => { count = value; println(f"Evaluation queue size={count}"); },
+                    Command.Seed(value) => { seed = value; println(f"Workload seed={seed}"); },
+                    Command.Inspect(value) => {
+                        if value >= count { println("Job index is outside the current queue.") } else {
+                            val job = list_get(workload(count, seed + 47, regime), value);
+                            val prediction = estimate(active, job);
+                            println(f"job={job.id} arrival={job.arrival} size={job.size} class={job.kind}");
+                            println(f"predicted_cost={prediction} observed_work={job.work}; scheduler scores do not read observed_work.");
+                        };
+                    },
+                    Command.Compare => {
+                        val jobs = workload(count, seed + 47, regime);
+                        println("HELD-OUT REPLAY / turnaround, wait, and makespan in work units");
+                        show_report(jobs, active, Policy.Fifo);
+                        show_report(jobs, active, Policy.Size);
+                        show_report(jobs, active, Policy.Learned);
+                    },
+                    Command.Train => {
+                        val training = workload(48, seed + 11, regime);
+                        val selection = workload(48, seed + 23, regime);
+                        val started = now_ms();
+                        val candidate = fit(training, initial_model());
+                        val decision = promote(selection, active, candidate);
+                        println(f"Training: samples=48 epochs=50 batch=4 elapsed_ms={now_ms() - started}");
+                        when decision {
+                            ok(weights) => { if valid_model(active) { previous = active }; active = weights; generation = generation + 1; println(f"Promoted generation={generation}"); },
+                            err(reason) => { println(concat("Candidate rejected; active model retained: ", reason)); }
+                        };
+                    },
+                    Command.Auto => {
+                        val training = workload(48, seed + 11, regime);
+                        val drift = prediction_mse(training, active);
+                        if drift > 25.0 || !valid_model(active) {
+                            println(f"Drift detected: MSE={drift}. Training candidate.");
+                            val candidate = fit(training, initial_model());
+                            when promote(workload(48, seed + 23, regime), active, candidate) {
+                                ok(weights) => { if valid_model(active) { previous = active }; active = weights; generation = generation + 1; println(f"Promoted generation={generation}"); },
+                                err(reason) => { println(concat("Candidate rejected: ", reason)); }
+                            };
+                        } else { println("Model is within the drift threshold; no training needed.") };
+                    },
+                    Command.Execute => {
+                        val jobs = workload(count, seed + 47, regime);
+                        val plan = replay(jobs, active, Policy.Learned);
+                        assert(execute(jobs, plan) >= 0);
+                    },
+                    Command.Fault => {
+                        if valid_model(active) { previous = active };
+                        active = CostModel { first: -1.0, second: 0.0, bias: 0.0 };
+                        println("Injected invalid weights. FIFO fallback is active; recover restores the saved model.");
+                    },
+                    Command.Recover => {
+                        val restored = restore_if_worse(workload(48, seed + 11, regime), active, previous);
+                        if restored.first != active.first || restored.second != active.second || restored.bias != active.bias {
+                            active = restored;
+                            generation = generation + 1;
+                            println(f"Watchdog restored saved weights; generation={generation}");
+                        } else { println("Watchdog kept the current model.") };
+                    },
+                    Command.Save => {
+                        when save_weights(active) {
+                            ok(saved) => { println("Saved iris-scheduler-model.txt"); },
+                            err(reason) => { println(concat("Save failed: ", reason)); }
+                        };
+                    },
+                    Command.Load => {
+                        when load_weights() {
+                            ok(weights) => { if valid_model(active) { previous = active }; active = weights; generation = generation + 1; println(f"Loaded checkpoint; generation={generation}"); },
+                            err(reason) => { println(concat("Load failed; active model retained: ", reason)); }
+                        };
+                    }
+                };
+            }
+        };
+    };
+    println("learning scheduler: session complete");
+    return 0
+}

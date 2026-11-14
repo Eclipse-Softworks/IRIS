@@ -3,10 +3,10 @@
 // codepoint counting, decoding, and Unicode property checks on top of
 // the byte-level primitives.
 
-// Check if byte value `b` is a UTF-8 continuation byte (top 2 bits = 10).
+// Check if byte value `b` is a UTF-8 continuation byte (top 2 bits = 10,
+// i.e. 0x80-0xBF). Bytes from 0xC0 begin a multi-byte sequence.
 pub def is_continuation(b: i64) -> bool {
-    if b >= 128 { return true };
-    false
+    b >= 128 && b <= 191
 }
 
 // Count the number of UTF-8 codepoints in `s`.
@@ -145,16 +145,15 @@ pub def word_count(s: str) -> i64 {
     count
 }
 
-// Approximate general category.
+// General category (UnicodeData.txt) for the ranges this module knows:
+// C0/C1 controls (Cc), space and no-break space (Zs), ASCII and Latin-1
+// letters (Lu/Ll), and the digits `is_digit` accepts (Nd). Anything else is
+// reported as "Cn" (unassigned), which is wrong for most other characters.
 pub def category(c: i64) -> str {
-    if is_whitespace(c) { return "Zs" };
-    if is_ascii_digit(c) { return "Nd" };
-    if c >= 65 {
-        if c <= 90 { return "Lu" };
-    };
-    if c >= 97 {
-        if c <= 122 { return "Ll" };
-    };
-    if is_letter(c) { return "Lo" };
+    if c < 32 || (c >= 127 && c <= 159) { return "Cc" };
+    if c == 32 || c == 160 { return "Zs" };
+    if is_digit(c) { return "Nd" };
+    if (c >= 65 && c <= 90) || (c >= 192 && c <= 214) || (c >= 216 && c <= 222) { return "Lu" };
+    if (c >= 97 && c <= 122) || (c >= 223 && c <= 246) || (c >= 248 && c <= 255) { return "Ll" };
     "Cn"
 }

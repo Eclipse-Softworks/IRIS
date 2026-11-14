@@ -1,0 +1,32 @@
+// Press to toggle: the LED changes state on each press (a rising edge of the
+// button), not for as long as the button is held. There is no debouncing
+// here, so a bouncy contact can toggle more than once per press;
+// modes.iris adds a debouncer.
+//
+// The state is top-level `var`s: on the board they live in SRAM between the
+// board support package's calls to the entry, on a host in globals.
+
+var toggle_last: i64 = 0
+var toggle_led: i64 = 0
+var toggle_presses: i64 = 0
+
+// One step: the button level in, the LED level out.
+pub def toggle_step(pressed: i64) -> i64 {
+    if pressed == 1 && toggle_last == 0 {
+        toggle_led = 1 - toggle_led;
+        toggle_presses = toggle_presses + 1
+    };
+    toggle_last = pressed;
+    toggle_led
+}
+
+pub def toggle_count() -> i64 {
+    toggle_presses
+}
+
+pub def toggle_reset() -> i64 {
+    toggle_last = 0;
+    toggle_led = 0;
+    toggle_presses = 0;
+    0
+}

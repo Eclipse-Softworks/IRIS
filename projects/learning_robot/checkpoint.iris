@@ -1,0 +1,21 @@
+bring "system.iris" bring std.fs bring std.string
+
+pub def save_checkpoint(path: str, dynamics: Dynamics) -> result<bool, str> {
+    if !valid(dynamics) { return err("invalid dynamics") };
+    val content = concat("IRIS-ROBOT-1\n", concat(to_str(dynamics.retention), concat("\n", concat(to_str(dynamics.gain), "\n"))));
+    return write_text(path, content)
+}
+
+pub def load_checkpoint(path: str) -> result<Dynamics, str> {
+    val content = read_text(path);
+    if !is_ok(content) { return err("cannot read checkpoint") };
+    val fields = lines(unwrap(content));
+    if list_len(fields) != 3 { return err("wrong checkpoint field count") };
+    if list_get(fields, 0) != "IRIS-ROBOT-1" { return err("unsupported checkpoint version") };
+    val a = parse_f64(list_get(fields, 1));
+    val b = parse_f64(list_get(fields, 2));
+    if !is_some(a) || !is_some(b) { return err("invalid numeric field") };
+    val dynamics = Dynamics { retention: unwrap(a), gain: unwrap(b) };
+    if !valid(dynamics) { return err("checkpoint outside model bounds") };
+    return ok(dynamics)
+}

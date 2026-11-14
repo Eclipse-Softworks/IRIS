@@ -1,0 +1,8 @@
+// expect: E0111 at 6:12
+// fix: val x: i64 = 1
+// fix-compiles
+
+def main() -> i64 {
+    val x: integer = 1
+    return x
+}

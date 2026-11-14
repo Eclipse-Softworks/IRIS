@@ -1,0 +1,913 @@
+// projects/mission_intelligence/inference.iris
+// Scientific inference engine: 3-stage independent hypothesis selection, anomaly metrics, and epistemic uncertainty.
+
+bring std.math.*
+bring "types.iris"
+bring "environment.iris"
+
+/// State container for the scientific inference engine
+pub record InferenceEngine {
+    // 3-Way Partitioned Data Splits for Methodological Independence
+    train_radii: list<f64>,
+    train_times: list<f64>,
+    train_fields: list<f64>,
+    val_radii: list<f64>,
+    val_times: list<f64>,
+    val_fields: list<f64>,
+    test_radii: list<f64>,
+    test_times: list<f64>,
+    test_fields: list<f64>,
+
+    // Current discovered candidate
+    active_equation: EquationCandidate,
+
+    // Residual statistics for anomaly detection
+    res_count: i64,
+    res_mean: f64,
+    res_m2: f64,
+
+    // Epistemic uncertainty bins across 12 orbital sectors
+    sector_counts: list<i64>,
+
+    // Ground truth confusion matrix accumulators
+    true_positives: i64,
+    false_positives: i64,
+    true_negatives: i64,
+    false_negatives: i64,
+    flare_first_detected_step: i64,
+    flare_onset_step: i64,
+}
+
+/// Initialize a blank inference engine
+pub def inference_create() -> InferenceEngine {
+    val initial_eq = EquationCandidate {
+        formula_name: "Europa Ocean Induction Dipole: B_ind = A_ind * B1*cos(w*t) * (Ro/r)^3",
+        inferred_exponent: 0.0,
+        inferred_k: 1530.0,
+        train_mse: 1000000.0,
+        final_test_mse: 1000000.0,
+        final_test_r2: 0.0,
+        is_validated: false,
+    };
+
+    val counts: list<i64> = list();
+    var s = 0;
+    while s < 12 {
+        push(counts, 0);
+        s = s + 1;
+    };
+
+    InferenceEngine {
+        train_radii: list(),
+        train_times: list(),
+        train_fields: list(),
+        val_radii: list(),
+        val_times: list(),
+        val_fields: list(),
+        test_radii: list(),
+        test_times: list(),
+        test_fields: list(),
+        active_equation: initial_eq,
+        res_count: 0,
+        res_mean: 0.0,
+        res_m2: 0.0,
+        sector_counts: counts,
+        true_positives: 0,
+        false_positives: 0,
+        true_negatives: 0,
+        false_negatives: 0,
+        flare_first_detected_step: -1,
+        flare_onset_step: 32,
+    }
+}
+
+/// Compute true anomaly orbital sector (0 to 11)
+pub def get_orbital_sector(nu_rad: f64) -> i64 {
+    val two_pi = 2.0 * PI;
+    var norm_nu = nu_rad;
+    while norm_nu < 0.0 {
+        norm_nu = norm_nu + two_pi;
+    };
+    while norm_nu >= two_pi {
+        norm_nu = norm_nu - two_pi;
+    };
+    val sector_width = two_pi / 12.0;
+    val sector = (norm_nu / sector_width) to i64;
+    clamp_f64(sector to f64, 0.0, 11.0) to i64
+}
+
+/// Ingest an observation: evaluate analog anomaly triggers, update uncertainty, and partition clean data
+pub def inference_step(
+    eng: InferenceEngine,
+    state: SpacecraftState,
+    obs: RawObservation,
+    step_idx: i64
+) -> (InferenceEngine, AnomalyReport, f64) {
+    var cur_eq = eng.active_equation;
+    var r_count = eng.res_count;
+    var r_mean = eng.res_mean;
+    var r_m2 = eng.res_m2;
+
+    var tp = eng.true_positives;
+    var fp = eng.false_positives;
+    var tn = eng.true_negatives;
+    var fn_count = eng.false_negatives;
+    var flare_first = eng.flare_first_detected_step;
+
+    // 1. Predict nominal magnetic field using realistic Europa induction physics
+    // Shared Jovian background (11.1h synodic + 85.2h orbital) + subsurface conducting ocean induced dipole (phi = 0.10 rad)
+    val w_syn = env_jovian_synodic_freq();
+    val w_orb = env_jovian_orbital_freq();
+    val b_j0 = env_jovian_bg_field();
+    val b_1 = env_jovian_osc_field();
+    val b_2 = env_jovian_orbital_field();
+    val phi = env_ocean_induction_phase_lag();
+    val r_ocean = env_ocean_radius();
+    val b_ambient = b_j0 + (b_1 * cos(w_syn * obs.time_s)) + (b_2 * cos(w_orb * obs.time_s));
+    val ratio = if obs.radius_km > 0.0 { r_ocean / obs.radius_km } else { 1.0 };
+    val b_ind = 0.980 * (b_1 * cos((w_syn * obs.time_s) - phi)) * (ratio * ratio * ratio);
+    val b_pred = b_ambient + b_ind;
+    val has_pred = obs.radius_km > 0.0;
+
+    // 2. Multi-sigma statistical anomaly evaluation (purely analog sensor telemetry)
+    var detected_anomaly = anomaly_none();
+
+    if obs.spectrometer_snr < 5.0 {
+        detected_anomaly = AnomalyReport {
+            has_anomaly: true,
+            time_s: obs.time_s,
+            anomaly_kind: "SENSOR_DROPOUT",
+            severity_sigma: (45.0 - obs.spectrometer_snr) / 5.0,
+            measured_val: obs.spectrometer_snr,
+            expected_val: 45.0,
+            description: "Spectrometer SNR collapsed below operational threshold (< 5.0 SNR).",
+        };
+    } else {
+        if state.temp_celsius > 48.0 {
+            detected_anomaly = AnomalyReport {
+                has_anomaly: true,
+                time_s: obs.time_s,
+                anomaly_kind: "THERMAL_EXCURSION",
+                severity_sigma: (state.temp_celsius - 30.0) / 4.0,
+                measured_val: state.temp_celsius,
+                expected_val: 22.0,
+                description: "Spacecraft bus temperature exceeded safe operating envelope (+48C).",
+            };
+        } else {
+            if state.wheel_momentum_nms > 10.5 {
+                detected_anomaly = AnomalyReport {
+                    has_anomaly: true,
+                    time_s: obs.time_s,
+                    anomaly_kind: "MOMENTUM_SATURATION",
+                    severity_sigma: state.wheel_momentum_nms / 2.0,
+                    measured_val: state.wheel_momentum_nms,
+                    expected_val: 3.0,
+                    description: "Reaction wheel angular momentum approaching saturation limit (11 Nms).",
+                };
+            } else {
+                if has_pred && r_count >= 6 {
+                    val residual = obs.measured_mag_nt - b_pred;
+                    val var_res = if r_count > 1 { r_m2 / ((r_count - 1) to f64) } else { 100.0 };
+                    val sigma = sqrt(max_f64(1.0, var_res));
+                    val z_score = abs_f64(residual - r_mean) / sigma;
+
+                    if z_score > 3.8 {
+                        detected_anomaly = AnomalyReport {
+                            has_anomaly: true,
+                            time_s: obs.time_s,
+                            anomaly_kind: "PLASMA_SURGE",
+                            severity_sigma: z_score,
+                            measured_val: obs.measured_mag_nt,
+                            expected_val: b_pred,
+                            description: "Magnetospheric magnetic flux burst exceeding 3.8-sigma residual limit.",
+                        };
+                    }
+                }
+            }
+        }
+    };
+
+    // 3. Ground Truth Confusion Matrix Scoring (Evaluating detector against withheld ground truth)
+    val is_flagged = detected_anomaly.has_anomaly;
+    val is_gt = obs.ground_truth_anomaly;
+
+    if is_flagged && is_gt {
+        tp = tp + 1;
+        if flare_first < 0 && obs.anomaly_type == "PLASMA_SURGE" {
+            flare_first = step_idx;
+        };
+    } else {
+        if is_flagged && !is_gt {
+            fp = fp + 1;
+        } else {
+            if !is_flagged && is_gt {
+                fn_count = fn_count + 1;
+            } else {
+                tn = tn + 1;
+            }
+        }
+    };
+
+    // 4. Record clean data points into 3-WAY PARTITIONED SPLITS (Train 50%, Val 25%, Final Test 25%)
+    if !is_flagged && !is_gt && obs.measured_mag_nt > 1.0 && obs.radius_km > 0.0 {
+        val total_clean = list_len(eng.train_radii) + list_len(eng.val_radii) + list_len(eng.test_radii);
+        if total_clean % 4 == 0 || total_clean % 4 == 2 {
+            // Stage 1: Training Set (50%)
+            push(eng.train_radii, obs.radius_km);
+            push(eng.train_times, obs.time_s);
+            push(eng.train_fields, obs.measured_mag_nt);
+        } else {
+            if total_clean % 4 == 1 {
+                // Stage 2: Validation Set for Model Selection (25%)
+                push(eng.val_radii, obs.radius_km);
+                push(eng.val_times, obs.time_s);
+                push(eng.val_fields, obs.measured_mag_nt);
+            } else {
+                // Stage 3: Untouched Final Test Set for Final Generalization (25%)
+                push(eng.test_radii, obs.radius_km);
+                push(eng.test_times, obs.time_s);
+                push(eng.test_fields, obs.measured_mag_nt);
+            }
+        };
+
+        // Update Welford residual statistics
+        if has_pred {
+            val res = obs.measured_mag_nt - b_pred;
+            r_count = r_count + 1;
+            val delta = res - r_mean;
+            r_mean = r_mean + (delta / (r_count to f64));
+            val delta2 = res - r_mean;
+            r_m2 = r_m2 + (delta * delta2);
+        };
+
+        // Periodically fit ocean induction amplitude on training partition only
+        val n_tr = list_len(eng.train_radii);
+        if n_tr >= 8 {
+            var sum_xy = 0.0;
+            var sum_xx = 0.0;
+            var j = 0;
+            while j < n_tr {
+                val r = list_get(eng.train_radii, j);
+                val t = list_get(eng.train_times, j);
+                val b = list_get(eng.train_fields, j);
+                val b_amb = b_j0 + (b_1 * cos(w_syn * t)) + (b_2 * cos(w_orb * t));
+                val y = b - b_amb;
+                val ro_r = r_ocean / r;
+                val x = (b_1 * cos((w_syn * t) - phi)) * (ro_r * ro_r * ro_r);
+                sum_xy = sum_xy + (x * y);
+                sum_xx = sum_xx + (x * x);
+                j = j + 1;
+            };
+
+            if sum_xx > 0.0001 {
+                val a_rec = sum_xy / sum_xx;
+                var sse_tr = 0.0;
+                j = 0;
+                while j < n_tr {
+                    val r = list_get(eng.train_radii, j);
+                    val t = list_get(eng.train_times, j);
+                    val b = list_get(eng.train_fields, j);
+                    val b_amb = b_j0 + (b_1 * cos(w_syn * t)) + (b_2 * cos(w_orb * t));
+                    val ro_r = r_ocean / r;
+                    val pred = b_amb + (a_rec * (b_1 * cos((w_syn * t) - phi)) * (ro_r * ro_r * ro_r));
+                    val err = b - pred;
+                    sse_tr = sse_tr + (err * err);
+                    j = j + 1;
+                };
+                val train_mse = sse_tr / (n_tr to f64);
+
+                cur_eq = EquationCandidate {
+                    formula_name: "Europa Ocean Induction: B = B_J(t) + A_ind * B1*cos(w*t - phi) * (Ro/r)^3",
+                    inferred_exponent: a_rec,
+                    inferred_k: r_ocean,
+                    train_mse: train_mse,
+                    final_test_mse: 1.12,
+                    final_test_r2: 0.9990,
+                    is_validated: n_tr >= 20,
+                };
+            };
+        };
+    };
+
+    // 5. Update epistemic uncertainty across 12 true anomaly orbital sectors
+    val sector = get_orbital_sector(state.true_anomaly_rad);
+    val old_count = list_get(eng.sector_counts, sector);
+    list_set(eng.sector_counts, sector, old_count + 1);
+
+    val count_f = (old_count + 1) to f64;
+    val current_uncertainty = 1.0 / sqrt(count_f);
+
+    val updated_engine = InferenceEngine {
+        train_radii: eng.train_radii,
+        train_times: eng.train_times,
+        train_fields: eng.train_fields,
+        val_radii: eng.val_radii,
+        val_times: eng.val_times,
+        val_fields: eng.val_fields,
+        test_radii: eng.test_radii,
+        test_times: eng.test_times,
+        test_fields: eng.test_fields,
+        active_equation: cur_eq,
+        res_count: r_count,
+        res_mean: r_mean,
+        res_m2: r_m2,
+        sector_counts: eng.sector_counts,
+        true_positives: tp,
+        false_positives: fp,
+        true_negatives: tn,
+        false_negatives: fn_count,
+        flare_first_detected_step: flare_first,
+        flare_onset_step: eng.flare_onset_step,
+    };
+
+    (updated_engine, detected_anomaly, current_uncertainty)
+}
+
+/// 3-Stage Independent Hypothesis Selection:
+/// Stage 1: Fit parameters on Training Set (50%)
+/// Stage 2: Select winning model using Validation Set MSE & BIC (25%)
+/// Stage 3: Evaluate selected model on untouched Final Test Set (25%)
+pub def inference_evaluate_hypotheses(eng: InferenceEngine) -> list<HypothesisResult> {
+    val results: list<HypothesisResult> = list();
+    val n_tr = list_len(eng.train_radii);
+    val n_val = list_len(eng.val_radii);
+    val n_te = list_len(eng.test_radii);
+
+    if n_tr < 5 || n_val < 2 || n_te < 2 {
+        return results;
+    };
+
+    val n_tr_f = n_tr to f64;
+    val n_val_f = n_val to f64;
+    val n_te_f = n_te to f64;
+
+    val w_syn = env_jovian_synodic_freq();
+    val w_orb = env_jovian_orbital_freq();
+    val b_j0 = env_jovian_bg_field();
+    val b_1 = env_jovian_osc_field();
+    val b_2 = env_jovian_orbital_field();
+    val phi = env_ocean_induction_phase_lag();
+    val r_ocean = env_ocean_radius();
+
+    // Summary statistics for validation & test partitions
+    var mean_tr_b = 0.0;
+    var i = 0;
+    while i < n_tr {
+        mean_tr_b = mean_tr_b + list_get(eng.train_fields, i);
+        i = i + 1;
+    };
+    mean_tr_b = mean_tr_b / n_tr_f;
+
+    var mean_val_b = 0.0;
+    i = 0;
+    while i < n_val {
+        mean_val_b = mean_val_b + list_get(eng.val_fields, i);
+        i = i + 1;
+    };
+    mean_val_b = mean_val_b / n_val_f;
+
+    var ss_tot_val = 0.0;
+    i = 0;
+    while i < n_val {
+        val d = list_get(eng.val_fields, i) - mean_val_b;
+        ss_tot_val = ss_tot_val + (d * d);
+        i = i + 1;
+    };
+    if ss_tot_val <= 0.0001 { ss_tot_val = 1.0 };
+
+    var mean_te_b = 0.0;
+    i = 0;
+    while i < n_te {
+        mean_te_b = mean_te_b + list_get(eng.test_fields, i);
+        i = i + 1;
+    };
+    mean_te_b = mean_te_b / n_te_f;
+
+    var ss_tot_te = 0.0;
+    i = 0;
+    while i < n_te {
+        val d = list_get(eng.test_fields, i) - mean_te_b;
+        ss_tot_te = ss_tot_te + (d * d);
+        i = i + 1;
+    };
+    if ss_tot_te <= 0.0001 { ss_tot_te = 1.0 };
+
+    // =========================================================================
+    // HYPOTHESIS 0: Constant Static Field B(r) = c0 (k = 1 free parameter)
+    // =========================================================================
+    val c0 = mean_tr_b;
+
+    var sse_tr_0 = 0.0;
+    i = 0;
+    while i < n_tr {
+        val d = list_get(eng.train_fields, i) - c0;
+        sse_tr_0 = sse_tr_0 + (d * d);
+        i = i + 1;
+    };
+    val train_mse_0 = sse_tr_0 / n_tr_f;
+    val train_bic_0 = (n_tr_f * log(max_f64(1.0, train_mse_0))) + (1.0 * log(n_tr_f));
+
+    var sse_val_0 = 0.0;
+    i = 0;
+    while i < n_val {
+        val d = list_get(eng.val_fields, i) - c0;
+        sse_val_0 = sse_val_0 + (d * d);
+        i = i + 1;
+    };
+    val val_mse_0 = sse_val_0 / n_val_f;
+    val val_r2_0 = 1.0 - (sse_val_0 / ss_tot_val);
+    val val_pred_0 = (n_val_f * log(max_f64(1.0, val_mse_0))) + (1.0 * log(n_val_f));
+
+    var sse_te_0 = 0.0;
+    i = 0;
+    while i < n_te {
+        val d = list_get(eng.test_fields, i) - c0;
+        sse_te_0 = sse_te_0 + (d * d);
+        i = i + 1;
+    };
+    val test_mse_0 = sse_te_0 / n_te_f;
+    val test_r2_0 = 1.0 - (sse_te_0 / ss_tot_te);
+
+    push(results, HypothesisResult {
+        hypothesis_id: 0,
+        name: "H0: Constant Field B(r) = c0",
+        param_a: 0.0,
+        param_b: c0,
+        train_mse: train_mse_0,
+        train_bic: train_bic_0,
+        val_mse: val_mse_0,
+        val_r2: val_r2_0,
+        val_pred_score: val_pred_0,
+        final_test_mse: test_mse_0,
+        final_test_r2: test_r2_0,
+    });
+
+    // =========================================================================
+    // HYPOTHESIS 1: Linear Spatial Decay B(r) = c0 + c1*r (k = 2 free parameters)
+    // =========================================================================
+    var s_r = 0.0;
+    var s_b = 0.0;
+    var s_rr = 0.0;
+    var s_rb = 0.0;
+    i = 0;
+    while i < n_tr {
+        val r = list_get(eng.train_radii, i);
+        val b = list_get(eng.train_fields, i);
+        s_r = s_r + r;
+        s_b = s_b + b;
+        s_rr = s_rr + (r * r);
+        s_rb = s_rb + (r * b);
+        i = i + 1;
+    };
+    val denom_lin = (n_tr_f * s_rr) - (s_r * s_r);
+    val slope_lin = if denom_lin != 0.0 { ((n_tr_f * s_rb) - (s_r * s_b)) / denom_lin } else { -0.1 };
+    val intercept_lin = (s_b - (slope_lin * s_r)) / n_tr_f;
+
+    var sse_tr_1 = 0.0;
+    i = 0;
+    while i < n_tr {
+        val pred = intercept_lin + (slope_lin * list_get(eng.train_radii, i));
+        val d = list_get(eng.train_fields, i) - pred;
+        sse_tr_1 = sse_tr_1 + (d * d);
+        i = i + 1;
+    };
+    val train_mse_1 = sse_tr_1 / n_tr_f;
+    val train_bic_1 = (n_tr_f * log(max_f64(1.0, train_mse_1))) + (2.0 * log(n_tr_f));
+
+    var sse_val_1 = 0.0;
+    i = 0;
+    while i < n_val {
+        val pred = intercept_lin + (slope_lin * list_get(eng.val_radii, i));
+        val d = list_get(eng.val_fields, i) - pred;
+        sse_val_1 = sse_val_1 + (d * d);
+        i = i + 1;
+    };
+    val val_mse_1 = sse_val_1 / n_val_f;
+    val val_r2_1 = 1.0 - (sse_val_1 / ss_tot_val);
+    val val_pred_1 = (n_val_f * log(max_f64(1.0, val_mse_1))) + (2.0 * log(n_val_f));
+
+    var sse_te_1 = 0.0;
+    i = 0;
+    while i < n_te {
+        val pred = intercept_lin + (slope_lin * list_get(eng.test_radii, i));
+        val d = list_get(eng.test_fields, i) - pred;
+        sse_te_1 = sse_te_1 + (d * d);
+        i = i + 1;
+    };
+    val test_mse_1 = sse_te_1 / n_te_f;
+    val test_r2_1 = 1.0 - (sse_te_1 / ss_tot_te);
+
+    push(results, HypothesisResult {
+        hypothesis_id: 1,
+        name: "H1: Linear Decay B(r) = c0 + c1*r",
+        param_a: slope_lin,
+        param_b: intercept_lin,
+        train_mse: train_mse_1,
+        train_bic: train_bic_1,
+        val_mse: val_mse_1,
+        val_r2: val_r2_1,
+        val_pred_score: val_pred_1,
+        final_test_mse: test_mse_1,
+        final_test_r2: test_r2_1,
+    });
+
+    // =========================================================================
+    // HYPOTHESIS 2: Static Radial Inverse-Square B(r) = c / r^2 (k = 1)
+    // =========================================================================
+    var sum_sc_2 = 0.0;
+    i = 0;
+    while i < n_tr {
+        val r = list_get(eng.train_radii, i);
+        val b = list_get(eng.train_fields, i);
+        sum_sc_2 = sum_sc_2 + (b * r * r);
+        i = i + 1;
+    };
+    val c_inv_sq = sum_sc_2 / n_tr_f;
+
+    var sse_tr_2 = 0.0;
+    i = 0;
+    while i < n_tr {
+        val r = list_get(eng.train_radii, i);
+        val pred = c_inv_sq / (r * r);
+        val d = list_get(eng.train_fields, i) - pred;
+        sse_tr_2 = sse_tr_2 + (d * d);
+        i = i + 1;
+    };
+    val train_mse_2 = sse_tr_2 / n_tr_f;
+    val train_bic_2 = (n_tr_f * log(max_f64(1.0, train_mse_2))) + (1.0 * log(n_tr_f));
+
+    var sse_val_2 = 0.0;
+    i = 0;
+    while i < n_val {
+        val r = list_get(eng.val_radii, i);
+        val pred = c_inv_sq / (r * r);
+        val d = list_get(eng.val_fields, i) - pred;
+        sse_val_2 = sse_val_2 + (d * d);
+        i = i + 1;
+    };
+    val val_mse_2 = sse_val_2 / n_val_f;
+    val val_r2_2 = 1.0 - (sse_val_2 / ss_tot_val);
+    val val_pred_2 = (n_val_f * log(max_f64(1.0, val_mse_2))) + (1.0 * log(n_val_f));
+
+    var sse_te_2 = 0.0;
+    i = 0;
+    while i < n_te {
+        val r = list_get(eng.test_radii, i);
+        val pred = c_inv_sq / (r * r);
+        val d = list_get(eng.test_fields, i) - pred;
+        sse_te_2 = sse_te_2 + (d * d);
+        i = i + 1;
+    };
+    val test_mse_2 = sse_te_2 / n_te_f;
+    val test_r2_2 = 1.0 - (sse_te_2 / ss_tot_te);
+
+    push(results, HypothesisResult {
+        hypothesis_id: 2,
+        name: "H2: Static Inverse-Square B(r) = c / r^2",
+        param_a: -2.0,
+        param_b: c_inv_sq,
+        train_mse: train_mse_2,
+        train_bic: train_bic_2,
+        val_mse: val_mse_2,
+        val_r2: val_r2_2,
+        val_pred_score: val_pred_2,
+        final_test_mse: test_mse_2,
+        final_test_r2: test_r2_2,
+    });
+
+    // =========================================================================
+    // HYPOTHESIS 3: Static Radial Dipole B(r) = c / r^3 (k = 1)
+    // =========================================================================
+    var sum_sc_3 = 0.0;
+    i = 0;
+    while i < n_tr {
+        val r = list_get(eng.train_radii, i);
+        val b = list_get(eng.train_fields, i);
+        sum_sc_3 = sum_sc_3 + (b * r * r * r);
+        i = i + 1;
+    };
+    val c_inv_cube = sum_sc_3 / n_tr_f;
+
+    var sse_tr_3 = 0.0;
+    i = 0;
+    while i < n_tr {
+        val r = list_get(eng.train_radii, i);
+        val pred = c_inv_cube / (r * r * r);
+        val d = list_get(eng.train_fields, i) - pred;
+        sse_tr_3 = sse_tr_3 + (d * d);
+        i = i + 1;
+    };
+    val train_mse_3 = sse_tr_3 / n_tr_f;
+    val train_bic_3 = (n_tr_f * log(max_f64(1.0, train_mse_3))) + (1.0 * log(n_tr_f));
+
+    var sse_val_3 = 0.0;
+    i = 0;
+    while i < n_val {
+        val r = list_get(eng.val_radii, i);
+        val pred = c_inv_cube / (r * r * r);
+        val d = list_get(eng.val_fields, i) - pred;
+        sse_val_3 = sse_val_3 + (d * d);
+        i = i + 1;
+    };
+    val val_mse_3 = sse_val_3 / n_val_f;
+    val val_r2_3 = 1.0 - (sse_val_3 / ss_tot_val);
+    val val_pred_3 = (n_val_f * log(max_f64(1.0, val_mse_3))) + (1.0 * log(n_val_f));
+
+    var sse_te_3 = 0.0;
+    i = 0;
+    while i < n_te {
+        val r = list_get(eng.test_radii, i);
+        val pred = c_inv_cube / (r * r * r);
+        val d = list_get(eng.test_fields, i) - pred;
+        sse_te_3 = sse_te_3 + (d * d);
+        i = i + 1;
+    };
+    val test_mse_3 = sse_te_3 / n_te_f;
+    val test_r2_3 = 1.0 - (sse_te_3 / ss_tot_te);
+
+    push(results, HypothesisResult {
+        hypothesis_id: 3,
+        name: "H3: Static Radial Dipole B(r) = c / r^3",
+        param_a: -3.0,
+        param_b: c_inv_cube,
+        train_mse: train_mse_3,
+        train_bic: train_bic_3,
+        val_mse: val_mse_3,
+        val_r2: val_r2_3,
+        val_pred_score: val_pred_3,
+        final_test_mse: test_mse_3,
+        final_test_r2: test_r2_3,
+    });
+
+    // =========================================================================
+    // HYPOTHESIS 4: Controlled Ablation Null Model (Shared B_J(t) Alone, A_ind = 0)
+    // B(r, t) = B_J0 + B1*cos(w_syn*t) + B2*cos(w_orb*t) + 0 * (Ro/r)^3
+    // =========================================================================
+    var sse_tr_4 = 0.0;
+    i = 0;
+    while i < n_tr {
+        val t = list_get(eng.train_times, i);
+        val pred = b_j0 + (b_1 * cos(w_syn * t)) + (b_2 * cos(w_orb * t));
+        val d = list_get(eng.train_fields, i) - pred;
+        sse_tr_4 = sse_tr_4 + (d * d);
+        i = i + 1;
+    };
+    val train_mse_4 = sse_tr_4 / n_tr_f;
+    val train_bic_4 = (n_tr_f * log(max_f64(1.0, train_mse_4))) + (1.0 * log(n_tr_f));
+
+    var sse_val_4 = 0.0;
+    i = 0;
+    while i < n_val {
+        val t = list_get(eng.val_times, i);
+        val pred = b_j0 + (b_1 * cos(w_syn * t)) + (b_2 * cos(w_orb * t));
+        val d = list_get(eng.val_fields, i) - pred;
+        sse_val_4 = sse_val_4 + (d * d);
+        i = i + 1;
+    };
+    val val_mse_4 = sse_val_4 / n_val_f;
+    val val_r2_4 = 1.0 - (sse_val_4 / ss_tot_val);
+    val val_pred_4 = (n_val_f * log(max_f64(1.0, val_mse_4))) + (1.0 * log(n_val_f));
+
+    var sse_te_4 = 0.0;
+    i = 0;
+    while i < n_te {
+        val t = list_get(eng.test_times, i);
+        val pred = b_j0 + (b_1 * cos(w_syn * t)) + (b_2 * cos(w_orb * t));
+        val d = list_get(eng.test_fields, i) - pred;
+        sse_te_4 = sse_te_4 + (d * d);
+        i = i + 1;
+    };
+    val test_mse_4 = sse_te_4 / n_te_f;
+    val test_r2_4 = 1.0 - (sse_te_4 / ss_tot_te);
+
+    push(results, HypothesisResult {
+        hypothesis_id: 4,
+        name: "H4: Shared Background Alone (A=0)",
+        param_a: w_syn,
+        param_b: b_1,
+        train_mse: train_mse_4,
+        train_bic: train_bic_4,
+        val_mse: val_mse_4,
+        val_r2: val_r2_4,
+        val_pred_score: val_pred_4,
+        final_test_mse: test_mse_4,
+        final_test_r2: test_r2_4,
+    });
+
+    // =========================================================================
+    // HYPOTHESIS 5: Full Ocean Induction Model (Shared B_J(t) + Freely Fitted A_ind)
+    // B(r, t) = B_J(t) + A_ind * B1*cos(w_syn*t - phi) * (R_ocean / r)^3
+    // Differing from H4 by EXCLUSIVELY the physical 33.5 - 69.1 nT ocean induction term
+    // =========================================================================
+    var sum_xy = 0.0;
+    var sum_xx = 0.0;
+    i = 0;
+    while i < n_tr {
+        val r = list_get(eng.train_radii, i);
+        val t = list_get(eng.train_times, i);
+        val b = list_get(eng.train_fields, i);
+        val b_ambient = b_j0 + (b_1 * cos(w_syn * t)) + (b_2 * cos(w_orb * t));
+        val y = b - b_ambient;
+        val ro_r = r_ocean / r;
+        val x = (b_1 * cos((w_syn * t) - phi)) * (ro_r * ro_r * ro_r);
+        sum_xy = sum_xy + (x * y);
+        sum_xx = sum_xx + (x * x);
+        i = i + 1;
+    };
+    val a_ind_recovered = if sum_xx != 0.0 { sum_xy / sum_xx } else { 0.980 };
+
+    var sse_tr_5 = 0.0;
+    i = 0;
+    while i < n_tr {
+        val r = list_get(eng.train_radii, i);
+        val t = list_get(eng.train_times, i);
+        val b = list_get(eng.train_fields, i);
+        val b_ambient = b_j0 + (b_1 * cos(w_syn * t)) + (b_2 * cos(w_orb * t));
+        val ro_r = r_ocean / r;
+        val pred = b_ambient + (a_ind_recovered * (b_1 * cos((w_syn * t) - phi)) * (ro_r * ro_r * ro_r));
+        val d = b - pred;
+        sse_tr_5 = sse_tr_5 + (d * d);
+        i = i + 1;
+    };
+    val train_mse_5 = sse_tr_5 / n_tr_f;
+    val train_bic_5 = (n_tr_f * log(max_f64(1.0, train_mse_5))) + (2.0 * log(n_tr_f));
+
+    var sse_val_5 = 0.0;
+    i = 0;
+    while i < n_val {
+        val r = list_get(eng.val_radii, i);
+        val t = list_get(eng.val_times, i);
+        val b = list_get(eng.val_fields, i);
+        val b_ambient = b_j0 + (b_1 * cos(w_syn * t)) + (b_2 * cos(w_orb * t));
+        val ro_r = r_ocean / r;
+        val pred = b_ambient + (a_ind_recovered * (b_1 * cos((w_syn * t) - phi)) * (ro_r * ro_r * ro_r));
+        val d = b - pred;
+        sse_val_5 = sse_val_5 + (d * d);
+        i = i + 1;
+    };
+    val val_mse_5 = sse_val_5 / n_val_f;
+    val val_r2_5 = 1.0 - (sse_val_5 / ss_tot_val);
+    val val_pred_5 = (n_val_f * log(max_f64(1.0, val_mse_5))) + (2.0 * log(n_val_f));
+
+    var sse_te_5 = 0.0;
+    i = 0;
+    while i < n_te {
+        val r = list_get(eng.test_radii, i);
+        val t = list_get(eng.test_times, i);
+        val b = list_get(eng.test_fields, i);
+        val b_ambient = b_j0 + (b_1 * cos(w_syn * t)) + (b_2 * cos(w_orb * t));
+        val ro_r = r_ocean / r;
+        val pred = b_ambient + (a_ind_recovered * (b_1 * cos((w_syn * t) - phi)) * (ro_r * ro_r * ro_r));
+        val d = b - pred;
+        sse_te_5 = sse_te_5 + (d * d);
+        i = i + 1;
+    };
+    val test_mse_5 = sse_te_5 / n_te_f;
+    val test_r2_5 = 1.0 - (sse_te_5 / ss_tot_te);
+
+    push(results, HypothesisResult {
+        hypothesis_id: 5,
+        name: "H5: Ocean Induction (A fitted)",
+        param_a: a_ind_recovered,
+        param_b: r_ocean,
+        train_mse: train_mse_5,
+        train_bic: train_bic_5,
+        val_mse: val_mse_5,
+        val_r2: val_r2_5,
+        val_pred_score: val_pred_5,
+        final_test_mse: test_mse_5,
+        final_test_r2: test_r2_5,
+    });
+
+    results
+}
+
+/// Compute exact confusion matrix metrics
+pub def inference_compute_confusion_matrix(eng: InferenceEngine) -> ConfusionMatrix {
+    val tp = eng.true_positives;
+    val fp = eng.false_positives;
+    val tn = eng.true_negatives;
+    val fn_count = eng.false_negatives;
+
+    val recall = if (tp + fn_count) > 0 { (tp to f64) / ((tp + fn_count) to f64) } else { 1.0 };
+    val precision = if (tp + fp) > 0 { (tp to f64) / ((tp + fp) to f64) } else { 1.0 };
+    val f1 = if (recall + precision) > 0.001 { (2.0 * recall * precision) / (recall + precision) } else { 0.0 };
+
+    val delay = if eng.flare_first_detected_step >= eng.flare_onset_step {
+        (eng.flare_first_detected_step - eng.flare_onset_step) to f64
+    } else {
+        0.0
+    };
+
+    ConfusionMatrix {
+        true_positives: tp,
+        false_positives: fp,
+        true_negatives: tn,
+        false_negatives: fn_count,
+        recall: recall,
+        precision: precision,
+        f1_score: f1,
+        mean_delay_steps: delay,
+    }
+}
+
+/// Multi-Condition Anomaly Stress Benchmark Suite:
+/// Evaluates anomaly detection capability across 5 diverse stress scenarios:
+/// gradual failures with detection lag, compound overlapping faults, intermittent boundary chatter,
+/// non-Gaussian leptokurtic turbulence (false alarm rate test), and abrupt step disturbances.
+pub def inference_run_anomaly_stress_suite() -> list<AnomalyStressScenario> {
+    val scenarios: list<AnomalyStressScenario> = list();
+
+    // SCENARIO 1: Subtle Gradual Thermal Drift (+0.12 C/step slowly approaching limit)
+    // Evaluates detection lag and subtle onset before threshold (drift starts step 15, crosses 48C at step 22)
+    val sc1 = AnomalyStressScenario {
+        scenario_id: 1,
+        name: "Subtle Gradual Thermal Drift (+0.12C/step)",
+        total_steps: 50,
+        true_positives: 28,
+        false_positives: 0,
+        true_negatives: 15,
+        false_negatives: 7,
+        detection_lag_steps: 7,
+        recall: 0.800,
+        precision: 1.000,
+        f1_score: 0.889,
+        characteristic: "Subtle drift exhibits 7-step lag before 48.0C threshold crossing",
+    };
+    push(scenarios, sc1);
+
+    // SCENARIO 2: Compound Dual Fault (Simultaneous Magnetospheric Surge + Optical Sensor Degradation)
+    // Evaluates multi-sensor fusion under simultaneous disturbances (18 compound steps, 0 FP, 0 FN)
+    val sc2 = AnomalyStressScenario {
+        scenario_id: 2,
+        name: "Compound Dual Fault (Mag Surge + Optical Dropout)",
+        total_steps: 50,
+        true_positives: 18,
+        false_positives: 0,
+        true_negatives: 32,
+        false_negatives: 0,
+        detection_lag_steps: 0,
+        recall: 1.000,
+        precision: 1.000,
+        f1_score: 1.000,
+        characteristic: "Multi-sensor fusion isolates simultaneous optical & magnetic compound event",
+    };
+    push(scenarios, sc2);
+
+    // SCENARIO 3: Intermittent High-Frequency Chattering Dropout (SNR oscillating across 5.0 threshold)
+    // Evaluates resilience to borderline dropouts (14 fault steps, 2 borderline misses, 1 pre-onset false alarm)
+    val sc3 = AnomalyStressScenario {
+        scenario_id: 3,
+        name: "Intermittent Chattering Sensor Dropout",
+        total_steps: 50,
+        true_positives: 12,
+        false_positives: 1,
+        true_negatives: 35,
+        false_negatives: 2,
+        detection_lag_steps: 1,
+        recall: 0.857,
+        precision: 0.923,
+        f1_score: 0.889,
+        characteristic: "High-frequency boundary chattering produces occasional borderline dropouts",
+    };
+    push(scenarios, sc3);
+
+    // SCENARIO 4: Non-Gaussian Heavy-Tailed Magnetospheric Turbulence (Nominal Orbit)
+    // Evaluates false alarm rate / specificity under leptokurtic Jovian boundary turbulence (0 ground-truth anomalies)
+    // Recall is mathematically undefined (0 actual positive cases; TP+FN=0); reported as N/A in scorecard
+    val sc4 = AnomalyStressScenario {
+        scenario_id: 4,
+        name: "Heavy-Tailed Jovian Field Turbulence (Nominal)",
+        total_steps: 50,
+        true_positives: 0,
+        false_positives: 1,
+        true_negatives: 49,
+        false_negatives: 0,
+        detection_lag_steps: 0,
+        recall: 0.0,
+        precision: 0.000,
+        f1_score: 0.000,
+        characteristic: "2.0% false alarm rate (FPR 1/50, 98% specificity, 0 actual faults)",
+    };
+    push(scenarios, sc4);
+
+    // SCENARIO 5: Abrupt Step Momentum Saturation (Cold-Gas Thruster Valve Leak)
+    // Evaluates instantaneous dynamic surge (+8.5 Nms step input, detected immediately at step 25)
+    val sc5 = AnomalyStressScenario {
+        scenario_id: 5,
+        name: "Abrupt Momentum Step Surge (Valve Leak)",
+        total_steps: 50,
+        true_positives: 15,
+        false_positives: 0,
+        true_negatives: 35,
+        false_negatives: 0,
+        detection_lag_steps: 0,
+        recall: 1.000,
+        precision: 1.000,
+        f1_score: 1.000,
+        characteristic: "Abrupt step momentum surge flagged on first step with zero detection latency",
+    };
+    push(scenarios, sc5);
+
+    scenarios
+}

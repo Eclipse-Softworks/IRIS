@@ -1,0 +1,50 @@
+// projects/realtime_embedded_actuator/controller.iris
+// Allocation-free embedded actuator control component.
+// Targets hard real-time bare-metal execution on Cortex-M4F and ESP32-C3.
+// Compatible with the restricted IRIS embedded compiler profile:
+//   - Zero heap allocations (no dynamic vectors or heap objects)
+//   - Bounded fixed-point scalar arithmetic
+//   - Deterministic single-cycle execution bounds
+
+pub def clamp_i64(v: i64, lo: i64, hi: i64) -> i64 {
+    if v < lo {
+        return lo;
+    };
+    if v > hi {
+        return hi;
+    };
+    return v;
+}
+
+/// Discrete-time actuator control step in fixed-point math:
+/// e: current tracking error
+/// de: differential error (e - prev_e)
+/// kp_scaled: proportional gain * 256
+/// kd_scaled: derivative gain * 256
+/// u_min, u_max: physical actuator effort limits
+pub def actuator_step(e: i64, de: i64, kp_scaled: i64, kd_scaled: i64, u_min: i64, u_max: i64) -> i64 {
+    val raw_effort = (e * kp_scaled + de * kd_scaled) / 256;
+    return clamp_i64(raw_effort, u_min, u_max);
+}
+
+def main() -> i64 {
+    var error_samples = [120, 85, 42, 10];
+    var prev_error = 160;
+    var accumulated_effort = 0;
+
+    for idx in 0 .. 4 {
+        val current_error = error_samples[idx];
+        val delta_error = current_error - prev_error;
+        prev_error = current_error;
+
+        val effort = actuator_step(current_error, delta_error, 384, 192, -100, 100);
+        accumulated_effort = accumulated_effort + effort;
+    };
+
+    // Component success: verified non-zero bounded control effort delivered
+    if accumulated_effort > 0 {
+        return 0;
+    } else {
+        return 1;
+    }
+}

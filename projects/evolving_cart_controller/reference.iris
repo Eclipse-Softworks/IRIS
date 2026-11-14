@@ -1,0 +1,103 @@
+bring "plant.iris" /// Derives the optimal cart controller and the canary cases the gates score against.
+
+// The reference behaviour candidates are judged by: the LQR-optimal law for
+// the cart, u = k_error * (target - x) - k_velocity * v, from the discrete
+// Riccati equation of plant.iris's own discretisation (dt = 0.02 s,
+// Q = diag(4, 1), R = 0.2). Prints the gains, checks the saturated closed loop
+// settles, and -- with IRIS_WRITE_CASES set to a path -- writes the canary
+// cases there: states near the operating point, where the optimal force stays
+// inside the +/-10 N rating.
+
+record Gains { k_error: f64, k_velocity: f64 }
+
+def lqr_gains(dt: f64, q_pos: f64, q_vel: f64, r: f64) -> Gains {
+    // x' = A x + B u, state (position error, velocity).
+    val damp = 1.0 - DRAG * dt / MASS
+    val a01 = dt * damp
+    val a11 = damp
+    val b0 = dt * dt / MASS
+    val b1 = dt / MASS
+    // P = Q + A'PA - A'PB (R + B'PB)^-1 B'PA, iterated to its fixed point.
+    var p00 = q_pos
+    var p01 = 0.0
+    var p11 = q_vel
+    var k0 = 0.0
+    var k1 = 0.0
+    for i in 0..5000 {
+        // PB and A'PB
+        val pb0 = p00 * b0 + p01 * b1
+        val pb1 = p01 * b0 + p11 * b1
+        val s = r + b0 * pb0 + b1 * pb1
+        // B'PA = (PB)' A
+        val bpa0 = pb0
+        val bpa1 = pb0 * a01 + pb1 * a11
+        k0 = bpa0 / s
+        k1 = bpa1 / s
+        // A'PA
+        val apa00 = p00
+        val apa01 = p00 * a01 + p01 * a11
+        val apa11 = a01 * (p00 * a01 + p01 * a11) + a11 * (p01 * a01 + p11 * a11)
+        p00 = q_pos + apa00 - bpa0 * bpa0 / s;
+        p01 = apa01 - bpa0 * bpa1 / s;
+        p11 = q_vel + apa11 - bpa1 * bpa1 / s
+    };
+    Gains { k_error: k0, k_velocity: k1 }
+}
+
+def optimal_force(g: Gains, error: f64, velocity: f64) -> f64 {
+    g.k_error * error - g.k_velocity * velocity
+}
+
+def saturate(u: f64) -> f64 { max(-10.0, min(10.0, u)) }
+
+def main() -> i64 {
+    val dt = 0.02
+    val g = lqr_gains(dt, 4.0, 1.0, 0.2)
+    println("LQR gains: k_error " + to_str(g.k_error) + ", k_velocity " + to_str(g.k_velocity));
+    assert(g.k_error > 1.0 && g.k_velocity > 0.5);
+
+    // The saturated optimal law settles every step the live run commands.
+    val targets: list<f64> = list()
+    list_push(targets, 1.0);
+    list_push(targets, 5.0);
+    list_push(targets, -2.0);
+    list_push(targets, 3.0);
+    var x = 0.0
+    var v = 0.0
+    for t in 0..list_len(targets) {
+        val target = list_get(targets, t)
+        for step in 0..400 {
+            val s = plant(PlantInput { position: x, velocity: v, force: saturate(optimal_force(g, target - x, v)), dt: dt })
+            x = s.position;
+            v = s.velocity
+        };
+        println("step to " + to_str(target) + ": final error " + to_str(target - x));
+        assert(abs(target - x) < 0.02 && abs(v) < 0.05);
+    };
+
+    // Canary cases: a grid near the operating point, all inside the rating.
+    var json = "["
+    var count = 0
+    var biggest = 0.0
+    for i in 0..5 {
+        val error = 0.4 * (i to f64) - 0.8
+        for j in 0..5 {
+            val velocity = 0.25 * (j to f64) - 0.5
+            val u = optimal_force(g, error, velocity)
+            biggest = max(biggest, abs(u));
+            if count > 0 { json = json + ", " };
+            json = json + "{\"inputs\": [" + to_str(error) + ", " + to_str(velocity) + "], \"expected\": " + to_str(u) + "}";
+            count = count + 1
+        };
+    };
+    json = json + "]"
+    assert(count == 25 && biggest < 10.0);
+    println("canary: " + to_str(count) + " cases, largest force " + to_str(biggest) + " N");
+    val out = env_get("IRIS_WRITE_CASES")
+    if len(out) > 0 {
+        assert(is_ok(file_write_all(out, json)));
+        println("wrote " + out);
+    };
+    println("evolving cart: reference controller derived");
+    return 0
+}

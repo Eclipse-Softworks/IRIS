@@ -4,7 +4,7 @@
 //! in a rustc-style format with source excerpts, span underlines, error
 //! codes, and optional help/hint notes.
 
-use crate::error::{Error, InterpError, LowerError, ParseError, PassError};
+use crate::error::{CodegenError, Error, InterpError, LowerError, ParseError, PassError};
 
 // ---------------------------------------------------------------------------
 // ANSI color helpers (no external dependency)
@@ -82,6 +82,10 @@ fn extract_span(err: &Error) -> Option<(u32, u32)> {
             ParseError::UnexpectedToken { span, .. } => Some((span.start.0, span.end.0)),
             ParseError::UnexpectedEof { .. } => None,
             ParseError::RecursionLimitExceeded { span, .. } => Some((span.start.0, span.end.0)),
+            ParseError::Diag { diag, .. } => diag.primary_span(),
+            ParseError::Multiple(errors) => errors
+                .first()
+                .and_then(|e| extract_span(&Error::Parse(e.clone()))),
         },
         Error::Lower(le) => match le {
             LowerError::UndefinedVariable { span, .. } => Some((span.start.0, span.end.0)),
@@ -93,10 +97,16 @@ fn extract_span(err: &Error) -> Option<(u32, u32)> {
             LowerError::DuplicateNode { span, .. } => Some((span.start.0, span.end.0)),
             LowerError::InvalidLayerParam { span, .. } => Some((span.start.0, span.end.0)),
             LowerError::UnknownOp { .. } => None,
+            LowerError::Diag { diag, .. } => diag.primary_span(),
+            LowerError::Multiple(errors) => errors
+                .first()
+                .and_then(|e| extract_span(&Error::Lower(e.clone_shallow()))),
         },
+        Error::Pass(crate::error::PassError::Diag { diag, .. }) => diag.primary_span(),
         Error::Interp(InterpError::Located { byte, byte_end, .. }) => {
             Some((*byte, byte_end.unwrap_or(*byte + 1)))
         }
+        Error::Codegen(CodegenError::Runtime { span, .. }) => *span,
         _ => None,
     }
 }
@@ -144,9 +154,6 @@ fn error_hint(err: &Error) -> Option<&'static str> {
             _ => None,
         },
         Error::Pass(pe) => match pe {
-            PassError::UnresolvedInfer { .. } => {
-                Some("add a type annotation — the compiler cannot infer the type automatically")
-            }
             PassError::MissingTerminator { .. } => {
                 Some("every block must end with a return value or branch — check for missing 'return' or 'else' clauses")
             }
@@ -158,22 +165,31 @@ fn error_hint(err: &Error) -> Option<&'static str> {
                 InterpError::Located { inner, .. } => inner.as_ref(),
                 other => other,
             };
-            match inner {
-                InterpError::DivisionByZero => {
-                    Some("check that the divisor is not zero before dividing")
-                }
-                InterpError::IndexOutOfBounds { .. } => {
-                    Some("use 'len(list)' to check bounds before indexing")
-                }
-                InterpError::TypeError { .. } => {
-                    Some("check that operand types match — use `to_i64()`, `to_f64()`, or `to_str()` for conversions")
-                }
-                InterpError::Panic { .. } => {
-                    Some("use `try` blocks to catch panics, or check conditions before the panicking operation")
-                }
-                _ => None,
-            }
+            runtime_hint(err.diagnostic_code(), &inner.to_string())
         }
+        Error::Codegen(CodegenError::Runtime { code, message, .. }) => runtime_hint(code, message),
+        _ => None,
+    }
+}
+
+/// Help for a runtime error, keyed by its code so a failure reads the same
+/// whichever backend ran the program.
+fn runtime_hint(code: &str, message: &str) -> Option<&'static str> {
+    match code {
+        "E0402" => Some("check that the divisor is not zero before dividing"),
+        "E0403" if message.contains("tensor of rank") || message.contains("for dimension") => {
+            Some("index a tensor with one index per dimension, each from 0 to that dimension's length - 1, or with one flat row-major position")
+        }
+        "E0403" => Some("valid indices run from 0 to `len(xs) - 1`; check the index first, or loop with `for x in xs`"),
+        "E0404" => Some("check that operand types match — use `to_i64()`, `to_f64()`, or `to_str()` for conversions"),
+        "E0406" if message.contains("unwrap called on none") => {
+            Some("check it with `is_some(x)` first, or give a default with `x.unwrap_or(default)`")
+        }
+        "E0406" if message.contains("unwrap called on err") => {
+            Some("handle both cases with `when r { ok(v) => ..., err(e) => ... }`, or pass the error on with `?`")
+        }
+        "E0408" => Some("check that the recursion reaches its base case; iteration this deep is better written as a loop"),
+        "E0409" => Some("integer arithmetic is checked; `wrapping_add`, `wrapping_sub` and `wrapping_mul` wrap around instead, and `f64` holds larger magnitudes"),
         _ => None,
     }
 }
@@ -220,6 +236,43 @@ pub fn render_error_colored_with_file(source: &str, err: &Error, filename: &str)
 // Structured Multi-Span Diagnostic Engine (rustc-style)
 // ---------------------------------------------------------------------------
 
+/// A span of at most one byte widened to the token that starts there: a
+/// whole identifier, number or string literal. Errors found on the IR know
+/// only where an expression starts.
+pub fn token_span(source: &str, start: u32, end: u32) -> (u32, u32) {
+    if end > start + 1 {
+        return (start, end);
+    }
+    let bytes = source.as_bytes();
+    let i = start as usize;
+    let Some(&first) = bytes.get(i) else {
+        return (start, end.max(start));
+    };
+    let mut j = i + 1;
+    if first == b'"' {
+        while j < bytes.len() && bytes[j] != b'"' && bytes[j] != b'\n' {
+            if bytes[j] == b'\\' {
+                j += 1;
+            }
+            j += 1;
+        }
+        if j < bytes.len() && bytes[j] == b'"' {
+            j += 1;
+        }
+    } else if first.is_ascii_alphanumeric() || first == b'_' {
+        while j < bytes.len()
+            && (bytes[j].is_ascii_alphanumeric()
+                || bytes[j] == b'_'
+                || (first.is_ascii_digit() && bytes[j] == b'.'))
+        {
+            j += 1;
+        }
+    } else {
+        return (start, end.max(start + 1));
+    }
+    (start, j as u32)
+}
+
 /// Severity level of a diagnostic.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -250,6 +303,101 @@ pub struct DiagnosticSpan {
     pub is_primary: bool,
 }
 
+/// One text replacement: bytes `start..end` of the source become `replacement`
+/// (an insertion when `start == end`).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Edit {
+    pub start: u32,
+    pub end: u32,
+    pub replacement: String,
+}
+
+/// A change that resolves a diagnostic, applied as a whole: the editor's quick
+/// fix, `suggested_replacement` in JSON, and a preview line in the terminal.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Fix {
+    pub message: String,
+    pub edits: Vec<Edit>,
+}
+
+impl Fix {
+    /// Replace `start..end` with `replacement`.
+    pub fn replace(
+        message: impl Into<String>,
+        start: u32,
+        end: u32,
+        replacement: impl Into<String>,
+    ) -> Self {
+        Fix {
+            message: message.into(),
+            edits: vec![Edit {
+                start,
+                end,
+                replacement: replacement.into(),
+            }],
+        }
+    }
+
+    /// Insert `text` at byte `at`.
+    pub fn insert(message: impl Into<String>, at: u32, text: impl Into<String>) -> Self {
+        Self::replace(message, at, at, text)
+    }
+
+    /// `source` with this fix applied. Edits must not overlap.
+    pub fn apply(&self, source: &str) -> String {
+        let mut edits = self.edits.clone();
+        edits.sort_by_key(|e| std::cmp::Reverse(e.start));
+        let mut out = source.to_string();
+        for e in &edits {
+            let (a, b) = (e.start as usize, (e.end as usize).max(e.start as usize));
+            if b <= out.len() && out.is_char_boundary(a) && out.is_char_boundary(b) {
+                out.replace_range(a..b, &e.replacement);
+            }
+        }
+        out
+    }
+
+    /// The lines this fix changes, as they read after it is applied.
+    fn preview(&self, source: &str) -> Vec<(u32, String)> {
+        let Some(first) = self.edits.iter().map(|e| e.start).min() else {
+            return Vec::new();
+        };
+        let last = self
+            .edits
+            .iter()
+            .map(|e| e.end.max(e.start))
+            .max()
+            .unwrap_or(first);
+        let (first_line, _) = byte_to_line_col(source, first);
+        let (last_line, _) = byte_to_line_col(source, last);
+        let added: usize = self
+            .edits
+            .iter()
+            .map(|e| e.replacement.matches('\n').count())
+            .sum::<usize>();
+        let removed: usize = self
+            .edits
+            .iter()
+            .map(|e| {
+                source
+                    .get(e.start as usize..(e.end as usize).max(e.start as usize))
+                    .map(|t| t.matches('\n').count())
+                    .unwrap_or(0)
+            })
+            .sum::<usize>();
+        let fixed = self.apply(source);
+        let count = (last_line - first_line) as usize + 1 + added
+            - removed.min(added + (last_line - first_line) as usize);
+        fixed
+            .lines()
+            .enumerate()
+            .skip(first_line as usize - 1)
+            .take(count.clamp(1, 6))
+            .map(|(i, l)| (i as u32 + 1, l.to_string()))
+            .collect()
+    }
+}
+
 /// A structured multi-span diagnostic with optional notes, helps, and JSON serialization.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Diagnostic {
@@ -260,6 +408,9 @@ pub struct Diagnostic {
     pub notes: Vec<String>,
     pub helps: Vec<String>,
     pub suggestions: Vec<String>,
+    /// Machine-applicable changes that resolve this diagnostic.
+    #[serde(default)]
+    pub fixes: Vec<Fix>,
 }
 
 impl Diagnostic {
@@ -272,6 +423,7 @@ impl Diagnostic {
             notes: Vec::new(),
             helps: Vec::new(),
             suggestions: Vec::new(),
+            fixes: Vec::new(),
         }
     }
 
@@ -284,6 +436,7 @@ impl Diagnostic {
             notes: Vec::new(),
             helps: Vec::new(),
             suggestions: Vec::new(),
+            fixes: Vec::new(),
         }
     }
 
@@ -325,6 +478,20 @@ impl Diagnostic {
     pub fn with_suggestion(mut self, suggestion: impl Into<String>) -> Self {
         self.suggestions.push(suggestion.into());
         self
+    }
+
+    pub fn with_fix(mut self, fix: Fix) -> Self {
+        self.fixes.push(fix);
+        self
+    }
+
+    /// The primary span, or the first span, as `(start, end)`.
+    pub fn primary_span(&self) -> Option<(u32, u32)> {
+        self.spans
+            .iter()
+            .find(|s| s.is_primary)
+            .or_else(|| self.spans.first())
+            .map(|s| (s.start, s.end))
     }
 
     /// Renders this diagnostic to a human-readable text string with source excerpts and underlines.
@@ -393,67 +560,98 @@ impl Diagnostic {
                 out.push_str(&format!(" --> {}\n", loc));
             }
 
-            // Sort spans by byte offset
-            let mut sorted_spans = self.spans.clone();
-            sorted_spans.sort_by_key(|s| s.start);
-
-            for span in &sorted_spans {
-                let (line, col) = byte_to_line_col(source, span.start);
+            // Spans grouped by line, in order: a line is shown once, with
+            // every span on it underlined, as rustc does. A span's label sits
+            // after its underline when it is the line's last; an earlier one
+            // hangs below its underline on a `|`.
+            let mut placed: Vec<(u32, usize, usize, Option<String>, bool)> = Vec::new();
+            for span in &self.spans {
+                let (start, end) = token_span(source, span.start, span.end);
+                let (line, col) = byte_to_line_col(source, start);
                 let source_line = source.lines().nth((line - 1) as usize).unwrap_or("");
-
-                let span_len = (span.end.saturating_sub(span.start)).max(1) as usize;
-                let max_underline = source_line
-                    .len()
-                    .saturating_sub((col as usize).saturating_sub(1));
-                let underline_len = span_len.min(max_underline).max(1);
-
                 let indent = (col as usize).saturating_sub(1);
-                let ch = if span.is_primary { "^" } else { "-" };
-                let pointer_chars = ch.repeat(underline_len);
-
-                let label_text = if let Some(ref l) = span.label {
-                    format!(" {}", l)
-                } else {
-                    String::new()
-                };
-
+                let max_len = source_line.len().saturating_sub(indent).max(1);
+                let len = ((end.saturating_sub(start)) as usize).clamp(1, max_len);
+                placed.push((line, indent, len, span.label.clone(), span.is_primary));
+            }
+            placed.sort_by_key(|p| (p.0, p.1));
+            let mut i = 0;
+            while i < placed.len() {
+                let line = placed[i].0;
+                let mut group: Vec<&(u32, usize, usize, Option<String>, bool)> = Vec::new();
+                while i < placed.len() && placed[i].0 == line {
+                    group.push(&placed[i]);
+                    i += 1;
+                }
+                let source_line = source.lines().nth((line - 1) as usize).unwrap_or("");
                 let line_str = line.to_string();
                 let pad = " ".repeat(gutter_width.saturating_sub(line_str.len()));
-
-                if colored {
-                    out.push_str(&format!("{} {}|{}\n", gutter, ansi::BOLD_BLUE, ansi::RESET));
-                    out.push_str(&format!(
-                        "{}{}{} |{} {}\n",
-                        pad,
-                        ansi::BOLD_BLUE,
-                        line_str,
-                        ansi::RESET,
-                        source_line
-                    ));
-                    let color = if span.is_primary {
-                        ansi::BOLD_RED
-                    } else {
-                        ansi::BOLD_BLUE
-                    };
-                    out.push_str(&format!(
-                        "{} {}|{} {}{}{}{}\n",
-                        gutter,
-                        ansi::BOLD_BLUE,
-                        ansi::RESET,
-                        " ".repeat(indent),
-                        color,
-                        pointer_chars,
-                        label_text,
-                    ));
+                let (blue, red, reset) = if colored {
+                    (ansi::BOLD_BLUE, ansi::BOLD_RED, ansi::RESET)
                 } else {
-                    out.push_str(&format!("{}  |\n", gutter));
-                    out.push_str(&format!("{}{} | {}\n", pad, line_str, source_line));
+                    ("", "", "")
+                };
+                out.push_str(&format!(
+                    "{gutter} {blue}|{reset}
+"
+                ));
+                out.push_str(&format!(
+                    "{pad}{blue}{line_str} |{reset} {source_line}
+"
+                ));
+                // The underline row.
+                let mut row = String::new();
+                let mut width = 0usize;
+                for (_, indent, len, _, primary) in &group {
+                    if *indent < width {
+                        continue;
+                    }
+                    row.push_str(&" ".repeat(indent - width));
+                    let (ch, color) = if *primary { ("^", red) } else { ("-", blue) };
+                    row.push_str(&format!("{color}{}{reset}", ch.repeat(*len)));
+                    width = indent + len;
+                }
+                let last = group.last().expect("a group has a span");
+                if let Some(label) = &last.3 {
+                    let color = if last.4 { red } else { blue };
+                    row.push_str(&format!(" {color}{label}{reset}"));
+                }
+                out.push_str(&format!(
+                    "{gutter} {blue}|{reset} {row}
+"
+                ));
+                // Earlier labels, rightmost first, each below its underline.
+                let earlier: Vec<&&(u32, usize, usize, Option<String>, bool)> = group
+                    [..group.len() - 1]
+                    .iter()
+                    .filter(|p| p.3.is_some())
+                    .collect();
+                for (k, p) in earlier.iter().enumerate().rev() {
+                    let bars = |upto: usize| -> String {
+                        let mut r = String::new();
+                        let mut w = 0usize;
+                        for q in &earlier[..upto] {
+                            if q.1 >= w {
+                                r.push_str(&" ".repeat(q.1 - w));
+                                r.push_str(&format!("{blue}|{reset}"));
+                                w = q.1 + 1;
+                            }
+                        }
+                        r
+                    };
+                    let connector = bars(k + 1);
                     out.push_str(&format!(
-                        "{}  | {}{}{}\n",
-                        gutter,
-                        " ".repeat(indent),
-                        pointer_chars,
-                        label_text
+                        "{gutter} {blue}|{reset} {connector}
+"
+                    ));
+                    let lead = bars(k);
+                    let lead_width = earlier[..k].iter().map(|q| q.1 + 1).max().unwrap_or(0);
+                    let color = if p.4 { red } else { blue };
+                    let label = p.3.as_deref().unwrap_or("");
+                    out.push_str(&format!(
+                        "{gutter} {blue}|{reset} {lead}{}{color}{label}{reset}
+",
+                        " ".repeat(p.1.saturating_sub(lead_width))
                     ));
                 }
             }
@@ -501,6 +699,52 @@ impl Diagnostic {
             }
         }
 
+        // Render fixes: the message, then the changed lines as they would read.
+        for fix in &self.fixes {
+            if colored {
+                out.push_str(&format!(
+                    "{}help{}: {}\n",
+                    ansi::BOLD_GREEN,
+                    ansi::RESET,
+                    fix.message
+                ));
+            } else {
+                out.push_str(&format!("help: {}\n", fix.message));
+            }
+            let lines = fix.preview(source);
+            let width = lines
+                .iter()
+                .map(|(n, _)| n.to_string().len())
+                .max()
+                .unwrap_or(1)
+                .max(2);
+            if !lines.is_empty() {
+                out.push_str(&format!("{} |\n", " ".repeat(width)));
+            }
+            for (n, text) in lines {
+                let num = n.to_string();
+                if colored {
+                    out.push_str(&format!(
+                        "{}{}{} |{} {}{}{}\n",
+                        " ".repeat(width - num.len()),
+                        ansi::BOLD_BLUE,
+                        num,
+                        ansi::RESET,
+                        ansi::BOLD_GREEN,
+                        text,
+                        ansi::RESET
+                    ));
+                } else {
+                    out.push_str(&format!(
+                        "{}{} | {}\n",
+                        " ".repeat(width - num.len()),
+                        num,
+                        text
+                    ));
+                }
+            }
+        }
+
         out
     }
 
@@ -531,6 +775,22 @@ impl Diagnostic {
         struct JsonChild<'a> {
             message: &'a str,
             level: &'a str,
+            #[serde(skip_serializing_if = "Vec::is_empty")]
+            spans: Vec<JsonReplacement<'a>>,
+        }
+
+        #[derive(serde::Serialize)]
+        struct JsonReplacement<'a> {
+            file_name: &'a str,
+            byte_start: u32,
+            byte_end: u32,
+            line_start: u32,
+            line_end: u32,
+            column_start: u32,
+            column_end: u32,
+            is_primary: bool,
+            suggested_replacement: &'a str,
+            suggestion_applicability: &'a str,
         }
 
         #[derive(serde::Serialize)]
@@ -547,13 +807,14 @@ impl Diagnostic {
         let mut json_spans = Vec::new();
 
         for span in &self.spans {
-            let (l_start, c_start) = byte_to_line_col(source, span.start);
-            let (l_end, c_end) = byte_to_line_col(source, span.end);
+            let (start, end) = token_span(source, span.start, span.end);
+            let (l_start, c_start) = byte_to_line_col(source, start);
+            let (l_end, c_end) = byte_to_line_col(source, end);
             let line_txt = source.lines().nth((l_start - 1) as usize).unwrap_or("");
             json_spans.push(JsonSpan {
                 file_name: fname,
-                byte_start: span.start,
-                byte_end: span.end,
+                byte_start: start,
+                byte_end: end,
                 line_start: l_start,
                 line_end: l_end,
                 column_start: c_start,
@@ -573,18 +834,48 @@ impl Diagnostic {
             children.push(JsonChild {
                 message: note,
                 level: "note",
+                spans: Vec::new(),
             });
         }
         for help in &self.helps {
             children.push(JsonChild {
                 message: help,
                 level: "help",
+                spans: Vec::new(),
             });
         }
         for sugg in &self.suggestions {
             children.push(JsonChild {
                 message: sugg,
                 level: "help",
+                spans: Vec::new(),
+            });
+        }
+        for fix in &self.fixes {
+            let spans = fix
+                .edits
+                .iter()
+                .map(|e| {
+                    let (line_start, column_start) = byte_to_line_col(source, e.start);
+                    let (line_end, column_end) = byte_to_line_col(source, e.end.max(e.start));
+                    JsonReplacement {
+                        file_name: fname,
+                        byte_start: e.start,
+                        byte_end: e.end.max(e.start),
+                        line_start,
+                        line_end,
+                        column_start,
+                        column_end,
+                        is_primary: true,
+                        suggested_replacement: &e.replacement,
+                        suggestion_applicability: "MachineApplicable",
+                    }
+                })
+                .collect();
+            children.push(JsonChild {
+                message: &fix.message,
+                level: "help",
+                spans,
             });
         }
 
@@ -610,8 +901,14 @@ impl Diagnostic {
 
 /// Converts any standard IRIS [`Error`] into a structured [`Diagnostic`].
 pub fn error_to_diagnostic(err: &Error) -> Diagnostic {
+    if let Some(diag) = rich_diagnostic(err) {
+        return diag;
+    }
+    if let Some(diag) = internal_error_diagnostic(err) {
+        return diag;
+    }
     let code = err.diagnostic_code();
-    let mut diag = Diagnostic::error(format!("{}", err)).with_code(code);
+    let mut diag = Diagnostic::error(err.message()).with_code(code);
 
     if let Some((start_byte, end_byte)) = extract_span(err) {
         diag.spans.push(DiagnosticSpan {
@@ -625,13 +922,169 @@ pub fn error_to_diagnostic(err: &Error) -> Diagnostic {
     if let Some(hint) = error_hint(err) {
         diag.helps.push(hint.to_string());
     }
+    if let Error::Interp(ie) = err {
+        let inner = match ie {
+            InterpError::Located { inner, .. } => inner.as_ref(),
+            other => other,
+        };
+        if let InterpError::StackOverflow { limit } = inner {
+            diag.notes.push(format!(
+                "the interpreter stops at a call depth of {limit}; `--max-depth N` raises it"
+            ));
+        }
+    }
 
     diag
 }
 
+/// Every diagnostic `err` carries: one per error when the compiler collected
+/// several (one per function), otherwise one.
+pub fn error_to_diagnostics(err: &Error) -> Vec<Diagnostic> {
+    match err {
+        Error::Lower(LowerError::Multiple(errors)) => errors
+            .iter()
+            .map(|e| error_to_diagnostic(&Error::Lower(e.clone_shallow())))
+            .collect(),
+        Error::Parse(ParseError::Multiple(errors)) => errors
+            .iter()
+            .map(|e| error_to_diagnostic(&Error::Parse(e.clone())))
+            .collect(),
+        _ => vec![error_to_diagnostic(err)],
+    }
+}
+
+/// A diagnostic built where the error was found, with its own spans, notes
+/// and fixes.
+fn rich_diagnostic(err: &Error) -> Option<Diagnostic> {
+    let (code, diag) = match err {
+        Error::Lower(LowerError::Diag { code, diag }) => (*code, diag),
+        Error::Lower(LowerError::Multiple(errors)) => {
+            return errors
+                .first()
+                .map(|e| error_to_diagnostic(&Error::Lower(e.clone_shallow())))
+        }
+        Error::Pass(PassError::Diag { code, diag }) => (*code, diag),
+        Error::Parse(ParseError::Diag { code, diag }) => (*code, diag),
+        Error::Parse(ParseError::Multiple(errors)) => {
+            return errors
+                .first()
+                .map(|e| error_to_diagnostic(&Error::Parse(e.clone())))
+        }
+        _ => return None,
+    };
+    let mut d = (**diag).clone();
+    d.code = Some(code.to_string());
+    Some(d)
+}
+
+/// Whether `IRIS_DEBUG` asks for compiler-internal detail in diagnostics.
+fn debug_detail() -> bool {
+    std::env::var_os("IRIS_DEBUG").is_some_and(|v| !v.is_empty() && v != "0")
+}
+
+/// An error that is a defect in IRIS rather than in the program -- an IR
+/// invariant the compiler broke -- rendered as such. The raw detail names IR
+/// values and passes, which mean nothing to the reader; it is shown only with
+/// `IRIS_DEBUG=1` (which `iris bug-report` sets).
+fn internal_error_diagnostic(err: &Error) -> Option<Diagnostic> {
+    let (function, detail) = match err {
+        Error::Pass(PassError::TypeError { func, detail })
+            if func == "verify_uses_defined" || func == "verify_release_dominance" =>
+        {
+            // "[after inline] main: block0 ..." names the function being built.
+            let name = detail
+                .split_once("] ")
+                .map(|(_, rest)| rest)
+                .and_then(|rest| rest.split(':').next())
+                .unwrap_or("")
+                .to_string();
+            (name, detail.clone())
+        }
+        Error::Pass(PassError::UseBeforeDef { func, .. })
+        | Error::Pass(PassError::MultipleDefinition { func, .. })
+        | Error::Pass(PassError::MissingTerminator { func, .. }) => (func.clone(), err.message()),
+        Error::Interp(InterpError::UndefinedValue { .. }) => (String::new(), err.message()),
+        _ => return None,
+    };
+    let message = if function.is_empty() || function.starts_with("__") {
+        "internal compiler error: IRIS generated invalid code for this program".to_string()
+    } else {
+        format!("internal compiler error: IRIS generated invalid code for `{function}`")
+    };
+    let mut diag = Diagnostic::error(message)
+        .with_code("E0900")
+        .with_note("this is a bug in IRIS, not in your program")
+        .with_help("`iris bug-report <file.iris>` collects what is needed to report it; rewriting the expression the compiler stopped on often avoids it meanwhile");
+    if debug_detail() {
+        diag = diag.with_note(format!("compiler detail: {detail}"));
+    }
+    Some(diag)
+}
+
 fn render_error_inner(source: &str, err: &Error, filename: Option<&str>, colored: bool) -> String {
-    let diag = error_to_diagnostic(err);
-    diag.render(source, filename, colored)
+    error_to_diagnostics(err)
+        .iter()
+        .map(|diag| diag.render_in(source, filename, colored))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+impl Diagnostic {
+    /// [`render`](Self::render) for a compile of `main`: in the brought file
+    /// the diagnostic is in, when it is not in `main` itself.
+    pub fn render_in(&self, source: &str, main: Option<&str>, colored: bool) -> String {
+        match main.and_then(|m| localize(self, m)) {
+            Some((path, text, local)) => local.render(&text, Some(&path), colored),
+            None => self.render(source, main, colored),
+        }
+    }
+
+    /// [`render_json`](Self::render_json), in the file the diagnostic is in.
+    pub fn render_json_in(&self, source: &str, main: Option<&str>) -> String {
+        match main.and_then(|m| localize(self, m)) {
+            Some((path, text, local)) => local.render_json(&text, Some(&path)),
+            None => self.render_json(source, main),
+        }
+    }
+}
+
+/// A diagnostic whose primary span is in a file `main` brought, rather than
+/// in `main` itself: that file's path as messages show it, its text, and the
+/// diagnostic with its spans made relative to that text. Spans and fixes in
+/// other files are dropped.
+pub fn localize(diag: &Diagnostic, main: &str) -> Option<(String, String, Diagnostic)> {
+    let primary = diag
+        .spans
+        .iter()
+        .find(|s| s.is_primary)
+        .or(diag.spans.first())?;
+    let map = crate::compiler::source_map_for(std::path::Path::new(main))?;
+    let (file, _) = map.lookup(primary.start)?;
+    if file.base == 0 {
+        return None;
+    }
+    let (base, end) = (file.base, file.base + file.text.len() as u32);
+    let inside = |start: u32, stop: u32| start >= base && stop <= end + 1;
+    let mut local = diag.clone();
+    local.spans.retain(|s| inside(s.start, s.end));
+    for span in &mut local.spans {
+        span.start -= base;
+        span.end -= base;
+    }
+    local
+        .fixes
+        .retain(|fix| fix.edits.iter().all(|e| inside(e.start, e.end)));
+    for fix in &mut local.fixes {
+        for edit in &mut fix.edits {
+            edit.start -= base;
+            edit.end -= base;
+        }
+    }
+    Some((
+        crate::compiler::display_path(&file.path),
+        file.text.clone(),
+        local,
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -928,15 +1381,6 @@ mod tests {
     fn hint_index_out_of_bounds() {
         let err = Error::Interp(InterpError::IndexOutOfBounds { idx: 5, len: 3 });
         assert!(error_hint(&err).is_some());
-    }
-
-    #[test]
-    fn hint_unresolved_infer() {
-        let err = Error::Pass(PassError::UnresolvedInfer {
-            func: "main".into(),
-        });
-        let h = error_hint(&err).unwrap();
-        assert!(h.contains("type annotation"));
     }
 
     #[test]

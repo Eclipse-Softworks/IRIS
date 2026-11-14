@@ -1,0 +1,32 @@
+// projects/continuous_background_learning/controller.iris
+// High-frequency real-time front-end control law with in-flight model hot swapping.
+
+bring std.math.*
+bring "types.iris"
+
+/// Evaluate reference trajectory at continuous time t
+pub def trajectory_target(t: f64) -> (f64, f64) {
+    // Smooth sinusoidal tracking target: amplitude = 1.2 rad, frequency = 2.0 rad/s
+    val theta_ref = 1.2 * sin(2.0 * t);
+    val omega_ref = 2.4 * cos(2.0 * t);
+    (theta_ref, omega_ref)
+}
+
+/// Compute bounded control torque from active model parameters and reference target
+pub def controller_compute(mw: ModelWeights, state: PlantState, t: f64) -> (ActuatorCommand, f64) {
+    val (theta_ref, omega_ref) = trajectory_target(t);
+    
+    val err_pos = theta_ref - state.theta;
+    val err_vel = omega_ref - state.omega;
+
+    // Feedforward bias cancellation + dynamic state feedback
+    val raw_torque = (mw.kp * err_pos) + (mw.kd * err_vel) + mw.est_bias;
+
+    // Physical actuator saturation limits: [-15.0, 15.0] Nm
+    val max_torque = 15.0;
+    val min_torque = -15.0;
+    val clamped_torque = clamp_f64(raw_torque, min_torque, max_torque);
+    val is_clamped = abs_f64(clamped_torque - raw_torque) > 0.001;
+
+    (ActuatorCommand { torque: clamped_torque, clamped: is_clamped }, err_pos)
+}

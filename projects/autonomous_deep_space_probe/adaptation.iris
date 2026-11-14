@@ -1,0 +1,144 @@
+bring "types.iris"
+bring "physics.iris"
+bring "traits.iris"
+bring "supervisor.iris"
+
+/// adaptation.iris — In-Language Autonomous Adaptation & Leased Policy Synthesis
+/// Diagnoses actuator inversion, synthesizes diverse candidate control kernels,
+/// subjects them to the 7-Gate Safety Verification pipeline, and issues verified Generation Leases.
+
+pub def diagnose_actuator_anomaly(vessel : VesselState, last_commanded_pitch_torque : f64) -> SubsystemState {
+    // If commanded torque was restoring (e.g. negative when pitch > 0),
+    // but the resulting pitch rate continues increasing in positive direction,
+    // we detect a phase/polarity inversion in the actuator plant!
+    if vessel.pitch_deg > 3.0 && last_commanded_pitch_torque < -5.0 && vessel.pitch_rate > 0.5 {
+        return SubsystemState.InvertedPolarity(1.0);
+    };
+    if vessel.pitch_deg < -3.0 && last_commanded_pitch_torque > 5.0 && vessel.pitch_rate < -0.5 {
+        return SubsystemState.InvertedPolarity(1.0);
+    };
+    return vessel.pitch_actuator_health;
+}
+
+pub def create_candidate_pool(vessel : VesselState) -> list<GenerationLease> {
+    val pool : list<GenerationLease> = list();
+
+    // Candidate 1: Naive Gain Scaling (amplifies Gen 0 without polarity compensation)
+    // EXPECTATION: Rejected by Gate 5 (speculative rollout diverges due to positive feedback)
+    list_push(pool, GenerationLease {
+        generation_id : 1,
+        name : "Candidate-NaiveBoost-Uncompensated",
+        kp_pitch : 14.0,
+        kd_pitch : 8.0,
+        kp_yaw : 5.5,
+        kd_yaw : 3.5,
+        target_temp_c : 22.0,
+        louver_gain : 0.05,
+        science_power_target : 40.0,
+        polarity_compensation : 1.0, // Flawed: still positive
+        lease_duration_cycles : 50,
+        verification_signature : 9901
+    });
+
+    // Candidate 2: Aggressive Overdriven Inversion
+    // EXPECTATION: Rejected by Gate 1 & Gate 2 (Kp = 45.0 exceeds bounds, torque saturates valves)
+    list_push(pool, GenerationLease {
+        generation_id : 1,
+        name : "Candidate-Overdriven-Saturation",
+        kp_pitch : 45.0, // Exceeds Gate 1 bound (40.0)
+        kd_pitch : 15.0,
+        kp_yaw : 5.5,
+        kd_yaw : 3.5,
+        target_temp_c : 22.0,
+        louver_gain : 0.05,
+        science_power_target : 40.0,
+        polarity_compensation : -1.0,
+        lease_duration_cycles : 50,
+        verification_signature : 9902
+    });
+
+    // Candidate 3: Inverted Compensator with Unsafe Thermal Target
+    // EXPECTATION: Rejected by Gate 3 (Thermal target = 8.0 C is freezing dangerous)
+    list_push(pool, GenerationLease {
+        generation_id : 1,
+        name : "Candidate-SubzeroThermal-Risk",
+        kp_pitch : 7.5,
+        kd_pitch : 4.5,
+        kp_yaw : 5.5,
+        kd_yaw : 3.5,
+        target_temp_c : 8.0, // Violates Gate 3 bound [12, 32]
+        louver_gain : 0.06,
+        science_power_target : 40.0,
+        polarity_compensation : -1.0,
+        lease_duration_cycles : 50,
+        verification_signature : 9903
+    });
+
+    // Candidate 4: Idiomatic Adaptive Inverting Compensator (Generation 1)
+    // EXPECTATION: PASSES ALL 7 GATES!
+    list_push(pool, GenerationLease {
+        generation_id : 1,
+        name : "Generation-1-Adaptive-Invert-v1",
+        kp_pitch : 2.2,
+        kd_pitch : 2.8,
+        kp_yaw : 1.8,
+        kd_yaw : 2.2,
+        target_temp_c : 21.5,
+        louver_gain : 0.06,
+        science_power_target : 40.0,
+        polarity_compensation : -1.0, // Correctly inverts negative feedback loop!
+        lease_duration_cycles : 80,
+        verification_signature : 202610
+    });
+
+    return pool;
+}
+
+pub def create_storm_survival_lease() -> GenerationLease {
+    // Generation 2: Deep-space solar particle storm survival lease
+    GenerationLease {
+        generation_id : 2,
+        name : "Generation-2-StormSurvival-v1",
+        kp_pitch : 2.4,
+        kd_pitch : 3.0,
+        kp_yaw : 1.8,
+        kd_yaw : 2.2,
+        target_temp_c : 20.0,
+        louver_gain : 0.09,
+        science_power_target : 25.0, // Power-shedding to prevent battery drain
+        polarity_compensation : -1.0,
+        lease_duration_cycles : 100,
+        verification_signature : 202620
+    }
+}
+
+pub def evaluate_and_select_policy(vessel : VesselState, pool : list<GenerationLease>) -> result<GenerationLease, str> {
+    println("----------------------------------------------------------------------");
+    println("   AUTONOMIC ADAPTATION: 7-GATE SAFETY VERIFICATION PIPELINE");
+    println("----------------------------------------------------------------------");
+    println(f"Evaluating pool of {list_len(pool)} candidate control policies in sandbox...");
+
+    for idx in 0 .. list_len(pool) {
+        val candidate = list_get(pool, idx);
+        print(f"  [{idx + 1}/{list_len(pool)}] Testing '{candidate.name}' ... ");
+
+        val decision = verify_all_7_gates(candidate, vessel);
+        when decision {
+            GateDecision.GatePassed => {
+                println(">>> PASSED ALL 7 GATES! <<<");
+                println(f"      Selected for promotion: Generation {candidate.generation_id}");
+                println(f"      Control law: Kp={candidate.kp_pitch}, Kd={candidate.kd_pitch}, PolarityComp={candidate.polarity_compensation}");
+                println(f"      Thermal setpoint: {candidate.target_temp_c} C, LouverGain={candidate.louver_gain}");
+                println(f"      Lease Duration: {candidate.lease_duration_cycles} cycles, Sig={candidate.verification_signature}");
+                println("----------------------------------------------------------------------");
+                return ok(candidate);
+            },
+            GateDecision.GateRejected(reason) => {
+                println(f"REJECTED: {reason}");
+            },
+        };
+    };
+
+    println("----------------------------------------------------------------------");
+    return err("No candidate survived all 7 verification gates!");
+}

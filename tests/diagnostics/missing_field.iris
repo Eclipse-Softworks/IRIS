@@ -1,0 +1,11 @@
+// expect: E0114 at 9:13
+// message: missing field `y`
+// fix: Point { x: 1, y: 0 }
+// fix-compiles
+
+record Point { x: i64, y: i64 }
+
+def main() -> i64 {
+    val p = Point { x: 1 }
+    return p.x
+}

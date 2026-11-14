@@ -1,0 +1,75 @@
+// Waypoint autopilot and pursuit for unicycle robots -- turtlesim's model.
+// Pure functions: the live ROS 2 node (main.iris) and the offline check
+// (simulate.iris) fly the same code.
+bring std.math
+
+pub record Pose2 { x: f64, y: f64, theta: f64 }
+pub record Command { linear: f64, angular: f64 }
+pub record Gains { linear: f64, angular: f64, max_speed: f64, max_turn: f64 }
+pub record Waypoint { x: f64, y: f64 }
+
+// The angle in (-pi, pi].
+pub def wrap_angle(a: f64) -> f64 {
+    var r = a
+    while r > PI { r = r - TAU };
+    while r <= 0.0 - PI { r = r + TAU };
+    r
+}
+
+pub def distance_to(p: Pose2, x: f64, y: f64) -> f64 {
+    val dx = x - p.x
+    val dy = y - p.y
+    sqrt(dx * dx + dy * dy)
+}
+
+// How far the robot must turn to face (x, y).
+pub def bearing_error(p: Pose2, x: f64, y: f64) -> f64 {
+    wrap_angle(atan2(y - p.y, x - p.x) - p.theta)
+}
+
+// Proportional steering toward (x, y). Forward speed is scaled by how well
+// the robot faces the target (the cosine of the heading error), so it pivots
+// at a corner instead of swinging wide.
+pub def steer(p: Pose2, x: f64, y: f64, g: Gains) -> Command {
+    val err = bearing_error(p, x, y)
+    val facing = max(0.0, cos(err))
+    Command {
+        linear: clamp(g.linear * distance_to(p, x, y) * facing, 0.0, g.max_speed),
+        angular: clamp(g.angular * err, 0.0 - g.max_turn, g.max_turn)
+    }
+}
+
+// Pursuit: steer toward the leader, stopping `gap` short of it.
+pub def pursue(p: Pose2, leader: Pose2, gap: f64, g: Gains) -> Command {
+    val err = bearing_error(p, leader.x, leader.y)
+    val facing = max(0.0, cos(err))
+    val excess = max(0.0, distance_to(p, leader.x, leader.y) - gap)
+    Command {
+        linear: clamp(g.linear * excess * facing, 0.0, g.max_speed),
+        angular: clamp(g.angular * err, 0.0 - g.max_turn, g.max_turn)
+    }
+}
+
+pub def arrived(p: Pose2, w: Waypoint, tolerance: f64) -> bool {
+    distance_to(p, w.x, w.y) <= tolerance
+}
+
+// One step of turtlesim's kinematics: turn, then move along the new heading.
+pub def unicycle_step(p: Pose2, c: Command, dt: f64) -> Pose2 {
+    val theta = wrap_angle(p.theta + c.angular * dt)
+    Pose2 { x: p.x + cos(theta) * c.linear * dt, y: p.y + sin(theta) * c.linear * dt, theta: theta }
+}
+
+// A closed route: the corners of a square, counter-clockwise from (x0, y0).
+pub def square_route(x0: f64, y0: f64, side: f64) -> list<Waypoint> {
+    val route: list<Waypoint> = list()
+    list_push(route, Waypoint { x: x0 + side, y: y0 });
+    list_push(route, Waypoint { x: x0 + side, y: y0 + side });
+    list_push(route, Waypoint { x: x0, y: y0 + side });
+    list_push(route, Waypoint { x: x0, y: y0 });
+    route
+}
+
+// A yaw rotation as a quaternion (x, y, z, w) = (0, 0, sin(t/2), cos(t/2)).
+pub def yaw_z(theta: f64) -> f64 { sin(theta * 0.5) }
+pub def yaw_w(theta: f64) -> f64 { cos(theta * 0.5) }

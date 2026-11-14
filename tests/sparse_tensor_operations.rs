@@ -145,7 +145,7 @@ fn test_sparsify_tensor() {
     let func = builder.build();
 
     // A 2x3 tensor with some zeros
-    let input = IrValue::Tensor(vec![1.0, 0.0, 2.0, 0.0, 0.0, 3.0], vec![2, 3]);
+    let input = IrValue::tensor(vec![1.0, 0.0, 2.0, 0.0, 0.0, 3.0], vec![2, 3]);
     let result = eval_function(&func, &[input]).expect("eval");
 
     match &result[0] {

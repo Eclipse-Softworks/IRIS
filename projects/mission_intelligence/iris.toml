@@ -1,0 +1,6 @@
+[package]
+name = "mission_intelligence"
+version = "0.1.0"
+entry = "main.iris"
+
+[dependencies]

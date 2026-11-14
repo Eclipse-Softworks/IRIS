@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import * as child_process from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
+import { isWorkspaceBuild, workspaceBuilds } from './irisExe';
 
 let statusBar: vscode.StatusBarItem;
 let cachedVersionInfo: IrisVersionInfo | null = null;
@@ -78,6 +79,16 @@ export function updateStatusBar(state: 'starting' | 'running' | 'stopped' | 'err
     statusBar.backgroundColor = colors[state] as any;
 
     const parts: string[] = [`IRIS Language Server: ${state}`];
+    // The editor's diagnostics come from this compiler. If the workspace
+    // holds a newer build, they can disagree with what `iris` reports in the
+    // terminal -- errors for code that compiles, or none for code that does
+    // not. Say so where it is seen.
+    const stale = executablePathFinder ? newerWorkspaceBuild(executablePathFinder()) : undefined;
+    if (stale && state === 'running') {
+        statusBar.text = `$(warning) ${label} (older than workspace build)`;
+        statusBar.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground') as any;
+        parts.push(`Diagnostics may not match: ${stale} is newer than the compiler in use. Remove iris.executablePath, or point it at that build.`);
+    }
     if (info.version) { parts.push(`Version: ${info.version}`); }
     if (info.gitCommit) { parts.push(`Commit: ${info.gitCommit}`); }
     if (info.gitBranch) { parts.push(`Branch: ${info.gitBranch}`); }
@@ -86,6 +97,21 @@ export function updateStatusBar(state: 'starting' | 'running' | 'stopped' | 'err
     if (info.rustc) { parts.push(`Rustc: ${info.rustc}`); }
     parts.push('Click for server options');
     statusBar.tooltip = parts.join('\n');
+}
+
+/** A workspace build newer than `exe`, when `exe` is not itself one. */
+function newerWorkspaceBuild(exe: string): string | undefined {
+    if (isWorkspaceBuild(exe)) { return undefined; }
+    let exeTime: number;
+    try { exeTime = fs.statSync(exe).mtimeMs; } catch { return undefined; }
+    for (const folder of vscode.workspace.workspaceFolders ?? []) {
+        for (const build of workspaceBuilds(folder.uri.fsPath)) {
+            try {
+                if (fs.statSync(build).mtimeMs > exeTime) { return build; }
+            } catch { /* not built */ }
+        }
+    }
+    return undefined;
 }
 
 export async function showServerMenu(

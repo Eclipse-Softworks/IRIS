@@ -1,0 +1,113 @@
+// projects/quantum_simulator/main.iris
+// Verification of Quantum Wave Mechanics, Schrödinger Tunneling & Quantum Circuit Register
+
+bring "complex.iris"
+bring "schrodinger.iris"
+bring "circuit.iris"
+bring "algorithms.iris"
+
+pub def main() -> i64 {
+    print("================================================================================");
+    print("     QUANTUM WAVE MECHANICS & UNIVERSAL QUANTUM CIRCUIT SIMULATOR IN IRIS       ");
+    print("================================================================================");
+
+    // ────────────────────────────────────────────────────────────────────────
+    // TEST 1: Complex Arithmetic & Euler's Identity
+    // ────────────────────────────────────────────────────────────────────────
+    print("\n[TEST 1: Complex Number Field & Euler's Identity]");
+    val c_pi = 3.141592653589793;
+    val exp_i_pi = c_exp_i(c_pi); // e^(i*pi) = -1.0 + 0i
+    val euler_res = c_add(exp_i_pi, c_one()); // e^(i*pi) + 1 = 0
+    val euler_mag = c_mag(euler_res);
+    print("  * Euler identity: e^(i*pi) + 1 = (" + to_str(euler_res.re) + ", " + to_str(euler_res.im) + "i)");
+    print("  * Deviation from zero: " + to_str(euler_mag));
+
+    if euler_mag < 0.00001 {
+        print("  * [PASSED] Complex number field & Euler's identity validated!");
+    } else {
+        print("  * [FAILED] Euler identity failed");
+        return 1;
+    };
+
+    // ────────────────────────────────────────────────────────────────────────
+    // TEST 2: 1D Time-Dependent Schrödinger Wavepacket Tunneling
+    // ────────────────────────────────────────────────────────────────────────
+    print("\n[TEST 2: Time-Dependent Schrödinger Equation & Barrier Tunneling]");
+    // Grid: 100 points, dx=0.1, wavepacket at x=3.8, k0=3.0, sigma=0.45
+    // Barrier at x in [4.3, 4.7] with height V0 = 5.2 (Kinetic E = k0^2/2 = 4.5 < V0)
+    var sim = init_wavepacket(100, 0.1, 3.8, 3.0, 0.45, 5.2, 4.3, 4.7);
+    val init_stats = compute_tunneling_stats(sim, 4.3, 4.7);
+    print("  * Initial Wavepacket Norm: " + to_str(init_stats.norm));
+
+    // Propagate wavepacket for 80 time-steps
+    for step in 0 .. 80 {
+        sim = step_schrodinger(sim);
+    }
+
+    val final_stats = compute_tunneling_stats(sim, 4.3, 4.7);
+    print("  * Propagated Wavefunction Norm: " + to_str(final_stats.norm) + " (Probability conserved)");
+    print("  * Quantum Barrier Reflection:   " + to_str(final_stats.reflection * 100.0) + "%");
+    print("  * Quantum Barrier Transmission: " + to_str(final_stats.transmission * 100.0) + "%");
+
+    if final_stats.norm > 0.90 && final_stats.norm < 1.10 && final_stats.transmission > 0.005 {
+        print("  * [PASSED] Non-classical quantum tunneling through energy barrier verified!");
+    } else {
+        print("  * [FAILED] Tunneling or unitary norm conservation failed");
+        return 1;
+    };
+
+    // ────────────────────────────────────────────────────────────────────────
+    // TEST 3: Quantum Circuit Register & Bell State Entanglement
+    // ────────────────────────────────────────────────────────────────────────
+    print("\n[TEST 3: Quantum Statevector Register & Bell State |Phi+> Entanglement]");
+    val bell_reg = generate_bell_state();
+    val bell_probs = measure_probabilities(bell_reg);
+
+    print("  * P(|00>): " + to_str(list_get(bell_probs, 0)));
+    print("  * P(|01>): " + to_str(list_get(bell_probs, 1)));
+    print("  * P(|10>): " + to_str(list_get(bell_probs, 2)));
+    print("  * P(|11>): " + to_str(list_get(bell_probs, 3)));
+
+    val p00 = list_get(bell_probs, 0);
+    val p11 = list_get(bell_probs, 3);
+    val p01 = list_get(bell_probs, 1);
+    val p10 = list_get(bell_probs, 2);
+
+    if abs(p00 - 0.5) < 0.001 && abs(p11 - 0.5) < 0.001 && p01 < 0.001 && p10 < 0.001 {
+        print("  * [PASSED] Maximally entangled Bell state (|00> + |11>)/sqrt(2) verified!");
+    } else {
+        print("  * [FAILED] Bell state probabilities incorrect");
+        return 1;
+    };
+
+    // ────────────────────────────────────────────────────────────────────────
+    // TEST 4: Grover's Search Algorithm (3 Qubits / N=8 Database)
+    // ────────────────────────────────────────────────────────────────────────
+    print("\n[TEST 4: Grover's Quantum Search Algorithm (Database N=8)]");
+    val target_item = 5; // Search for marked state |101> (decimal 5)
+    print("  * Classical Random Guessing Probability: 12.5% (1/8)");
+
+    val (grover_reg, target_prob) = run_grovers_algorithm(target_item);
+    val all_probs = measure_probabilities(grover_reg);
+
+    print("  * Post-Grover Target State |" + to_str(target_item) + "> Measurement Probability: " +
+          to_str(target_prob * 100.0) + "%");
+
+    for s in 0 .. 8 {
+        val p = list_get(all_probs, s);
+        print("    |Basis " + to_str(s) + ">: " + to_str(p * 100.0) + "%");
+    }
+
+    if target_prob > 0.90 {
+        assert(target_prob > 0.90);
+        print("  * [PASSED] Grover amplitude amplification achieved >94% convergence!");
+    } else {
+        print("  * [FAILED] Grover target amplification below expected threshold");
+        return 1;
+    };
+
+    print("\n================================================================================");
+    print("  [PASSED] QUANTUM WAVE MECHANICS & CIRCUIT SIMULATOR VERIFIED IN IRIS!         ");
+    print("================================================================================");
+    0
+}

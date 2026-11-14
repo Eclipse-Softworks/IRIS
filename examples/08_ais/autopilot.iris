@@ -1,0 +1,60 @@
+// An autopilot that learns its plant and keeps it viable through a change.
+//
+// A heated tank, T' = T + 0.1 * (-0.5 * (T - ambient) + 15 * u), driven by
+// idle (u = 0), heat (1) or cool (-1). At step 150 a heat wave raises the
+// ambient temperature from 20 to 75 degrees.
+//
+// The autopilot starts knowing nothing about the tank. Each step it fits a
+// world model to what its last action did (recursive least squares, which
+// forgets old samples, so it follows the change), applies a safety policy,
+// and takes the permitted action whose predicted trajectory stays inside the
+// preferred band. A thermostat that only heats or idles drifts with the
+// ambient past the critical limit.
+//
+//   iris run examples/08_ais/autopilot.iris
+bring std.ais
+
+def plant(t: f64, u: f64, ambient: f64) -> f64 {
+    t + 0.1 * (0.0 - 0.5 * (t - ambient) + 15.0 * u)
+}
+
+def main() -> i64 {
+    val idle: list<f64> = list(0.0)
+    val heat: list<f64> = list(1.0)
+    val cool: list<f64> = list(0.0 - 1.0)
+    val controls = list(idle, heat, cool)
+    // Preferred 45..60 degrees; critical below 35 or above 72.
+    val bounds: list<ViabilityBound> = list(viability_bound_new("temperature", 45.0, 60.0, 35.0, 72.0, 1.0, 2))
+    val safety = safety_policy_new()
+    safety_forbid_when(safety, "no heat above 58", 0, ">", 58.0, 1, 5)
+    safety_require_when(safety, "cool above 70", 0, ">", 70.0, 2, 10)
+
+    var pilot = autopilot_new(1, controls, bounds, safety, 5, 0.9)
+    var t = 50.0
+    var thermostat = 50.0
+    var in_band = 0
+    var critical = 0
+    var thermostat_critical = 0
+    for step in 0..300 {
+        val ambient = if step < 150 { 20.0 } else { 75.0 }
+        val r = autopilot_step(pilot, list(t))
+        pilot = r.pilot
+        t = plant(t, list_get(list_get(controls, r.action), 0), ambient)
+        thermostat = plant(thermostat, if thermostat < 50.0 { 1.0 } else { 0.0 }, ambient)
+        if step >= 20 {
+            if t >= 45.0 && t <= 60.0 { in_band = in_band + 1 }
+            if t <= 35.0 || t >= 72.0 { critical = critical + 1 }
+            if thermostat >= 72.0 { thermostat_critical = thermostat_critical + 1 }
+        }
+        if step % 50 == 49 {
+            println("step " + to_str(step + 1) + ": autopilot " + to_str(t) + ", thermostat " + to_str(thermostat))
+        }
+    }
+    println("autopilot in band " + to_str(in_band) + "/280 steps, critical " + to_str(critical) + "; thermostat critical " + to_str(thermostat_critical))
+    println("learned: T' = " + to_str(list_get(pilot.model.w, 0)) + " T + " + to_str(list_get(pilot.model.w, 1)) + " u + " + to_str(list_get(pilot.model.w, 2)))
+    assert(critical == 0)
+    assert(in_band >= 266)
+    assert(thermostat_critical > 0)
+    println("autopilot: ok")
+    return 0
+}

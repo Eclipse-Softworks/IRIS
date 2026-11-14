@@ -1,0 +1,159 @@
+// Drives a running `iris evolve-serve` through the life of the inventory
+// service: traffic on version 1, two refused upgrades, a promotion that
+// keeps the stock and counters, a rollback that carries them back, and a
+// second promotion. Every step is asserted. See README.md for the server.
+//
+//   IRIS_SERVICE_PORT  server port (default 8787)
+//   IRIS_SERVICE_DIR   directory holding the versions (default
+//                      projects/self_upgrading_service)
+
+bring std.http
+bring std.json
+
+def setting(name: str, fallback: str) -> str {
+    val value = env_get(name);
+    if len(value) == 0 { fallback } else { value }
+}
+
+def send(method: str, path: str, body: str) -> HttpResponse {
+    val url = "http://127.0.0.1:" + setting("IRIS_SERVICE_PORT", "8787") + path;
+    val request = HttpRequest {
+        method: method,
+        url: url,
+        headers: "Content-Type: application/json\r\n",
+        body: body,
+        timeout_ms: 60000,
+    };
+    val response = http_send(request);
+    if is_ok(response) == false {
+        println("cannot reach " + url);
+    };
+    assert(is_ok(response));
+    unwrap(response)
+}
+
+// One gateway call: the reply, which must be a 200.
+def call(gateway: str, body: str) -> str {
+    val response = send("POST", "/call/" + gateway, body);
+    assert(response.status == 200);
+    response.body
+}
+
+def item(sku: str, qty: i64) -> str {
+    "{\"sku\":\"" + sku + "\",\"qty\":" + to_str(qty) + "}"
+}
+
+def generation() -> str {
+    val response = send("GET", "/status", "");
+    assert(response.status == 200);
+    json_query(response.body, "generation")
+}
+
+def stat(name: str) -> str {
+    json_query(call("stats", "{}"), name)
+}
+
+// Offer a version; the reply's status and body.
+def upgrade(file: str) -> HttpResponse {
+    val path = setting("IRIS_SERVICE_DIR", "projects/self_upgrading_service") + "/" + file;
+    val source = file_read_all(path);
+    if is_ok(source) == false {
+        println("cannot read " + path);
+    };
+    assert(is_ok(source));
+    send("POST", "/upgrade", unwrap(source))
+}
+
+// Version 1 takes traffic, including the reservation it should refuse.
+def version_one() -> i64 {
+    assert(generation() == "1");
+    assert(json_query(call("restock", item("bolt", 10)), "stock") == "10");
+    assert(json_query(call("restock", item("nut", 4)), "stock") == "4");
+    assert(json_query(call("reserve", item("bolt", 3)), "stock") == "7");
+    val oversold = call("reserve", item("bolt", 9));
+    assert(json_query(oversold, "ok") == "true");
+    assert(json_query(oversold, "stock") == "-2");
+    assert(json_query(call("restock", item("bolt", 12)), "stock") == "10");
+    assert(stat("served") == "5");
+    assert(stat("reserved") == "12");
+    println("version 1: 5 requests served, bolt oversold to -2 and restocked");
+    0
+}
+
+// Two upgrades are refused, each at its gate; nothing changes.
+def refused_upgrades() -> i64 {
+    val logging = upgrade("candidates/debug_logging.iris");
+    assert(logging.status == 409);
+    assert(json_query(logging.body, "gate") == "language_safety");
+    val retyped = upgrade("candidates/fractional_stock.iris");
+    assert(retyped.status == 409);
+    assert(json_query(retyped.body, "gate") == "resource_and_abi");
+    assert(generation() == "1");
+    assert(stat("served") == "5");
+    println("refused: debug_logging (language_safety), fractional_stock (resource_and_abi)");
+    0
+}
+
+// Version 2 is promoted and continues from the live state.
+def version_two() -> i64 {
+    val promoted = upgrade("v2.iris");
+    assert(promoted.status == 200);
+    assert(json_query(promoted.body, "generation") == "2");
+    assert(contains(json_query(promoted.body, "carried"), "\"stock\""));
+    assert(contains(json_query(promoted.body, "carried"), "\"served\""));
+    assert(json_query(promoted.body, "initialised") == "[\"refused\"]");
+    assert(generation() == "2");
+    assert(stat("served") == "5");
+    assert(stat("refused") == "0");
+    val refused = call("reserve", item("bolt", 25));
+    assert(json_query(refused, "ok") == "false");
+    assert(json_query(refused, "short") == "15");
+    assert(json_query(call("reserve", item("bolt", 4)), "stock") == "6");
+    assert(stat("served") == "7");
+    assert(stat("refused") == "1");
+    println("version 2 (generation 2): state carried, oversell refused, 7 served");
+    0
+}
+
+// Roll back: version 1 again, with the state version 2 left.
+def roll_back() -> i64 {
+    val restored = send("POST", "/rollback", "");
+    assert(restored.status == 200);
+    assert(json_query(restored.body, "generation") == "1");
+    assert(generation() == "1");
+    assert(stat("served") == "7");
+    assert(stat("units") == "10");
+    assert(stat("refused") == "");
+    assert(json_query(call("reserve", item("nut", 1)), "stock") == "3");
+    println("rolled back to generation 1: 8 served, stock carried back");
+    0
+}
+
+// Promote version 2 again: a new generation, and `refused` starts over.
+def promote_again() -> i64 {
+    val again = upgrade("v2.iris");
+    assert(again.status == 200);
+    assert(json_query(again.body, "generation") == "3");
+    assert(stat("served") == "8");
+    assert(stat("refused") == "0");
+    assert(json_query(call("reserve", item("nut", 9)), "short") == "6");
+    assert(stat("refused") == "1");
+    println("version 2 again (generation 3): 9 served");
+    0
+}
+
+def main() -> i64 {
+    version_one();
+    refused_upgrades();
+    version_two();
+    roll_back();
+    promote_again();
+    // 22 gateway calls: 9 that change the stock, 13 `stats` reads.
+    val status = send("GET", "/status", "");
+    assert(json_query(status.body, "requests") == "22");
+    assert(json_query(status.body, "generation") == "3");
+    val stop = send("POST", "/shutdown", "");
+    assert(stop.status == 200);
+    println("self-upgrading service: upgraded, refused, rolled back, upgraded again");
+    return 0
+}

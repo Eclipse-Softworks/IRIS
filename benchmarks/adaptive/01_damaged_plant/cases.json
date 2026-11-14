@@ -1,0 +1,5 @@
+[
+  {"input": -10, "expected": -40},
+  {"input": 0, "expected": 0},
+  {"input": 15, "expected": 60}
+]

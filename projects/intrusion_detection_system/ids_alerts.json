@@ -1,0 +1,54 @@
+[
+  {
+    "alert_id": 1,
+    "packet_id": 42,
+    "timestamp": 1006.05,
+    "src_ip": "198.51.100.77",
+    "dst_ip": "10.0.0.1",
+    "dst_port": 22,
+    "category": "AIS_SYN_FLOOD_ANOMALY",
+    "engine": "AIS_NEGATIVE_SELECTION",
+    "severity": "HIGH",
+    "score": 8.5,
+    "mitigation": "QUARANTINE_IP"
+  },
+  {
+    "alert_id": 2,
+    "packet_id": 51,
+    "timestamp": 1006.5,
+    "src_ip": "203.0.113.19",
+    "dst_ip": "10.0.0.1",
+    "dst_port": 80,
+    "category": "SQL_INJECTION",
+    "engine": "DPI_SIGNATURE",
+    "severity": "CRITICAL",
+    "score": 9.5,
+    "mitigation": "QUARANTINE_IP"
+  },
+  {
+    "alert_id": 3,
+    "packet_id": 61,
+    "timestamp": 1008.5,
+    "src_ip": "10.0.1.99",
+    "dst_ip": "185.220.101.5",
+    "dst_port": 8443,
+    "category": "HIGH_ENTROPY_C2_EXFILTRATION",
+    "engine": "ENTROPY_ANALYSIS",
+    "severity": "CRITICAL",
+    "score": 9.3,
+    "mitigation": "QUARANTINE_IP"
+  },
+  {
+    "alert_id": 4,
+    "packet_id": 76,
+    "timestamp": 1009.55,
+    "src_ip": "198.51.100.200",
+    "dst_ip": "10.0.0.1",
+    "dst_port": 443,
+    "category": "AIS_SYN_FLOOD_ANOMALY",
+    "engine": "AIS_NEGATIVE_SELECTION",
+    "severity": "HIGH",
+    "score": 8.5,
+    "mitigation": "QUARANTINE_IP"
+  }
+]

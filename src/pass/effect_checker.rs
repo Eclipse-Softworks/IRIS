@@ -56,6 +56,7 @@ impl EffectChecker {
                 self.verify_call_sites(&mangled, &method.body);
             }
         }
+        self.verify_trait_impl_effects(ast);
 
         // Calls through function-valued parameters need the callback's effect
         // row, not a (non-existent) call-graph node named after the parameter.
@@ -455,7 +456,7 @@ impl EffectChecker {
                     .all(|c| c.is_ascii_uppercase() || c == '_' || c.is_ascii_digit())
                 {
                     effect_vars.push(e.clone());
-                } else {
+                } else if e != "pure" {
                     concrete_effects.push(e.clone());
                 }
             }
@@ -1326,10 +1327,131 @@ impl EffectChecker {
             }
         }
     }
+
+    /// Verifies that every `impl Trait for Type` method's declared and inferred
+    /// effects are subsumed by the trait method's declared `effect` clause.
+    fn verify_trait_impl_effects(&mut self, ast: &AstModule) {
+        let parse_row = |effects: &[String]| -> EffectRow {
+            let mut vars = Vec::new();
+            let mut concrete = Vec::new();
+            for e in effects {
+                if e.chars()
+                    .all(|c| c.is_ascii_uppercase() || c == '_' || c.is_ascii_digit())
+                {
+                    vars.push(e.clone());
+                } else if e != "pure" {
+                    concrete.push(e.clone());
+                }
+            }
+            EffectRow::from_parts(concrete, vars)
+        };
+
+        for impl_def in &ast.impls {
+            let trait_name = &impl_def.trait_name;
+            if trait_name.is_empty() {
+                continue;
+            }
+            let Some(trait_def) = ast.traits.iter().find(|t| &t.name.name == trait_name) else {
+                continue;
+            };
+            for method in &impl_def.methods {
+                let Some(trait_method) = trait_def
+                    .methods
+                    .iter()
+                    .find(|tm| tm.name.name == method.name.name)
+                else {
+                    continue;
+                };
+                if trait_method.effects.is_empty() {
+                    continue;
+                }
+                let trait_row = parse_row(&trait_method.effects);
+                if !trait_row.vars.is_empty() {
+                    continue;
+                }
+
+                let mangled = Self::mangle(impl_def, method);
+                let mut impl_row = parse_row(&method.effects);
+                if let Some(inferred) = self.inferred.get(&mangled) {
+                    impl_row = impl_row.union(inferred);
+                }
+
+                let missing: Vec<String> = impl_row
+                    .effects
+                    .iter()
+                    .filter(|e| !trait_row.effects.contains(*e))
+                    .cloned()
+                    .collect();
+                if !missing.is_empty() {
+                    self.errors.push(format!(
+                        "error[E0304]: [effect check] impl method `{}` performs effect{} `{}` exceeding trait `{}.{}` bound `{}`",
+                        mangled,
+                        if missing.len() == 1 { "" } else { "s" },
+                        missing.join(", "),
+                        trait_name,
+                        method.name.name,
+                        trait_row.display()
+                    ));
+                }
+            }
+        }
+    }
 }
 
 fn is_inferred_stdlib_contract(name: &str) -> bool {
     ["ais__", "tensor__", "tensorx__", "nn__", "ml__"]
         .iter()
         .any(|prefix| name.starts_with(prefix))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn trait_impl_effect_bound_allows_subset_and_rejects_exceeding() {
+        let ok_src = r#"
+trait Logger {
+    def log(self: Self) -> i64 effect io
+}
+record Console { id: i64 }
+impl Logger for Console {
+    def log(self: Console) -> i64 {
+        0
+    }
+}
+"#;
+        let ok_ast = crate::parse_recovering(ok_src).unwrap();
+        let mut checker = EffectChecker::new(false);
+        checker.run(&ok_ast);
+        assert!(
+            checker.errors.is_empty(),
+            "unexpected: {:?}",
+            checker.errors
+        );
+
+        let bad_src = r#"
+trait PureEval {
+    def eval(self: Self) -> i64 effect pure
+}
+record Printer { id: i64 }
+impl PureEval for Printer {
+    def eval(self: Printer) -> i64 {
+        println("side effect");
+        1
+    }
+}
+"#;
+        let bad_ast = crate::parse_recovering(bad_src).unwrap();
+        let mut checker2 = EffectChecker::new(false);
+        checker2.run(&bad_ast);
+        assert!(
+            checker2
+                .errors
+                .iter()
+                .any(|e| e.contains("E0304") && e.contains("io")),
+            "expected E0304 trait effect violation, got: {:?}",
+            checker2.errors
+        );
+    }
 }

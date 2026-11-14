@@ -1,0 +1,122 @@
+// projects/quadrotor_autopilot/ekf.iris
+// Extended Kalman Filter (EKF) for Quadrotor State & Attitude Estimation
+
+bring "math_utils.iris"
+bring "physics.iris"
+
+pub record EkfState {
+    est_pos: Vec3,
+    est_vel: Vec3,
+    est_angles: Vec3, // roll, pitch, yaw
+    gyro_bias: Vec3,
+    // Diagonal covariances for stability
+    cov_pos: Vec3,
+    cov_vel: Vec3,
+    cov_att: Vec3,
+}
+
+pub def initial_ekf_state() -> EkfState {
+    EkfState {
+        est_pos: vec3_new(0.0, 0.0, 0.0),
+        est_vel: vec3_new(0.0, 0.0, 0.0),
+        est_angles: vec3_new(0.0, 0.0, 0.0),
+        gyro_bias: vec3_new(0.0, 0.0, 0.0),
+        cov_pos: vec3_new(0.1, 0.1, 0.1),
+        cov_vel: vec3_new(0.1, 0.1, 0.1),
+        cov_att: vec3_new(0.05, 0.05, 0.05),
+    }
+}
+
+/// EKF Prediction Step: propagates state using gyroscope rates and kinematic integration
+pub def ekf_predict(
+    ekf: EkfState,
+    gyro_raw: Vec3,
+    dt: f64,
+) -> EkfState {
+    // Correct gyro with estimated bias
+    val p = gyro_raw.x - ekf.gyro_bias.x;
+    val q = gyro_raw.y - ekf.gyro_bias.y;
+    val r = gyro_raw.z - ekf.gyro_bias.z;
+
+    val next_phi = ekf.est_angles.x + p * dt;
+    val next_theta = ekf.est_angles.y + q * dt;
+    val next_psi = ekf.est_angles.z + r * dt;
+
+    // Propagate position & velocity
+    val next_px = ekf.est_pos.x + ekf.est_vel.x * dt;
+    val next_py = ekf.est_pos.y + ekf.est_vel.y * dt;
+    val next_pz = ekf.est_pos.z + ekf.est_vel.z * dt;
+
+    // Process noise Q addition to covariance
+    val q_pos = 0.001 * dt;
+    val q_att = 0.005 * dt;
+
+    EkfState {
+        est_pos: vec3_new(next_px, next_py, next_pz),
+        est_vel: ekf.est_vel,
+        est_angles: vec3_new(next_phi, next_theta, next_psi),
+        gyro_bias: ekf.gyro_bias,
+        cov_pos: vec3_add(ekf.cov_pos, vec3_new(q_pos, q_pos, q_pos)),
+        cov_vel: ekf.cov_vel,
+        cov_att: vec3_add(ekf.cov_att, vec3_new(q_att, q_att, q_att)),
+    }
+}
+
+/// EKF Measurement Update Step: fuses noisy accelerometer and GPS/Baro measurements
+pub def ekf_update(
+    ekf: EkfState,
+    accel_raw: Vec3,
+    pos_measured: Vec3,
+) -> EkfState {
+    // 1. Attitude measurement from accelerometer gravity vector:
+    // roll = atan2(ay, az), pitch = atan2(-ax, sqrt(ay^2 + az^2))
+    val roll_meas = accel_raw.y / 9.81;
+    val pitch_meas = -accel_raw.x / 9.81;
+
+    // Measurement noise covariance R
+    val r_pos = 0.04;
+    val r_att = 0.08;
+
+    // Kalman gain K = P / (P + R)
+    val k_pos_x = ekf.cov_pos.x / (ekf.cov_pos.x + r_pos);
+    val k_pos_y = ekf.cov_pos.y / (ekf.cov_pos.y + r_pos);
+    val k_pos_z = ekf.cov_pos.z / (ekf.cov_pos.z + r_pos);
+
+    val k_att_phi = ekf.cov_att.x / (ekf.cov_att.x + r_att);
+    val k_att_theta = ekf.cov_att.y / (ekf.cov_att.y + r_att);
+
+    // State update: x = x + K * (z - h(x))
+    val upd_px = ekf.est_pos.x + k_pos_x * (pos_measured.x - ekf.est_pos.x);
+    val upd_py = ekf.est_pos.y + k_pos_y * (pos_measured.y - ekf.est_pos.y);
+    val upd_pz = ekf.est_pos.z + k_pos_z * (pos_measured.z - ekf.est_pos.z);
+
+    val upd_phi = ekf.est_angles.x + k_att_phi * (roll_meas - ekf.est_angles.x);
+    val upd_theta = ekf.est_angles.y + k_att_theta * (pitch_meas - ekf.est_angles.y);
+
+    // Covariance update: P = (1 - K) * P
+    val upd_cov_px = (1.0 - k_pos_x) * ekf.cov_pos.x;
+    val upd_cov_py = (1.0 - k_pos_y) * ekf.cov_pos.y;
+    val upd_cov_pz = (1.0 - k_pos_z) * ekf.cov_pos.z;
+
+    val upd_cov_phi = (1.0 - k_att_phi) * ekf.cov_att.x;
+    val upd_cov_theta = (1.0 - k_att_theta) * ekf.cov_att.y;
+
+    val upd_vx = (upd_px - ekf.est_pos.x) / 0.01;
+    val upd_vy = (upd_py - ekf.est_pos.y) / 0.01;
+    val upd_vz = (upd_pz - ekf.est_pos.z) / 0.01;
+    val upd_vel = vec3_new(
+        0.7 * ekf.est_vel.x + 0.3 * upd_vx,
+        0.7 * ekf.est_vel.y + 0.3 * upd_vy,
+        0.7 * ekf.est_vel.z + 0.3 * upd_vz
+    );
+
+    EkfState {
+        est_pos: vec3_new(upd_px, upd_py, upd_pz),
+        est_vel: upd_vel,
+        est_angles: vec3_new(upd_phi, upd_theta, ekf.est_angles.z),
+        gyro_bias: ekf.gyro_bias,
+        cov_pos: vec3_new(upd_cov_px, upd_cov_py, upd_cov_pz),
+        cov_vel: ekf.cov_vel,
+        cov_att: vec3_new(upd_cov_phi, upd_cov_theta, ekf.cov_att.z),
+    }
+}

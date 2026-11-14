@@ -26,6 +26,8 @@ typedef struct {
 } ONNXModel;
 
 void* iris_onnx_session_create(const char* model_path) {
+    iris_sandbox_require_ffi("onnxruntime");
+    if (model_path) iris_sandbox_require_fs_read(model_path);
     const OrtApi* g_ort = iris_ort_api();
     if (!g_ort) return NULL;
     OrtEnv* env = NULL;

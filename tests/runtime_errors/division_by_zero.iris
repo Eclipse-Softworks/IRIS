@@ -1,0 +1,8 @@
+// expect: E0402 at 6:20
+// message: division by zero
+def main() -> i64 {
+    val a = 10
+    val b = a - 10
+    println(to_str(a / b))
+    return 0
+}

@@ -11,6 +11,18 @@ struct Borrow {
     span: Span,
 }
 
+/// A borrow that escapes as the value of an expression (the tail of a
+/// block, an arm of an `if`/`when`). The borrow tracker writes the loans
+/// directly into `self.borrows` as it goes; this is the subset that also
+/// flows outward as a value, so a following `Let` can register it against
+/// the place the binding keeps borrowed.
+#[derive(Debug, Clone)]
+struct Loan {
+    place: String,
+    is_mut: bool,
+    span: Span,
+}
+
 #[derive(Debug, Clone)]
 pub enum BorrowError {
     MutBorrowWhileBorrowed {
@@ -138,6 +150,7 @@ impl BorrowError {
             )],
             helps: vec![],
             suggestions: vec![],
+            fixes: vec![],
         }
     }
 }
@@ -330,7 +343,7 @@ impl BorrowChecker {
         }
 
         self.scan_type_for_refs(&func.return_ty);
-        self.check_block(&func.body);
+        let _ = self.check_block(&func.body);
     }
 
     fn scan_type_for_refs(&mut self, ty: &AstType) {
@@ -377,32 +390,47 @@ impl BorrowChecker {
         }
     }
 
-    fn check_block(&mut self, block: &AstBlock) {
+    fn check_block(&mut self, block: &AstBlock) -> Vec<Loan> {
         self.scope_depth += 1;
         for stmt in &block.stmts {
-            self.check_stmt(stmt);
+            let _ = self.check_stmt(stmt);
         }
+        let mut loans = Vec::new();
         if let Some(result) = &block.tail {
-            self.check_expr(result);
+            loans = self.check_expr(result);
         }
         self.scope_depth -= 1;
         self.clear_scope_borrows();
+        loans
     }
 
-    fn check_stmt(&mut self, stmt: &AstStmt) {
+    fn check_stmt(&mut self, stmt: &AstStmt) -> Vec<Loan> {
         match stmt {
             AstStmt::Let { name, init, ty, .. } => {
                 if let Some(t) = ty {
                     self.scan_type_for_refs(t);
                 }
-                self.check_expr(init);
+                let loans = self.check_expr(init);
+                for loan in loans {
+                    // The binding keeps the borrow alive: register it so a
+                    // later mutable use of the borrowed place is caught.
+                    self.borrows
+                        .entry(loan.place.clone())
+                        .or_default()
+                        .push(Borrow {
+                            var_name: loan.place,
+                            is_mut: loan.is_mut,
+                            scope_depth: self.scope_depth,
+                            span: loan.span,
+                        });
+                }
                 self.add_var(&name.name);
             }
             AstStmt::Expr(e) => {
-                self.check_expr(e);
+                let _ = self.check_expr(e);
             }
             AstStmt::Assign { target, value, .. } => {
-                self.check_expr(value);
+                let _ = self.check_expr(value);
                 if let AstExpr::Ident(ident) = target.as_ref() {
                     self.check_use_after_move(&ident.name, target.span());
                     if let Some(borrows) = self.borrows.get(&ident.name) {
@@ -421,74 +449,75 @@ impl BorrowChecker {
             }
             AstStmt::Return { value, .. } => {
                 if let Some(v) = value {
-                    self.check_expr(v);
+                    let _ = self.check_expr(v);
                 }
             }
             AstStmt::While { cond, body, .. } => {
-                self.check_expr(cond);
-                self.check_block(body);
+                let _ = self.check_expr(cond);
+                let _ = self.check_block(body);
             }
             AstStmt::Loop { body, .. } => {
-                self.check_block(body);
+                let _ = self.check_block(body);
             }
             AstStmt::ForRange {
                 start, end, body, ..
             } => {
-                self.check_expr(start);
-                self.check_expr(end);
-                self.check_block(body);
+                let _ = self.check_expr(start);
+                let _ = self.check_expr(end);
+                let _ = self.check_block(body);
             }
             AstStmt::ForEach { iter, body, .. } => {
-                self.check_expr(iter);
-                self.check_block(body);
+                let _ = self.check_expr(iter);
+                let _ = self.check_block(body);
             }
             AstStmt::ParFor {
                 start, end, body, ..
             } => {
-                self.check_expr(start);
-                self.check_expr(end);
-                self.check_block(body);
+                let _ = self.check_expr(start);
+                let _ = self.check_expr(end);
+                let _ = self.check_block(body);
             }
             AstStmt::Spawn { body, group, .. } => {
                 for s in body {
-                    self.check_stmt(s);
+                    let _ = self.check_stmt(s);
                 }
                 if let Some(g) = group {
-                    self.check_expr(g);
+                    let _ = self.check_expr(g);
                 }
             }
             AstStmt::LetTuple { init, .. } => {
-                self.check_expr(init);
+                let _ = self.check_expr(init);
             }
             AstStmt::MaskStmt { body, .. } => {
-                self.check_block(body);
+                let _ = self.check_block(body);
             }
             AstStmt::HandleStmt { expr, arms, .. } => {
-                self.check_expr(expr);
+                let _ = self.check_expr(expr);
                 for arm in arms {
-                    self.check_expr(&arm.body);
+                    let _ = self.check_expr(&arm.body);
                 }
             }
             AstStmt::Break { .. } | AstStmt::Continue { .. } => {}
             AstStmt::Defer { expr, .. } => {
-                self.check_expr(expr);
+                let _ = self.check_expr(expr);
             }
             AstStmt::Yield { expr, .. } => {
-                self.check_expr(expr);
+                let _ = self.check_expr(expr);
             }
             AstStmt::Select { arms, default, .. } => {
                 for arm in arms {
-                    self.check_expr(&arm.channel);
-                    self.check_block(&arm.body);
+                    let _ = self.check_expr(&arm.channel);
+                    let _ = self.check_block(&arm.body);
                 }
                 if let Some(d) = default {
-                    self.check_block(d);
+                    let _ = self.check_block(d);
                 }
             }
         }
+        Vec::new()
     }
 
-    fn check_expr(&mut self, expr: &AstExpr) {
+    fn check_expr(&mut self, expr: &AstExpr) -> Vec<Loan> {
         match expr {
             AstExpr::Ref { expr: inner, span } => {
                 self.has_ref_types = true;
@@ -507,8 +536,13 @@ impl BorrowChecker {
                         }
                     }
                     self.add_borrow(ident.name.clone(), false, *span);
+                    vec![Loan {
+                        place: ident.name.clone(),
+                        is_mut: false,
+                        span: *span,
+                    }]
                 } else {
-                    self.check_expr(inner);
+                    self.check_expr(inner)
                 }
             }
             AstExpr::RefMut { expr: inner, span } => {
@@ -528,13 +562,16 @@ impl BorrowChecker {
                         }
                     }
                     self.add_borrow(ident.name.clone(), true, *span);
+                    vec![Loan {
+                        place: ident.name.clone(),
+                        is_mut: true,
+                        span: *span,
+                    }]
                 } else {
-                    self.check_expr(inner);
+                    self.check_expr(inner)
                 }
             }
-            AstExpr::Deref { expr: inner, .. } => {
-                self.check_expr(inner);
-            }
+            AstExpr::Deref { expr: inner, .. } => self.check_expr(inner),
             AstExpr::Move { expr: inner, span } => {
                 // Check for borrow conflicts first
                 if let AstExpr::Ident(ident) = inner.as_ref() {
@@ -552,143 +589,198 @@ impl BorrowChecker {
                     }
                     self.mark_moved(&ident.name, *span);
                 } else {
-                    self.check_expr(inner);
+                    let _ = self.check_expr(inner);
                 }
+                Vec::new()
             }
             AstExpr::Ident(ident) => {
                 self.check_use_after_move(&ident.name, ident.span);
+                Vec::new()
             }
             AstExpr::IntLit { .. }
             | AstExpr::FloatLit { .. }
             | AstExpr::BoolLit { .. }
-            | AstExpr::StringLit { .. } => {}
+            | AstExpr::StringLit { .. } => Vec::new(),
             AstExpr::BinOp { lhs, rhs, .. } => {
-                self.check_expr(lhs);
-                self.check_expr(rhs);
+                let _ = self.check_expr(lhs);
+                let _ = self.check_expr(rhs);
+                Vec::new()
             }
             AstExpr::UnaryOp { expr, .. } => {
-                self.check_expr(expr);
+                let _ = self.check_expr(expr);
+                Vec::new()
             }
             AstExpr::Call {
                 args, named_args, ..
             } => {
                 for arg in args {
-                    self.check_expr(arg);
+                    let _ = self.check_expr(arg);
                 }
                 for (_, arg) in named_args {
-                    self.check_expr(arg);
+                    let _ = self.check_expr(arg);
                 }
+                Vec::new()
             }
             AstExpr::MethodCall { base, args, .. } => {
-                self.check_expr(base);
+                let _ = self.check_expr(base);
                 for arg in args {
-                    self.check_expr(arg);
+                    let _ = self.check_expr(arg);
                 }
+                Vec::new()
             }
             AstExpr::If {
                 cond,
                 then_block,
                 else_block,
-                ..
+                span: _,
             } => {
-                self.check_expr(cond);
-                self.check_block(then_block);
+                let _ = self.check_expr(cond);
+                let then_loans = self.check_block(then_block);
+                let mut loans = then_loans.clone();
                 if let Some(eb) = else_block {
-                    self.check_block(eb);
+                    let else_loans = self.check_block(eb);
+                    self.check_arm_loans(&then_loans, &else_loans);
+                    loans.extend(else_loans);
                 }
+                loans
             }
-            AstExpr::Block(block) => {
-                self.check_block(block);
-            }
+            AstExpr::Block(block) => self.check_block(block),
             AstExpr::Lambda { body, .. } => {
-                self.check_expr(body);
+                let _ = self.check_expr(body);
+                Vec::new()
             }
             AstExpr::Index { base, indices, .. } => {
-                self.check_expr(base);
+                let _ = self.check_expr(base);
                 for idx in indices {
-                    self.check_expr(idx);
+                    let _ = self.check_expr(idx);
                 }
+                Vec::new()
             }
             AstExpr::Cast { expr, .. } => {
-                self.check_expr(expr);
+                let _ = self.check_expr(expr);
+                Vec::new()
             }
             AstExpr::StructLit { fields, spread, .. } => {
                 for (_, v) in fields {
-                    self.check_expr(v);
+                    let _ = self.check_expr(v);
                 }
                 if let Some(s) = spread {
-                    self.check_expr(s);
+                    let _ = self.check_expr(s);
                 }
+                Vec::new()
             }
             AstExpr::FieldAccess { base, .. } => {
-                self.check_expr(base);
+                let _ = self.check_expr(base);
+                Vec::new()
             }
             AstExpr::When {
                 scrutinee, arms, ..
             } => {
-                self.check_expr(scrutinee);
+                let _ = self.check_expr(scrutinee);
+                let mut loans: Vec<Loan> = Vec::new();
                 for arm in arms {
-                    self.check_expr(&arm.body);
+                    let arm_loans = self.check_expr(&arm.body);
+                    self.check_arm_loans(&loans, &arm_loans);
+                    loans.extend(arm_loans);
                 }
+                loans
             }
             AstExpr::Tuple { elements, .. } => {
                 for e in elements {
-                    self.check_expr(e);
+                    let _ = self.check_expr(e);
                 }
+                Vec::new()
             }
             AstExpr::TupleIndex { base, .. } => {
-                self.check_expr(base);
+                let _ = self.check_expr(base);
+                Vec::new()
             }
             AstExpr::ArrayLit { elems, .. } => {
                 for e in elems {
-                    self.check_expr(e);
+                    let _ = self.check_expr(e);
                 }
+                Vec::new()
             }
             AstExpr::MapLiteral { entries, .. } => {
                 for (k, v) in entries {
-                    self.check_expr(k);
-                    self.check_expr(v);
+                    let _ = self.check_expr(k);
+                    let _ = self.check_expr(v);
                 }
+                Vec::new()
             }
             AstExpr::Await { expr, .. } => {
-                self.check_expr(expr);
+                let _ = self.check_expr(expr);
+                Vec::new()
             }
             AstExpr::Try { expr, .. } => {
-                self.check_expr(expr);
+                let _ = self.check_expr(expr);
+                Vec::new()
             }
             AstExpr::Mask { body, .. } => {
-                self.check_block(body);
+                let _ = self.check_block(body);
+                Vec::new()
             }
             AstExpr::Handle { expr, arms, .. } => {
-                self.check_expr(expr);
+                let _ = self.check_expr(expr);
                 for arm in arms {
-                    self.check_expr(&arm.body);
+                    let _ = self.check_expr(&arm.body);
                 }
+                Vec::new()
             }
             AstExpr::NullCoal { expr, default, .. } => {
-                self.check_expr(expr);
-                self.check_expr(default);
+                let lhs = self.check_expr(expr);
+                let rhs = self.check_expr(default);
+                self.check_arm_loans(&lhs, &rhs);
+                let mut loans = lhs;
+                loans.extend(rhs);
+                loans
             }
             AstExpr::TryCatch {
                 body, catch_body, ..
             } => {
-                self.check_expr(body);
-                self.check_expr(catch_body);
+                let _ = self.check_expr(body);
+                let _ = self.check_expr(catch_body);
+                Vec::new()
             }
             AstExpr::Raise { args, .. } => {
                 for a in args {
-                    self.check_expr(a);
+                    let _ = self.check_expr(a);
                 }
+                Vec::new()
             }
             AstExpr::Unsafe { body, .. } => {
-                self.check_expr(body);
+                let _ = self.check_expr(body);
+                Vec::new()
             }
             AstExpr::Splat { expr, .. } => {
-                self.check_expr(expr);
+                let _ = self.check_expr(expr);
+                Vec::new()
             }
             AstExpr::MacroCall { args, .. } => {
                 for a in args {
-                    self.check_expr(a);
+                    let _ = self.check_expr(a);
+                }
+                Vec::new()
+            }
+        }
+    }
+
+    /// Cross-arm compatibility for `&x` in one arm and `&mut x` in another
+    /// arm of the same expression: the value cannot keep both. Conflicts are
+    /// reported on the mutable arm (the error rustc reports at).
+    fn check_arm_loans(&mut self, a: &[Loan], b: &[Loan]) {
+        for x in a {
+            for y in b {
+                if x.place == y.place && x.is_mut != y.is_mut {
+                    let (ref_loan, mut_loan) = if x.is_mut { (y, x) } else { (x, y) };
+                    self.errors.push((
+                        BorrowError::MutBorrowWhileBorrowed {
+                            var: x.place.clone(),
+                            borrow_span: ref_loan.span,
+                            mut_span: mut_loan.span,
+                        },
+                        mut_loan.span,
+                    ));
                 }
             }
         }

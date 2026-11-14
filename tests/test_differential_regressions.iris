@@ -1,0 +1,60 @@
+// Defects found by the differential tester (tests/differential.rs) once it
+// generated floats, enums with payloads, tuples and map iteration. Each
+// function failed on one backend; see known-issues #90-#93.
+
+choice Shape { Dot, Circle(i64), Label(str) }
+
+record Holder { s: Shape, n: i64 }
+
+def size(s: Shape) -> i64 {
+    when s { Shape.Dot => 1, Shape.Circle(r) => r, Shape.Label(l) => len(l) + 2 }
+}
+
+def pick(c: bool) -> Shape {
+    if c { Shape.Dot } else { Shape.Circle(7) }
+}
+
+// #90: a tag-only variant reaching a `when` with payload arms.
+def tag_only_variants() -> i64 {
+    val a = Shape.Dot;
+    val direct = when a { Shape.Dot => 1, Shape.Circle(r) => r, Shape.Label(l) => len(l) };
+    val h = Holder { s: Shape.Dot, n: 4 };
+    val l: list<Shape> = list();
+    push(l, Shape.Dot);
+    push(l, Shape.Circle(9));
+    push(l, Shape.Label("abc"));
+    var listed = 0;
+    for i in 0..list_len(l) { listed = listed + size(list_get(l, i)) };
+    direct + size(pick(true)) + size(pick(false)) + size(h.s) + h.n + listed
+}
+
+// #91: the annotation is the binding's type.
+def annotated_none() -> str {
+    val o: option<i64> = none();
+    val t = ((when o { some(x) => x, none => 3 }), "hi");
+    to_str(t.0) + t.1
+}
+
+// #92: a float `x - x` is not folded to zero.
+def float_self_subtraction() -> str {
+    val inf = 1.0 / 0.0;
+    val h = 2.5;
+    to_str(inf - inf) + " " + to_str(h - h)
+}
+
+// #93: map keys are the strings themselves.
+def map_keys_plain() -> str {
+    val m: map<str, i64> = map();
+    map_set(m, "x", 2);
+    map_set(m, "ab", 1);
+    join(map_keys(m), ",")
+}
+
+def main() -> i64 {
+    assert(tag_only_variants() == 1 + 1 + 7 + 1 + 4 + 15);
+    assert(annotated_none() == "3hi");
+    assert(float_self_subtraction() == "NaN 0");
+    assert(map_keys_plain() == "ab,x");
+    println("differential regressions ok");
+    return 0
+}

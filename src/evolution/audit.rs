@@ -20,6 +20,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const AUDIT_SCHEMA: &str = "iris-evolution-audit/1";
 pub const CHECKPOINT_SCHEMA: &str = "iris-evolution-audit-head/1";
+pub const SIGNED_CHECKPOINT_SCHEMA: &str = "iris-evolution-audit-head/2";
 pub const GENESIS_HASH: &str = "0000000000000000000000000000000000000000000000000000000000000000";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -92,6 +93,69 @@ pub struct AuditHead {
 struct AuditCheckpoint {
     schema: String,
     head: AuditHead,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    hmac_sha256: Option<String>,
+}
+
+/// Trust-domain and cryptographic authentication policy for audit checkpoints.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AuditTrustPolicy {
+    /// Optional shared secret for HMAC-SHA256 authenticated checkpoints
+    /// (`iris-evolution-audit-head/2`). When set, unsigned or forged
+    /// checkpoints are rejected.
+    pub hmac_key: Option<Vec<u8>>,
+    /// Secondary checkpoint files atomically updated alongside the primary
+    /// checkpoint (e.g., on an independent volume or mount).
+    pub checkpoint_mirrors: Vec<PathBuf>,
+    /// Reject opening if the JSONL audit log and any checkpoint share the same
+    /// canonical parent directory.
+    pub require_separate_domain: bool,
+}
+
+impl AuditTrustPolicy {
+    /// Load policy overrides from `IRIS_AUDIT_HMAC_KEY`,
+    /// `IRIS_AUDIT_HMAC_KEY_FILE`, `IRIS_AUDIT_HEAD_MIRROR`, and
+    /// `IRIS_AUDIT_REQUIRE_SEPARATE_DOMAIN`.
+    pub fn from_env() -> Self {
+        let mut policy = Self::default();
+        if let Ok(secret) = std::env::var("IRIS_AUDIT_HMAC_KEY") {
+            if !secret.is_empty() {
+                policy.hmac_key = Some(secret.into_bytes());
+            }
+        } else if let Some(key_file) = std::env::var_os("IRIS_AUDIT_HMAC_KEY_FILE") {
+            if !key_file.is_empty() {
+                if let Ok(key) = load_hmac_key_file(Path::new(&key_file)) {
+                    policy.hmac_key = Some(key);
+                }
+            }
+        }
+        if let Some(mirror) = std::env::var_os("IRIS_AUDIT_HEAD_MIRROR") {
+            if !mirror.is_empty() {
+                policy.checkpoint_mirrors.push(PathBuf::from(mirror));
+            }
+        }
+        if let Ok(val) = std::env::var("IRIS_AUDIT_REQUIRE_SEPARATE_DOMAIN") {
+            let v = val.trim();
+            policy.require_separate_domain =
+                v == "1" || v.eq_ignore_ascii_case("true") || v.eq_ignore_ascii_case("yes");
+        }
+        policy
+    }
+}
+
+/// Read an HMAC secret key from `path`, stripping trailing line endings.
+pub fn load_hmac_key_file(path: &Path) -> Result<Vec<u8>, std::io::Error> {
+    let mut bytes = std::fs::read(path)?;
+    while matches!(bytes.last(), Some(b'\n' | b'\r')) {
+        bytes.pop();
+    }
+    if bytes.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("audit HMAC key file '{}' is empty", path.display()),
+        ));
+    }
+    Ok(bytes)
 }
 
 impl AuditHead {
@@ -140,6 +204,16 @@ pub enum AuditError {
     MissingCheckpoint {
         path: PathBuf,
         actual: AuditHead,
+    },
+    SameTrustDomain {
+        audit_path: PathBuf,
+        checkpoint_path: PathBuf,
+    },
+    InvalidCheckpointSignature {
+        path: PathBuf,
+    },
+    MissingCheckpointKey {
+        path: PathBuf,
     },
     UnsupportedCheckpointSchema(String),
     SequenceOverflow,
@@ -195,6 +269,25 @@ impl fmt::Display for AuditError {
                 "evolution audit already contains sequence {} (hash {}) but trusted checkpoint '{}' is missing",
                 actual.sequence,
                 actual.hash,
+                path.display()
+            ),
+            Self::SameTrustDomain {
+                audit_path,
+                checkpoint_path,
+            } => write!(
+                formatter,
+                "audit trust-domain violation: checkpoint '{}' shares directory with JSONL log '{}'",
+                checkpoint_path.display(),
+                audit_path.display()
+            ),
+            Self::InvalidCheckpointSignature { path } => write!(
+                formatter,
+                "invalid or missing HMAC signature on audit checkpoint '{}'",
+                path.display()
+            ),
+            Self::MissingCheckpointKey { path } => write!(
+                formatter,
+                "audit checkpoint '{}' is HMAC-authenticated (schema {SIGNED_CHECKPOINT_SCHEMA}) but no HMAC key was supplied",
                 path.display()
             ),
             Self::UnsupportedCheckpointSchema(schema) => write!(
@@ -271,6 +364,7 @@ pub struct EvolutionAuditLog {
     path: PathBuf,
     head: AuditHead,
     checkpoint_path: Option<PathBuf>,
+    trust: AuditTrustPolicy,
 }
 
 impl EvolutionAuditLog {
@@ -283,6 +377,7 @@ impl EvolutionAuditLog {
             path,
             head,
             checkpoint_path: None,
+            trust: AuditTrustPolicy::default(),
         })
     }
 
@@ -303,20 +398,36 @@ impl EvolutionAuditLog {
         Ok(log)
     }
 
-    /// Open a log using a mandatory independently persisted head checkpoint.
-    ///
-    /// A checkpoint is initialized only for a new, empty log. If a non-empty
-    /// log has no checkpoint, or the stored head differs from the verified log
-    /// head, opening fails closed. Put `checkpoint_path` in a separate trust
-    /// domain when protection against an attacker who can rewrite the audit
-    /// directory is required.
+    /// Open a log using a mandatory independently persisted head checkpoint and
+    /// environment trust overrides (`IRIS_AUDIT_*`).
     pub fn open_with_checkpoint(
         path: impl Into<PathBuf>,
         checkpoint_path: impl Into<PathBuf>,
     ) -> Result<Self, AuditError> {
+        Self::open_with_trusted_checkpoint(path, checkpoint_path, AuditTrustPolicy::from_env())
+    }
+
+    /// Open a log with explicit trust-domain, HMAC-SHA256 authentication, and
+    /// checkpoint mirror policy.
+    ///
+    /// A checkpoint is initialized only for a new, empty log. If a non-empty
+    /// log has no checkpoint, any signature check fails, or a stored head
+    /// differs from the verified log head, opening fails closed.
+    pub fn open_with_trusted_checkpoint(
+        path: impl Into<PathBuf>,
+        checkpoint_path: impl Into<PathBuf>,
+        trust: AuditTrustPolicy,
+    ) -> Result<Self, AuditError> {
         let mut log = Self::open(path)?;
         let checkpoint_path = checkpoint_path.into();
-        let checkpoint = match read_checkpoint(&checkpoint_path) {
+        if trust.require_separate_domain {
+            ensure_separate_domain(&log.path, &checkpoint_path)?;
+            for mirror in &trust.checkpoint_mirrors {
+                ensure_separate_domain(&log.path, mirror)?;
+            }
+        }
+        let hmac_key = trust.hmac_key.as_deref();
+        let checkpoint = match read_verified_checkpoint(&checkpoint_path, hmac_key) {
             Ok(checkpoint) => checkpoint,
             Err(AuditError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
                 if log.head != AuditHead::genesis() {
@@ -325,11 +436,8 @@ impl EvolutionAuditLog {
                         actual: log.head,
                     });
                 }
-                write_checkpoint(&checkpoint_path, &log.head)?;
-                AuditCheckpoint {
-                    schema: CHECKPOINT_SCHEMA.to_owned(),
-                    head: log.head.clone(),
-                }
+                write_checkpoint(&checkpoint_path, &log.head, hmac_key)?;
+                build_checkpoint(&log.head, hmac_key)
             }
             Err(error) => return Err(error),
         };
@@ -339,8 +447,33 @@ impl EvolutionAuditLog {
                 actual: log.head,
             });
         }
+        for mirror in &trust.checkpoint_mirrors {
+            match read_verified_checkpoint(mirror, hmac_key) {
+                Ok(mirror_cp) => {
+                    if mirror_cp.head != log.head {
+                        return Err(AuditError::ExpectedHeadMismatch {
+                            expected: mirror_cp.head,
+                            actual: log.head,
+                        });
+                    }
+                }
+                Err(AuditError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                    write_checkpoint(mirror, &log.head, hmac_key)?;
+                }
+                Err(error) => return Err(error),
+            }
+        }
         log.checkpoint_path = Some(checkpoint_path);
+        log.trust = trust;
         Ok(log)
+    }
+
+    pub fn trust_policy(&self) -> &AuditTrustPolicy {
+        &self.trust
+    }
+
+    pub fn checkpoint_path(&self) -> Option<&Path> {
+        self.checkpoint_path.as_deref()
     }
 
     pub fn path(&self) -> &Path {
@@ -407,42 +540,190 @@ impl EvolutionAuditLog {
             sequence,
             hash: record.hash.clone(),
         };
+        let hmac_key = self.trust.hmac_key.as_deref();
         if let Some(path) = &self.checkpoint_path {
-            write_checkpoint(path, &self.head)?;
+            write_checkpoint(path, &self.head, hmac_key)?;
+        }
+        for mirror in &self.trust.checkpoint_mirrors {
+            write_checkpoint(mirror, &self.head, hmac_key)?;
         }
         Ok(record)
     }
 }
 
-fn read_checkpoint(path: &Path) -> Result<AuditCheckpoint, AuditError> {
+fn resolve_normalized_dir(path: &Path) -> Result<PathBuf, AuditError> {
+    let abs = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(path)
+    };
+    let parent = match abs.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
+        _ => std::env::current_dir()?,
+    };
+    // Canonicalize the deepest existing ancestor so non-existent directories
+    // still compare accurately against existing symlinks/mounts.
+    let mut missing = Vec::new();
+    let mut cursor = parent.clone();
+    while !cursor.exists() {
+        let Some(name) = cursor.file_name() else {
+            break;
+        };
+        missing.push(name.to_os_string());
+        let Some(next) = cursor.parent() else {
+            break;
+        };
+        cursor = next.to_path_buf();
+    }
+    let mut resolved = std::fs::canonicalize(&cursor).unwrap_or(cursor);
+    for component in missing.into_iter().rev() {
+        resolved.push(component);
+    }
+    Ok(resolved)
+}
+
+fn ensure_separate_domain(audit_path: &Path, checkpoint_path: &Path) -> Result<(), AuditError> {
+    let audit_dir = resolve_normalized_dir(audit_path)?;
+    let cp_dir = resolve_normalized_dir(checkpoint_path)?;
+    if audit_dir == cp_dir {
+        return Err(AuditError::SameTrustDomain {
+            audit_path: audit_path.to_path_buf(),
+            checkpoint_path: checkpoint_path.to_path_buf(),
+        });
+    }
+    Ok(())
+}
+
+fn hmac_sha256_hex(key: &[u8], message: &[u8]) -> String {
+    const BLOCK_LEN: usize = 64;
+    let mut key_block = [0u8; BLOCK_LEN];
+    if key.len() > BLOCK_LEN {
+        let digest = Sha256::digest(key);
+        key_block[..digest.len()].copy_from_slice(&digest);
+    } else {
+        key_block[..key.len()].copy_from_slice(key);
+    }
+    let mut i_pad = [0x36u8; BLOCK_LEN];
+    let mut o_pad = [0x5cu8; BLOCK_LEN];
+    for i in 0..BLOCK_LEN {
+        i_pad[i] ^= key_block[i];
+        o_pad[i] ^= key_block[i];
+    }
+    let mut inner = Sha256::new();
+    inner.update(i_pad);
+    inner.update(message);
+    let inner_digest = inner.finalize();
+
+    let mut outer = Sha256::new();
+    outer.update(o_pad);
+    outer.update(inner_digest);
+    let digest = outer.finalize();
+    digest.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (&x, &y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
+fn checkpoint_hmac(head: &AuditHead, key: &[u8]) -> String {
+    let payload = format!("{SIGNED_CHECKPOINT_SCHEMA}:{}:{}", head.sequence, head.hash);
+    hmac_sha256_hex(key, payload.as_bytes())
+}
+
+fn build_checkpoint(head: &AuditHead, hmac_key: Option<&[u8]>) -> AuditCheckpoint {
+    match hmac_key {
+        Some(key) => AuditCheckpoint {
+            schema: SIGNED_CHECKPOINT_SCHEMA.to_owned(),
+            head: head.clone(),
+            hmac_sha256: Some(checkpoint_hmac(head, key)),
+        },
+        None => AuditCheckpoint {
+            schema: CHECKPOINT_SCHEMA.to_owned(),
+            head: head.clone(),
+            hmac_sha256: None,
+        },
+    }
+}
+
+fn read_verified_checkpoint(
+    path: &Path,
+    expected_key: Option<&[u8]>,
+) -> Result<AuditCheckpoint, AuditError> {
     let bytes = std::fs::read(path)?;
     let checkpoint: AuditCheckpoint =
         serde_json::from_slice(&bytes).map_err(|source| AuditError::Json { line: 0, source })?;
-    if checkpoint.schema != CHECKPOINT_SCHEMA {
-        return Err(AuditError::UnsupportedCheckpointSchema(checkpoint.schema));
+    match (expected_key, checkpoint.schema.as_str()) {
+        (Some(key), SIGNED_CHECKPOINT_SCHEMA) => {
+            let Some(tag) = checkpoint.hmac_sha256.as_deref() else {
+                return Err(AuditError::InvalidCheckpointSignature {
+                    path: path.to_path_buf(),
+                });
+            };
+            let expected = checkpoint_hmac(&checkpoint.head, key);
+            if !constant_time_eq(tag.as_bytes(), expected.as_bytes()) {
+                return Err(AuditError::InvalidCheckpointSignature {
+                    path: path.to_path_buf(),
+                });
+            }
+        }
+        (Some(_), CHECKPOINT_SCHEMA) => {
+            return Err(AuditError::InvalidCheckpointSignature {
+                path: path.to_path_buf(),
+            });
+        }
+        (None, CHECKPOINT_SCHEMA) => {
+            if checkpoint.hmac_sha256.is_some() {
+                return Err(AuditError::MissingCheckpointKey {
+                    path: path.to_path_buf(),
+                });
+            }
+        }
+        (None, SIGNED_CHECKPOINT_SCHEMA) => {
+            return Err(AuditError::MissingCheckpointKey {
+                path: path.to_path_buf(),
+            });
+        }
+        (_, other) => return Err(AuditError::UnsupportedCheckpointSchema(other.to_owned())),
     }
     Ok(checkpoint)
 }
 
-fn write_checkpoint(path: &Path, head: &AuditHead) -> Result<(), AuditError> {
+fn write_checkpoint(
+    path: &Path,
+    head: &AuditHead,
+    hmac_key: Option<&[u8]>,
+) -> Result<(), AuditError> {
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)?;
+        }
     }
-    let checkpoint = AuditCheckpoint {
-        schema: CHECKPOINT_SCHEMA.to_owned(),
-        head: head.clone(),
-    };
+    let checkpoint = build_checkpoint(head, hmac_key);
     let mut bytes =
         serde_json::to_vec(&checkpoint).map_err(|source| AuditError::Json { line: 0, source })?;
     bytes.push(b'\n');
+    let file_name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "audit.head.json".to_owned());
+    let tmp_path = path.with_file_name(format!(".{file_name}.{}.tmp", std::process::id()));
     let mut file = OpenOptions::new()
         .create(true)
         .write(true)
         .truncate(true)
-        .open(path)?;
+        .open(&tmp_path)?;
     file.write_all(&bytes)?;
     file.flush()?;
     file.sync_all()?;
+    drop(file);
+    std::fs::rename(&tmp_path, path)?;
     Ok(())
 }
 

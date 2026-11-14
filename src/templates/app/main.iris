@@ -1,0 +1,43 @@
+// {{name}}: a starting point.
+//
+//   iris run main.iris      build and run it
+//   iris test               run the test_ functions below
+//   iris watch main.iris    run it again on every save
+//   iris check              find errors without building
+
+record Stats { count: i64, total: i64, largest: i64 }
+
+// Count, total and largest of `values`.
+def summarize(values: list<i64>) -> Stats {
+    var total = 0
+    var largest = 0
+    for i in 0..list_len(values) {
+        val v = list_get(values, i)
+        total = total + v
+        if v > largest { largest = v }
+    }
+    Stats { count: list_len(values), total: total, largest: largest }
+}
+
+def main() -> i64 {
+    val values: list<i64> = list(3, 9, 4)
+    val s = summarize(values)
+    println("count " + to_str(s.count) + ", total " + to_str(s.total) + ", largest " + to_str(s.largest))
+    return 0
+}
+
+def test_summarize() -> i64 {
+    val values: list<i64> = list(3, 9, 4)
+    val s = summarize(values)
+    assert(s.count == 3)
+    assert(s.total == 16)
+    assert(s.largest == 9)
+    0
+}
+
+def test_summarize_empty() -> i64 {
+    val empty: list<i64> = list()
+    val s = summarize(empty)
+    assert(s.count == 0 && s.total == 0 && s.largest == 0)
+    0
+}

@@ -102,8 +102,13 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo DEBIAN_FRONTEND=noninteractive apt-get update -yq
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -yq build-essential pkg-config clang lld
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -yq build-essential pkg-config clang lld gdb
           echo "IRIS_CLANG=/usr/bin/clang" >> "$GITHUB_ENV"
+          # The native-debugger and worker-sandbox tests skip when their
+          # prerequisites are missing; on Linux runners they must run, so a
+          # missing gdb or an unenforced Landlock/seccomp backend fails CI.
+          echo "IRIS_REQUIRE_NATIVE_DEBUGGER=1" >> "$GITHUB_ENV"
+          echo "IRIS_REQUIRE_NATIVE_SANDBOX=1" >> "$GITHUB_ENV"
 
       - name: Install LLVM toolchain (macOS)
         if: runner.os == 'macOS'
@@ -113,6 +118,9 @@ jobs:
           echo "$LLVM_PREFIX/bin" >> "$GITHUB_PATH"
           echo "IRIS_CLANG=$LLVM_PREFIX/bin/clang" >> "$GITHUB_ENV"
           echo "SDKROOT=$(xcrun --show-sdk-path)" >> "$GITHUB_ENV"
+          # The Seatbelt worker sandbox must be enforced on macOS runners.
+          # Native debugging uses lldb-dap from this LLVM when present.
+          echo "IRIS_REQUIRE_NATIVE_SANDBOX=1" >> "$GITHUB_ENV"
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -244,6 +252,40 @@ jobs:
         run: |
           mkdir -p bench-baseline
           cp bench-results/results.json bench-baseline/results.json
+
+  # Generated programs and the .iris corpus, built natively with
+  # AddressSanitizer (runtime and generated code) and compared with the
+  # interpreter. A heap error fails the run with ASan's report.
+  sanitize:
+    name: AddressSanitizer (Linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      IRIS_SANITIZE: address
+      IRIS_CLANG: /usr/bin/clang
+      IRIS_NO_INTERP_FALLBACK: "1"
+      IRIS_DIFF_SEEDS: "1..61"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install system dependencies
+        run: |
+          sudo DEBIAN_FRONTEND=noninteractive apt-get update -yq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -yq build-essential clang lld libclang-rt-dev
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: sanitize-${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: sanitize-${{ runner.os }}-cargo-
+      - name: Differential tester under ASan
+        run: cargo test --test differential -- --nocapture
+      - name: Corpus under ASan (both backends agree)
+        run: cargo test --test iris_corpus the_two_backends_agree -- --nocapture
+      - name: Closure, array and heap regressions under ASan
+        run: cargo test --test native_heap_arrays --test spawn_capture_regression
 
   fuzz:
     name: Fuzz Testing

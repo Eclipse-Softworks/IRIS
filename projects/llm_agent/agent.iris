@@ -1,0 +1,79 @@
+// The agent loop: send the conversation and the tool table to a chat model;
+// run the tools it asks for, each through its typed decoder; send the results
+// back; stop when it answers or after `max_steps` turns of tool calls.
+//
+// A client whose chat_url starts with "script:" talks to the scripted model
+// in scripted.iris instead of the network, through the same request and
+// response JSON.
+
+bring std.llm
+bring "tools.iris"
+bring "scripted.iris"
+
+pub const SYSTEM_PROMPT: str = "You are a warehouse assistant. Use the tools for every fact about stock, orders and shipping; never guess a number. Answer in one or two sentences."
+
+pub record AgentRun {
+    answer: str,
+    // "answered", "step limit", or "provider error: ..."
+    stopped: str,
+    steps: i64,
+    // "tool_name -> result" for every tool call, in order
+    trace: list<str>,
+}
+
+def chat(client: LlmClient, messages: list<LlmMessage>) -> result<LlmResponse, str> {
+    if starts_with(client.chat_url, "script:") {
+        val request = llm_request_json(client, messages, 0.0, 512, tools_json());
+        return llm_response_from_json(200, scripted_reply(request))
+    };
+    llm_chat_with_tools(client, messages, 0.0, 512, tools_json())
+}
+
+pub def run_agent(client: LlmClient, question: str, max_steps: i64) -> AgentRun {
+    run_agent_with(client, SYSTEM_PROMPT, question, max_steps)
+}
+
+/// As run_agent, with the system prompt given ("" sends none: some small
+/// models, Mistral 7B v0.3 among them, answer in prose instead of calling
+/// tools when a system message is present).
+pub def run_agent_with(client: LlmClient, system: str, question: str, max_steps: i64) -> AgentRun {
+    val messages: list<LlmMessage> = list();
+    if len(system) > 0 {
+        push(messages, llm_message("system", system))
+    };
+    push(messages, llm_message("user", question));
+    val trace: list<str> = list();
+    var step = 0;
+    while step < max_steps {
+        val reply = chat(client, messages);
+        if is_ok(reply) == false {
+            return AgentRun { answer: "", stopped: "provider error: " + unwrap_err(reply), steps: step, trace: trace }
+        };
+        val response = unwrap(reply);
+        val calls = llm_tool_calls(response);
+        if list_len(calls) == 0 {
+            return AgentRun { answer: response.content, stopped: "answered", steps: step + 1, trace: trace }
+        };
+        push(messages, llm_assistant_turn(response));
+        var c = 0;
+        while c < list_len(calls) {
+            val call = list_get(calls, c);
+            val result = run_tool(call.name, call.arguments_json);
+            push(trace, call.name + " -> " + result);
+            push(messages, llm_tool_result(call.id, result));
+            c = c + 1
+        };
+        step = step + 1
+    };
+    AgentRun { answer: "", stopped: "step limit", steps: step, trace: trace }
+}
+
+pub def print_run(run: AgentRun) -> i64 {
+    var i = 0;
+    while i < list_len(run.trace) {
+        println("  tool " + list_get(run.trace, i));
+        i = i + 1
+    };
+    println("  " + run.stopped + " after " + to_str(run.steps) + " turns: " + run.answer);
+    0
+}

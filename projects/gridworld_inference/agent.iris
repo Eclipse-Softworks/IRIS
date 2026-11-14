@@ -1,0 +1,212 @@
+// An active-inference agent that learns the world's dynamics while it acts.
+//
+// Model: for every (cell, action), a Dirichlet distribution over the five
+// outcomes (stay, up, right, down, left), held as counts: a weak prior that a
+// move usually goes where it is aimed (1.0 on that outcome, 0.1 on each other
+// outcome on the grid), plus one count per move made. The predicted outcome
+// distribution is the normalized counts. A uniform prior makes every untried
+// move look like it mostly fails, and the agent then settles for the first
+// route it finds.
+//
+// Choice: the action with the lowest expected free energy
+//   G(s, a) = E[risk] - eta * novelty(s, a) + E[G*(s')]
+// Risk is -ln of the preference for the outcome: one nat for each step not
+// ending at the goal (preferred and absorbing). Novelty is the expected
+// information gain about the Dirichlet parameters,
+//   sum_k (a_k / a_0) * 0.5 * (1/a_k - 1/a_0) = 0.5 * (n - 1) / a_0
+// for n possible outcomes and a_0 counts in all; it shrinks as the pair is
+// tried, and it is what makes the agent explore. eta = 0 only exploits.
+//
+// Learning forgets: before a move's outcome is counted, that pair's evidence
+// decays towards the prior by DECAY, so the model follows a world that
+// changes (memory of about twenty moves per pair).
+//
+// G* is planned by value iteration on the learned model, kept between
+// decisions and refined by one sweep each step. eta * novelty stays below
+// the one-nat step cost (eta <= 0.5 with this prior), so every step costs
+// something and G* stays finite without a horizon or discount.
+
+bring "world.iris"
+
+pub const PRIOR_AIMED: f64 = 1.0
+pub const PRIOR_OTHER: f64 = 0.1
+pub const DECAY: f64 = 0.95
+pub const SWEEPS: i64 = 1
+
+pub record Agent {
+    // (cell * ACTIONS + action) * SLOTS + outcome
+    counts: list<f64>,
+    priors: list<f64>,
+    // a_0 per (cell, action)
+    totals: list<f64>,
+    // outcomes on the grid per cell
+    outcomes: list<f64>,
+    // cell * SLOTS + outcome -> cell, or -1
+    targets: list<i64>,
+    // G* per cell
+    values: list<f64>,
+}
+
+pub def agent_new() -> Agent {
+    val targets: list<i64> = list();
+    val outcomes: list<f64> = list();
+    val counts: list<f64> = list();
+    val priors: list<f64> = list();
+    val totals: list<f64> = list();
+    val values: list<f64> = list();
+    var s = 0;
+    while s < CELLS {
+        var n = 0.0;
+        var slot = 0;
+        while slot < SLOTS {
+            val t = slot_target(s, slot);
+            push(targets, t);
+            if t >= 0 {
+                n = n + 1.0
+            };
+            slot = slot + 1
+        };
+        push(outcomes, n);
+        push(values, 0.0);
+        var a = 0;
+        while a < ACTIONS {
+            var total = 0.0;
+            var k = 0;
+            while k < SLOTS {
+                val prior = if slot_target(s, k) < 0 { 0.0 } else if k == a + 1 { PRIOR_AIMED } else { PRIOR_OTHER };
+                push(counts, prior);
+                push(priors, prior);
+                total = total + prior;
+                k = k + 1
+            };
+            push(totals, total);
+            a = a + 1
+        };
+        s = s + 1
+    };
+    Agent { counts: counts, priors: priors, totals: totals, outcomes: outcomes, targets: targets, values: values }
+}
+
+/// Count one observed move, after letting that pair's evidence decay.
+pub def learn(agent: Agent, s: i64, a: i64, next: i64) -> i64 {
+    var total = 0.0;
+    var slot = 0;
+    while slot < SLOTS {
+        val i = (s * ACTIONS + a) * SLOTS + slot;
+        val c = list_get(agent.counts, i);
+        if c > 0.0 {
+            val prior = list_get(agent.priors, i);
+            val kept = prior + (c - prior) * DECAY;
+            val counted = if list_get(agent.targets, s * SLOTS + slot) == next { kept + 1.0 } else { kept };
+            list_set(agent.counts, i, counted);
+            total = total + counted
+        };
+        slot = slot + 1
+    };
+    list_set(agent.totals, s * ACTIONS + a, total);
+    0
+}
+
+pub def novelty(agent: Agent, s: i64, a: i64) -> f64 {
+    0.5 * (list_get(agent.outcomes, s) - 1.0) / list_get(agent.totals, s * ACTIONS + a)
+}
+
+pub def predicted(agent: Agent, s: i64, a: i64, slot: i64) -> f64 {
+    list_get(agent.counts, (s * ACTIONS + a) * SLOTS + slot) / list_get(agent.totals, s * ACTIONS + a)
+}
+
+/// Expected free energy of action a from s, under the agent's current G*.
+pub def efe(agent: Agent, s: i64, a: i64, eta: f64) -> f64 {
+    val base = (s * ACTIONS + a) * SLOTS;
+    val a0 = list_get(agent.totals, s * ACTIONS + a);
+    var g = 0.0 - eta * novelty(agent, s, a);
+    var slot = 0;
+    while slot < SLOTS {
+        val ak = list_get(agent.counts, base + slot);
+        if ak > 0.0 {
+            val t = list_get(agent.targets, s * SLOTS + slot);
+            if t != GOAL {
+                g = g + (ak / a0) * (1.0 + list_get(agent.values, t))
+            }
+        };
+        slot = slot + 1
+    };
+    g
+}
+
+def best(agent: Agent, s: i64, eta: f64) -> (i64, f64) {
+    var best_a = 0;
+    var best_g = 1.0e30;
+    var a = 0;
+    while a < ACTIONS {
+        val g = efe(agent, s, a, eta);
+        if g < best_g {
+            best_g = g;
+            best_a = a
+        };
+        a = a + 1
+    };
+    (best_a, best_g)
+}
+
+// Value-iteration sweeps of G* on the learned model.
+pub def refine(agent: Agent, eta: f64, sweeps: i64) -> i64 {
+    var k = 0;
+    while k < sweeps {
+        var s = 0;
+        while s < CELLS {
+            // Every cell but the goal: the agent does not know where the walls are.
+            if s != GOAL {
+                list_set(agent.values, s, best(agent, s, eta).1)
+            };
+            s = s + 1
+        };
+        k = k + 1
+    };
+    0
+}
+
+/// Plan a little further, then the action to take from s.
+pub def choose(agent: Agent, s: i64, eta: f64) -> i64 {
+    refine(agent, eta, SWEEPS);
+    best(agent, s, eta).0
+}
+
+// For reporting only (it consults the world to know which moves are
+// possible): the learned chance that a move from s fails, from the counts
+// alone (prior removed), over the actions that can move; -1 if s was never left.
+pub def learned_slip(agent: Agent, s: i64) -> f64 {
+    var stays = 0.0;
+    var tries = 0.0;
+    var a = 0;
+    while a < ACTIONS {
+        if passable(s, a) {
+            val i = (s * ACTIONS + a) * SLOTS;
+            stays = stays + list_get(agent.counts, i) - list_get(agent.priors, i);
+            tries = tries + list_get(agent.totals, s * ACTIONS + a) - prior_total(agent, s, a)
+        };
+        a = a + 1
+    };
+    if tries < 0.5 { -1.0 } else { stays / tries }
+}
+
+def prior_total(agent: Agent, s: i64, a: i64) -> f64 {
+    var total = 0.0;
+    var k = 0;
+    while k < SLOTS {
+        total = total + list_get(agent.priors, (s * ACTIONS + a) * SLOTS + k);
+        k = k + 1
+    };
+    total
+}
+
+// For reporting: the evidence (decayed moves) the agent holds about s.
+pub def tries_from(agent: Agent, s: i64) -> f64 {
+    var tries = 0.0;
+    var a = 0;
+    while a < ACTIONS {
+        tries = tries + list_get(agent.totals, s * ACTIONS + a) - prior_total(agent, s, a);
+        a = a + 1
+    };
+    tries
+}

@@ -20,5 +20,6 @@ def main() -> i64 {
         i = i + 1
     }
     print(sum);
+    assert(sum == 41541750);
     0
 }

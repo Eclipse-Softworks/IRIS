@@ -1,0 +1,135 @@
+// Runs the three Uno programs' logic on the host against simulated inputs:
+// a bouncing button, a held button, and a heater plant for the PID. The
+// board files (uno_*.iris) call the same step functions from the hardware
+// hooks.
+
+bring "toggle.iris"
+bring "pid.iris"
+bring "modes.iris"
+
+// Feed `level` to the lamp for `steps` steps; the steps the lamp was lit.
+def hold(level: i64, steps: i64) -> i64 {
+    var lit = 0;
+    for i in 0..steps {
+        lit = lit + modes_step(level);
+    };
+    lit
+}
+
+// A heater: ambient 200 counts, 3 counts per unit of duty at steady state,
+// a time constant of 25 steps. Temperature is in thousandths of a count.
+def heat(temp_milli: i64, duty: i64) -> i64 {
+    temp_milli + (200000 + duty * 3000 - temp_milli) / 25
+}
+
+def check_toggle() -> i64 {
+    toggle_reset();
+    assert(toggle_step(0) == 0);
+    assert(toggle_step(1) == 1);
+    assert(toggle_step(1) == 1);
+    assert(toggle_step(0) == 1);
+    assert(toggle_step(1) == 0);
+    assert(toggle_step(0) == 0);
+    assert(toggle_step(1) == 1);
+    assert(toggle_count() == 3);
+    println("toggle: 3 presses, LED follows each rising edge");
+    0
+}
+
+def check_modes() -> i64 {
+    assert(hold(0, 100) == 0);
+    // Contact bounce shorter than the debounce window is ignored.
+    hold(1, 10);
+    hold(0, 5);
+    hold(1, 30);
+    hold(0, 100);
+    assert(lamp_mode_now() == MODE_OFF);
+    // A short press advances on release.
+    hold(1, 200);
+    assert(lamp_mode_now() == MODE_OFF);
+    hold(0, 100);
+    assert(lamp_mode_now() == MODE_ON);
+    assert(hold(0, 1000) == 1000);
+    hold(1, 200);
+    hold(0, 100);
+    assert(lamp_mode_now() == MODE_SLOW);
+    val slow = hold(0, 2 * SLOW_HALF_PERIOD);
+    println("slow blink: lit " + to_str(slow) + " of " + to_str(2 * SLOW_HALF_PERIOD) + " steps");
+    assert(slow == SLOW_HALF_PERIOD);
+    hold(1, 200);
+    hold(0, 100);
+    assert(lamp_mode_now() == MODE_FAST);
+    val fast = hold(0, 2 * FAST_HALF_PERIOD);
+    assert(fast == FAST_HALF_PERIOD);
+    hold(1, 200);
+    hold(0, 100);
+    assert(lamp_mode_now() == MODE_OFF);
+    // From on, a long press switches off and its release does not advance.
+    hold(1, 200);
+    hold(0, 100);
+    assert(lamp_mode_now() == MODE_ON);
+    hold(1, LONG_PRESS_STEPS + 500);
+    assert(lamp_mode_now() == MODE_OFF);
+    hold(0, 100);
+    assert(lamp_mode_now() == MODE_OFF);
+    assert(hold(0, 500) == 0);
+    println("modes: bounce ignored, off -> on -> slow -> fast -> off, long press switches off");
+    0
+}
+
+def check_pid() -> i64 {
+    pid_reset();
+    var temp = 200000;
+    var peak = 0;
+    var low_duty = 255;
+    var high_duty = 0;
+    var settled_at = -1;
+    for step in 0..800 {
+        val measured = temp / 1000;
+        val duty = pid_step(600, measured);
+        low_duty = min(low_duty, duty);
+        high_duty = max(high_duty, duty);
+        peak = max(peak, measured);
+        if settled_at < 0 && abs(measured - 600) <= 3 {
+            settled_at = step
+        };
+        if abs(measured - 600) > 3 {
+            settled_at = -1
+        };
+        temp = heat(temp, duty);
+    };
+    val final_reading = temp / 1000;
+    println("pid 200 -> 600: settled at step " + to_str(settled_at) + ", peak " + to_str(peak) + ", final " + to_str(final_reading) + ", duty " + to_str(low_duty) + ".." + to_str(high_duty));
+    assert(settled_at >= 0 && settled_at < 150);
+    assert(peak <= 615);
+    assert(abs(final_reading - 600) <= 1);
+    assert(low_duty >= 0 && high_duty <= PID_DUTY_MAX);
+
+    // An unreachable setpoint saturates the heater without winding up.
+    for step in 0..400 {
+        temp = heat(temp, pid_step(1000, temp / 1000));
+    };
+    val wound = pid_integral_term();
+    var recovered_at = -1;
+    for step in 0..400 {
+        val duty = pid_step(500, temp / 1000);
+        if recovered_at < 0 && duty < PID_DUTY_MAX {
+            recovered_at = step
+        };
+        temp = heat(temp, duty);
+    };
+    println("pid windup: integral " + to_str(wound) + " at saturation; off the limit after " + to_str(recovered_at) + " steps; final " + to_str(temp / 1000));
+    // Integration stopped when the heater saturated, before the clamp.
+    assert(wound > 0 && wound < PID_I_LIMIT);
+    assert(recovered_at >= 0 && recovered_at < 10);
+    assert(abs(temp / 1000 - 500) <= 2);
+    0
+}
+
+def main() -> i64 {
+    check_toggle();
+    check_modes();
+    check_pid();
+    println("uno controls: toggle, debounced modes and fixed-point PID checked");
+    return 0
+}

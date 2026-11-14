@@ -29,5 +29,6 @@ def main() -> i64 {
         i = i + 1
     }
     print(count);
+    assert(count == 1229);
     0
 }

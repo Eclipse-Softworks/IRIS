@@ -1,0 +1,165 @@
+bring "types.iris"
+
+/// physics.iris — Cyber-Physical Environmental Plant & Disturbance Simulator
+/// Models multi-axis rigid body attitude dynamics, multiphysics thermal dissipation,
+/// photovoltaic generation, battery state of charge, and physical hardware fault injection.
+
+pub def abs_f(x : f64) -> f64 {
+    if x < 0.0 {
+        0.0 - x
+    } else {
+        x
+    }
+}
+
+pub def clamp_f(x : f64, lo : f64, hi : f64) -> f64 {
+    if x < lo {
+        lo
+    } else {
+        if x > hi {
+            hi
+        } else {
+            x
+        }
+    }
+}
+
+pub def max_f(a : f64, b : f64) -> f64 {
+    if a > b {
+        a
+    } else {
+        b
+    }
+}
+
+pub def min_f(a : f64, b : f64) -> f64 {
+    if a < b {
+        a
+    } else {
+        b
+    }
+}
+
+pub def step_vessel(state : VesselState, cmd : ActuatorCommand, disturbance_pitch : f64) -> VesselState {
+    val dt = 0.5;
+
+    // 1. Actuator health mapping & torque delivery (via pattern matching)
+    val delivered_pitch_torque = when state.pitch_actuator_health {
+        SubsystemState.Nominal => cmd.pitch_torque_nm,
+        SubsystemState.Degraded(reason) => cmd.pitch_torque_nm * 0.5,
+        SubsystemState.InvertedPolarity(scale) => 0.0 - (cmd.pitch_torque_nm * scale),
+        SubsystemState.CriticalRupture(reason) => 0.0,
+    };
+
+    val delivered_yaw_torque = cmd.yaw_torque_nm;
+
+    // 2. Rigid-body attitude dynamics
+    // Moments of inertia: I_pitch = 80.0 kg*m^2, I_yaw = 65.0 kg*m^2
+    val net_pitch_torque = delivered_pitch_torque + disturbance_pitch;
+    val alpha_pitch_rad = net_pitch_torque / 80.0;
+    val alpha_pitch_deg = alpha_pitch_rad * 57.2958;
+
+    val alpha_yaw_rad = delivered_yaw_torque / 65.0;
+    val alpha_yaw_deg = alpha_yaw_rad * 57.2958;
+
+    val next_pitch_rate = (state.pitch_rate * 0.93) + (alpha_pitch_deg * dt);
+    val next_pitch_deg = state.pitch_deg + (next_pitch_rate * dt);
+
+    val next_yaw_rate = (state.yaw_rate * 0.93) + (alpha_yaw_deg * dt);
+    val next_yaw_deg = state.yaw_deg + (next_yaw_rate * dt);
+
+    // 3. Solar geometry and pointing factor
+    val total_attitude_err = abs_f(next_pitch_deg) + abs_f(next_yaw_deg);
+    val cos_factor = max_f(0.0, 1.0 - (total_attitude_err / 90.0));
+
+    // 4. Multiphysics thermal model
+    val solar_heat_absorbed = state.solar_irradiance * 0.16 * cos_factor;
+    val internal_heat = 28.0 + cmd.payload_power_watts + (abs_f(cmd.pitch_torque_nm) * 0.22) + cmd.survival_heater_watts;
+
+    val louver_effective = when state.radiator_health {
+        SubsystemState.Nominal => clamp_f(cmd.radiator_louver_pos, 0.0, 1.0),
+        SubsystemState.Degraded(msg) => 0.65, // louvers partially jammed
+        SubsystemState.InvertedPolarity(s) => clamp_f(cmd.radiator_louver_pos, 0.0, 1.0),
+        SubsystemState.CriticalRupture(msg) => 0.95, // radiator punctured / stuck wide open
+    };
+
+    val heat_rejected = (28.0 + 135.0 * louver_effective) * (1.0 + (state.bus_temp_c / 55.0));
+    val net_thermal_flux = (solar_heat_absorbed + internal_heat) - heat_rejected;
+    val next_temp_c = state.bus_temp_c + (net_thermal_flux * 0.012);
+
+    // 5. Power & Battery dynamics
+    val solar_gen_watts = state.solar_irradiance * 0.24 * cos_factor;
+    val electric_load_watts = 22.0 + cmd.payload_power_watts + (abs_f(cmd.pitch_torque_nm) * 0.3) + (abs_f(cmd.yaw_torque_nm) * 0.3) + cmd.survival_heater_watts;
+    val net_power_watts = solar_gen_watts - electric_load_watts;
+    val next_soc = clamp_f(state.battery_soc + (net_power_watts * 0.024), 0.0, 100.0);
+
+    // 6. Science payload accumulation
+    val science_locked = abs_f(next_pitch_deg) < 4.0 && abs_f(next_yaw_deg) < 4.0 && cmd.payload_power_watts >= 20.0;
+    val next_science = if science_locked {
+        state.science_packets + 1
+    } else {
+        state.science_packets
+    };
+
+    VesselState {
+        cycle : state.cycle + 1,
+        pitch_deg : next_pitch_deg,
+        pitch_rate : next_pitch_rate,
+        yaw_deg : next_yaw_deg,
+        yaw_rate : next_yaw_rate,
+        bus_temp_c : next_temp_c,
+        battery_soc : next_soc,
+        solar_irradiance : state.solar_irradiance,
+        science_packets : next_science,
+        pitch_actuator_health : state.pitch_actuator_health,
+        radiator_health : state.radiator_health
+    }
+}
+
+pub def inject_meteoroid_strike(state : VesselState) -> VesselState {
+    VesselState {
+        cycle : state.cycle,
+        pitch_deg : state.pitch_deg + 6.5, // physical impulse nudge
+        pitch_rate : state.pitch_rate + 2.8,
+        yaw_deg : state.yaw_deg - 1.5,
+        yaw_rate : state.yaw_rate - 0.9,
+        bus_temp_c : state.bus_temp_c + 3.0,
+        battery_soc : state.battery_soc,
+        solar_irradiance : state.solar_irradiance,
+        science_packets : state.science_packets,
+        pitch_actuator_health : SubsystemState.InvertedPolarity(1.0), // crossed solenoid phase
+        radiator_health : SubsystemState.Degraded("perforated thermal blanket")
+    }
+}
+
+pub def inject_solar_storm(state : VesselState) -> VesselState {
+    VesselState {
+        cycle : state.cycle,
+        pitch_deg : state.pitch_deg + 3.2,
+        pitch_rate : state.pitch_rate + 1.2,
+        yaw_deg : state.yaw_deg,
+        yaw_rate : state.yaw_rate,
+        bus_temp_c : state.bus_temp_c + 8.5,
+        battery_soc : state.battery_soc,
+        solar_irradiance : 1100.0, // radiation spike
+        science_packets : state.science_packets,
+        pitch_actuator_health : state.pitch_actuator_health,
+        radiator_health : state.radiator_health
+    }
+}
+
+pub def make_nominal_vessel() -> VesselState {
+    VesselState {
+        cycle : 0,
+        pitch_deg : 4.0, // initial small attitude error
+        pitch_rate : 0.0,
+        yaw_deg : -2.5,
+        yaw_rate : 0.0,
+        bus_temp_c : 22.0,
+        battery_soc : 92.0,
+        solar_irradiance : 420.0,
+        science_packets : 0,
+        pitch_actuator_health : SubsystemState.Nominal,
+        radiator_health : SubsystemState.Nominal
+    }
+}

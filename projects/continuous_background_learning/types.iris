@@ -1,0 +1,65 @@
+// projects/continuous_background_learning/types.iris
+// Domain types and telemetry contracts for Continuous Background Learning.
+
+pub record PlantParams {
+    inertia: f64,      // Rotational mass J (kg*m^2)
+    damping: f64,      // Viscous friction coefficient b (N*m*s/rad)
+    bias_torque: f64,  // External gravity/load torque tau_bias (N*m)
+}
+
+pub record PlantState {
+    theta: f64,        // Angular position (radians)
+    omega: f64,        // Angular velocity (radians/sec)
+    time_s: f64,       // Elapsed continuous simulation time (seconds)
+}
+
+pub record ActuatorCommand {
+    torque: f64,       // Commanded effort in N*m
+    clamped: bool,     // True if saturated at physical torque ceiling
+}
+
+pub record ModelWeights {
+    gen: i64,          // Generation counter (0 = nominal prior, 1 = online adapted)
+    est_inertia: f64,  // Learned inertia parameter J_hat
+    est_damping: f64,  // Learned friction parameter b_hat
+    est_bias: f64,     // Learned external bias tau_hat
+    kp: f64,           // Adaptive proportional gain Kp
+    kd: f64,           // Adaptive derivative gain Kd
+    loss: f64,         // Training residual mean squared error
+}
+
+pub record Transition {
+    theta: f64,        // Initial angle theta_k
+    omega: f64,        // Initial velocity omega_k
+    torque: f64,       // Applied torque u_k
+    next_theta: f64,   // Resulting angle theta_{k+1}
+    next_omega: f64,   // Resulting velocity omega_{k+1}
+    time_s: f64,       // Observation timestamp
+}
+
+pub record ControlTelemetry {
+    step: i64,          // Discrete control loop step index
+    time_s: f64,        // Elapsed continuous time
+    target_theta: f64,  // Desired reference position
+    actual_theta: f64,  // Measured plant position
+    tracking_error: f64,// theta_ref - theta
+    control_torque: f64,// Applied torque
+    active_gen: i64,    // Currently active model generation
+}
+
+pub record LearningStats {
+    samples_ingested: i64,
+    gradient_steps: i64,
+    models_published: i64,
+    best_loss: f64,
+}
+
+pub record MissionReport {
+    total_steps: i64,
+    nominal_mse: f64,
+    drift_mse: f64,
+    adapted_mse: f64,
+    improvement_pct: f64,
+    models_adapted: i64,
+    training_steps_run: i64,
+}

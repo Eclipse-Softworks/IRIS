@@ -1,0 +1,142 @@
+// std.ais: an active inference agent learns its model from experience.
+//
+// The likelihood and the transitions are Dirichlet counts. Each observation
+// adds to the counts of the state the agent believes it came from, so the
+// model converges to the world's own statistics; and the novelty drive --
+// expected information about those counts -- sends the agent where they are
+// still thin.
+bring std.ais
+
+def draw(probs: list<f64>) -> i64 effect random {
+    probs_sample(probs)
+}
+
+def main() -> i64 {
+    seed(42)
+
+    // ── The likelihood: three states visited in a known cycle ──────────────
+    // The world shows the true state 80% of the time and each other one 10%.
+    // The agent knows how it moves but not what it will see.
+    val world: list<list<f64>> = list(list(0.8, 0.1, 0.1), list(0.1, 0.8, 0.1), list(0.1, 0.1, 0.8))
+    val m = pomdp_new(3, 3, 1)
+    for s in 0..3 {
+        val next: list<f64> = list(0.0, 0.0, 0.0)
+        list_set(next, (s + 1) % 3, 1.0)
+        pomdp_set_transition(m, 0, s, next, 100.0)
+    }
+    pomdp_set_prior(m, list(1.0, 0.0, 0.0))
+    var agent = aif_with_learning(aif_agent_new(m, 1, 1.0), 1.0)
+    var s = 0
+    for t in 0..1500 {
+        agent = aif_observe(agent, draw(list_get(world, s)))
+        val step = aif_decide(agent)
+        agent = step.0
+        s = (s + 1) % 3
+    }
+    var worst = 0.0
+    for st in 0..3 {
+        for o in 0..3 {
+            val err = abs(list_get(agent.model.a, o * 3 + st) - list_get(list_get(world, st), o))
+            if err > worst { worst = err }
+        }
+    }
+    println("likelihood: largest error " + to_str(worst) + " after 1500 observations")
+    assert(worst < 0.05)
+    // Beliefs stayed certain throughout, because the moves are known: the
+    // agent is sure of the state it last observed, the one before `s`.
+    assert(list_get(agent.belief, (s + 2) % 3) > 0.999)
+
+    // ── The transitions: a fully observed world, a random policy ───────────
+    // Action 0 mostly stays, action 1 mostly advances.
+    val stay: list<list<f64>> = list(list(0.9, 0.1, 0.0), list(0.0, 0.9, 0.1), list(0.1, 0.0, 0.9))
+    val advance: list<list<f64>> = list(list(0.2, 0.8, 0.0), list(0.0, 0.2, 0.8), list(0.8, 0.0, 0.2))
+    val mt = pomdp_new(3, 3, 2)
+    for st in 0..3 {
+        val col: list<f64> = list(0.0, 0.0, 0.0)
+        list_set(col, st, 1.0)
+        pomdp_set_likelihood(mt, st, col, 1000.0)
+    }
+    pomdp_set_prior(mt, list(1.0, 0.0, 0.0))
+    var learner = aif_with_learning(aif_agent_new(mt, 1, 1.0), 1.0)
+    var cur = 0
+    for t in 0..6000 {
+        learner = aif_observe(learner, cur)
+        val act = random_range(0, 2)
+        var l2 = learner
+        l2.last_action = act
+        learner = l2
+        val row = if act == 0 { list_get(stay, cur) } else { list_get(advance, cur) }
+        cur = draw(row)
+    }
+    var worst_b = 0.0
+    for st in 0..3 {
+        for s2 in 0..3 {
+            val e0 = abs(list_get(learner.model.b, (0 * 3 + st) * 3 + s2) - list_get(list_get(stay, st), s2))
+            val e1 = abs(list_get(learner.model.b, (1 * 3 + st) * 3 + s2) - list_get(list_get(advance, st), s2))
+            if e0 > worst_b { worst_b = e0 }
+            if e1 > worst_b { worst_b = e1 }
+        }
+    }
+    println("transitions: largest error " + to_str(worst_b) + " after 6000 moves")
+    assert(worst_b < 0.05)
+
+    // ── Novelty: explore a corridor where nothing has been seen yet ────────
+    // Six cells; stay, left, right; the moves are known, what each cell
+    // shows is not. Compare the steps until every cell is visited.
+    var novelty_steps = 0
+    var random_steps = 0
+    val runs = 20
+    for run in 0..runs {
+        novelty_steps = novelty_steps + cover_time(true)
+        random_steps = random_steps + cover_time(false)
+    }
+    println("corridor: novelty-seeking covers it in " + to_str(novelty_steps / runs) + " steps on average, a random walk in " + to_str(random_steps / runs))
+    // Five steps is the least possible: straight down the corridor.
+    assert(novelty_steps / runs <= 6)
+    assert(random_steps >= 4 * novelty_steps)
+    println("std.ais learning: ok")
+    return 0
+}
+
+def corridor() -> Pomdp {
+    val m = pomdp_new(6, 6, 3)
+    for c in 0..6 {
+        val left = if c > 0 { c - 1 } else { c }
+        val right = if c < 5 { c + 1 } else { c }
+        for act in 0..3 {
+            val dest = if act == 0 { c } else { if act == 1 { left } else { right } }
+            val row: list<f64> = list(0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+            list_set(row, dest, 1.0)
+            pomdp_set_transition(m, act, c, row, 100.0)
+        }
+    }
+    pomdp_set_prior(m, list(1.0, 0.0, 0.0, 0.0, 0.0, 0.0))
+    m
+}
+
+// Steps until a run has visited all six cells (60 at most). The world shows
+// each cell as itself; the agent starts with no idea of that.
+def cover_time(novelty: bool) -> i64 effect random {
+    val m = corridor()
+    var agent = aif_with_sampling(aif_with_learning(aif_agent_new(m, 2, 16.0), 1.0), true)
+    agent = if novelty { aif_with_drives(agent, 1.0, 1.0) } else { aif_with_drives(agent, 0.0, 0.0) }
+    val seen: list<bool> = list(false, false, false, false, false, false)
+    var cell = 0
+    var count = 0
+    var steps = 0
+    while count < 6 && steps < 60 {
+        if !list_get(seen, cell) {
+            list_set(seen, cell, true)
+            count = count + 1
+        }
+        if count < 6 {
+            agent = aif_observe(agent, cell)
+            val step = aif_decide(agent)
+            agent = step.0
+            val act = step.1.action
+            cell = if act == 1 { if cell > 0 { cell - 1 } else { cell } } else { if act == 2 { if cell < 5 { cell + 1 } else { cell } } else { cell } }
+            steps = steps + 1
+        }
+    }
+    steps
+}

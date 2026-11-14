@@ -3,41 +3,72 @@
 Defects found by writing new IRIS programs against v1.0.0-rc1 and verifying
 their output. Each entry has a minimal reproduction.
 
-## Current open limitations (2026-09-09)
+## Current open limitations (2026-11-12)
 
 The numbered entries below are a chronological engineering log and mostly mark
 resolved defects. The release-relevant open limits are:
 
-- The general native security policy does not mediate every C runtime call.
-  `iris evolve` compensates with a fail-closed reachable-IR subset and bounded
-  interpreter validation. The library's Windows worker backend now stages an
-  executable in an ephemeral zero-capability LPAC, creates it suspended,
-  assigns memory/CPU/process limits through a Job Object, bounds stdout/stderr,
-  and only then resumes it. Non-Windows native worker backends remain
-  unavailable and fail closed. The scalar `iris evolve` CLI still validates in
-  the interpreter rather than launching this worker backend.
-- A transaction can stage and roll back individual filesystem writes, but commit
-  of several files is not one OS-level atomic operation.
-- Function and whole-program hot swap retain eight generations by default
-  (active plus bounded history). Source/manifest artifacts can be persisted in
-  the content-addressed artifact store; a durable service must still configure
-  retention and backup policy outside the process.
-- `iris evolve` now requires `--audit-head`; the checkpoint is verified before
-  promotion and advanced after each durable append. Put it in a separate trust
-  domain from the JSONL log to defend against an actor able to rewrite both.
+- Native security policies now propagate from IRIS (`--sandbox` /
+  `set_security_policy` / `IRIS_SECURITY_POLICY`) into compiled LLVM binaries
+  and the C runtime (`iris_sandbox_set_policy_spec`), mediating C-runtime
+  filesystem, SQLite, ML model loaders, TCP/UDP/HTTP/TLS/async sockets,
+  process/env, Python, and dynamic FFI entry points (with path-traversal,
+  allowlist/blocklist, byte-size, and open-handle checks), while unmediated
+  `extern def` declarations and external native libraries fail closed unless
+  explicitly permitted by `allow_ffi` / `ffi_allowlist`. Arbitrary pre-linked
+  third-party native code outside IRIS runtime/codegen mediation still
+  requires the OS worker sandbox.
+- The Windows LPAC worker sandbox (memory, CPU, process, stdout/stderr limits)
+  runs locally on Windows. Linux (Landlock kernel 5.13+ + seccomp-bpf + rlimits,
+  verified in Linux containers) and macOS (Seatbelt `sandbox-exec` + rlimits +
+  sub-second `mach_timebase_info` CPU sampling, verified in macOS CI) remain
+  OS-specific and fail closed when their kernel mechanism is unavailable.
+  `iris evolve` now defaults to `--validate sandbox` (covering `i64`, `f64`,
+  and `record` ABIs).
+- Multi-file `transaction_commit` (interpreter and C runtime) uses a synced
+  two-phase WAL (`PREPARED` -> `COMMITTING` -> `COMMITTED`) with per-file
+  `.new`/`.bak` staging, automatic rollback on mid-commit failure, and
+  explicit crash recovery (`recover_incomplete_transactions` /
+  `iris_transaction_recover`). Single-file rename replacement remains OS-atomic
+  per mount/volume rather than a single cross-volume kernel syscall.
+- Function and whole-program hot swap retain 8 generations by default and now
+  support configurable limits and durable external generation archiving
+  (`--max-generations` / `IRIS_HOT_SWAP_RETENTION`, `--generation-archive` /
+  `IRIS_HOT_SWAP_ARCHIVE_DIR`). `--audit-head` supports atomic checkpoint writes,
+  keyed HMAC-SHA256 authentication (`iris-evolution-audit-head/2` via
+  `--audit-hmac-key` / `--audit-hmac-key-file` / `IRIS_AUDIT_HMAC_KEY`),
+  secondary mirrors (`--audit-head-mirror`), and fail-closed separate-directory
+  checks (`--require-separate-audit-domain` /
+  `IRIS_AUDIT_REQUIRE_SEPARATE_DOMAIN`); production deployments must still hold
+  checkpoints and keys in an independent trust domain.
 - The v2 whole-program manifest, reviewed JSON/command/scalar gateways, explicit
   JSON state contract, atomic gateway switch, and artifact store are available
-  as library APIs. The public seven-gate `iris evolve` command still uses the
-  legacy scalar canary metric and is not yet a general stateful program CLI.
-- The DAP debugger records and replays interpreter execution traces. It supports
-  source breakpoints, conditions, logpoints, watches, variable inspection,
-  named test entry points, and reverse stepping, but it is not a native machine
-  debugger and does not attach to already-running native processes.
+  as library APIs. The public seven-gate `iris evolve` command promotes scalar,
+  `f64` control and record policies, and whole stateful programs through
+  `--manifest`/`--scenarios` (since 2026-10-18; see #73 for state limits).
+- The DAP debugger supports both trace-based interpreter sessions (source
+  breakpoints, conditions, logpoints, watches, variable inspection, named test
+  entry points, `stepBack`, and `reverseContinue`) and native DWARF sessions
+  (`"native": true`, or `"attach"` with `processId`/`pid`/`target`, relayed to
+  GDB 14+'s DAP mode, `lldb-dap`, or `IRIS_NATIVE_DAP`). Native builds emit
+  DWARF types for scalars, `str`, `record` structs (with field names/offsets),
+  `enum` variants, fixed scalar arrays, `option`, `result`, `tuple`, `list`,
+  and `map` locals/parameters across brought modules. Native reverse stepping
+  (`stepBack`/`reverseContinue`) forwards only when the underlying adapter
+  advertises `supportsStepBack: true` (for example `rr`); adapters without
+  reverse execution (including GDB on Windows) emit `capabilities` with
+  `supportsStepBack: false` and return an explicit error on reverse requests.
+  Lines after a `#define`/`#if` directive are offset by the dropped directive
+  lines. On Windows with LLVM 23 (`clang`/`llvm-config` archives without
+  `lldb-dap`, or `lldb-dap` builds missing Python DLL `0xC0000135` on `PATH`),
+  GDB 14+ (tested with GDB 17.1) is the tested native adapter.
 - Arduino Uno physical validation covers the documented scalar/control-flow
   profile. AVR cyclic CFGs/fixed arrays are rejected under the current LLVM
   backend, and Cortex-M/ESP32 physical board validation remains outstanding.
-- ROS 2 topics/QoS/lifecycle and local transform support exist; services,
-  actions, sensor-message breadth, and wire-level tf2 remain future work.
+- ROS 2 runs on rclcpp (topics of any message type, services, actions,
+  parameters, lifecycle nodes, tf2, timers), verified on Windows Humble (Cyclone DDS)
+  and Linux Humble with Fast DDS on 2026-10-20 (#74); macOS remains unbuilt, and
+  the executor is single-threaded per context.
 
 These limits are release-candidate scope, not hidden implementation promises.
 
@@ -48,10 +79,12 @@ named-function callback ABI, and Windows append newline preservation. See
 `tests/native_scalar_array_fields.rs`, `tests/native_named_callbacks.rs`, and
 the `examples/06_data/files.iris` catalog test.
 
-Const-generic array lengths can still be represented as zero in some declared
-field metadata. Direct literal field access recovers the initializer's real
-bound; this is not a claim that every const-generic cross-function shape is
-supported. The current examples exercise the checked, directly initialized form.
+Const-generic struct instantiations (`record Array[T, const N: usize]`) and
+generic functions propagate concrete const bounds into declared field metadata
+(`IrModule::struct_defs`) and runtime `const` bindings across unannotated struct
+literals, global `const` arguments, and cross-function `[T; N]` / `Array<T, N>`
+calls; non-constant runtime values remain dynamic lists (`list<T>`). See
+`tests/const_generics.rs` and `tests/native_scalar_array_fields.rs`.
 
 ---
 
@@ -1007,7 +1040,7 @@ Nothing runs it.
 expected — argument positions, list/map element types, struct fields, return
 positions — rather than only at let-bindings.
 
-### 18b. …and there is no native implementation at all
+### 18b. …and there is no native implementation at all — **FIXED**
 
 Worse than the coercion gap: `dyn Trait` does not work in a native build in
 *any* form, including the annotated-binding one that works interpreted.
@@ -1050,7 +1083,7 @@ Until then: **trait objects are interpreter-only, and only via
 `val x: dyn Trait = concrete`.** Do not describe `dyn Trait` as a working
 feature.
 
-**Status:** open.
+**Status:** fixed. `MakeTraitObject` and `DynCall` have native code generation, and as of 2026-10-18 coercion to `dyn Trait` happens at every site that expects one: parameters, annotated bindings, list elements, a function's tail value, early `return`, each `if` branch of a returned value, and record fields (whose method lists were previously empty because records are registered before traits). A record that does not implement the trait is now a compile error (E0108) instead of a runtime dispatch failure. Covered on both backends by `tests/test_dyn_coercion_sites.iris`, `tests/test_dyn_requires_impl.iris` and `tests/core_language_traps.rs`.
 
 ---
 
@@ -1774,6 +1807,10 @@ publisher and publishes 20 messages, matching the interpreter.
 
 ## ROS 2 support — regraded 2026-08-16
 
+> Superseded 2026-10-18: `std.ros2` now runs on rclcpp, rclcpp_action,
+> rclcpp_lifecycle and tf2_ros; current grades are in
+> [ros2-build.md](ros2-build.md) and the remaining limits in #74.
+
 Previously graded on inspection alone. With ROS 2 Humble installed and the
 bridge built, the following are now **Verified** on both backends:
 
@@ -2406,6 +2443,10 @@ FFI at all rather than that it could not pass strings. Interpreter-side mirror o
 
 ## ROS 2 — regraded 2/10 → 4/10, 2026-08-16
 
+> Superseded 2026-10-18: `std.ros2` now runs on rclcpp, rclcpp_action,
+> rclcpp_lifecycle and tf2_ros; current grades are in
+> [ros2-build.md](ros2-build.md) and the remaining limits in #74.
+
 | | Status |
 |---|---|
 | `rcl_init`, node, publisher, subscription | Verified, both backends |
@@ -2585,9 +2626,10 @@ catch-all that absorbs the next variant silently. `apply_replacements` in
 > remains is `handler_frames`, a 164 KB thread-local array of the same shape;
 > worth the same treatment, but it is 1.3% of what this was.
 >
-> **Concurrency update:** native `spawn`, task groups, and lowered `async def`
-> are now scheduled on the fixed executor rather than creating one OS thread per
-> source-level task. The "concurrency does not scale" warning in the historical
+> **Concurrency update:** native `spawn` and task groups are now scheduled on
+> the fixed executor rather than creating one OS thread per source-level task.
+> (`async def` has since become a compiled state machine that runs on the
+> awaiting thread; see #72.) The "concurrency does not scale" warning in the historical
 > report below described the pre-fix runtime, not the current native path.
 >
 > **Correctness verified, not assumed:** `tests/autodiff_tape_chunks.rs` asserts
@@ -3650,6 +3692,925 @@ passes with the fix.
 
 ---
 
+## 72. Async tasks: what the state-machine design does not cover — **OPEN (by design)**
+
+`async def` bodies are compiled into state machines (`src/pass/async_lower.rs`)
+run by a per-thread cooperative executor. The boundaries:
+
+- **A task belongs to the thread that created it.** Awaiting, from inside a
+  `spawn`, a task handle created on another thread is not supported: that
+  thread's executor never sees the task, so the await reports "await can never
+  complete" (or waits on its own tasks). Create the task inside the `spawn`.
+- **Tasks run while their thread waits** -- on `await`, or on a blocking
+  `recv`. A program that creates a task and never waits on anything does not
+  run it.
+- **A fixed-size array (`[T; N]`) cannot be used after an `await` in the same
+  `async def`** (a compile error): it lives on the native stack, which does not
+  survive suspension. Use a list.
+- **Freeing tasks (native):** a task is freed once the program and the
+  executor are both done with it. The compiler releases the program's handle
+  only when the task was created in that function and used exactly once -- by
+  an `await` or as an `async_any` argument -- which covers `await f(x)`,
+  `await async_sleep(ms)` and `await ch`. A handle stored in a list or record,
+  passed to a function, or awaited twice keeps its task (about 200 bytes)
+  alive until the program exits. Measured: a loop of 200,000 iterations with
+  three awaits each runs in constant memory (5.7 MB).
+- **Values created inside a loop are not released until exit** (a GC
+  limitation that predates async and affects all code): a string built in
+  each iteration stays allocated. It no longer slows programs down: the
+  refcount table now grows, and the allocation registry is a hash set (the
+  flat array made a loop building 200,000 strings spend 25 s in exit cleanup).
+- **Awaiting a channel nothing will ever send to waits forever**, like a
+  blocking `recv`; the executor sleeps rather than spins while it waits.
+- **Socket reads and accepts are awaitable; writes, connects and HTTP are
+  not** (since 2026-10-20). `await tcp_accept_async(..)` and
+  `await tcp_read_async(..)` wait on the socket's readiness (`poll`, or
+  `WSAPoll` on Windows) through the builtin `async_readable(handle)`, so one
+  thread serves many connections (`tests/test_async_sockets.iris`: two
+  clients on one thread, the later one answered first, on both backends; a
+  blocking server answers them in the other order). `tcp_write_all_checked`,
+  `tcp_connect_checked` and the HTTP client still block their thread, and
+  every task on it waits with them. While sockets are pending, the executor
+  re-checks its other leaves every 50 ms: a channel send does not interrupt
+  the socket wait, so it is seen up to 50 ms late. There is no async HTTP
+  client.
+
+## 73. Program state: what it does not do yet — **OPEN (by design)**
+
+`var` at the top level (program state) is new; its boundaries:
+
+- **No synchronisation.** Natively, state variables are plain globals: two
+  threads (`spawn`, `par for`) writing one without a `mutex` or `atomic` race.
+  Keep shared counters in an `atomic`, or update state from one thread.
+- **State is per program, not per brought module.** A brought module's `var`
+  declarations merge into the program by name; two with the same name are a
+  compile error.
+- **Handoff types.** Evolution carries `i64`, `f64`, `bool`, `str`, lists of
+  those, and records of `f64`/`i64`/`bool` fields between generations. A
+  variable of another type (a map, a list of records, an option) is
+  re-initialised in the new generation, and the promotion says so; write a
+  manifest `state` contract (snapshot/import functions) to carry it yourself.
+- **Microcontrollers keep scalar state only.** `iris embedded` accepts `var`s
+  of type `i64`, `f64` and `bool` (globals in `.bss`, initialised on the
+  entry's first call); any other type is rejected because it needs the heap.
+- **The interpreter keys state by module.** A host that interprets the same
+  `IrModule` twice should call `iris::interp::init_program_state` (or
+  `reset_program_state`) between runs; `iris evolve` does this for every
+  scenario.
+
+## 74. ROS 2: what the rclcpp bridge does not cover yet — **OPEN**
+
+`std.ros2` runs on rclcpp, rclcpp_action, rclcpp_lifecycle and tf2_ros
+(verified on Windows Humble with Cyclone DDS; see
+[ros2-build.md](ros2-build.md)). Its boundaries:
+
+- **macOS is unbuilt.** Linux was built and verified on 2026-10-20 (ROS 2
+  Humble, Ubuntu 22.04, Fast DDS: `tests/ros2_live.rs` native and ORC, and
+  all 16 interop checks, via `tools/ros2/linux_check.sh`). The macOS paths of
+  the CMake project and the `dladdr` install discovery have not been compiled
+  or run. On Windows only Cyclone DDS was exercised: `rmw_fastrtps_cpp.dll`
+  does not load on the validation machine.
+- **One single-threaded executor per context.** No callback groups and no
+  multi-threaded executor; a long computation between `spin_once` calls delays
+  every callback of that context (rclcpp's /clock thread excepted).
+- **Decisions are policies, not callbacks.** IRIS code cannot run inside an
+  rclcpp callback, so goal acceptance, cancel acceptance, lifecycle callback
+  results and parameter validation are configured in advance
+  (`action_server_create_with`, `lifecycle_set_result`, parameter
+  descriptors). A program cannot, say, accept a goal by inspecting it.
+- **QoS** exposes history, depth, reliability and durability; deadline,
+  lifespan, liveliness and QoS events are absent.
+- **tf2 lookups do not block**, and there is no `waitForTransform`: spin and
+  retry (`tf_can_transform`).
+- **Sim time** is the standard `use_sim_time` parameter, but no test drives a
+  node from a /clock publisher.
+- **Per-call cost** is unmeasured: each `std.ros2` call opens the bridge
+  (an OS-cached load) and resolves its symbol.
+
+## 75. A user function named like a C library symbol breaks native linking — **FIXED**
+
+A native executable emitted user functions under their source names, in the
+same symbol namespace as the C runtime and the libraries it links. A program
+defining `def send(...)` failed to link on Windows (`duplicate symbol: send`,
+against Winsock's import library); against a shared C library the same
+definition would instead have replaced `send` for the runtime's own TCP code.
+`log`, `free`, `connect`, `exit` and the like were exposed in the same way.
+Found building `projects/self_upgrading_service/client.iris` natively.
+
+Native executables (`iris build`, `--emit binary`, native `--emit eval`, `-g`
+builds) now name every user function `iris.<name>`. `.` cannot occur in an
+IRIS or C identifier, so the name collides with nothing. Compiler-internal
+`__` functions and the C `main` wrapper keep their names, debug info still
+shows the source name, and ORC/JIT, `--emit llvm` and embedded output are
+unchanged. Covered by `tests/native_symbol_namespace.rs` (`send`, `connect`,
+`free`, called directly and through a function value).
+
+## 76. `iris evolve-serve`: what the service host does not do — **OPEN (by design)**
+
+- **A gateway that panics stops the host.** Native calls are not trapped, so
+  an input the scenarios never exercised can end the process. Validate input
+  in the gateway and answer with an error instead.
+- **Gateway calls are serialised.** One call runs at a time, which is what
+  keeps every update in exactly one generation; throughput is bounded by a
+  single gateway's latency.
+- **Only operators roll back.** A promoted version is judged by the
+  scenarios and constitution at the gate; live replies are not re-checked,
+  and nothing rolls back automatically (unlike `iris evolve-live`).
+- **The gateways are fixed at start.** An upgrade keeps the manifest's
+  gateways and ABIs; it cannot add an endpoint.
+- **The canary demands improvement.** A candidate must beat the running
+  version on at least one scenario step, so a behaviour-preserving refactor is
+  refused; add a scenario step it improves, or promote it offline.
+- **HTTP is minimal:** one request per connection, `Content-Length` bodies,
+  127.0.0.1 only, no TLS or authentication. Anyone who can reach the port can
+  offer upgrades (which still pass through the gates) and roll back.
+- **Rollback keeps one direction of state.** Variables both versions declare
+  go back with the live values; a variable only the newer version had (here
+  `refused`) is lost, and starts fresh if that version is promoted again.
+
+## 77. Embedded objects referenced the hosted runtime's abort — **FIXED**
+
+Since 2026-09-12 every `extern` function has had a weak fallback definition
+that calls `iris_unhandled_effect_abort` when nothing else defines it. On a
+microcontroller the board support package defines the hooks, but the
+fallback's body stays in the module's `.text` and keeps its reference, and
+the embedded runtime does not define that symbol. Linking a firmware would
+have failed with an undefined reference, including for
+`examples/embedded/uno_button_led.iris` (its hardware report is from
+2026-08-31, before the change). Found by listing the symbols of the
+`projects/uno_controls` objects.
+
+Bare-metal targets (`avr-*` and `*-none-*` triples) now declare `extern`
+functions without a fallback. The modules' only undefined symbols are the
+board hooks they call, libgcc's 64-bit arithmetic helpers, and avr-libc's
+`__do_clear_bss`/`__do_copy_data`. Covered by
+`uno_programs_keep_scalar_state_between_steps` in
+`tests/embedded_allocation_free.rs`. Not re-verified by a link: no AVR-GCC
+on the machine that found it.
+
+## 78. Global constants were lowered in hash order — **FIXED**
+
+Each function materialised every global `const` at entry by iterating a
+`HashMap`, so two compilations of the same source produced IR with the
+constants in different orders. Execution was unaffected (constants are
+inlined), but the embedded proof fingerprint is a hash of the IR, so a
+rebuild of the same firmware could get a different fingerprint, and a board
+report could not be checked against a rebuilt manifest. A program with two constants produced one of two
+fingerprints on alternate builds. Constants are now lowered in name order.
+
+## 79. Native arrays of heap values were empty — **FIXED**
+
+`AllocArray` for a non-scalar element type (`[str; N]`, arrays of records)
+was emitted as an empty runtime list, and its initial elements were never
+stored. Every native load from such an array failed its bounds check
+(`list index 1 out of bounds (len=0)`), while the interpreter was right.
+Found in `projects/cli_tools/csvkit.iris`, whose condition parser walks an
+array of operator strings. The backend now boxes and pushes each initial
+element. Covered by `tests/native_heap_arrays.rs`.
+
+## 80. Strings from `split` were freed while a record field still held them — **FIXED**
+
+`iris_str_split` and `iris_str_chars` put freshly allocated strings in boxes
+without a reference count, unlike `iris_box_str`. A record that stored one of
+those strings retained it, and the retain created the string's first count.
+When the split list was released, each box released its string as if it
+owned a count, which took the record's count to zero and freed the string. A
+later allocation reused the memory: natively, `parse_log_line` in
+`projects/cli_tools/logs.iris` returned a `path` of `"0"`, and a loop doing
+this corrupted the heap at exit (`c0000374`). Whether it showed depended on
+allocator reuse, so simpler tests passed by luck.
+
+Boxes made by those functions now hold one counted reference to their string
+(`box_owned_str`), as `iris_box_str` does. A side effect is that their strings
+are now freed with the list, where before they leaked. The native and
+interpreter `.iris` corpus and the catalog were re-run afterwards. Covered by
+`tests/cli_tools.rs`, whose log analysis failed natively before the fix.
+
+## 81. `std.ais` `active_inference_step` chose action 0 whatever the model — **FIXED**
+
+The function updated beliefs and then "chose" an action by expected free
+energy, but the loop over actions computed the same number for every one: it
+read neither the transition model nor any preferences, and
+`qs * 0.0 - log(qs)` parsed as `(qs * 0.0) - log(qs)`. The first action
+always won. Nothing in the repository called it, so no result depended on it.
+It did, however, back the description of `std.ais` as including active
+inference. Found while building `projects/gridworld_inference`.
+
+`GenerativeModel` now documents its tables' layout (log-probabilities;
+transitions at `(a * n_states + s) * n_states + s'`).
+`model_expected_free_energy(gm, beliefs, action, log_preferences)` computes
+the one-step expected free energy, risk (KL divergence of predicted
+observations from preferred ones) plus ambiguity.
+`active_inference_choose` takes the minimum, and `active_inference_step`
+uses it with uniform preferences. Checked against hand-computed values (KL
+2.303 versus 0.105) in `tests/test_ais_active_inference.iris`, on both
+backends.
+
+Still not covered: multi-step policies, learning of the model's tables, and
+the epistemic value of parameters. The policy-level `expected_free_energy` /
+`active_inference_select` pair measures risk as a squared distance between
+distributions, not a KL divergence, and takes ambiguity and epistemic value
+from the caller. `projects/gridworld_inference` implements multi-step
+planning and Dirichlet learning in the project itself.
+
+## 82. Loop-invariant code motion hoisted guarded divisions and indexing — **FIXED**
+
+LICM moved every invariant, side-effect-free instruction out of a loop,
+from any block, including blocks that run only under a condition. A guarded
+`if len(s) > 0 { a % len(s) } else { 0 }` inside a loop therefore divided by
+zero when `s` was empty (the interpreter stopped; natively it is undefined
+behaviour, a hardware fault on x86). Guarded `str_index` and `slice` went the
+same way. Its list of safe instructions also included `DynCall` (a dynamic
+method call can do anything) and `split` (a fresh mutable list each time).
+Found by the differential tester (`tests/differential.rs`, seed 3).
+
+An instruction that can fail (integer division or remainder by anything
+but a non-zero constant, `str_index`, `slice`, `repeat`, variant-field
+extraction, tensor operations) now moves only from the loop header, which
+runs on every entry to the loop. `DynCall` and `split` stay where they are.
+
+## 83. A parameter named like an LLVM temporary broke native compilation — **FIXED**
+
+The LLVM backend named parameters `%<name>`. SSA values are `%v<id>` and
+temporaries have names like `%box0`, so a parameter or captured variable
+called `v3` produced "multiple definition of local value named 'v3'" and the
+native build failed. Parameters are now `%p.<name>` (`.` cannot occur in an
+IRIS identifier). Found by the differential tester (seed 3: a closure
+capturing `v3`).
+
+## 84. The backends printed floats differently — **FIXED**
+
+Natively `to_str` and `println` used `%g`: six significant digits and an
+exponent (`0.333333`, `1.23457e+08`, `nan`). The interpreter printed the
+shortest round-trip form (`0.3333333333333333`, `123456789.125`, `NaN`).
+Native output lost precision, and the corpus avoided printing floats.
+Both now print the fewest significant digits that read back as the same
+value, without an exponent, by the same steps (`iris_format_float` and
+`interp::format_float`), and JSON output uses the same form.
+
+## 85. Map iteration order differed between backends and between runs — **FIXED**
+
+The interpreter kept maps in a randomly seeded `HashMap`, so `map_keys` came
+back in a different order on every run; natively the order was the hash
+buckets'. Map iteration (`map_keys`, `map_values`, entries, JSON output) is
+now in key order (bytewise) on both backends.
+
+## 86. A closure over a fixed array corrupted the native heap — **FIXED**
+
+`val a = [10, 20, 30]; val f = |z: i64| z + a[0]; f(1)` exited with
+0xC0000374 (heap corruption) natively and ran correctly interpreted. A
+fixed array of scalars lives on the stack, and its raw address went into
+the closure's capture list, where the runtime expects a boxed value; freeing
+the closure `free()`d the stack. Arrays of strings or records (runtime
+lists) went in unboxed the same way. The same path serves list elements and
+spawn environments. Found by the differential tester: seeds 33, 59, 67, 110,
+132, 185 and 187 all reduced to it.
+
+A fixed array put in a generic slot is now copied: scalar elements into a
+heap block the box owns (`iris_box_scalar_array`), other elements into a new
+list (`iris_box_array_list`). Arrays are values, so the copy is also the
+interpreter's semantics: a store to the array after the closure was made is
+not seen by the closure, on either backend.
+
+## 87. A closure did not capture a name used only inside an index — **FIXED**
+
+`val f = |z: i64| z + a[v % 3]` failed to compile on both backends with
+"cannot find 'v'". The free-variable search (`expr_uses_name`) looked at an
+index expression's base and not at its indices. It also skipped named call
+arguments, a `for` loop's `step`, and effect-handler arm bodies. Found by
+the differential tester (seeds 37, 148, 152, 157, 194).
+
+## 88. A closure calling another closure failed type inference — **FIXED**
+
+```iris
+val p0 = "abc";
+val h = |z: i64| z + len(p0);
+val k = |z: i64| h(z) * 2;
+```
+
+failed with "type mismatch: i64 vs str -- CallClosure arg %4 param 0". A
+closure's type lists its captures before its parameters, and a call
+supplies only the parameters. Inference skipped the captures by counting
+them at the `make_closure` in the same function, so a closure reached
+through a capture or a parameter (none there) had its captures checked
+against the call's arguments. The arguments are now matched to the trailing
+parameters. Found by the differential tester (seeds 22, 27).
+
+## 89. A function could fall off its end without a value — **FIXED**
+
+`def f() -> i64 { }` compiled. If `f` was never called, a binary was built;
+if it was called, the build failed after inlining with an internal "operand
+not defined" message. A function whose declared result carries a value
+(scalars, `str`, collections, `option`, `result`, arrays, non-empty tuples
+and records) is now rejected when control can reach the end of its body
+without one:
+
+> function 'f' declares `-> i64` but can reach the end of its body without a
+> value — end the body with an expression or a `return`
+
+A body that ends in `panic`, a `while true` or `loop` left only by
+`return`, or an `if`/`when` whose every arm returns is accepted. `-> unit`
+needs no value. None of the 417 `.iris` files in the repository relied on
+falling off. Found while reducing a differential-tester program.
+
+## 90. A tag-only variant of a payload-carrying enum broke native builds — **FIXED**
+
+```iris
+choice Shape { Dot, Circle(i64), Label(str) }
+val sh = Shape.Dot;
+when sh { Shape.Dot => 1, Shape.Circle(r) => r, Shape.Label(l) => len(l) }
+```
+
+failed natively with "'%v0' defined with type 'i64' but expected 'ptr'" and
+ran interpreted. A variant without a payload is an immediate tag, and the
+`when` extracts payload fields in each payload arm; the extraction passed
+the tag where the runtime takes a pointer. The runtime already accepts a tag
+cast to a pointer (it is how such values travel through record fields and
+parameters), so the tag is now cast. Found by the differential tester when
+it began generating enums with payloads: 32 of seeds 1–40 failed on it.
+
+## 91. A binding's annotation did not complete its initialiser's type — **FIXED**
+
+`val o: option<i64> = none()` bound `o` as an `option` of undetermined
+element type: the annotation shaped `list()` and `if` branches but was not
+the binding's type. Inference usually recovered the element from later
+uses, but not where only lowering could see it, so
+`((when o { some(x) => x, none => 3 }), "hi")` was rejected on both backends
+with E0207 "type annotations needed". When the initialiser's type leaves
+parts open and the annotation fills them, the annotation is now the
+binding's type. Found by the differential tester (seeds 15, 32).
+
+## 92. Strength reduction rewrote a float `x - x` to an integer zero — **FIXED**
+
+The pass replaced `x - x` with `0` for every type. For floats that is wrong
+(`x - x` is NaN when `x` is NaN or infinite), and the zero was an integer
+constant typed `f64`, which the LLVM backend wrote as `double 0` and clang
+rejected. The pass now rewrites integers only. Found by the differential
+tester (seed 22, `fclip(fl19 - fl19)`).
+
+## 93. The interpreter stored string map keys with quotes — **FIXED**
+
+The interpreter turned a key into text by displaying it, and a displayed
+string is quoted, so `map_set(m, "ab", 1)` stored the key `"ab"` with its
+quotes. Lookups agreed with themselves, but `map_keys` returned the quotes
+(`join(map_keys(m), ",")` was `"ab","x"` interpreted and `ab,x` natively),
+and a map whose keys came from elsewhere, such as the interpreter's
+`json_parse` builtin, could not be read with `map_get`. A string key is now its own text, as natively. Found by
+the differential tester (16 of seeds 1–40 printed map keys).
+
+## 94. `std.unicode` miscounted UTF-8 and misnamed categories — **FIXED**
+
+`is_continuation` returned true for every byte from 0x80, but only
+0x80–0xBF continue a sequence; 0xC0 and above begin one. So lead bytes were
+skipped: `codepoint_count("héllo")` was 4 and `codepoint_count("日本語")` 0.
+`category` reported Latin-1 letters as `Lo` (À is `Lu`, é and ß are `Ll`)
+and newline and tab as `Zs` (they are `Cc`). Found by the first reference
+test for the module (`tests/test_unicode_reference.iris`), written under the
+new rule that every stdlib function is tested against an independent
+reference. `category` still knows only ASCII, Latin-1, the C0/C1 controls
+and the digits `is_digit` accepts, and says `Cn` for everything else.
+
+## 95. Native servers on Windows could share a port with another server — **FIXED**
+
+The native runtime set `SO_REUSEADDR` on listening sockets. On Unix that
+only lets a restarted server reuse a port still in TIME_WAIT; on Windows it
+lets a second socket bind a port that is already listening, and the two then
+split its connections. Two copies of a native server on one port both
+started, and each received some of the other's clients; the interpreter
+(Rust's `TcpListener`) correctly failed the second listen, so the backends
+disagreed. Found when the corpus ran `tests/test_async_sockets.iris` twice at
+once. Windows now uses `SO_EXCLUSIVEADDRUSE`: a busy port fails to listen on
+both backends, and the test picks the first free port.
+
+## 96. `--emit eval` hid native failures behind the interpreter — **FIXED**
+
+When the native build or run failed, `--emit eval` printed a note and ran the
+program again in the interpreter; if the interpreter got it right, the run
+passed. The corpus test compared "native" output that was in fact the
+interpreter's with the interpreter's own, so four native-only defects (#97 to
+#100) passed for as long as they existed. Eval now reports the native failure
+(E0302, with the program's own output first) and falls back only when there is
+no native toolchain at all, saying so; `IRIS_INTERP_FALLBACK=1` restores the old
+retry.
+
+## 97. Native `list_insert` was an access violation — **FIXED**
+
+`iris_list_insert` stores a boxed `IrisVal*`, as `push` does; codegen passed the
+raw scalar, which the runtime dereferenced. Every native `list_insert` crashed.
+The value is now boxed by its type.
+
+## 98. Native `gc_stats()` returned an empty map — **FIXED**
+
+`iris_gc_stats_map` returned a boxed map, but generated code holds a
+`map<K, V>` as a raw `IrisMap*`, so `map_len(gc_stats())` read the box as a map
+and answered 0. It returns the map itself.
+
+## 99. An `extern def` of a C library function aborted — **FIXED**
+
+Every extern got a weak definition that aborts with "no handler for effect",
+so an extern used only as an effect operation still links. But a weak
+definition in the program's own object stops the linker looking in libraries:
+`extern def fabs(x: f64) -> f64` called the stub, never the C library. The
+stub is now emitted only for externs some `handle` block names; any other
+extern is declared, so the real function links, or the linker names it as
+missing.
+
+## 100. Heap corruption after `list_slice`, `list_concat` and other list copies — **FIXED**
+
+`push` of an integer or float stores the value inside an arena of chunks
+owned by the list. Copying a list (`list_slice`, `list_concat`, set
+operations, reversals) pushed pointers *into that arena* into the new list and
+retained them, which made them look separately owned: releasing the copy freed
+addresses in the middle of the original's arena (0xC0000374), and a copy that
+outlived its source read freed memory. Recursive choice payloads were also
+typed as empty records (`choice Nat { Zero, Succ(Nat) }`), so native code
+unboxed them as records.
+
+A scalar that lives in another list's arena is now copied into the new list's
+own arena; a boxed value is freed only if it was allocated on its own; a list
+releases its owned elements even when it also has an arena (they used to
+leak); and enum payloads resolve to the enum. Separately, freeing every live
+object at exit is now opt-in (`IRIS_FREE_AT_EXIT=1`): the memory goes back to
+the system anyway, and objects shared by two structures were freed twice.
+
+## 101. Native code did not check list indices — **FIXED**
+
+The interpreter rejected `list_get(xs, 5)` on a three-element list; the
+native binary read past the end, or crashed with an access violation, from
+the inline list access codegen emits for `i64` and `f64` lists. Every index is
+now checked on both backends (one compare, inlined), and an out-of-range or
+negative index stops the program with E0403 and the index and the length.
+
+## 102. Native integer division by zero gave an arbitrary answer — **FIXED**
+
+`a / b` with `b == 0` was an LLVM `sdiv`, which is undefined behaviour: a
+constant divisor of zero was folded to whatever LLVM chose, and a run-time one
+crashed. Both backends now stop with E0402. `i64::MIN / -1` is an overflow
+(E0409) on both; `i64::MIN % -1` is 0.
+
+## 103. Integer overflow wrapped silently in native code — **FIXED**
+
+The interpreter stopped on `9223372036854775807 + 1`; native code wrapped to
+`-9223372036854775808`, so the two backends disagreed and the native answer
+was wrong without a word. Three more paths wrapped on both backends: strength
+reduction rewrote `x * 2^n` as a shift, and the compile-time evaluators
+(`const def` calls and constant expressions) used wrapping arithmetic, so
+`BIG * 2` printed a negative number. Integer `+`, `-`, `*` and `/` are now
+checked everywhere and stop with E0409, naming the operation and operands;
+the shift rewrite is gone (LLVM does it itself where it is sound). Where
+wrap-around is the intent -- hashes, random-number generators -- use
+`wrapping_add`, `wrapping_sub` and `wrapping_mul`. The cost, measured on a
+native benchmark of 60M calls, 20M floating-point steps and 20M list reads,
+is about 2%.
+
+## 104. Infinite recursion in a pure function could be miscompiled — **FIXED**
+
+Pure functions were declared `willreturn`, which tells LLVM the call always
+returns. A pure function that recursed forever let LLVM delete or rewrite the
+recursion, producing a trap or a wrong answer instead of a stack overflow.
+`willreturn` is no longer emitted.
+
+## 105. A stack overflow ended the native program without a word — **FIXED**
+
+Deep or endless recursion killed a native program with 0xC00000FD on Windows
+(SIGSEGV elsewhere) and no message; the interpreter reported "not yet
+supported -- call depth exceeded". Both now report E0408, "stack overflow: the
+recursion is too deep, or never ends", at the call that recursed: natively
+from a guarded exception handler (Windows) or an alternate-stack signal
+handler (POSIX) that keeps the output printed so far. On POSIX a fault outside
+the stack is reported as an invalid memory access (E0400) rather than blamed
+on recursion.
+
+## 106. A boxed `bool` could read back as `true` natively — **FIXED**
+
+Generated code declared the runtime's `iris_box_bool(int)` as taking an LLVM
+`i1`. An `i1` argument defines only the register's low bit -- on Windows x64
+at most the low 8, even marked `zeroext` -- and the C side read all 32, so
+whatever the register held before made `false` read as `true`. Any `bool` in
+a tuple, list, option or record field could flip: `(correct, rewarded,
+first)` returned from a function read back as `(true, true, ...)` in a T-maze
+test while the interpreter was right; the machine code set `%al` with `sete`
+over a register holding an address. The value is now widened to an `i32`
+before the call, which every target's ABI passes whole.
+
+## 107. Native `mkdir` and `remove_file` reported the opposite of what happened — **FIXED**
+
+Both returned 0 on success and -1 on failure from C, but were declared to
+return a `bool`; the low bit of 0 is false, so a successful `mkdir` returned
+`false` and a failed one `true`. They return 1 and 0, as the interpreter's
+do, and `mkdir` creates missing parent directories as the interpreter's
+`create_dir_all` does.
+
+## 108. An error in a brought file was reported in the main file — **FIXED**
+
+Spans restarted at 0 in every file, and diagnostics were rendered against the
+main file's text: `x * fatcor` in `helper.iris` was reported as
+`main.iris:2:20`, underlining `def main() -> i64 {`. Every compile now gives
+each file its own span range (the main file first, unchanged), and a
+diagnostic in a brought file is rendered in that file, in the terminal, in
+`--error-format json` and in the editor (at the `bring` that names the file,
+with the file's own position in the message). Native runtime errors carry the
+file too.
+
+## 109. Runtime errors could name the wrong line — **FIXED**
+
+The position of a failing instruction came from a table keyed by its index in
+its block, and no pass maintained it: once constant folding deleted an
+instruction, every later position in the block shifted, and a division by
+zero was reported on the line before it. The interpreter also wrapped an
+error again in every frame on the way out, so the outermost call won: an
+index error two calls deep was reported at `return 0` in `main`. Positions are
+now keyed by the value an instruction produces (and restored across the
+passes for the rest), both backends use the same rule -- the innermost frame
+in the user's files, the expression that failed -- and inlining carries
+positions into the caller.
+
+## 110. A nested `list(...)` literal was rejected, and its first element ran twice — **FIXED**
+
+`val g: list<list<f64>> = list(list(0.8, 0.1), list(0.1, 0.8))` failed with a
+type error (with no position): the inner `list(...)` saw the outer annotation
+and typed itself `list<list<f64>>`. And the first element was lowered twice --
+once to infer the element type -- so `list(f(), g())` called `f` twice. Each
+element is now lowered once, against the element type.
+
+## 111. The interpreter dropped a program's output when it failed — **FIXED**
+
+`--emit eval` in the interpreter captures what the program prints and returned
+it with the result -- and discarded it with an error, so a program that
+printed and then failed an `assert` showed only the error. Native runs kept
+the output. Both do now.
+
+## 112. Freeing a long integer list took a lock per element — **FIXED**
+
+Dropping a list looked each element up in the reference-count table, taking
+and releasing a mutex per element: 60 ms for two million integers, which made
+a push-heavy benchmark 60% slower than before the list-ownership fix (#100).
+The scan takes the lock once.
+
+## 113. Parallel native builds in one process could hang — **FIXED**
+
+Each in-process native build initialised the LLVM target, which registers it
+in LLVM's global target list. Two threads doing so at once could link the list
+into a cycle, and every later target lookup looped forever -- the test suite
+hung in `tests/module_system.rs`. Initialisation now happens once per library,
+under a lock. The prebuilt-runtime cache's temporary files are also unique per
+thread, not only per process.
+
+## 114. `std.ais`: `epsilon_greedy` never explored the last action — **FIXED**
+
+It drew the exploratory action with `random_range(0, n - 1)`, but the range is
+half-open: the last action was never explored, and with two actions none was.
+Homeostat health also averaged raw deviations, so a variable measured in
+milliseconds swamped one measured as a fraction, and a system inside every
+band read as unhealthy; deviations are now measured in tolerances.
+
+## 115. A keyword used as a name gave a cascade of errors — **FIXED**
+
+`val choice = ...` reported "expected identifier, but found 'choice'" and then
+an error for every later use, several of them at unrelated tokens after the
+parser lost its place. A noun-like keyword (`choice`, `type`, `trait`,
+`impl`, `match`, `const`, `extern`) in a name's place is now one error per
+use -- "`choice` is a keyword, so it cannot be used as a name" -- with a fix
+(`choice_`), and the parser carries on as if it were the name.
+
+## 116. A binding's annotation could be ignored — **FIXED**
+
+`val z: i32 = a`, with `a` an `i64`, compiled, and `z` was an `i64`:
+printing it after `val a = 3000000000` showed `3000000000`. `val x: f64 = 1`
+compiled too, and `x` stayed an integer, so the error appeared later, at the
+first use with a float (`x * 0.5`). Nothing checked an annotation against its
+initialiser. The source type checker (src/lower/typeck.rs, which types the
+program before lowering) now reports both at the binding, with a fix: `a to
+i32`, `1.0`.
+
+## 117. An integer passed for a float parameter crashed natively — **FIXED**
+
+`def f(x: f64)` called as `f(3)` passed the integer through unconverted: the
+native build failed with invalid LLVM IR (`mul i64 3, 2.5`), and the
+interpreter with a run-time type error inside `f`. It is now a compile error
+at the argument, pointing at the parameter, with the fix `f(3.0)`.
+
+## 118. Types the program declared did not reach the values it built — **FIXED**
+
+Lowering gave a value's unknown parts an `i64` default where the program
+said otherwise: an unannotated `map()` was `map<str, i64>` whatever it held
+(storing `2.5` read back an integer); `ok(7)` under `result<i64, str>`
+carried an `i64` error type; an empty `list()` passed for a `list<f64>` or
+assigned to a `list<str>` variable became `list<i64>`; a literal annotated
+`u8` or `i32` stayed `i64`. Lowering now takes these types from the source
+type checker. `tests/test_expected_types.iris` covers each, on both
+backends.
+
+## 119. Native `to_str` of a `u8`, `i8` or `u32` failed to build — **FIXED**
+
+The narrow integer types had no case in native `to_str` and fell through to
+the boxed converter, which was handed the raw value: `to_str(65 to u8)` was
+invalid LLVM IR. They are widened to `i64` first.
+
+## 120. Native tensor indexing read the wrong memory, or returned NULL — **FIXED**
+
+`t[i]` read the runtime's `IrisTensor` header as if it were the data (a
+2x2 tensor's `t[1]` was 8.66e-43), `t[i, j]` called a stub that returned
+NULL, and the interpreter treated one index as the first coordinate
+(`t[1]` on 2x2 gave row 1, column 0) and a tensor written inside a called
+function or a `par for` body lost the write. Both backends now read
+`t[i, j, ...]` (every dimension) or `t[k]` (the flat row-major position),
+any rank, through the runtime (`iris_tensor_get_at` / `iris_tensor_set_at`);
+another count of indices, or an index out of range, is E0403 naming the
+dimension. Interpreter tensors share their storage, as native ones do.
+`tests/test_tensor_indexing.iris` (rank 2, 3 and 5, reads and writes, both
+backends), `tests/runtime_errors/tensor_index_*.iris`.
+
+## 121. `--emit simd` produced IR that LLVM rejected — **FIXED**
+
+Every loop's back-edge was given `!llvm.loop !llvm.loop.vec.f64`, which is
+not valid (an attachment names a metadata node), so `--emit simd` output
+failed to parse for any program with a loop; the explicit vector kernels
+had unseparated operands, undefined values, `floor` emitted as `fneg`, `f32`
+vectors calling `sqrt.v8f64`, and nothing ever called them; the target
+features enabled AVX-512 on an x86-64-v3 (AVX2) target. Now: `--simd` (and
+`--emit simd`) gives each element-wise `par for` body a `<VF x T>` kernel
+that the loop runs through `iris_par_for_chunked` (one contiguous range per
+thread), with every check the scalar body makes done per vector before any
+store, and an iteration that would fail run by the scalar body; other loops
+get a width hint on their own `distinct` loop node. **Tested:**
+`tests/simd_kernels.rs` builds and runs `test_simd_kernels.iris` (five
+kernels, every element checked bit for bit against a sequential loop) and
+holds an overflow and an out-of-range index inside a vectorised loop to the
+scalar build's exact report. A 4M-element `f32` loop ran in 52 ms against
+1950 ms scalar on this machine. **Limits:** only bodies that read and write
+tensors at the loop index and compute on numbers are vectorised; the rest
+run as before.
+
+## 122. The backends disagreed on several scalar operations — **FIXED**
+
+Found while making the vector kernels match the scalar code: natively,
+`pow`, `min`, `max` and `sign` of an `f32` failed to build (they named `f64`
+intrinsics); `x != x` for NaN was `false` (`fcmp one`); a shift by the
+width or more was poison; the IR's `floordiv` (no source syntax; IR built
+by tools and evolution candidates) truncated where the interpreter floors;
+`true to f64` was `-1.0`; a float too large for `i64` converted to poison.
+In the interpreter `sign(0.0)` was `1` (Rust's `signum`) and a `bool` could
+not be cast to a number. Both now: `une`, shifts modulo the width (the
+interpreter's `wrapping_shl`), `floordiv` floors with E0402/E0409 like `/`,
+`uitofp` for unsigned and `bool`, saturating float-to-int (`fptosi.sat`,
+Rust's `as`), `sign` -1/0/1, and the same in constant folding.
+
+## 123. A `par for` worker's error could name another worker's line — **FIXED**
+
+The position a runtime error reports was one global that every thread
+wrote, so a failing iteration could be reported at the line another
+thread had just stored (`par_for_index.iris` gave 9:18 or 9:9 at random).
+Generated code now writes the calling thread's slot (`iris_loc_slot()`,
+thread-local in the runtime); ten runs of the case give 9:18 every time.
+
+## 124. The CUDA backend emitted placeholders — **FIXED** (GPU execution untested)
+
+Unknown binary operators became `add i64 0, 0`, tensor operations called
+`iris_tensor_op()` (NULL), any other instruction called
+`iris_cuda_unsupported()`; kernels returned values, ignored the thread
+index, and host code (`main`, `println`) was compiled for the GPU; nothing
+could launch a kernel. The backend is rewritten:
+
+- **Device code** for every function that works on numbers and tensors:
+  all scalar operators with the CPU's checks (overflow, division by zero),
+  tensor indexing against the tensor's own shape with bounds checks, calls,
+  `panic`/`assert`, and whole-tensor operations on the device (`einsum` for
+  any notation, `relu` `sigmoid` `tanh` `neg` `exp` `log` `sqrt` `abs`,
+  reductions, transpose, reshape, element-wise arithmetic), allocated with
+  device `malloc`. A function that uses anything else is left out as host
+  code, with the reason in the module's header.
+- **Kernels:** each device-code `par for` body becomes
+  `{body}_kernel(start, end, env)`; a `@kernel` function becomes a map kernel
+  `{f}_kernel(n, inputs..., out)`.
+- **Errors:** a failing operation records its code, operands and source
+  position in `__iris_dev_error`; the runtime reports it exactly as the CPU
+  does.
+- **`--gpu cuda`** builds a native program whose device-code `par for` loops
+  run on the GPU: the PTX (clang's NVPTX backend, with the CUDA toolkit's
+  libdevice when `sin`/`exp`/`pow` are used) is embedded, and
+  `iris_cuda_launch` loads the driver, copies tensors and captures, launches,
+  copies back. Loops that are not device code run on CPU threads, with a
+  note at build time. No driver or GPU at run time is E0410.
+
+**Tested, not verified on a GPU:** the device code compiles to PTX
+(`tests/cuda_kernel_codegen.rs`); the same device code compiled for the CPU
+computes the expected values and leaves the expected error records -- code,
+operands, position -- for six kernels and all nineteen tensor operations
+(`tests/cuda_device_code.rs`, `tests/cuda_device_tensors.rs`); a `--gpu
+cuda` program builds and, without a driver, stops with E0410 at its `par
+for` (`tests/cuda_offload.rs`). No NVIDIA hardware was available, so the
+driver path (`iris_cuda_launch`) has not run a kernel.
+
+## 125. PGO counted nothing and applied made-up weights — **FIXED**
+
+`--emit pgo-instrument` declared counter globals that nothing incremented
+and called compiler-rt symbols nothing linked; `--emit pgo-optimize` was
+given an empty profile and stamped `branch_weights 1000:1` on every branch.
+Now `--pgo-generate` builds a program that counts each block and adds the
+counts to `IRIS_PROFILE_FILE` (default `iris.profile`) at exit -- also when a
+runtime error stops it -- and `--pgo-use FILE` (native builds, or `--emit
+pgo-optimize`) applies them: branch weights from the measured successor
+counts, entry counts, a full LLVM `ProfileSummary`, `cold` on functions that
+never ran. `pgo-optimize` without a profile is an error. **Tested:**
+`tests/pgo_end_to_end.rs` records two runs (exact counts, accumulated),
+applies them (a 1%-taken branch gets `200:19800`), and runs the optimised
+build.
+
+## 126. Python extensions could not be built, and lost most values — **FIXED**
+
+`--emit python-ext` wrote C glue only, declaring functions under names the
+compiled program does not have, so it never linked; any value other than a
+number or `str` came back as `None`; a runtime error in IRIS code ended the
+Python process. Now `--emit python-ext -o NAME.pyd` (`.so`) builds the
+module: lists, maps, tuples, options, results (`err` raises
+`NAME.IrisError`), records (dicts), choices (`"Variant"` /
+`("Variant", ...)`), tensors (nested lists), arrays and slices convert both
+ways, range-checked; handles (channels, closures, tasks) travel as capsules;
+calls release the GIL; a runtime error, also from a `par for` worker,
+raises `IrisError` with the full report and Python carries on.
+**Tested:** `tests/python_extension_build.rs` builds a module and drives it
+from Python (skipped where no Python with headers is installed). Verified
+on Windows with Python 3.14 (MSVC build; the module is built with MinGW).
+
+## 127. `iris service-daemon` replayed a script — **FIXED**
+
+Its "telemetry" was a schedule: the regime was `(tick / 15) % 4` and
+latency a table lookup, with no service involved. It is now a reverse
+proxy in front of a real HTTP service (`--upstream URL`, `--listen PORT`):
+each interval it measures the traffic -- p99, error ratio, rate, requests in
+flight, cache hits -- classifies the regime, records how the active policy
+fared there, and applies the policy with the least measured strain
+(forward; shed with 429 over `--max-inflight`; serve the last good response
+to a `GET`; throttle to the healthy rate), returning to forwarding after
+three good intervals. **Tested:** `tests/service_daemon_proxy.rs` fails a
+local service mid-run; the daemon serves from cache within an interval and
+forwards again after it recovers. **Limits:** plain HTTP/1.1, one request
+per connection, no TLS.
+
+## 128. Binary ONNX output was malformed — **FIXED**
+
+`opset_import` and `graph` had each other's field numbers (8 and 7), node
+attributes were written to field 7 with integers in field 4, layers had no
+weights and carried attributes ONNX does not define (`units` on a `Gemm`),
+and `-o model.onnx` wrote the bytes as hex text. No tool could load it. Each
+layer now becomes its ONNX operators with its parameters as initializers
+(Dense as MatMul + Add, Conv, BatchNormalization, LayerNormalization,
+Gather, GELU decomposed for opset 17, pooling, Flatten, Concat, Add,
+Softmax), from `--weights FILE` (JSON; every parameter required, shapes
+checked) or freshly initialised (Glorot, seeded by name). **Tested:**
+`tests/binary_onnx_protobuf_output.rs` runs the ONNX checker
+(`full_check`) on an MLP and a CNN and compares ONNX Runtime's output with
+numpy's from the same weights, to 1e-5 (skipped without Python's `onnx`
+and `onnxruntime`).
+
+## 129. The TensorRT backend printed a plan — **FIXED** (engine build untested)
+
+`--emit tensorrt` wrote a text "plan" ending "Status: NVIDIA TensorRT Engine
+lowered successfully" and Rust FFI declarations as text; no engine existed.
+It now compiles the `model` to ONNX (#128) and builds a serialized engine
+with TensorRT's `trtexec` (`TENSORRT_ROOT` or `PATH`), with an optimisation
+profile for named dimensions and `IRIS_TRT_PRECISION`; `-o model.engine`
+writes it. Without TensorRT it is a toolchain error naming what to
+install. **Tested:** the `trtexec` arguments (`tests/tensorrt_codegen.rs`);
+no TensorRT was installed, so no engine has been built.
+
+## 130. The default package registry was `example.com` — **FIXED**
+
+Registry dependencies resolved against `https://iris-pkg.example.com`,
+there was no way to publish, and an HTTP error page was parsed as the
+index. The default is now `registry/` of this repository, served from
+GitHub's raw files (live once pushed); a registry may also be a directory
+or `file://` URL, entry URLs may be relative; `iris pkg publish` adds a
+version (deterministic archive, SHA-256, never replaced), `iris pkg
+search` finds packages and `iris pkg serve` serves a registry directory.
+**Tested:** `tests/pkg_registry.rs` publishes two versions, installs and
+runs a consumer from the directory (`^0.1`) and over HTTP (`^0.2`).
+
+## 131. `iris upgrade` could install an archive as its executable — **FIXED**
+
+It asked the old repository name, matched assets by "contains windows"
+(possibly the installer), copied a `.tar.gz` download over the binary
+unextracted, compared versions without their pre-release part (rc1 ==
+rc2), and checked nothing. It now takes this target triple's archive (the
+lightweight one when there is one), verifies GitHub's SHA-256 digest,
+extracts the executable in process from `.zip` or `.tar.gz`, and orders
+pre-releases. **Tested:** `tests/upgrade_logic.rs`; its network test
+(ignored by default) downloaded v1.0.0-rc2 for x86_64-pc-windows-msvc,
+verified it, extracted it and ran it.
+
+## 132. Element-wise tensor arithmetic on mismatched sizes returned NULL — **FIXED**
+
+The native runtime's tensor `+ - * /` and `reshape` returned NULL when the
+sizes differed, and the program failed later where the NULL was used. Both
+now stop with E0404 naming the two sizes; the GPU reports the same.
+
+## 133. The preprocessor ignored `#define` values and described the wrong machine — **FIXED**
+
+`#if BUILD == "beta"` was true whenever `BUILD` was defined, whatever its
+value; `#define NAME VALUE` threw the value away, though the BOOK said the
+directives "behave as they do in C"; `A || B && C` was `(A || B) && C`; a
+true `#ifdef` nested in a skipped group ended the skip early. `WASM` was
+defined on every machine, `WINDOWS`/`LINUX` named the host, not `--target`,
+`DEBUG` meant the compiler itself was a debug build, and `-D` was not a
+flag. Now `#if` has C's expression grammar and precedence (`defined`, `!`,
+`&&`, `||`, parentheses, `==` `!=` on strings and integers, `<`-family on
+integers, an undefined name is `0`); a valued `#define` substitutes its value
+for later uses of the name -- on tokens, which keep the name's source
+position, and never inside strings -- until `#undef`; nesting is tracked per
+group (`#else` after `#else` is an error); the predefined symbols follow the
+target and `-g` (`TARGET_OS`, `TARGET_ARCH` as strings); `-D NAME[=VALUE]`
+adds one. **Tested:** 12 unit tests in `src/preprocessor.rs`;
+`tests/test_conditional_compile.iris` on both backends. **Limit:** object
+macros only; no function-like macros (IRIS has `defmacro` for those).
+
+## 134. Runtime and library stubs that returned nothing — **REMOVED**
+
+The C runtime exported `iris_call_closure` (returned 0), `iris_call_closure_void`
+and `iris_dyn_call` (returned NULL) "for link compatibility"; generated code
+calls closures and `dyn Trait` methods itself, and nothing called these.
+`iris::inference::StubBackend` loaded any path and returned its input as the
+model's output. All four are gone; the inference module's ONNX, TensorFlow
+and LibTorch backends remain (LibTorch reports that it is not linked when it
+is not).
+
+## 135. `--emit onnx` was a "structural stub" — **FIXED**
+
+It printed a protobuf-text-like sketch: `ir_version: 7`, Dense as `Gemm`
+with no weights, GELU as `Gelu` (not an opset-17 operator), attributes ONNX
+does not define. It now prints, in protobuf's text format, the very model
+`--emit onnx-binary` writes (#128), initializers included: the binary and
+text encoders share one message tree. **Tested:**
+`tests/binary_onnx_protobuf_output.rs` parses the text with
+`google.protobuf.text_format`, requires it to equal the binary model, and
+runs the ONNX checker on it.
+
+## 136. WebAssembly builds did not compile, and those that linked did not run — **FIXED**
+
+The runtime failed to compile for `wasm32-wasip1`: `pthread_cond_timedwait`
+(which WASI preview 1 lacks) sat in code compiled for every target (in the
+last commit, 2026-09-17, and again in the async executor), and since
+2026-10-21 `<setjmp.h>` (for #126's error traps) needs WebAssembly's
+exception-handling proposal. A module that did link trapped at once:
+LLVM IR's `main(argc, argv)` is not renamed `__main_argc_argv`, which
+wasi-libc's start code calls, as clang renames C's. Now single-threaded
+WASM sleeps where native code waits, error traps are compiled only where
+setjmp works, and the WASM build names `main` for wasi-libc. A program
+that reaches the network on `wasm32-wasip1` (no sockets in preview 1) is
+error E0303 naming each call, instead of a module whose every connect
+returns -1. **Tested:** `tests/wasm_target_codegen.rs` builds a program
+with the WASI sysroot and runs it under Node's WASI (skipped without them),
+and checks the network error and that unreached networking does not
+trigger it. **Limit:** `wasm32-wasip2` sockets are untested.
+
+## 137. `xs[i]` on a list compiled to a tensor access, and `x[i] += v` dropped the `+` — **FIXED**
+
+Indexing anything but an array, slice or tensor took a "fallback": a tensor
+read whose type was the list's own, so `xs[0] + "!"` on a `list<str>` was
+"cannot add `list<str>` and `str`" and natively read the list's header as a
+tensor; `xs[i] = v` was a tensor write. `arr[i] += 5` stored 5: the
+operator was dropped for every index target. `s += "x"` failed on every
+target (variable, field, index): `+=` was numeric addition, where `+`
+concatenates. Native `char_at` returned a byte, splitting multibyte
+characters, where the interpreter returned the character. Now `xs[i]` and
+`xs[i] = v` are the bounds-checked list operations (E0403 with position,
+both backends), compound assignment combines with the current element,
+string `+=` concatenates, `char_at` counts characters natively too, and
+`[]` on a string or a map is E0124 pointing to `char_at`/`str_index` or
+`map_get`. **Tested:** `tests/test_index_assign.iris`, both backends.
+
+## 138. Type errors the compiler let through, and types it guessed after lowering — **FIXED**
+
+Completing the source type checker (type-system milestones 4 and 5,
+`docs/architecture-vs-rustc.md` §4.2) found programs the compiler accepted
+though they make no sense, and types it guessed:
+
+- `?` in a function that does not return a result (`main() -> i64`) was
+  accepted: its early return handed an `err` back from a function returning
+  `i64`. It is now E0202, with what to do instead (`when`, `??`, `try`).
+- `?`s carrying different error types in one `try` were accepted, and the
+  `catch` parameter had no type; now the parameter has the error type the
+  body's `?`s carry, and a second type is E0202.
+- A list given values of different types (`push(xs, ok(1))`, then
+  `push(xs, none())`) was accepted, typed by its first value: later reads
+  took every element for that type. Now E0202.
+- `concat` accepted any argument; it takes strings (E0110).
+- An `option` compared with a number was caught only by lowering, and a
+  type error found by the checker was reported only if lowering accepted the
+  program. The checker's type errors now always stand, with the same fixes.
+- Inference after lowering guessed what the source said: the success side
+  of the `err` a `?` returns, a generator's list (from the function's
+  declared `list<T>`), a channel's element (from its `send`s), a top-level
+  `var history: list<f64> = list()`, an effect handler's continuation, and
+  `none`/`ok`/`err` in generic and `async` bodies. Lowering now takes these
+  from the source, and leaves no value untyped (0 of the corpus's values,
+  from 274); one nothing determines is E0207 at once.
+
+**Tested:** `tests/typeck_milestones.rs`; `tests/diagnostic_quality.rs`
+(every E0202/E0207/E0208/E0209 among its 51 cases comes from the checker);
+`tests/typeck_agreement.rs` (the checker against the IR on the corpus).
+**Limits:** in `docs/architecture-vs-rustc.md`, milestone table.
+
 ## RC1 capability boundaries (2026-09-01)
 
 The following are deliberate supported boundaries rather than silent stubs:
@@ -3669,10 +4630,32 @@ The following are deliberate supported boundaries rather than silent stubs:
   It retains compiler, manifest, ABI, materialization, atomicity, lease and
   rollback checks only. Use governed `iris evolve` when those safety properties
   are required.
-- `async def` retains its RC1-compatible single-result `chan<T>` surface. Native
-  execution now uses a bounded fixed executor shared by `spawn` and task groups.
+- `async def` returns a `task<T>` run by a cooperative executor on the calling
+  thread (see #72). `spawn` and task groups use a bounded fixed executor.
   `task_group_join` closes the group and waits while helping queued jobs;
   `task_group_cancel` is cooperative, so queued tasks skip their body at entry
   and running CPU tasks should poll `cancellation_requested()`. The reference
   interpreter preserves the same observable result/cancellation semantics while
   using managed host join handles internally.
+- The interpreter is the reference backend, not the fast one. Measured
+  2026-10-20 on Windows (best of two runs, compile time included, same
+  output on every backend):
+
+  | Program | Debug build (before the change below) | Release build | Native |
+  |---|---|---|---|
+  | 1,000,000-iteration arithmetic loop | 15.8 s | 1.2 s | 0.09 s |
+  | `fib(24)` (about 75,000 calls) | 2.4 s | 0.30 s | 0.08 s |
+  | 200,000 list pushes and reads, 20,000 map writes, 2,000 string appends | 5.3 s | 0.51 s | 0.17 s |
+  | `projects/gridworld_inference/run.iris` | 33 s | 4.0 s | 0.17 s |
+
+  So use a release build of `iris` for interpreted runs, and native code
+  (`iris run`, `iris build`) for anything performance-sensitive: the release
+  interpreter is about ten times faster than the debug one and native code
+  10–25 times faster again (its times include about 0.07 s of process start).
+  The value store is a vector indexed by value id (it was a hash map). Since
+  2026-10-20 the interpreter no longer looks up a source position on every
+  instruction (it finds it only when an error is reported), skips the
+  autodiff alias table when no tape is in use, and reuses one buffer for
+  branch arguments: a loop-and-call benchmark went from 12.4 s to 6.1 s on a
+  debug build and runs in about 1.05 s on a release build. Value clones
+  remain.

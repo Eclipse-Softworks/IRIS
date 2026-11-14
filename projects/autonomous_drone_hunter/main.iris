@@ -1,0 +1,193 @@
+// projects/autonomous_drone_hunter/main.iris
+// Executive Mission Simulation: Autonomous Drone Hunter & Target Acquisition.
+// Simulates multi-spectral search, evasive target pursuit, laser lock, and idiomatic telemetry debriefing.
+
+bring "types.iris"
+bring "math_3d.iris"
+bring "environment.iris"
+bring "sensors.iris"
+bring "guidance.iris"
+bring "reporter.iris"
+
+pub def run_drone_hunter_simulation() -> result<MissionReport, str> {
+    val home_pos = v3_new(0.0, 0.0, 0.0);
+    var drone = default_drone_kinematics(v3_new(0.0, 0.0, 2.0));
+    var power = default_drone_power();
+    val sensors = default_sensors();
+
+    // Spawn high-value elusive target at coordinates (380m, 290m)
+    var target = create_target_entity(1, 380.0, 290.0);
+    val init_target_pos = target.pos;
+    var track = initial_target_track();
+    var phase = HuntPhase.AreaSearch(30.0, 0.0);
+
+    val events = list();
+    push(events, "[T+0.0s] LAUNCH: Autonomous Drone Hunter deployed from Base (0, 0, 0)");
+    push(events, "[T+0.0s] INITIATING: Expanding Archimedean Spiral search in Sector Alpha");
+
+    val path_x = list();
+    val path_y = list();
+
+    val dt = 0.5; // 2 Hz guidance and perception loop
+    val max_steps = 300; // 150 seconds flight envelope
+    var cumulative_dist = 0.0;
+    var min_standoff = 9999.0;
+    var peak_conf = 0.0;
+    var target_locked_pos = v3_zero();
+    var completed = false;
+    var final_status = MissionStatus.TargetNeutralized;
+
+    println("================================================================================");
+    println("      AUTONOMOUS DRONE HUNTER ENVIRONMENT & TARGET ACQUISITION SIMULATOR       ");
+    println("================================================================================");
+    println(f"[MISSION START] Base: (0, 0, 0) | Search Radius Target: ~500m");
+    println(f"[SENSORS] RF Sensitivity: {sensors.rf_sensitivity_dbm} dBm | FLIR Range: {sensors.flir_range_m}m | LiDAR Range: {sensors.lidar_range_m}m");
+    println(f"[TARGET INTEL] Unknown high-value mobile entity emitting intermittent telemetry\n");
+
+    var step = 0;
+    while step < max_steps && !completed {
+        val t = to_f64(step) * dt;
+
+        // Record path breadcrumbs every 2 steps
+        if (step % 2) == 0 {
+            push(path_x, drone.pos.x);
+            push(path_y, drone.pos.y);
+        };
+
+        // 1. Environmental occlusion and sensor scanning
+        val has_los = check_line_of_sight(drone.pos, target.pos, 8);
+        val rf_contact = sense_rf_beacon(drone.pos, drone.heading_rad, target, sensors);
+        val flir_contact = sense_thermal_flir(drone.pos, drone.heading_rad, target, has_los, sensors);
+        val lidar_contact = sense_optical_lidar(drone.pos, target, has_los, sensors);
+
+        // 2. Bayesian Track Fusion
+        track = update_track_estimate(
+            track,
+            drone.pos,
+            drone.heading_rad,
+            rf_contact,
+            flir_contact,
+            lidar_contact,
+            has_los,
+            t,
+            dt
+        );
+
+        if track.confidence > peak_conf {
+            peak_conf = track.confidence;
+        };
+
+        if track.confidence >= 0.40 {
+            target.is_detected = true;
+        };
+
+        // 3. Dynamic target motion & evasive countermeasures
+        target = step_target_kinematics(target, drone.pos, dt);
+
+        // 4. Flight Guidance & State Machine
+        val g_res = step_hunt_state_machine(
+            drone,
+            phase,
+            track,
+            home_pos,
+            dt,
+            t
+        );
+        phase = g_res.next_phase;
+
+        if len(g_res.log_msg) > 0 {
+            push(events, g_res.log_msg);
+            println(g_res.log_msg);
+        };
+
+        // 5. Kinematics and Propulsion Power integration
+        drone = step_drone_kinematics(drone, g_res.desired_vel, dt);
+        power = step_power_model(power, drone.speed_ms, drone.climb_rate_ms, dt);
+
+        val dist_now = v3_dist(drone.pos, target.pos);
+        if dist_now < min_standoff {
+            min_standoff = dist_now;
+        };
+
+        cumulative_dist = cumulative_dist + (drone.speed_ms * dt);
+
+        // Check if terminal laser lock was achieved
+        when phase {
+            HuntPhase.TerminalLaserLock(id, coord) => {
+                target.is_locked = true;
+                target_locked_pos = target.pos;
+            }
+            HuntPhase.MissionDebrief => {
+                completed = true;
+                final_status = MissionStatus.TargetNeutralized;
+            }
+            _ => {}
+        };
+
+        // Periodic tactical HUD print
+        if step == 20 {
+            println(f"[HUD T+{t}s] Area Sweep: Alt={drone.pos.z}m | Speed={drone.speed_ms}m/s | Batt={power.battery_mah}mAh");
+        } else if step == 60 {
+            println(f"[HUD T+{t}s] Expanding Spiral: Drone=({drone.pos.x}, {drone.pos.y}) | RSSI Track Conf={track.confidence}");
+        } else if step == 110 {
+            println(f"[HUD T+{t}s] Pursuing Target: Dist={dist_now}m | Target Speed={v3_mag(target.vel)}m/s");
+        } else if step == 160 {
+            println(f"[HUD T+{t}s] Laser Standoff Orbit: Alt={drone.pos.z}m | Sensor Conf={track.confidence * 100.0}%");
+        } else if step == 210 {
+            println(f"[HUD T+{t}s] Returning to Base: Base Dist={v3_dist_2d(drone.pos, home_pos)}m | Batt={power.battery_mah}mAh");
+        };
+
+        step = step + 1;
+    };
+
+    val total_time = if completed {
+        to_f64(list_len(path_x)) * dt * 2.0
+    } else {
+        to_f64(max_steps) * dt
+    };
+
+    val batt_consumed_pct = ((power.max_mah - power.battery_mah) / power.max_mah) * 100.0;
+
+    // Render 2D Tactical ASCII Display
+    render_tactical_ascii_map(home_pos, target_locked_pos, path_x, path_y);
+
+    val report = MissionReport {
+        mission_id: "HUNT-ALPHA-2026",
+        status: final_status,
+        elapsed_time_s: total_time,
+        total_flight_dist_m: cumulative_dist,
+        battery_consumed_pct: batt_consumed_pct,
+        target_initial_loc: init_target_pos,
+        target_locked_loc: target_locked_pos,
+        final_standoff_distance_m: min_standoff,
+        peak_confidence: peak_conf,
+        total_samples: max_steps,
+        tactical_events: events,
+    };
+
+    ok(report)
+}
+
+pub def main() -> i64 {
+    val mission_result = run_drone_hunter_simulation();
+
+    // Idiomatic Result unwrap and debriefing
+    when mission_result {
+        ok(report) => {
+            print_mission_report(report);
+
+            println("\n[GROUND CONTROL TELEMETRY DOWNLINK JSON PAYLOAD]:");
+            val json_str = serialize_mission_json(report);
+            println(json_str);
+
+            assert(report.final_standoff_distance_m >= 0.0);
+            assert(report.peak_confidence > 0.0);
+            println("\n[MISSION SUCCESS] Target successfully acquired, localized, and neutralized. Returning 0.\n");
+            0
+        }
+        err(failure_reason) => {
+            println(f"\n[MISSION FAILED] Reason: {failure_reason}");
+            1
+        }
+    }
+}

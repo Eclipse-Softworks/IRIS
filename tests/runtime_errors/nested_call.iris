@@ -1,0 +1,13 @@
+// expect: E0403 at 4:5
+// message: index 7 is out of bounds for length 3
+def pick(xs: list<i64>, i: i64) -> i64 {
+    list_get(xs, i)
+}
+def total(xs: list<i64>) -> i64 {
+    pick(xs, 0) + pick(xs, 7)
+}
+def main() -> i64 {
+    val xs: list<i64> = list(1, 2, 3)
+    println(to_str(total(xs)))
+    return 0
+}

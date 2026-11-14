@@ -1,0 +1,117 @@
+// std.ais: a safety policy constrains what an agent may do, by the state
+// and by the world model's predictions; and the software governor runs the
+// autonomic loop over named metrics, its choices cleared by a constitution.
+bring std.ais
+
+def controls() -> list<list<f64>> {
+    val idle: list<f64> = list(0.0)
+    val heat: list<f64> = list(1.0)
+    val cool: list<f64> = list(0.0 - 1.0)
+    list(idle, heat, cool)
+}
+
+def main() -> i64 {
+    // A world model of a heated tank: T' = 0.95 T + 1.5 u + 1.
+    var wm = wm_new(1, 1, 1.0)
+    var t = 30.0
+    for i in 0..30 {
+        val u = to_f64(i % 3 - 1)
+        val next = 0.95 * t + 1.5 * u + 1.0
+        wm = wm_learn(wm, list(t), list(u), list(next))
+        t = next
+    }
+
+    val p = safety_policy_new()
+    safety_forbid_when(p, "no heat above 58", 0, ">", 58.0, 1, 5)
+    safety_require_when(p, "cool above 70", 0, ">", 70.0, 2, 10)
+    safety_keep_within(p, "stay under 59", 0, 30.0, 59.0, 8)
+
+    // ── State rules ────────────────────────────────────────────────────────
+    val cold = safety_permitted_now(p, list(40.0), 3)
+    assert(list_get(cold, 0) && list_get(cold, 1) && list_get(cold, 2))
+    val warm = safety_permitted_now(p, list(60.0), 3)
+    assert(list_get(warm, 0) && !list_get(warm, 1) && list_get(warm, 2))
+    assert(safety_required(p, list(65.0)) == 0 - 1)
+    assert(safety_required(p, list(75.0)) == 2)
+
+    // ── Prediction rules: at 59.5 the model says heating ends above 59 ─────
+    val near = safety_permitted(p, list(56.6), wm, controls())
+    // 0.95 * 56.6 + 1.5 + 1 = 56.27 is inside, and 56.6 is not above 58.
+    assert(list_get(near, 1))
+    val edge = safety_permitted(p, list(57.9), wm, controls())
+    // Heating would reach 0.95 * 57.9 + 2.5 = 57.505: inside, so permitted.
+    assert(list_get(edge, 1))
+    val hot = list(61.0)
+    val over = safety_permitted(p, hot, wm, controls())
+    // At 61, idling predicts 0.95 * 61 + 1 = 58.95, inside; heating is both
+    // forbidden by state and predicted out; cooling predicts 57.45.
+    assert(list_get(over, 0) && !list_get(over, 1) && list_get(over, 2))
+    val high = safety_permitted(p, list(61.5), wm, controls())
+    // At 61.5 idling predicts 59.425: out of bounds, so only cooling is left.
+    assert(!list_get(high, 0) && !list_get(high, 1) && list_get(high, 2))
+
+    // ── Resolving a proposal ───────────────────────────────────────────────
+    val r1 = safety_resolve(p, list(61.5), high, 1, 0)
+    assert(r1.1.action == 2 && r1.1.overridden)
+    val r2 = safety_resolve(r1.0, list(40.0), cold, 1, 0)
+    assert(r2.1.action == 1 && !r2.1.overridden)
+    val r3 = safety_resolve(r2.0, list(75.0), cold, 0, 0)
+    assert(r3.1.action == 2 && r3.1.overridden && r3.1.rule == "cool above 70")
+    assert(r3.0.interventions == 2)
+    assert(list_len(r3.0.audit) == 2)
+    println("audit: " + list_get(r3.0.audit, 0) + "; " + list_get(r3.0.audit, 1))
+
+    // ── An active inference agent decides only among permitted actions ─────
+    // Two states, two observations, two actions: action a leads to state a.
+    // The agent prefers observation 1, so it would choose action 1.
+    val m = pomdp_new(2, 2, 2)
+    pomdp_set_likelihood(m, 0, list(1.0, 0.0), 100.0)
+    pomdp_set_likelihood(m, 1, list(0.0, 1.0), 100.0)
+    for a in 0..2 {
+        for s in 0..2 {
+            val row: list<f64> = list(0.0, 0.0)
+            list_set(row, a, 1.0)
+            pomdp_set_transition(m, a, s, row, 100.0)
+        }
+    }
+    pomdp_set_preferences(m, list(0.0, 3.0))
+    val agent = aif_observe(aif_agent_new(m, 1, 4.0), 0)
+    assert(aif_decide(agent).1.action == 1)
+    val no_one = safety_policy_new()
+    safety_forbid_when(no_one, "never 1", 0, ">=", 0.0, 1, 5)
+    val allowed = safety_permitted_now(no_one, list(0.0), 2)
+    val constrained = aif_decide_permitted(agent, allowed)
+    assert(constrained.1.action == 0)
+    assert(list_get(constrained.1.action_probs, 1) == 0.0)
+    val nothing: list<bool> = list(false, false)
+    assert(aif_decide_permitted(agent, nothing).1.action == 0 - 1)
+
+    // ── The software governor ──────────────────────────────────────────────
+    val h = homeostat_new()
+    homeostat_add_var(h, homeovar_new(0.5, 0.2, 1.0))
+    homeostat_add_var(h, homeovar_new(100.0, 50.0, 0.01))
+    // "restart" needs clearance 2 the constitution (mode 2) gives only to
+    // constraints of severity 2 or more; restart has 1.
+    val c = constitution_new(2)
+    constitution_add(c, "restart", 1)
+    constitution_add(c, "scale_up", 3)
+    val actions: list<str> = list("noop", "scale_up", "restart")
+    val gov = software_governor_new(h, c, actions)
+    software_governor_add_rule(gov, autonomic_rule_new("cpu", ">", 0.8, 1, 2))
+    software_governor_add_rule(gov, autonomic_rule_new("latency", ">", 300.0, 2, 3))
+    val names: list<str> = list("cpu", "latency")
+
+    val s1 = software_governor_step(gov, names, list(0.9, 120.0), 1.0)
+    assert(s1.action == 1 && s1.action_name == "scale_up" && s1.rule == 0)
+    println("governor: " + s1.action_name + " because " + s1.reason)
+    val s2 = software_governor_step(s1.governor, names, list(0.9, 400.0), 1.0)
+    // The latency rule is the more severe, but restart is not cleared.
+    assert(s2.action == 0 && s2.rule == 1)
+    println("governor: " + s2.action_name + " because " + s2.reason)
+    val s3 = software_governor_step(s2.governor, names, list(0.4, 90.0), 1.0)
+    assert(s3.action == 0 && s3.rule == 0 - 1 && s3.reason == "no rule fired")
+    assert(list_len(s3.governor.metrics_history) == 3)
+    assert(s3.health > s2.health)
+    println("std.ais safety: ok")
+    return 0
+}

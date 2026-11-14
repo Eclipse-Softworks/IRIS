@@ -21,35 +21,105 @@ pub def push_back(dq: list<i64>, value: i64) -> list<i64> {
 }
 
 /// Pop and return the value from the front of the deque.
-/// Panics if the deque is empty.
+/// Returns 0 if the deque is empty.
 pub def pop_front(dq: list<i64>) -> i64 {
     deque_pop_front(dq)
 }
 
 /// Pop and return the value from the back of the deque.
-/// Panics if the deque is empty.
+/// Returns 0 if the deque is empty.
 pub def pop_back(dq: list<i64>) -> i64 {
     deque_pop_back(dq)
 }
 
 /// Return the number of elements in the deque.
-pub def len(dq: list<i64>) -> i64 {
+pub def deque_size(dq: list<i64>) -> i64 {
     deque_len(dq)
 }
 
 /// Peek at the front value without removing it.
-/// Panics if the deque is empty.
+/// Returns 0 if the deque is empty.
 pub def peek_front(dq: list<i64>) -> i64 {
     deque_front(dq)
 }
 
 /// Peek at the back value without removing it.
-/// Panics if the deque is empty.
+/// Returns 0 if the deque is empty.
 pub def peek_back(dq: list<i64>) -> i64 {
     deque_back(dq)
 }
 
 /// Check if the deque is empty.
-pub def is_empty(dq: list<i64>) -> bool {
+pub def deque_is_empty(dq: list<i64>) -> bool {
     deque_len(dq) == 0
+}
+
+/// Convert deque elements to a regular list<i64> from front to back.
+pub def deque_to_list(dq: list<i64>) -> list<i64> {
+    val out: list<i64> = list()
+    var i = 0
+    val n = deque_len(dq)
+    while i < n {
+        push(out, list_get(dq, i));
+        i = i + 1
+    }
+    out
+}
+
+/// Construct a deque populated from a list<i64>.
+pub def deque_from_list(xs: list<i64>) -> list<i64> {
+    var dq = deque_create()
+    var i = 0
+    val n = list_len(xs)
+    while i < n {
+        dq = push_back(dq, list_get(xs, i));
+        i = i + 1
+    }
+    dq
+}
+
+/// Check if a value exists within the deque.
+pub def deque_contains(dq: list<i64>, target: i64) -> bool {
+    var i = 0
+    val n = deque_len(dq)
+    while i < n {
+        if list_get(dq, i) == target {
+            return true
+        }
+        i = i + 1
+    }
+    false
+}
+
+/// Clear all elements from the deque and return an empty deque.
+pub def deque_clear(dq: list<i64>) -> list<i64> {
+    deque_create()
+}
+
+/// Rotate deque elements to the left by n steps (front items move to back).
+pub def deque_rotate_left(dq: list<i64>, n: i64) -> list<i64> {
+    val size = deque_len(dq)
+    if size <= 1 || n <= 0 { return dq }
+    val steps = n % size
+    var i = 0
+    while i < steps {
+        val val_front = pop_front(dq)
+        push_back(dq, val_front);
+        i = i + 1
+    }
+    dq
+}
+
+/// Rotate deque elements to the right by n steps (back items move to front).
+pub def deque_rotate_right(dq: list<i64>, n: i64) -> list<i64> {
+    val size = deque_len(dq)
+    if size <= 1 || n <= 0 { return dq }
+    val steps = n % size
+    var i = 0
+    while i < steps {
+        val val_back = pop_back(dq)
+        push_front(dq, val_back);
+        i = i + 1
+    }
+    dq
 }

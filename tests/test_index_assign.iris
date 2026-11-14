@@ -1,0 +1,71 @@
+// `[]` on arrays and lists, and compound assignment (`op=`) through an
+// index, a field and a variable.
+//
+// Until 2026-10-21 `xs[i]` on a list was lowered as a tensor read of the
+// list (wrong type, garbage natively), `xs[i] = v` as a tensor write, and
+// `arr[i] += 5` stored 5: the operator was dropped. Native `char_at` returned
+// a byte, splitting multibyte characters, where the interpreter returned the
+// character. And `s += "x"` on a string, through any target, failed: `+=` was
+// numeric addition, where `+` concatenates.
+
+record Tag { name: str }
+
+def main() -> i64 {
+    // Arrays: compound assignment combines with the element.
+    var arr = [1, 2, 3]
+    arr[1] += 5
+    arr[2] *= 4
+    arr[0] -= 1
+    assert(arr[0] == 0)
+    assert(arr[1] == 7)
+    assert(arr[2] == 12)
+
+    // Lists: read, write and compound-assign through `[]`.
+    val xs: list<i64> = list()
+    push(xs, 10)
+    push(xs, 20)
+    xs[1] = xs[1] + 1
+    xs[0] *= 3
+    assert(xs[0] == 30)
+    assert(xs[1] == 21)
+    assert(xs[0] + xs[1] == 51)
+
+    // Element types come through: a list of strings yields strings.
+    val names: list<str> = list()
+    push(names, "iris")
+    push(names, "wasi")
+    names[1] += "!"
+    assert(names[0] + " " + names[1] == "iris wasi!")
+
+    // Floats, and an index computed from the loop.
+    val ws: list<f64> = list()
+    var i = 0
+    while i < 4 {
+        push(ws, to_f64(i) * 0.5)
+        i = i + 1
+    }
+    var k = 0
+    while k < 4 {
+        ws[k] += 1.0
+        k = k + 1
+    }
+    assert(ws[3] == 2.5)
+
+    // String `+=` concatenates, on a variable and a field.
+    var word = "ir"
+    word += "is"
+    var tag = Tag { name: "v" }
+    tag.name += "1"
+    assert(word == "iris")
+    assert(tag.name == "v1")
+
+    // char_at counts characters, not bytes, on both backends.
+    val s = "héllo"
+    assert(len(s) == 6)
+    assert(char_at(s, 1) == "é")
+    assert(char_at(s, 2) == "l")
+    assert(char_at(s, 9) == "")
+
+    println("index assign ok")
+    0
+}

@@ -1,0 +1,22 @@
+// evolved_policy.iris — Autonomously Evolved Non-Linear Algorithmic Controller
+// Synthesized by IRIS Genetic Programming Engine
+// Discovered non-linear feedback law counteracting cubic Duffing force and Coulomb stick-slip friction.
+
+pub def abs_i64(v: i64) -> i64 {
+    if v < 0 { 0 - v } else { v }
+}
+
+pub def sign_i64(v: i64) -> i64 {
+    if v > 0 { 1 } else { if v < 0 { 0 - 1 } else { 0 } }
+}
+
+pub def clamp_i64(v: i64, lo: i64, hi: i64) -> i64 {
+    if v < lo { lo } else { if v > hi { hi } else { v } }
+}
+
+/// Evolved Non-Linear Control Law:
+/// Synthesizes state-dependent non-linear terms that no linear PD controller can express.
+pub def evolved_control_law(x: i64, v: i64) -> i64 {
+    val raw_u = ((((-30 * x) / 10) - ((20 * v) / 10)) - (((x * x * x) / 100) + ((150 * sign_i64(x)) / 10)));
+    return clamp_i64(raw_u, -150, 150);
+}

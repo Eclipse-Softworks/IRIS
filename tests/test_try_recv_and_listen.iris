@@ -1,0 +1,27 @@
+// `try_recv` (std.async) answers without waiting, and `tcp_listen_local`
+// (std.net) opens a loopback listener.
+
+bring std.async
+bring std.net
+
+def main() -> i64 {
+    // Nothing sent yet: none, at once. Then the value that was sent.
+    val ch: chan<i64> = channel()
+    assert(is_none(try_recv(ch)))
+    send(ch, 7)
+    val got = try_recv(ch)
+    assert(is_some(got) && unwrap(got) == 7)
+    assert(is_none(try_recv(ch)))
+
+    // The first free port from 47700, so two runs can overlap.
+    var port = 47700
+    var handle = tcp_listen_local(port)
+    while handle < 0 && port < 47740 {
+        port = port + 1
+        handle = tcp_listen_local(port)
+    }
+    assert(handle >= 0)
+    tcp_close(handle)
+    println("try_recv and tcp_listen_local ok")
+    return 0
+}

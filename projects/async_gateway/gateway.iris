@@ -1,0 +1,184 @@
+// A quote gateway on IRIS's async runtime. Every request is an `async def`
+// task on one thread. A quote fans out to three suppliers at once and waits
+// for them until a deadline; whatever has not answered by then is cancelled.
+//
+// The suppliers are simulated with timers (`async_sleep`): the latencies and
+// prices below are fixed functions of the SKU, so runs are reproducible.
+// The network front end is in main.iris.
+
+bring std.async
+
+pub const DEADLINE_MS: i64 = 150
+pub const SUPPLIERS: i64 = 3
+// What a supplier that never answers would take.
+pub const HUNG_MS: i64 = 10000
+
+var served: i64 = 0
+var timeouts: i64 = 0
+var cancelled_calls: i64 = 0
+var in_flight: i64 = 0
+var peak_in_flight: i64 = 0
+
+pub def sku_hash(sku: str) -> i64 {
+    var h = 7;
+    var i = 0;
+    while i < len(sku) {
+        h = (h * 31 + str_index(sku, i)) % 100003;
+        i = i + 1
+    };
+    h
+}
+
+// Supplier `s` quotes `sku` after 20..79 ms, except that supplier 2 never
+// answers for a SKU starting with "rare". The SKU decides which supplier is
+// fastest; the three answer 25 ms apart (wider than a Windows timer tick).
+pub def latency_ms(supplier: i64, sku: str) -> i64 {
+    val h = sku_hash(sku);
+    if supplier == 2 && starts_with(sku, "rare") {
+        HUNG_MS
+    } else {
+        20 + ((h + supplier) % SUPPLIERS) * 25 + h % 10
+    }
+}
+
+pub def price(supplier: i64, sku: str) -> i64 {
+    100 + (sku_hash(sku) * 13 + supplier * 41) % 50
+}
+
+async def supplier_quote(supplier: i64, sku: str) -> i64 {
+    await async_sleep(latency_ms(supplier, sku));
+    price(supplier, sku)
+}
+
+def start_calls(sku: str) -> list<task<i64>> {
+    val calls: list<task<i64>> = list();
+    var s = 0;
+    while s < SUPPLIERS {
+        push(calls, supplier_quote(s, sku));
+        s = s + 1
+    };
+    calls
+}
+
+pub def http(status: i64, body: str) -> str {
+    val reason = if status == 200 {
+        "OK"
+    } else if status == 404 {
+        "Not Found"
+    } else if status == 504 {
+        "Gateway Timeout"
+    } else {
+        "Bad Request"
+    };
+    val head = "HTTP/1.1 " + to_str(status) + " " + reason + "\r\nContent-Type: application/json\r\n";
+    head + "Content-Length: " + to_str(len(body)) + "\r\nConnection: close\r\n\r\n" + body
+}
+
+// Every supplier's answer that arrives within the deadline; the best price.
+async def quote(sku: str) -> str {
+    val started = time_now_ms();
+    val calls = start_calls(sku);
+    var best = -1;
+    var best_supplier = -1;
+    var answered = 0;
+    var cancelled = 0;
+    var s = 0;
+    while s < SUPPLIERS {
+        val call = list_get(calls, s);
+        val remaining = max(0, DEADLINE_MS - (time_now_ms() - started));
+        val reply = await timeout_after(call, remaining);
+        if is_some(reply) {
+            val offer = unwrap(reply);
+            answered = answered + 1;
+            if best < 0 || offer < best {
+                best = offer;
+                best_supplier = s
+            }
+        } else {
+            task_cancel(call);
+            cancelled = cancelled + 1
+        };
+        s = s + 1
+    };
+    cancelled_calls = cancelled_calls + cancelled;
+    val elapsed = time_now_ms() - started;
+    val counts = ",\"answered\":" + to_str(answered) + ",\"cancelled\":" + to_str(cancelled);
+    if answered == 0 {
+        timeouts = timeouts + 1;
+        http(504, "{\"sku\":\"" + sku + "\"" + counts + "}")
+    } else {
+        val offer = "{\"sku\":\"" + sku + "\",\"best\":" + to_str(best) + ",\"supplier\":" + to_str(best_supplier);
+        http(200, offer + counts + ",\"elapsed_ms\":" + to_str(elapsed) + "}")
+    }
+}
+
+// The first supplier to answer wins; the other calls are cancelled.
+async def fastest(sku: str) -> str {
+    val calls = start_calls(sku);
+    val first = await async_any(calls);
+    val offer = await list_get(calls, first);
+    val cancelled = cancel_all(calls);
+    cancelled_calls = cancelled_calls + cancelled;
+    val body = "{\"sku\":\"" + sku + "\",\"price\":" + to_str(offer) + ",\"supplier\":" + to_str(first);
+    http(200, body + ",\"cancelled\":" + to_str(cancelled) + "}")
+}
+
+// An upstream that never answers: the request times out at the deadline.
+async def slow() -> str {
+    val call = supplier_quote(2, "rare-slow");
+    val reply = await timeout_after(call, DEADLINE_MS);
+    if is_some(reply) {
+        http(200, "{\"price\":" + to_str(unwrap(reply)) + "}")
+    } else {
+        task_cancel(call);
+        cancelled_calls = cancelled_calls + 1;
+        timeouts = timeouts + 1;
+        http(504, "{\"error\":\"upstream did not answer within " + to_str(DEADLINE_MS) + " ms\"}")
+    }
+}
+
+pub def stats_json() -> str {
+    val counts = "{\"served\":" + to_str(served) + ",\"timeouts\":" + to_str(timeouts);
+    counts + ",\"cancelled_calls\":" + to_str(cancelled_calls) + ",\"peak_in_flight\":" + to_str(peak_in_flight) + "}"
+}
+
+pub def peak_requests_in_flight() -> i64 {
+    peak_in_flight
+}
+
+// The path of an HTTP request line ("GET /quote/bolt HTTP/1.1").
+pub def request_path(raw: str) -> str {
+    val first = find(raw, " ");
+    if is_some(first) == false {
+        return ""
+    };
+    val rest = slice(raw, unwrap(first) + 1, len(raw));
+    val second = find(rest, " ");
+    if is_some(second) { slice(rest, 0, unwrap(second)) } else { rest }
+}
+
+async def route(path: str) -> str {
+    if starts_with(path, "/quote/") && len(path) > 7 {
+        await quote(slice(path, 7, len(path)))
+    } else if starts_with(path, "/fastest/") && len(path) > 9 {
+        await fastest(slice(path, 9, len(path)))
+    } else if path == "/slow" {
+        await slow()
+    } else if path == "/stats" {
+        http(200, stats_json())
+    } else {
+        http(404, "{\"error\":\"no route\"}")
+    }
+}
+
+// Answer one raw HTTP request.
+pub async def handle(raw: str) -> str {
+    in_flight = in_flight + 1;
+    if in_flight > peak_in_flight {
+        peak_in_flight = in_flight
+    };
+    val response = await route(request_path(raw));
+    in_flight = in_flight - 1;
+    served = served + 1;
+    response
+}

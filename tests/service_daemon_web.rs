@@ -150,12 +150,37 @@ fn test_render_dashboard_html_unit() {
     assert!(html.contains("Gen 1"));
 }
 
+fn idle_config(upstream: &str) -> iris::evolution::DaemonConfig {
+    iris::evolution::DaemonConfig {
+        upstream: upstream.to_string(),
+        listen: 0,
+        ticks: 5,
+        tick_ms: 20,
+        target_p99: 15.0,
+        error_budget: 0.01,
+        max_inflight: 8,
+        headless: true,
+        audit: None,
+        serve: Some(0),
+        ready: None,
+        tls: None,
+    }
+}
+
 #[test]
 fn test_run_service_daemon_with_serve() {
-    // Run a short 5-tick headless daemon simulation with serve = true on port 0
-    let res = run_service_daemon(5, 15.0, 0.01, true, None, true, 0);
-    assert!(
-        res.is_ok(),
-        "daemon execution with serve enabled must succeed"
-    );
+    // No traffic: five quiet intervals, nominal, forwarding throughout.
+    let ledger = run_service_daemon(idle_config("http://127.0.0.1:9")).expect("the daemon runs");
+    assert_eq!(ledger.total_ticks, 5);
+    assert_eq!(ledger.total_hot_swaps, 0);
+    assert!(ledger
+        .ticks
+        .iter()
+        .all(|t| t.regime == "Nominal Traffic" && t.active_policy_id == 0));
+}
+
+#[test]
+fn test_run_service_daemon_rejects_a_non_http_upstream() {
+    let err = run_service_daemon(idle_config("ftp://example")).unwrap_err();
+    assert!(err.contains("http://"), "{err}");
 }

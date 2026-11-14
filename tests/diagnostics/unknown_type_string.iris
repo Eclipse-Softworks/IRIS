@@ -1,0 +1,10 @@
+// expect: E0111 at 5:17
+// fix: def greet(name: str)
+// fix-compiles
+
+def greet(name: String) -> i64 {
+    println(name);
+    return 0
+}
+
+def main() -> i64 { greet("iris") }

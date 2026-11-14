@@ -8,10 +8,8 @@ def main() -> i64 effect io {
     val pressed = iris_embedded_gpio_read(2);
     if pressed == 1 {
         iris_embedded_gpio_write(13, 1);
-
     } else {
         iris_embedded_gpio_write(13, 0);
-
     };
     return 0
 }

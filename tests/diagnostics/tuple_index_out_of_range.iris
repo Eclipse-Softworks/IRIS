@@ -1,0 +1,6 @@
+// expect: E0125 at 5:5
+// message: tuple index 2 is out of range
+def main() -> i64 {
+    val t = (1, 2)
+    t.2
+}

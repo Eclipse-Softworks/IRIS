@@ -7,9 +7,9 @@ pub mod types;
 pub mod value;
 
 pub use block::{BlockId, IrBlock};
-pub use function::{FunctionId, IrFunction, Param};
+pub use function::{DropBinding, DropScope, FunctionId, IrFunction, Param, ScopeId};
 pub use graph::{GraphIr, GraphNode, LayerParam, NodeId, ParamValue};
 pub use instr::{BinOp, InstrId, IrInstr, TensorOp};
 pub use module::{IrFunctionBuilder, IrModule};
-pub use types::{DType, Dim, IrType, Shape};
+pub use types::{DType, Dim, IrType, IrTypeId, Shape, TypeArena, TypeArenaStats};
 pub use value::{BlockParam, ValueDef, ValueId};

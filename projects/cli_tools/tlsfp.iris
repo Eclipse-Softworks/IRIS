@@ -1,0 +1,87 @@
+// tlsfp: fingerprint the TLS clients in a packet capture.
+//
+//   iris run projects/cli_tools/tlsfp.iris -- capture.pcap [--known known.csv] [--ja3-string]
+//
+// For every TLS ClientHello prints its JA3 (Salesforce: MD5 of version,
+// ciphers, extensions, groups and point formats, GREASE removed) and JA4
+// (FoxIO). --known takes a CSV of `fingerprint,label` rows, a JA3 MD5 or a
+// JA4 each, and labels the clients that match; nothing is labelled without it.
+
+bring "packets.iris"
+bring "csvkit.iris"
+
+def main() -> i64 {
+    val argv = args();
+    var file = "";
+    var known_file = "";
+    var show_ja3 = false;
+    var bad = false;
+    var i = 1;
+    while i < list_len(argv) {
+        val a = list_get(argv, i);
+        if a == "--known" && i + 1 < list_len(argv) {
+            known_file = list_get(argv, i + 1);
+            i = i + 1
+        } else if a == "--ja3-string" {
+            show_ja3 = true
+        } else if starts_with(a, "--") || len(file) > 0 {
+            bad = true
+        } else {
+            file = a
+        };
+        i = i + 1
+    };
+    if bad || len(file) == 0 {
+        println("usage: tlsfp FILE [--known FINGERPRINTS.csv] [--ja3-string]");
+        return 2
+    };
+    val labels: map<str, str> = map();
+    if len(known_file) > 0 {
+        val text = file_read_all(known_file);
+        if is_ok(text) == false {
+            println("tlsfp: cannot read " + known_file);
+            return 1
+        };
+        val rows = csv_records(unwrap(text));
+        var r = 0;
+        while r < list_len(rows) {
+            val row = list_get(rows, r);
+            if list_len(row) >= 2 {
+                map_set(labels, trim(list_get(row, 0)), trim(list_get(row, 1)))
+            };
+            r = r + 1
+        }
+    };
+    val capture = load_capture(file);
+    if is_ok(capture) == false {
+        println("tlsfp: " + unwrap_err(capture));
+        return 1
+    };
+    val summary = summarize(unwrap(capture), 10);
+    if is_ok(summary) == false {
+        println("tlsfp: " + file + ": " + unwrap_err(summary));
+        return 1
+    };
+    val hellos = unwrap(summary).hellos;
+    var matched = 0;
+    var h = 0;
+    while h < list_len(hellos) {
+        val hello = list_get(hellos, h);
+        assert(len(hello.ja3_md5) == 32);
+        val sni = if len(hello.sni) > 0 { hello.sni } else { "(none)" };
+        println("packet " + to_str(hello.packet) + "  " + hello.src + " -> " + hello.dst + ":" + to_str(hello.dst_port) + "  sni " + sni);
+        println("  ja3 " + hello.ja3_md5);
+        if show_ja3 {
+            println("  ja3 string " + hello.ja3)
+        };
+        println("  ja4 " + hello.ja4);
+        val label = if map_contains(labels, hello.ja3_md5) { map_get(labels, hello.ja3_md5) } else { map_get(labels, hello.ja4) };
+        if is_some(label) {
+            println("  known: " + unwrap(label));
+            matched = matched + 1
+        };
+        h = h + 1
+    };
+    println(to_str(list_len(hellos)) + " client hellos, " + to_str(matched) + " known");
+    return 0
+}

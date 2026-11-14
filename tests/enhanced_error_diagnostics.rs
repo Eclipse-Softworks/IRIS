@@ -142,12 +142,12 @@ fn test_help_hint_for_hash_comment() {
     let src = "# this is a comment";
     let err = compile(src, "test", EmitKind::Ir).expect_err("should fail");
     let rendered = render_error(src, &err);
+    // The hint is a fix: the line as it should read.
     assert!(
-        rendered.contains("= help:"),
-        "expected help hint for '#':\n{}",
+        rendered.contains("help: use `//`") && rendered.contains("// this is a comment"),
+        "expected a fix for '#':\n{}",
         rendered
     );
-    assert!(rendered.contains("//"));
 }
 
 // ---------------------------------------------------------------------------

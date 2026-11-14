@@ -1,0 +1,76 @@
+// std.bitset against hand-derived sets. Bits 63 (the sign bit of the first
+// word) and 64 (the first bit of the second word) are the edge cases a
+// word-packed bitset gets wrong.
+
+bring std.bitset
+
+def ints(xs: list<i64>) -> str {
+    var out = "";
+    for i in 0..list_len(xs) {
+        out = out + (if i > 0 { "," } else { "" }) + to_str(list_get(xs, i));
+    };
+    out
+}
+
+def from(xs: str) -> list<i64> {
+    val idx: list<i64> = list();
+    val parts = split(xs, ",");
+    for i in 0..list_len(parts) { push(idx, unwrap(parse_i64(list_get(parts, i)))) };
+    bitset_from_indices(idx)
+}
+
+def single_bits() -> i64 {
+    var bs = bitset_create();
+    assert(bitset_is_empty(bs));
+    assert(bitset_max_bit(bs) == -1);
+    bs = set_bit(bs, 0);
+    bs = set_bit(bs, 63);
+    bs = set_bit(bs, 64);
+    bs = set_bit(bs, 200);
+    assert(get_bit(bs, 0) && get_bit(bs, 63) && get_bit(bs, 64) && get_bit(bs, 200));
+    assert(!get_bit(bs, 1) && !get_bit(bs, 62) && !get_bit(bs, 65) && !get_bit(bs, 199));
+    assert(popcount(bs) == 4);
+    assert(bitset_max_bit(bs) == 200);
+    assert(ints(bitset_to_indices(bs)) == "0,63,64,200");
+    bs = clear_bit(bs, 63);
+    assert(!get_bit(bs, 63));
+    assert(popcount(bs) == 3);
+    bs = toggle_bit(bs, 63);
+    bs = toggle_bit(bs, 0);
+    assert(ints(bitset_to_indices(bs)) == "63,64,200");
+    assert(!bitset_is_empty(bs));
+    0
+}
+
+def set_algebra() -> i64 {
+    val a = from("1,5,63,64,130");
+    val b = from("5,64,77");
+    assert(ints(bitset_to_indices(bitset_union(a, b))) == "1,5,63,64,77,130");
+    assert(ints(bitset_to_indices(bitset_intersection(a, b))) == "5,64");
+    assert(ints(bitset_to_indices(bitset_difference(a, b))) == "1,63,130");
+    assert(ints(bitset_to_indices(bitset_difference(b, a))) == "77");
+    assert(ints(bitset_to_indices(bitset_xor(a, b))) == "1,63,77,130");
+    assert(bitset_intersects(a, b));
+    assert(!bitset_intersects(from("1,2"), from("3,64")));
+    assert(bitset_is_subset(from("5,64"), a));
+    assert(!bitset_is_subset(b, a));
+    assert(bitset_is_subset(bitset_create(), a));
+    // A set of different word counts on each side.
+    assert(ints(bitset_to_indices(bitset_union(from("3"), from("300")))) == "3,300");
+    assert(ints(bitset_to_indices(bitset_intersection(from("300"), from("3")))) == "");
+
+    // A clone is independent of the original.
+    var c = bitset_clone(a);
+    c = clear_bit(c, 1);
+    assert(get_bit(a, 1));
+    assert(!get_bit(c, 1));
+    assert(bitset_max_bit(a) == 130);
+    0
+}
+
+def main() -> i64 {
+    single_bits();
+    set_algebra();
+    println("bitset reference ok");
+    return 0
+}

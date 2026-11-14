@@ -1,0 +1,88 @@
+// std.ais: elastic weight consolidation lets a model learn a second task
+// without forgetting the first.
+//
+// A linear model y = w0 * x0 + w1 * x1, two tasks that disagree about the
+// weights. Trained on A, then on B by plain gradient descent, it forgets A.
+// Consolidated after A -- the Fisher information of A's samples anchors the
+// weights A relied on -- it learns B while keeping A.
+bring std.ais
+
+def loss(w: list<f64>, xs: list<list<f64>>, ys: list<f64>) -> f64 {
+    var total = 0.0
+    for i in 0..list_len(xs) {
+        val x = list_get(xs, i)
+        val e = list_get(w, 0) * list_get(x, 0) + list_get(w, 1) * list_get(x, 1) - list_get(ys, i)
+        total = total + e * e
+    }
+    total / to_f64(list_len(xs))
+}
+
+def grad(w: list<f64>, xs: list<list<f64>>, ys: list<f64>) -> list<f64> {
+    var g0 = 0.0
+    var g1 = 0.0
+    val n = to_f64(list_len(xs))
+    for i in 0..list_len(xs) {
+        val x = list_get(xs, i)
+        val e = list_get(w, 0) * list_get(x, 0) + list_get(w, 1) * list_get(x, 1) - list_get(ys, i)
+        g0 = g0 + 2.0 * e * list_get(x, 0) / n
+        g1 = g1 + 2.0 * e * list_get(x, 1) / n
+    }
+    list(g0, g1)
+}
+
+def train(start: list<f64>, xs: list<list<f64>>, ys: list<f64>, ewc: EWCState, use_ewc: bool) -> list<f64> {
+    var w0 = list_get(start, 0)
+    var w1 = list_get(start, 1)
+    for step in 0..2000 {
+        val w = list(w0, w1)
+        val g = grad(w, xs, ys)
+        val pen = if use_ewc { ewc_penalty_grad(ewc, w) } else { list(0.0, 0.0) }
+        w0 = w0 - 0.1 * (list_get(g, 0) + list_get(pen, 0))
+        w1 = w1 - 0.1 * (list_get(g, 1) + list_get(pen, 1))
+    }
+    list(w0, w1)
+}
+
+def main() -> i64 {
+    val xa: list<list<f64>> = list()
+    list_push(xa, list(1.0, 0.5))
+    list_push(xa, list(1.0, 0.4))
+    list_push(xa, list(1.0, 0.6))
+    val ya: list<f64> = list(1.0, 0.95, 1.05)
+    val xb: list<list<f64>> = list()
+    list_push(xb, list(1.0, 0.0 - 0.5))
+    list_push(xb, list(1.0, 0.0 - 0.4))
+    list_push(xb, list(1.0, 0.0 - 0.6))
+    val yb: list<f64> = list(0.0 - 1.0, 0.0 - 0.95, 0.0 - 1.05)
+
+    val none_yet = ewc_new(2, 1.0)
+    val wa = train(list(0.0, 0.0), xa, ya, none_yet, false)
+    println("after A: loss A " + to_str(loss(wa, xa, ya)) + ", loss B " + to_str(loss(wa, xb, yb)))
+    assert(loss(wa, xa, ya) < 1.0e-5)
+    assert(loss(wa, xb, yb) > 1.0)
+
+    // The Fisher information of a regression with unit noise: per sample, the
+    // gradient of the prediction, which is x.
+    val ewc = ewc_consolidate(ewc_new(2, 1.0), wa, xa)
+    assert(ewc.n_tasks == 1)
+    assert(abs(list_get(ewc.importance_weights, 0) - 1.0) < 1.0e-12)
+    assert(abs(list_get(ewc.importance_weights, 1) - (0.25 + 0.16 + 0.36) / 3.0) < 1.0e-12)
+    // No penalty, and no pull, at the anchor.
+    assert(ewc_penalty(ewc, wa) == 0.0)
+    assert(list_get(ewc_penalty_grad(ewc, wa), 0) == 0.0)
+
+    val plain = train(wa, xb, yb, ewc, false)
+    val kept = train(wa, xb, yb, ewc, true)
+    val plain_a = loss(plain, xa, ya)
+    val kept_a = loss(kept, xa, ya)
+    val kept_b = loss(kept, xb, yb)
+    println("then B, plain: loss A " + to_str(plain_a) + ", loss B " + to_str(loss(plain, xb, yb)))
+    println("then B, EWC:   loss A " + to_str(kept_a) + ", loss B " + to_str(kept_b))
+    // Plain descent forgets A; EWC keeps it, and still learns most of B.
+    assert(plain_a > 1.0)
+    assert(kept_a < 0.05)
+    assert(kept_b < 0.2)
+    assert(kept_a * 50.0 < plain_a)
+    println("std.ais ewc: ok")
+    return 0
+}

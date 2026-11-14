@@ -1,0 +1,9 @@
+// expect: E0202 at 7:18
+// message: expected `i32`, found `i64`
+// fix: a to i32
+// fix-compiles
+def main() -> i64 {
+    val a = 3
+    val z: i32 = a
+    0
+}

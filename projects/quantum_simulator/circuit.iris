@@ -1,0 +1,141 @@
+// projects/quantum_simulator/circuit.iris
+// N-Qubit Quantum Statevector Register & Universal Quantum Gates
+
+bring "complex.iris"
+
+pub record QubitRegister {
+    num_qubits: i64,
+    num_states: i64, // 2^n
+    state: list<Complex>,
+}
+
+/// Create an n-qubit register initialized to |0...0>
+pub def create_register(n_qubits: i64) -> QubitRegister {
+    var n_states = 1;
+    for i in 0 .. n_qubits {
+        n_states = n_states * 2;
+    }
+
+    val state: list<Complex> = list();
+    // |0...0> has amplitude 1.0 + 0i, all others 0.0
+    list_push(state, c_one());
+    for s in 1 .. n_states {
+        list_push(state, c_zero());
+    }
+
+    QubitRegister {
+        num_qubits: n_qubits,
+        num_states: n_states,
+        state: state,
+    }
+}
+
+/// Apply single-qubit Hadamard gate (H) to target qubit
+pub def apply_hadamard(reg: QubitRegister, target: i64) -> QubitRegister {
+    val next_state: list<Complex> = list();
+    for i in 0 .. reg.num_states {
+        list_push(next_state, c_zero());
+    }
+
+    val inv_sqrt2 = 0.7071067811865475;
+    val bit_mask = shl(1, target);
+
+    for s in 0 .. reg.num_states {
+        if band(s, bit_mask) == 0 {
+            val s0 = s;
+            val s1 = bor(s, bit_mask);
+            val a0 = list_get(reg.state, s0);
+            val a1 = list_get(reg.state, s1);
+
+            val new_a0 = c_scale(c_add(a0, a1), inv_sqrt2);
+            val new_a1 = c_scale(c_sub(a0, a1), inv_sqrt2);
+
+            list_set(next_state, s0, new_a0);
+            list_set(next_state, s1, new_a1);
+        }
+    }
+
+    QubitRegister {
+        num_qubits: reg.num_qubits,
+        num_states: reg.num_states,
+        state: next_state,
+    }
+}
+
+/// Apply Pauli-X (NOT) gate to target qubit
+pub def apply_pauli_x(reg: QubitRegister, target: i64) -> QubitRegister {
+    val next_state: list<Complex> = list();
+    for i in 0 .. reg.num_states {
+        list_push(next_state, c_zero());
+    }
+
+    val bit_mask = shl(1, target);
+    for s in 0 .. reg.num_states {
+        val flipped = bxor(s, bit_mask);
+        list_set(next_state, flipped, list_get(reg.state, s));
+    }
+
+    QubitRegister {
+        num_qubits: reg.num_qubits,
+        num_states: reg.num_states,
+        state: next_state,
+    }
+}
+
+/// Apply Pauli-Z (Phase Flip) gate to target qubit
+pub def apply_pauli_z(reg: QubitRegister, target: i64) -> QubitRegister {
+    val next_state: list<Complex> = list();
+    val bit_mask = shl(1, target);
+
+    for s in 0 .. reg.num_states {
+        val amp = list_get(reg.state, s);
+        if band(s, bit_mask) != 0 {
+            list_push(next_state, c_scale(amp, -1.0));
+        } else {
+            list_push(next_state, amp);
+        }
+    }
+
+    QubitRegister {
+        num_qubits: reg.num_qubits,
+        num_states: reg.num_states,
+        state: next_state,
+    }
+}
+
+/// Apply Controlled-NOT (CNOT) gate between control and target qubits
+pub def apply_cnot(reg: QubitRegister, control: i64, target: i64) -> QubitRegister {
+    val next_state: list<Complex> = list();
+    for i in 0 .. reg.num_states {
+        list_push(next_state, c_zero());
+    }
+
+    val c_mask = shl(1, control);
+    val t_mask = shl(1, target);
+
+    for s in 0 .. reg.num_states {
+        val amp = list_get(reg.state, s);
+        if band(s, c_mask) != 0 {
+            // Control is 1, flip target bit
+            val target_s = bxor(s, t_mask);
+            list_set(next_state, target_s, amp);
+        } else {
+            list_set(next_state, s, amp);
+        }
+    }
+
+    QubitRegister {
+        num_qubits: reg.num_qubits,
+        num_states: reg.num_states,
+        state: next_state,
+    }
+}
+
+/// Calculate probability distribution of measuring basis states |0...0> to |1...1>
+pub def measure_probabilities(reg: QubitRegister) -> list<f64> {
+    val probs: list<f64> = list();
+    for s in 0 .. reg.num_states {
+        list_push(probs, c_mag_sq(list_get(reg.state, s)));
+    }
+    probs
+}

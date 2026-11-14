@@ -1,0 +1,80 @@
+// The gateway's request handling on one thread, without the network: single
+// requests of each kind, then hundreds at once.
+
+bring std.async
+bring "gateway.iris"
+
+def status_of(response: str) -> i64 {
+    val code = parse_i64(slice(response, 9, 12));
+    if is_some(code) { unwrap(code) } else { 0 }
+}
+
+def body_of(response: str) -> str {
+    val at = find(response, "\r\n\r\n");
+    if is_some(at) { slice(response, unwrap(at) + 4, len(response)) } else { "" }
+}
+
+def request(path: str) -> str {
+    "GET " + path + " HTTP/1.1\r\nHost: localhost\r\n\r\n"
+}
+
+def cheapest(sku: str) -> i64 {
+    min(price(0, sku), min(price(1, sku), price(2, sku)))
+}
+
+def main() -> i64 {
+    // Every supplier answers inside the deadline: the best of three.
+    val bolt = await handle(request("/quote/bolt"));
+    println(body_of(bolt));
+    assert(status_of(bolt) == 200);
+    assert(contains(bolt, "\"best\":" + to_str(cheapest("bolt"))));
+    assert(contains(bolt, "\"answered\":3,\"cancelled\":0"));
+
+    // Supplier 2 never answers for a rare part: cut off at the deadline.
+    val started = time_now_ms();
+    val rare = await handle(request("/quote/rare-gear"));
+    val waited = time_now_ms() - started;
+    println(body_of(rare) + " after " + to_str(waited) + " ms");
+    assert(status_of(rare) == 200);
+    assert(contains(rare, "\"answered\":2,\"cancelled\":1"));
+    assert(waited >= DEADLINE_MS - 20 && waited < HUNG_MS);
+
+    // The first answer wins and the other two calls are cancelled.
+    val first = await handle(request("/fastest/bolt"));
+    println(body_of(first));
+    assert(status_of(first) == 200);
+    assert(contains(first, "\"cancelled\":2"));
+
+    // An upstream that never answers.
+    val timed_out = await handle(request("/slow"));
+    assert(status_of(timed_out) == 504);
+    assert(status_of(await handle(request("/nowhere"))) == 404);
+
+    // 300 requests at once, all on this thread.
+    val burst_started = time_now_ms();
+    val tasks: list<task<str>> = list();
+    var i = 0;
+    while i < 300 {
+        push(tasks, handle(request("/quote/part" + to_str(i % 25))));
+        i = i + 1
+    };
+    val replies = await join_all(tasks);
+    val burst = time_now_ms() - burst_started;
+    var ok = 0;
+    var j = 0;
+    while j < list_len(replies) {
+        if status_of(list_get(replies, j)) == 200 {
+            ok = ok + 1
+        };
+        j = j + 1
+    };
+    println("300 concurrent quotes: " + to_str(ok) + " answered in " + to_str(burst) + " ms; peak in flight " + to_str(peak_requests_in_flight()));
+    assert(ok == 300);
+    assert(peak_requests_in_flight() == 300);
+    // One after another they would take at least 300 x 20 ms.
+    assert(burst < 3000);
+    println(stats_json());
+    assert(contains(stats_json(), "\"served\":305,\"timeouts\":1,\"cancelled_calls\":4"));
+    println("async gateway: deadlines, cancellation and 300 concurrent requests checked");
+    return 0
+}

@@ -40,5 +40,7 @@ def main() -> i64 {
     val c_last = list_get(c, size - 1);
     print((c_first to i64));
     print((c_last to i64));
+    assert((c_first to i64) == 0);
+    assert((c_last to i64) > 0);
     0
 }

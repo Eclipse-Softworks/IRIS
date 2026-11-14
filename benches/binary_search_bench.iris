@@ -34,5 +34,6 @@ def main() -> i64 {
         i = i + 1
     }
     print(found);
+    assert(found == 500);
     0
 }

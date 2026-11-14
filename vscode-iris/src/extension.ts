@@ -1,7 +1,8 @@
 import * as vscode from 'vscode';
 import { initStatusBar, updateStatusBar, showServerMenu } from './statusBar';
 import { startLspClient, restartLsp, stopLsp, client } from './lspClient';
-import { getIrisExe, resetIrisExeCache, diagnoseCandidates } from './irisExe';
+import * as fs from 'fs';
+import { getIrisExe, resetIrisExeCache, diagnoseCandidates, workspaceBuilds } from './irisExe';
 import {
     runIrisFile,
     runNamedFunction,
@@ -21,7 +22,7 @@ import {
     IrisEmitProvider,
     runDiagCollection,
 } from './commands';
-import { IrisDebugAdapterFactory } from './debugAdapter';
+import { IrisDebugAdapterFactory, IrisDebugConfigurationProvider } from './debugAdapter';
 import { IrisCodeLensProvider } from './codelens';
 import { IrisTaskProvider } from './tasks';
 import { IrisTestController } from './testController';
@@ -43,6 +44,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         vscode.commands.registerCommand('iris.runFile',    () => runIrisFile(context, 'run', getIrisExe, outputChannel)),
         vscode.commands.registerCommand('iris.buildFile',  () => runIrisFile(context, 'build', getIrisExe, outputChannel)),
         vscode.commands.registerCommand('iris.debugFile',  (uri?: vscode.Uri | string) => debugIrisFile(uri, getIrisExe)),
+        vscode.commands.registerCommand('iris.debugFileNative', (uri?: vscode.Uri | string) => debugIrisFile(uri, getIrisExe, true)),
         vscode.commands.registerCommand('iris.openRepl',   () => openRepl(context, getIrisExe)),
         vscode.commands.registerCommand('iris.restartLsp', () => restartLsp(context, getIrisExe, serverOutputChannel)),
         vscode.commands.registerCommand('iris.stopLsp',    () => stopLsp(getIrisExe)),
@@ -121,6 +123,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     // Register Debug Adapter Descriptor Factory
     context.subscriptions.push(
         vscode.debug.registerDebugAdapterDescriptorFactory('iris', new IrisDebugAdapterFactory(getIrisExe)),
+        vscode.debug.registerDebugConfigurationProvider('iris', new IrisDebugConfigurationProvider()),
     );
 
     // Register Task Provider
@@ -161,6 +164,34 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
     // Start LSP Client
     await startLspClient(context, getIrisExe, serverOutputChannel);
+
+    // Follow the compiler being built in the workspace: when `cargo build`
+    // replaces target/{debug,release}/iris, restart the server on the new
+    // build so diagnostics come from the compiler as it now is. Polled rather
+    // than watched through VS Code, whose `files.watcherExclude` commonly
+    // hides `target/`. An explicit `iris.executablePath` is left alone.
+    let pending: NodeJS.Timeout | undefined;
+    const onBuild = (curr: fs.Stats, prev: fs.Stats) => {
+        const configured = vscode.workspace.getConfiguration('iris').get<string>('executablePath', '').trim();
+        if (curr.mtimeMs === prev.mtimeMs || curr.mtimeMs === 0 || (configured && configured !== 'iris' && configured !== 'iris.exe')) {
+            return;
+        }
+        if (pending) {
+            clearTimeout(pending);
+        }
+        // Let the linker finish writing before the binary is probed and copied.
+        pending = setTimeout(() => {
+            pending = undefined;
+            serverOutputChannel.appendLine('IRIS: the workspace compiler was rebuilt; restarting the language server');
+            void restartLsp(context, getIrisExe, serverOutputChannel, true);
+        }, 3000);
+    };
+    for (const folder of vscode.workspace.workspaceFolders ?? []) {
+        for (const build of workspaceBuilds(folder.uri.fsPath)) {
+            fs.watchFile(build, { interval: 2000 }, onBuild);
+            context.subscriptions.push({ dispose: () => fs.unwatchFile(build, onBuild) });
+        }
+    }
 }
 
 export function deactivate(): Thenable<void> | undefined {

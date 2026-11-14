@@ -27,5 +27,6 @@ def main() -> i64 {
     val s = repeat_str("iris", 50)
     val n = count_char(s, "i")
     print(n);
+    assert(n == 100);
     0
 }

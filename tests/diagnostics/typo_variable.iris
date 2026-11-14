@@ -1,0 +1,8 @@
+// expect: E0100 at 7:12
+// fix: return total
+// fix-compiles
+
+def main() -> i64 {
+    val total = 3
+    return totl
+}

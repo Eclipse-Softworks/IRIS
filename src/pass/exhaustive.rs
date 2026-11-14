@@ -18,8 +18,8 @@ impl Pass for ExhaustivePass {
 
     fn run(&mut self, module: &mut IrModule) -> Result<(), PassError> {
         for func in module.functions() {
-            for block in func.blocks() {
-                for instr in &block.instrs {
+            for (bi, block) in func.blocks().iter().enumerate() {
+                for (ii, instr) in block.instrs.iter().enumerate() {
                     if let IrInstr::SwitchVariant {
                         scrutinee,
                         arms,
@@ -32,22 +32,35 @@ impl Pass for ExhaustivePass {
                         }
                         // Look up the enum type from the scrutinee's value type.
                         let enum_ty = func.value_type(*scrutinee);
-                        let num_variants = match enum_ty {
-                            Some(IrType::Enum { variants, .. }) => variants.len(),
+                        let (enum_name, variant_names) = match enum_ty {
+                            Some(IrType::Enum { name, variants }) => {
+                                (name.clone(), variants.clone())
+                            }
                             _ => continue, // can't determine — skip
                         };
+                        let num_variants = variant_names.len();
                         let covered: std::collections::HashSet<usize> =
                             arms.iter().map(|(idx, _)| *idx).collect();
                         let missing: Vec<usize> =
                             (0..num_variants).filter(|v| !covered.contains(v)).collect();
                         if !missing.is_empty() {
-                            return Err(PassError::TypeError {
-                                func: func.name.clone(),
-                                detail: format!(
-                                    "non-exhaustive match: variant indices {:?} not covered",
-                                    missing
-                                ),
-                            });
+                            let names: Vec<String> = missing
+                                .iter()
+                                .map(|i| format!("`{}.{}`", enum_name, variant_names[*i]))
+                                .collect();
+                            let mut diag = crate::diagnostics::Diagnostic::error(format!(
+                                "this `when` does not handle {}",
+                                names.join(", ")
+                            ))
+                            .with_help("add an arm for each, or a `_ =>` arm for the rest");
+                            let at = func
+                                .get_instr_span(bi as u32, ii)
+                                .or_else(|| func.debug_span(bi as u32, ii))
+                                .or_else(|| func.span_table.get_for_val(*scrutinee));
+                            if let Some(b) = at {
+                                diag = diag.with_primary_span(b, b + 1, None);
+                            }
+                            return Err(PassError::rich("E0210", diag));
                         }
                     }
                 }

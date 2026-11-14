@@ -1,0 +1,71 @@
+bring "system.iris"
+
+def main() -> i64 {
+    val nominal = Plant { dynamics: Dynamics { retention: 0.5, gain: 1.0 }, drag: 0.0, noise: 0.0 };
+    val changed = Plant { dynamics: Dynamics { retention: 0.8, gain: 0.25 }, drag: 0.0, noise: 0.0 };
+    val initial = Dynamics { retention: 0.1, gain: 0.5 };
+    val nominal_data = collect(nominal, 96, 11);
+    for index in 1 .. 96 {
+        assert(list_get(nominal_data, index).velocity == list_get(nominal_data, index - 1).next_velocity);
+    };
+    val frozen = train(nominal_data, initial);
+    assert(prediction_loss(nominal_data, frozen, 0, 96) < 0.000001);
+    val stable = adapt(collect(nominal, 96, 23), collect(nominal, 64, 31), nominal, frozen);
+    assert(stable.triggers == 0 && stable.accepted == 0);
+    val observations = collect(changed, 96, 43);
+    val selection = collect(changed, 64, 59);
+    val update = adapt(observations, selection, changed, frozen);
+    assert(update.triggers == 1 && update.accepted == 1);
+    val active = update.active;
+    assert(prediction_loss(selection, active, 0, 64) < 0.0001);
+    val settled = adapt(collect(changed, 96, 67), selection, changed, active);
+    assert(settled.triggers == 0);
+    val invalid = Dynamics { retention: 1.2, gain: 0.0 };
+    assert(!acceptable(selection, changed, active, invalid));
+    assert(!acceptable(selection, changed, active, initial));
+    assert(!acceptable(selection, changed, active, active));
+    // Triggered job whose closed-loop validation fails must keep its model.
+    val refused = adapt(observations, selection, nominal, frozen);
+    assert(refused.triggers == 1 && refused.accepted == 0);
+    assert(refused.active.retention == frozen.retention && refused.active.gain == frozen.gain);
+    // An isolated sensor spike cannot satisfy three consecutive windows.
+    val spike = collect(nominal, 96, 71);
+    val first = list_get(spike, 0);
+    list_set(spike, 0, Observation { velocity: first.velocity, command: first.command, next_velocity: first.next_velocity + 2.0 });
+    assert(adapt(spike, selection, changed, frozen).triggers == 0);
+
+    // Final scenarios never reach training, monitoring, or candidate selection.
+    val tests: list<Plant> = list(
+        changed,
+        Plant { dynamics: Dynamics { retention: 0.75, gain: 0.3 }, drag: 0.01, noise: 0.01 },
+        Plant { dynamics: Dynamics { retention: 0.85, gain: 0.22 }, drag: 0.02, noise: 0.02 }
+    );
+    var fixed_total = 0.0;
+    var learned_total = 0.0;
+    var feedback_total = 0.0;
+    for index in 0 .. list_len(tests) {
+        val plant = list_get(tests, index);
+        val scenario = if index == 1 { 1 } else { 2 };
+        val fixed = episode(plant, frozen, scenario, false);
+        val learned = episode(plant, active, scenario, false);
+        val feedback = episode(plant, frozen, scenario, true);
+        println(f"scenario={index} frozen_mse={fixed.mse} adapted_mse={learned.mse} feedback_mse={feedback.mse}");
+        println(f"saturated/120: frozen={fixed.saturated} adapted={learned.saturated} feedback={feedback.saturated}");
+        fixed_total = fixed_total + fixed.mse;
+        learned_total = learned_total + learned.mse;
+        feedback_total = feedback_total + feedback.mse;
+    };
+    println(f"mean MSE: frozen={fixed_total / 3.0} adapted={learned_total / 3.0} feedback={feedback_total / 3.0}");
+    assert(learned_total < fixed_total);
+    val recent = collect(changed, 32, 83);
+    val restored = recover(recent, initial, active);
+    assert(restored.retention == active.retention && restored.gain == active.gain);
+    assert(recover(recent, active, frozen).gain == active.gain);
+    assert(recover(recent, invalid, active).gain == active.gain);
+    val unchecked = fault_episode(changed, active, false);
+    val recovered = fault_episode(changed, active, true);
+    println(f"continuous fault episode MSE: unchecked={unchecked} recovered={recovered}");
+    assert(recovered < unchecked);
+    println("learning robot: trajectories, drift, evaluation, recovery verified");
+    return 0
+}

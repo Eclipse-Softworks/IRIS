@@ -1,0 +1,499 @@
+// projects/mission_intelligence/environment.iris
+// Physically consistent Jovian moon (Europa) orbital environment, subsystems, and anomaly simulator.
+
+bring std.math.*
+bring "types.iris"
+
+/// Physical parameters for target body: Jovian Moon Europa
+pub def env_planet_radius() -> f64 { 1560.8 } // km (Real Europa radius)
+pub def env_mu() -> f64 { 3202.73 }          // km^3 / s^2 (Real Europa GM)
+pub def env_semi_major_axis() -> f64 { 1850.0 } // km
+pub def env_eccentricity() -> f64 { 0.12 }     // Moderate eccentricity
+
+/// Europa subsurface conducting ocean parameters (Europa Clipper reference)
+pub def env_ocean_radius() -> f64 { 1530.0 }   // km (conducting saline ocean boundary below ~30km ice shell)
+pub def env_ocean_induction_amplitude() -> f64 { 0.980 } // Theoretical inductive response amplitude (saline ocean)
+pub def env_ocean_induction_phase_lag() -> f64 { 0.10 }  // radians (~5.7 deg, delta_t = phi/(2*PI)*T_syn = 636.6 s = 10.61 min)
+pub def env_jovian_synodic_period() -> f64 { 40000.0 }   // seconds (~11.1 hours Jupiter synodic period relative to Europa)
+pub def env_jovian_synodic_freq() -> f64 { (2.0 * PI) / env_jovian_synodic_period() } // ~1.5708e-4 rad/s
+pub def env_jovian_orbital_period() -> f64 { 306828.0 }   // seconds (~85.23 hours Europa orbit around Jupiter)
+pub def env_jovian_orbital_freq() -> f64 { (2.0 * PI) / env_jovian_orbital_period() } // ~2.0478e-5 rad/s
+pub def env_jovian_bg_field() -> f64 { 210.0 } // nT (ambient mean Jovian background magnetic field at 9.38 Rj)
+pub def env_jovian_osc_field() -> f64 { 85.0 } // nT (amplitude of primary synodic oscillation driven by Jupiter's 9.6 deg dipole tilt)
+pub def env_jovian_orbital_field() -> f64 { 12.0 } // nT (amplitude of secondary orbital variation from plasma sheet geometry)
+
+/// Orbital period in seconds: T = 2 * PI * sqrt(a^3 / mu) = 8834.42 s (2.454 hours)
+pub def env_orbital_period() -> f64 {
+    val a = env_semi_major_axis();
+    val mu = env_mu();
+    (2.0 * PI) * sqrt((a * a * a) / mu)
+}
+
+/// Theoretical orbital energy: E = -mu / (2*a) = -0.865603 km^2/s^2
+pub def env_theoretical_energy() -> f64 {
+    0.0 - (env_mu() / (2.0 * env_semi_major_axis()))
+}
+
+/// Theoretical specific angular momentum: h = sqrt(mu * a * (1 - e^2))
+pub def env_theoretical_momentum() -> f64 {
+    val a = env_semi_major_axis();
+    val e = env_eccentricity();
+    sqrt(env_mu() * a * (1.0 - (e * e)))
+}
+
+/// Independent analytical Kepler conic equation solver via Newton-Raphson
+pub def env_solve_kepler(m: f64, e: f64) -> f64 {
+    var big_e = m;
+    var iter = 0;
+    while iter < 15 {
+        val f = big_e - (e * sin(big_e)) - m;
+        val f_prime = 1.0 - (e * cos(big_e));
+        val delta = f / f_prime;
+        big_e = big_e - delta;
+        if abs_f64(delta) < 0.000000000001 {
+            return big_e;
+        };
+        iter = iter + 1;
+    };
+    big_e
+}
+
+/// Independent analytical Keplerian conic reference solution at elapsed time t_s
+pub def env_analytical_reference(t_s: f64) -> (f64, f64) {
+    val a = env_semi_major_axis();
+    val e = env_eccentricity();
+    val mu = env_mu();
+    val n = sqrt(mu / (a * a * a));
+    val m = n * t_s;
+    val big_e = env_solve_kepler(m, e);
+    val r_exact = a * (1.0 - (e * cos(big_e)));
+    val v_exact = sqrt(mu * ((2.0 / r_exact) - (1.0 / a)));
+    (r_exact, v_exact)
+}
+
+/// Create initial spacecraft state at periapsis
+pub def env_initial_state() -> SpacecraftState {
+    val a = env_semi_major_axis();
+    val e = env_eccentricity();
+    val r0 = a * (1.0 - e); // Periapsis radius = 1628.0 km
+    val alt0 = r0 - env_planet_radius(); // 67.2 km
+    val mu = env_mu();
+    val v0 = sqrt(mu * ((2.0 / r0) - (1.0 / a))); // 1.517 km/s
+    val e0 = (0.5 * v0 * v0) - (mu / r0);
+    val h0 = r0 * v0;
+
+    SpacecraftState {
+        time_s: 0.0,
+        altitude_km: alt0,
+        radius_km: r0,
+        true_anomaly_rad: 0.0,
+        velocity_kms: v0,
+        specific_energy: e0,
+        specific_momentum: h0,
+        battery_pct: 95.0,
+        temp_celsius: 20.0,
+        wheel_momentum_nms: 2.1,
+        solar_flux_wm2: 1361.0,
+        is_eclipse: false,
+        sensor_sun_angle_deg: 75.0,
+        accumulated_radiation_krad: 0.0,
+        vault_radiation_krad: 0.0,
+    }
+}
+
+/// Propagate physical orbit and spacecraft subsystems forward by dt seconds
+pub def env_step(
+    state: SpacecraftState,
+    executed_action_name: str,
+    action_power_w: f64,
+    action_sun_angle_deg: f64,
+    step_idx: i64,
+    dt: f64,
+    seed_offset: f64
+) -> (SpacecraftState, RawObservation) {
+    val a = env_semi_major_axis();
+    val e = env_eccentricity();
+    val mu = env_mu();
+    val p = a * (1.0 - (e * e));
+    val h_orb = sqrt(mu * p);
+
+    // 1. Two-step midpoint numerical integration of true anomaly d(nu)/dt = h / r^2
+    val r_current = p / (1.0 + (e * cos(state.true_anomaly_rad)));
+    val dnu_1 = (h_orb / (r_current * r_current)) * dt;
+    val nu_mid = state.true_anomaly_rad + (0.5 * dnu_1);
+    val r_mid = p / (1.0 + (e * cos(nu_mid)));
+    val dnu_2 = (h_orb / (r_mid * r_mid)) * dt;
+    var next_nu = state.true_anomaly_rad + dnu_2;
+
+    // Wrap anomaly within [0, 2*PI)
+    if next_nu >= (2.0 * PI) {
+        next_nu = next_nu - (2.0 * PI);
+    };
+
+    val next_r = p / (1.0 + (e * cos(next_nu)));
+    val next_alt = next_r - env_planet_radius();
+    val next_v = sqrt(mu * ((2.0 / next_r) - (1.0 / a)));
+    val current_energy = (0.5 * next_v * next_v) - (mu / next_r);
+
+    // 2. Solar illumination and eclipse geometry (behind body)
+    val sin_nu = sin(next_nu);
+    val is_eclipse = sin_nu < -0.32;
+    val solar_flux = if is_eclipse { 0.0 } else { 1361.0 };
+
+    // 3. Electrical power balance
+    val solar_gen_w = if is_eclipse { 0.0 } else { 88.0 };
+    val base_bus_draw_w = 22.0;
+    val net_power_w = solar_gen_w - base_bus_draw_w - action_power_w;
+    // 100% capacity = 250 Watt-hours = 900,000 Joules
+    val delta_soc = (net_power_w * dt / 9000.0);
+    val next_battery = clamp_f64(state.battery_pct + delta_soc, 0.0, 100.0);
+
+    // 4. Thermal subsystem balance (conductive + radiative + internal)
+    val is_thermal_excursion = if seed_offset == 0.0 {
+        step_idx >= 60 && step_idx <= 72
+    } else {
+        val th_start = 58 + (3.0 * cos(seed_offset * 1.45)) to i64;
+        step_idx >= th_start && step_idx <= (th_start + 11)
+    };
+    val cooling_coeff = 0.36;
+    val heat_in = ((solar_flux / 1361.0) * 14.0) + (action_power_w * 0.12);
+    val heat_out = cooling_coeff * (state.temp_celsius - (-12.0));
+    val delta_temp = (heat_in - heat_out) * (dt * 0.002);
+    val next_temp = if is_thermal_excursion {
+        52.5 + (1.5 * sin(((step_idx - 60) to f64) * 0.4))
+    } else {
+        clamp_f64(state.temp_celsius + delta_temp, -20.0, 65.0)
+    };
+
+    // 5. Attitude and reaction wheel momentum dynamics
+    val is_desat = executed_action_name == "MOMENTUM_DESATURATION";
+    val delta_momentum = if is_desat { -1.5 } else { 0.0006 * dt };
+    val next_momentum = clamp_f64(state.wheel_momentum_nms + delta_momentum, 0.5, 15.0);
+
+    // Update boresight pointing angle relative to Sun vector
+    val next_sun_angle = if executed_action_name == "SUN_SAFE_SLEW" { 65.0 } else { action_sun_angle_deg };
+
+    // Accumulated ionizing radiation dose in Jovian radiation belt:
+    // Exterior unshielded rate: 0.150 krad/h = 0.00004167 krad/s
+    // Shielded Europa Clipper 9.2 mm Al-Zn alloy vault rate: 0.00417 krad/h = 0.000001157 krad/s (36x attenuation)
+    val next_rad = state.accumulated_radiation_krad + (0.00004167 * dt);
+    val next_vault_rad = state.vault_radiation_krad + (0.000001157 * dt);
+
+    val next_state = SpacecraftState {
+        time_s: state.time_s + dt,
+        altitude_km: next_alt,
+        radius_km: next_r,
+        true_anomaly_rad: next_nu,
+        velocity_kms: next_v,
+        specific_energy: current_energy,
+        specific_momentum: h_orb,
+        battery_pct: next_battery,
+        temp_celsius: next_temp,
+        wheel_momentum_nms: next_momentum,
+        solar_flux_wm2: solar_flux,
+        is_eclipse: is_eclipse,
+        sensor_sun_angle_deg: next_sun_angle,
+        accumulated_radiation_krad: next_rad,
+        vault_radiation_krad: next_vault_rad,
+    };
+
+    // 6. Realistic Europa Electromagnetic Induction Physics (NASA Europa Clipper model)
+    // Jupiter's primary synodic oscillation (11.1 h, 40000s) + secondary orbital variation (85.2 h, 306828s)
+    val w_syn = env_jovian_synodic_freq();
+    val w_orb = env_jovian_orbital_freq();
+    val b_j0 = env_jovian_bg_field();
+    val b_1 = env_jovian_osc_field();
+    val b_2 = env_jovian_orbital_field();
+    val b_jup = b_j0 + (b_1 * cos(w_syn * state.time_s)) + (b_2 * cos(w_orb * state.time_s));
+
+    // Secondary induced dipole field from subsurface saline ocean (R_ocean = 1530 km, A_ind = 0.980, phi = 0.10 rad)
+    val r_ocean = env_ocean_radius();
+    val a_ind = env_ocean_induction_amplitude();
+    val phi = env_ocean_induction_phase_lag();
+    val r_ratio = r_ocean / next_r;
+    val b_ind = a_ind * (b_1 * cos((w_syn * state.time_s) - phi)) * (r_ratio * r_ratio * r_ratio);
+    val b_true = b_jup + b_ind;
+
+    val plasma_nominal = 18.0 * exp(-next_alt / 220.0);
+
+    // Pseudo-random Gaussian-like sensor measurement noise modulated by seed_offset
+    val t_s = state.time_s + seed_offset;
+    val alt_noise = (0.42 * sin(17.3 * t_s)) + (0.28 * cos(29.1 * t_s));
+    val meas_alt = max_f64(0.0, next_alt + alt_noise);
+    // Europa Clipper Magnetometer (ECM) sensor noise is ~1.5 nT
+    val noise_mag = (1.5 * sin((11.3 * t_s) + seed_offset)) + (1.2 * cos((37.9 * t_s) + (seed_offset * 2.0)));
+    val noise_plasma = (1.8 * cos(19.1 * t_s)) + (1.2 * sin(43.7 * t_s));
+
+    // GROUND TRUTH INJECTED ANOMALY LABELS
+    val is_plasma_flare = if seed_offset == 0.0 {
+        step_idx >= 32 && step_idx <= 44
+    } else {
+        val f_start = 30 + (4.0 * sin(seed_offset * 1.73)) to i64;
+        val f_dur = 10 + (2.0 * cos(seed_offset * 0.91)) to i64;
+        step_idx >= f_start && step_idx <= (f_start + f_dur)
+    };
+
+    val is_sensor_dropout = if seed_offset == 0.0 {
+        step_idx >= 84 && step_idx <= 88
+    } else {
+        val s_start = 82 + (3.0 * sin(seed_offset * 2.11)) to i64;
+        step_idx >= s_start && step_idx <= (s_start + 4)
+    };
+
+    val is_gt_anomaly = is_plasma_flare || is_sensor_dropout || is_thermal_excursion;
+    val gt_type = if is_plasma_flare {
+        "PLASMA_SURGE"
+    } else {
+        if is_thermal_excursion {
+            "THERMAL_EXCURSION"
+        } else {
+            if is_sensor_dropout {
+                "SENSOR_DROPOUT"
+            } else {
+                "NONE"
+            }
+        }
+    };
+
+    val f_peak = if seed_offset == 0.0 { 120.0 } else { 110.0 + (30.0 * sin(seed_offset * 2.37)) };
+    val anomaly_mag = if is_plasma_flare { f_peak + (45.0 * sin(((step_idx - 32) to f64) * 0.26)) } else { 0.0 };
+    val anomaly_plasma = if is_plasma_flare { 120.0 + (35.0 * sin(((step_idx - 32) to f64) * 0.26)) } else { 0.0 };
+
+    val measured_b = max_f64(0.0, b_true + noise_mag + anomaly_mag);
+    val measured_plasma = max_f64(0.0, plasma_nominal + noise_plasma + anomaly_plasma);
+    val snr = if is_sensor_dropout { 2.1 + (0.4 * sin(t_s * 3.1)) } else { 42.5 + (8.0 * cos(7.3 * t_s)) };
+
+    val obs = RawObservation {
+        time_s: state.time_s,
+        altitude_km: next_alt,
+        measured_altitude_km: meas_alt,
+        radius_km: next_r,
+        measured_mag_nt: measured_b,
+        plasma_density_cm3: measured_plasma,
+        spectrometer_snr: snr,
+        sensor_healthy: !is_sensor_dropout,
+        ground_truth_anomaly: is_gt_anomaly,
+        anomaly_type: gt_type,
+    };
+
+    (next_state, obs)
+}
+
+/// Precompute full environmental ground truth timeline for a given seed before running policies
+pub def env_precompute_timeline(
+    seed_offset: f64,
+    total_steps: i64,
+    dt: f64
+) -> list<EnvironmentTimelineStep> {
+    val timeline: list<EnvironmentTimelineStep> = list();
+    val a = env_semi_major_axis();
+    val e = env_eccentricity();
+    val mu = env_mu();
+    val p = a * (1.0 - (e * e));
+    val h_orb = sqrt(mu * p);
+    val w_syn = env_jovian_synodic_freq();
+    val b_j0 = env_jovian_bg_field();
+    val b_1 = env_jovian_osc_field();
+    val r_ocean = env_ocean_radius();
+    val a_ind = env_ocean_induction_amplitude();
+
+    var cur_nu = 0.0;
+    var cur_time = 0.0;
+    var st = 0;
+
+    while st < total_steps {
+        val r_cur = p / (1.0 + (e * cos(cur_nu)));
+        val dnu_1 = (h_orb / (r_cur * r_cur)) * dt;
+        val nu_mid = cur_nu + (0.5 * dnu_1);
+        val r_mid = p / (1.0 + (e * cos(nu_mid)));
+        val dnu_2 = (h_orb / (r_mid * r_mid)) * dt;
+        var next_nu = cur_nu + dnu_2;
+        if next_nu >= (2.0 * PI) {
+            next_nu = next_nu - (2.0 * PI);
+        };
+
+        val next_r = p / (1.0 + (e * cos(next_nu)));
+        val next_alt = next_r - env_planet_radius();
+        val next_v = sqrt(mu * ((2.0 / next_r) - (1.0 / a)));
+
+        val sin_nu = sin(next_nu);
+        val is_eclipse = sin_nu < -0.32;
+        val solar_flux = if is_eclipse { 0.0 } else { 1361.0 };
+
+        val w_orb = env_jovian_orbital_freq();
+        val b_2 = env_jovian_orbital_field();
+        val phi = env_ocean_induction_phase_lag();
+        val b_jup = b_j0 + (b_1 * cos(w_syn * cur_time)) + (b_2 * cos(w_orb * cur_time));
+        val ratio_ocean = r_ocean / next_r;
+        val b_ind = a_ind * (b_1 * cos((w_syn * cur_time) - phi)) * (ratio_ocean * ratio_ocean * ratio_ocean);
+        val b_phys = b_jup + b_ind;
+
+        val plasma_nom = 18.0 * exp(-next_alt / 220.0);
+
+        val t_s = cur_time + seed_offset;
+        val alt_noise = (0.42 * sin(17.3 * t_s)) + (0.28 * cos(29.1 * t_s));
+        val mag_noise = (1.5 * sin((11.3 * t_s) + seed_offset)) + (1.2 * cos((37.9 * t_s) + (seed_offset * 2.0)));
+        val plasma_noise = (1.8 * cos(19.1 * t_s)) + (1.2 * sin(43.7 * t_s));
+
+        val is_plasma_flare = if seed_offset == 0.0 {
+            st >= 32 && st <= 44
+        } else {
+            val f_start = 30 + (4.0 * sin(seed_offset * 1.73)) to i64;
+            val f_dur = 10 + (2.0 * cos(seed_offset * 0.91)) to i64;
+            st >= f_start && st <= (f_start + f_dur)
+        };
+
+        val is_thermal_excursion = if seed_offset == 0.0 {
+            st >= 60 && st <= 72
+        } else {
+            val th_start = 58 + (3.0 * cos(seed_offset * 1.45)) to i64;
+            st >= th_start && st <= (th_start + 11)
+        };
+
+        val is_sensor_dropout = if seed_offset == 0.0 {
+            st >= 84 && st <= 88
+        } else {
+            val s_start = 82 + (3.0 * sin(seed_offset * 2.11)) to i64;
+            st >= s_start && st <= (s_start + 4)
+        };
+
+        val gt_type = if is_plasma_flare {
+            "PLASMA_SURGE"
+        } else {
+            if is_thermal_excursion {
+                "THERMAL_EXCURSION"
+            } else {
+                if is_sensor_dropout {
+                    "SENSOR_DROPOUT"
+                } else {
+                    "NONE"
+                }
+            }
+        };
+
+        val f_peak = if seed_offset == 0.0 { 120.0 } else { 110.0 + (30.0 * sin(seed_offset * 2.37)) };
+        val flare_mag = if is_plasma_flare { f_peak + (45.0 * sin(((st - 32) to f64) * 0.26)) } else { 0.0 };
+        val flare_plasma = if is_plasma_flare { 120.0 + (35.0 * sin(((st - 32) to f64) * 0.26)) } else { 0.0 };
+        val snr = if is_sensor_dropout { 2.1 + (0.4 * sin(t_s * 3.1)) } else { 42.5 + (8.0 * cos(7.3 * t_s)) };
+
+        push(timeline, EnvironmentTimelineStep {
+            step_idx: st,
+            time_s: cur_time,
+            radius_km: next_r,
+            altitude_km: next_alt,
+            velocity_kms: next_v,
+            ambient_mag_nt: b_phys,
+            plasma_density_cm3: plasma_nom,
+            is_eclipse: is_eclipse,
+            solar_flux_wm2: solar_flux,
+            alt_noise_km: alt_noise,
+            mag_noise_nt: mag_noise,
+            plasma_noise_cm3: plasma_noise,
+            spectrometer_snr: snr,
+            is_plasma_flare: is_plasma_flare,
+            is_thermal_excursion: is_thermal_excursion,
+            is_sensor_dropout: is_sensor_dropout,
+            gt_anomaly_type: gt_type,
+            flare_mag_boost: flare_mag,
+            flare_plasma_boost: flare_plasma,
+        });
+
+        cur_nu = next_nu;
+        cur_time = cur_time + dt;
+        st = st + 1;
+    };
+
+    timeline
+}
+
+/// Systematic Timestep Refinement & Asymptotic Convergence Study:
+/// Validates that the 2nd-order midpoint Runge-Kutta integrator demonstrates
+/// approximately quadratic (O(dt^2), alpha ~ 2.000) error reduction across
+/// successively refined timesteps (N = 50, 100, 200, 400, 800 steps).
+pub def env_run_convergence_study() -> list<ConvergenceStepRecord> {
+    val records: list<ConvergenceStepRecord> = list();
+    val steps_list: list<i64> = list();
+    push(steps_list, 50);
+    push(steps_list, 100);
+    push(steps_list, 200);
+    push(steps_list, 400);
+    push(steps_list, 800);
+
+    val a = env_semi_major_axis();
+    val e = env_eccentricity();
+    val mu = env_mu();
+    val p = a * (1.0 - (e * e));
+    val h_orb = sqrt(mu * p);
+    val t_period = env_orbital_period();
+
+    var prev_pos_err = 0.0;
+    var prev_vel_err = 0.0;
+    var i = 0;
+
+    while i < list_len(steps_list) {
+        val n = list_get(steps_list, i);
+        val dt = t_period / (n to f64);
+
+        var cur_nu = 0.0;
+        var max_pos_err_m = 0.0;
+        var max_vel_err_mms = 0.0;
+
+        var s = 0;
+        while s < n {
+            val r_curr = p / (1.0 + (e * cos(cur_nu)));
+            val dnu_1 = (h_orb / (r_curr * r_curr)) * dt;
+            val nu_mid = cur_nu + (0.5 * dnu_1);
+            val r_mid = p / (1.0 + (e * cos(nu_mid)));
+            val dnu_2 = (h_orb / (r_mid * r_mid)) * dt;
+            cur_nu = cur_nu + dnu_2;
+            if cur_nu >= (2.0 * PI) {
+                cur_nu = cur_nu - (2.0 * PI);
+            };
+
+            val t_elapsed = ((s + 1) to f64) * dt;
+            val (r_ref, v_ref) = env_analytical_reference(t_elapsed);
+            val num_r = p / (1.0 + (e * cos(cur_nu)));
+            val num_v = sqrt(mu * ((2.0 / num_r) - (1.0 / a)));
+
+            val err_pos_m = abs_f64(num_r - r_ref) * 1000.0;
+            val err_vel_mms = abs_f64(num_v - v_ref) * 1000000.0;
+
+            if err_pos_m > max_pos_err_m {
+                max_pos_err_m = err_pos_m;
+            };
+            if err_vel_mms > max_vel_err_mms {
+                max_vel_err_mms = err_vel_mms;
+            };
+
+            s = s + 1;
+        };
+
+        val (r_ref_end, _) = env_analytical_reference(t_period);
+        val r_final = p / (1.0 + (e * cos(cur_nu)));
+        val closure_err_mm = abs_f64(r_final - r_ref_end) * 1000000.0;
+
+        val pos_ratio = if i > 0 { prev_pos_err / max_pos_err_m } else { 0.0 };
+        val pos_alpha = if i > 0 { log(pos_ratio) / log(2.0) } else { 0.0 };
+        val vel_ratio = if i > 0 { prev_vel_err / max_vel_err_mms } else { 0.0 };
+        val vel_alpha = if i > 0 { log(vel_ratio) / log(2.0) } else { 0.0 };
+
+        push(records, ConvergenceStepRecord {
+            steps: n,
+            dt_s: dt,
+            max_pos_error_m: max_pos_err_m,
+            pos_error_ratio: pos_ratio,
+            pos_order_alpha: pos_alpha,
+            max_vel_error_mms: max_vel_err_mms,
+            vel_error_ratio: vel_ratio,
+            vel_order_alpha: vel_alpha,
+            closure_error_mm: closure_err_mm,
+        });
+
+        prev_pos_err = max_pos_err_m;
+        prev_vel_err = max_vel_err_mms;
+        i = i + 1;
+    };
+
+    records
+}
+

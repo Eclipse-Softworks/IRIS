@@ -1,0 +1,110 @@
+// projects/autonomous_drone_hunter/types.iris
+// Domain types, algebraic data types (choices), records, and mission structures.
+
+pub record Vector3 {
+    x: f64,
+    y: f64,
+    z: f64,
+}
+
+pub choice TargetSignature {
+    RadioFrequency(f64),              // Frequency in MHz
+    ThermalInfrared(f64),             // Temperature delta in Celsius
+    VisualAperture(f64),              // Optical cross-section in m^2
+    StealthMultiSpectral(f64, f64),   // RF dBm, Thermal delta C
+}
+
+pub choice TargetManeuver {
+    StationaryCamouflage,
+    LowSpeedPatrol,
+    HighSpeedEvasion,
+    CanyonBreakout,
+}
+
+pub choice SensorContact {
+    NoSignal,
+    RFBearing(f64, f64),              // Azimuth bearing (rad), RSSI (dBm)
+    ThermalHotspot(Vector3, f64),      // Direction vector, temperature delta (C)
+    OpticalLock(Vector3, Vector3, f64), // Position, Velocity, Confidence [0.0 .. 1.0]
+}
+
+pub choice HuntPhase {
+    AreaSearch(f64, f64),             // Search radius (m), scan angle (rad)
+    SignalTriangulation(Vector3, f64), // Estimated centroid, confidence
+    InterceptPursuit(Vector3, f64),    // Target position, closing speed (m/s)
+    TerminalLaserLock(i64, Vector3),   // Target ID, designated coordinate
+    ReturnToBase(Vector3),             // Base waypoint vector
+    MissionDebrief,                    // Final debriefing state
+}
+
+pub choice MissionStatus {
+    TargetNeutralized,
+    TargetEscaped,
+    BatteryDepleted,
+    SensorFailure(str),
+}
+
+pub record TargetEntity {
+    id: i64,
+    pos: Vector3,
+    vel: Vector3,
+    signature: TargetSignature,
+    maneuver: TargetManeuver,
+    evasive_timer: f64,
+    is_detected: bool,
+    is_locked: bool,
+}
+
+pub record DroneKinematics {
+    pos: Vector3,
+    vel: Vector3,
+    heading_rad: f64,
+    speed_ms: f64,
+    climb_rate_ms: f64,
+}
+
+pub record DronePower {
+    battery_mah: f64,
+    max_mah: f64,
+    voltage_v: f64,
+    avg_power_w: f64,
+    energy_consumed_wh: f64,
+}
+
+pub record SensorPayload {
+    rf_sensitivity_dbm: f64,
+    flir_fov_rad: f64,
+    flir_range_m: f64,
+    lidar_range_m: f64,
+    optical_zoom: f64,
+}
+
+pub record TargetTrack {
+    id: i64,
+    estimated_pos: Vector3,
+    estimated_vel: Vector3,
+    confidence: f64,
+    last_contact_time: f64,
+    observation_count: i64,
+    has_los: bool,
+}
+
+pub record GuidanceStepResult {
+    next_phase: HuntPhase,
+    desired_vel: Vector3,
+    log_msg: str,
+}
+
+pub record MissionReport {
+    mission_id: str,
+    status: MissionStatus,
+    elapsed_time_s: f64,
+    total_flight_dist_m: f64,
+    battery_consumed_pct: f64,
+    target_initial_loc: Vector3,
+    target_locked_loc: Vector3,
+    final_standoff_distance_m: f64,
+    peak_confidence: f64,
+    total_samples: i64,
+    tactical_events: list<str>,
+}

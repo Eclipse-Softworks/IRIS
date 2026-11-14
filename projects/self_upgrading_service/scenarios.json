@@ -1,0 +1,26 @@
+[
+  {
+    "name": "a shelf runs short",
+    "steps": [
+      { "gateway": "restock", "input": { "sku": "bolt", "qty": 10 }, "expected": { "ok": true, "stock": 10 } },
+      { "gateway": "reserve", "input": { "sku": "bolt", "qty": 4 }, "expected": { "ok": true, "stock": 6 } },
+      { "gateway": "reserve", "input": { "sku": "bolt", "qty": 9 },
+        "expected": { "ok": false, "error": "insufficient stock", "stock": 6, "short": 3 } },
+      { "gateway": "stats", "input": {},
+        "expected": { "served": 3, "reserved": 4, "refused": 1, "skus": 1, "units": 6 } }
+    ]
+  },
+  {
+    "name": "resumed from live state",
+    "state": { "skus": ["nut", "washer"], "stock": [2, 40], "served": 120, "reserved": 300 },
+    "steps": [
+      { "gateway": "reserve", "input": { "sku": "nut", "qty": 3 },
+        "expected": { "ok": false, "error": "insufficient stock", "stock": 2, "short": 1 } },
+      { "gateway": "restock", "input": { "sku": "nut", "qty": 5 }, "expected": { "ok": true, "stock": 7 } },
+      { "gateway": "reserve", "input": { "sku": "nut", "qty": 3 }, "expected": { "ok": true, "stock": 4 } },
+      { "gateway": "reserve", "input": { "sku": "gear", "qty": 1 }, "expected": { "ok": false, "error": "unknown sku" } },
+      { "gateway": "stats", "input": {},
+        "expected": { "served": 124, "reserved": 303, "refused": 1, "skus": 2, "units": 44 } }
+    ]
+  }
+]

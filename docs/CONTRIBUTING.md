@@ -187,21 +187,54 @@ refactor: simplify IR lowering pass
 Integration tests follow this pattern:
 
 ```rust
+use iris::{compile, EmitKind};
+
 #[test]
 fn my_feature_works() {
     let src = r#"
 def main() -> i64 {
-    // Your test code here
-    val result = my_feature(42);
-    print(result);
-    0
+    my_feature(42)
 }
 "#;
-    let (exit, stdout, _stderr) = iris::run_str(src);
-    assert_eq!(exit, 0);
-    assert_eq!(stdout.trim(), "expected output");
+    // `EmitKind::Eval` runs the program and returns what it printed,
+    // followed by `main`'s return value.
+    let out = compile(src, "test", EmitKind::Eval).expect("should run");
+    assert_eq!(out.trim(), "84");
 }
 ```
+
+For a test written in IRIS, put a `tests/test_<feature>.iris` file with
+`assert(...)` on every result; the corpus runs it on both backends.
+
+### Both backends, generated programs, and sanitizers
+
+IRIS runs programs two ways, natively and in the interpreter, and the two
+must agree. Three tests hold them to it:
+
+- **`tests/iris_corpus.rs`** runs every `tests/*.iris` file on both
+  backends (`the_two_backends_agree`). A `.iris` test must `assert(...)`
+  its results; a test that only prints cannot fail.
+- **`tests/differential.rs`** generates programs that combine features
+  from a seed and requires identical output from both backends
+  (`IRIS_DIFF_SEEDS=1..201` for more seeds). A failing program is kept in
+  `target/difftest/seedN.iris`; shrink it with
+  `python tools/difftest_reduce.py target/difftest/seedN.iris --differ`
+  (or `--native-crash`, or `--compile-error TEXT`) before debugging.
+- **`IRIS_SANITIZE=address`** builds native programs with AddressSanitizer,
+  runtime and generated code alike (Linux and macOS). CI runs the
+  differential tester and the corpus this way (job `sanitize`); from any
+  machine with Docker, `tools/sanitize_linux.sh` runs the same job in a
+  container.
+
+### Standard library functions need reference tests
+
+Every public function in `src/stdlib/` must be called by an asserting test,
+or be listed in `tests/stdlib_untested.txt`; `tests/stdlib_coverage.rs`
+enforces it, and the list may only shrink. Check results against an
+independent reference: a published test vector (RFCs, FIPS, NIST), a value
+derived by hand from a specification, or a second implementation, never the
+output of the function under test. `tests/test_crypto_vectors.iris` and
+`tests/test_unicode_reference.iris` show the pattern.
 
 ## Project Structure
 

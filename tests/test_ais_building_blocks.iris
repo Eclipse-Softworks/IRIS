@@ -1,0 +1,95 @@
+// std.ais v3 building blocks, each against values worked out by hand.
+bring std.ais
+
+def near(a: f64, b: f64) -> bool { abs(a - b) < 1.0e-12 }
+
+def main() -> i64 {
+    // ── Categorical helpers ────────────────────────────────────────────────
+    val p = probs_normalize(list(1.0, 3.0))
+    assert(near(list_get(p, 0), 0.25) && near(list_get(p, 1), 0.75))
+    val uniform = probs_normalize(list(0.0, 0.0, 0.0, 0.0))
+    assert(near(list_get(uniform, 3), 0.25))
+    val sm = probs_softmax(list(0.0, log(3.0)))
+    assert(near(list_get(sm, 0), 0.25) && near(list_get(sm, 1), 0.75))
+    val ls = probs_log_softmax(list(0.0, log(3.0)))
+    assert(near(list_get(ls, 0), log(0.25)) && near(list_get(ls, 1), log(0.75)))
+    // KL(p || p) = 0; KL((1, 0) || (0.5, 0.5)) = log 2.
+    assert(near(probs_kl(p, p), 0.0))
+    assert(near(probs_kl(list(1.0, 0.0), list(0.5, 0.5)), log(2.0)))
+    assert(probs_argmax(list(0.1, 0.7, 0.7, 0.2)) == 1)
+
+    // ── A two-state model: action 0 stays, action 1 swaps ──────────────────
+    val m = pomdp_new(2, 2, 2)
+    pomdp_set_likelihood(m, 0, list(0.9, 0.1), 10.0)
+    pomdp_set_likelihood(m, 1, list(0.2, 0.8), 10.0)
+    pomdp_set_transition(m, 0, 0, list(1.0, 0.0), 10.0)
+    pomdp_set_transition(m, 0, 1, list(0.0, 1.0), 10.0)
+    pomdp_set_transition(m, 1, 0, list(0.0, 1.0), 10.0)
+    pomdp_set_transition(m, 1, 1, list(1.0, 0.0), 10.0)
+    val q = list(0.7, 0.3)
+    val swapped = pomdp_predict(m, q, 1)
+    assert(near(list_get(swapped, 0), 0.3) && near(list_get(swapped, 1), 0.7))
+    // q(o = 0) = 0.9 * 0.7 + 0.2 * 0.3 = 0.69.
+    val qo = pomdp_observation_probs(m, q)
+    assert(near(list_get(qo, 0), 0.69) && near(list_get(qo, 1), 0.31))
+    // Bayes: P(s = 0 | o = 0) = 0.63 / 0.69.
+    val post = pomdp_posterior(m, q, 0)
+    assert(near(list_get(post, 0), 0.63 / 0.69))
+    // An impossible observation leaves the prior.
+    val certain = pomdp_new(2, 2, 1)
+    pomdp_set_likelihood(certain, 0, list(1.0, 0.0), 1.0)
+    pomdp_set_likelihood(certain, 1, list(1.0, 0.0), 1.0)
+    val kept = pomdp_posterior(certain, q, 1)
+    assert(near(list_get(kept, 0), 0.7))
+    // H[P(o | s)] per state.
+    val amb = pomdp_state_ambiguity(m)
+    assert(near(list_get(amb, 0), 0.0 - 0.9 * log(0.9) - 0.1 * log(0.1)))
+    // Counts are likelihood * 10: novelty weight 1/c - 1/sum.
+    val w = pomdp_novelty_weights(m)
+    assert(near(list_get(w, 0), 1.0 / 9.0 - 1.0 / 10.0))
+    val pols = policies_all(2, 3)
+    assert(list_len(pols) == 8)
+    assert(list_get(list_get(pols, 5), 0) == 1 && list_get(list_get(pols, 5), 1) == 0 && list_get(list_get(pols, 5), 2) == 1)
+
+    // ── Learning moves the counts by the posterior ─────────────────────────
+    pomdp_learn_likelihood(m, 0, list(1.0, 0.0), 1.0)
+    // State 0's counts were (9, 1); now (10, 1).
+    assert(near(list_get(m.pa, 0), 10.0) && near(list_get(m.a, 0), 10.0 / 11.0))
+    pomdp_learn_transition(m, 0, list(1.0, 0.0), list(0.0, 1.0), 1.0)
+    // Action 0 from state 0 was (10, 0); now (10, 1).
+    assert(near(list_get(m.b, 1), 1.0 / 11.0))
+
+    // ── Linear model ───────────────────────────────────────────────────────
+    val lm = linear_model_new(2, 1, 1.0, 1.0)
+    list_set(lm.w, 0, 2.0)
+    list_set(lm.w, 1, 0.0 - 1.0)
+    assert(near(list_get(linear_model_predict(lm, list(3.0, 4.0)), 0), 2.0))
+    // P = I: the variance at x is |x|^2.
+    assert(near(linear_model_variance(lm, list(3.0, 4.0)), 25.0))
+    val feats = wm_features(list(1.0, 2.0), list(5.0))
+    assert(list_len(feats) == 4 && list_get(feats, 2) == 5.0 && list_get(feats, 3) == 1.0)
+    // A model of next = 0.5 * x + u: hold u = 1 from 0, reach 1, 1.5, 1.75.
+    var wm = wm_new(1, 1, 1.0)
+    list_set(wm.w, 0, 0.5)
+    list_set(wm.w, 1, 1.0)
+    val path = wm_rollout(wm, list(0.0), list(1.0), 3)
+    assert(near(list_get(list_get(path, 2), 0), 1.75))
+
+    // ── Viability over predictions ─────────────────────────────────────────
+    // Keep x in 1.2..2.5: from 0, holding u = 1 reaches 1.75 in three steps;
+    // holding u = 3 overshoots to 5.25.
+    val bounds: list<ViabilityBound> = list(viability_bound_new("x", 1.2, 2.5, 0.0 - 10.0, 10.0, 1.0, 0))
+    val actions = list(list(0.0), list(1.0), list(3.0))
+    val pick = viability_choose(bounds, wm, list(0.0), actions, 3, list(), 0.0)
+    assert(pick.action == 1)
+    assert(list_get(pick.risks, 1) < list_get(pick.risks, 0) && list_get(pick.risks, 1) < list_get(pick.risks, 2))
+    val only_big: list<bool> = list(false, false, true)
+    assert(viability_choose(bounds, wm, list(0.0), actions, 3, only_big, 0.0).action == 2)
+
+    // ── Rules ──────────────────────────────────────────────────────────────
+    assert(safety_condition(">=", 2.0, 2.0) && !safety_condition(">", 2.0, 2.0) && safety_condition("!=", 1.0, 2.0))
+    val pilot = autopilot_with_learning(autopilot_new(1, actions, bounds, safety_policy_new(), 3, 0.95), false)
+    assert(!pilot.learning)
+    println("std.ais building blocks: ok")
+    return 0
+}

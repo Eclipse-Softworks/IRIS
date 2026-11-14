@@ -21,7 +21,9 @@ static void deallocator_noop(void* data, size_t len, void* arg) {
 }
 
 void* iris_tf_load_saved_model(const char* path) {
+    iris_sandbox_require_ffi("tensorflow");
     if (!path) return NULL;
+    iris_sandbox_require_fs_read(path);
     if (!iris_tf_available()) return NULL;
 
 #ifdef _WIN32

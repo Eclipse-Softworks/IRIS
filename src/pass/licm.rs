@@ -15,6 +15,7 @@ use crate::ir::block::BlockId;
 use crate::ir::function::IrFunction;
 use crate::ir::instr::IrInstr;
 use crate::ir::module::IrModule;
+use crate::ir::types::{DType, IrType};
 use crate::ir::value::ValueId;
 use crate::pass::Pass;
 
@@ -173,6 +174,17 @@ fn licm_func(func: &mut IrFunction) {
         }
     }
 
+    // Integer constants that are not zero: dividing by one cannot trap.
+    let nonzero: HashSet<ValueId> = func
+        .blocks
+        .iter()
+        .flat_map(|block| block.instrs.iter())
+        .filter_map(|instr| match instr {
+            IrInstr::ConstInt { result, value, .. } if *value != 0 => Some(*result),
+            _ => None,
+        })
+        .collect();
+
     for (header, body) in &loops {
         // Find preheader: a predecessor of the header, outside the loop, that
         // *dominates* the header.
@@ -211,6 +223,15 @@ fn licm_func(func: &mut IrFunction) {
                             continue;
                         }
                         if is_side_effecting_for_licm(instr) {
+                            continue;
+                        }
+                        // Hoisting runs the instruction whether or not its
+                        // block would have run. Only the header runs on
+                        // every entry to the loop, so an instruction that can
+                        // fail (a division by zero, an index out of range)
+                        // moves only from there: `if len(s) > 0 { a % len(s) }`
+                        // inside a loop used to divide by zero.
+                        if bi != *header && can_trap(instr, &nonzero) {
                             continue;
                         }
                         // All operands must be either defined outside loop or invariant.
@@ -275,6 +296,31 @@ fn block_index(func: &IrFunction, bid: BlockId) -> Option<usize> {
     func.blocks.iter().position(|b| b.id == bid)
 }
 
+/// Whether `instr` can fail at run time for some operands.
+fn can_trap(instr: &IrInstr, nonzero: &HashSet<ValueId>) -> bool {
+    use crate::ir::instr::BinOp;
+    match instr {
+        IrInstr::BinOp { op, rhs, ty, .. } => {
+            matches!(op, BinOp::Div | BinOp::FloorDiv | BinOp::Mod)
+                && !matches!(ty, IrType::Scalar(DType::F32 | DType::F64))
+                && !nonzero.contains(rhs)
+        }
+        IrInstr::StrIndex { .. }
+        | IrInstr::StrSlice { .. }
+        | IrInstr::StrRepeat { .. }
+        | IrInstr::ExtractVariantField { .. }
+        | IrInstr::TensorOp { .. }
+        | IrInstr::Sparsify { .. }
+        | IrInstr::Densify { .. } => true,
+        _ => false,
+    }
+}
+
+/// Whether `instr` must stay where it is. Hoisting is only for instructions
+/// whose result depends on nothing but their operands: no effects, and no
+/// fresh mutable object (`split` returns a new list each time; hoisting it
+/// would share one list across iterations). Records are immutable values here
+/// (a field assignment builds a new record), so building one can move.
 fn is_side_effecting_for_licm(instr: &IrInstr) -> bool {
     !matches!(
         instr,
@@ -289,7 +335,6 @@ fn is_side_effecting_for_licm(instr: &IrInstr) -> bool {
             | IrInstr::MakeStruct { .. }
             | IrInstr::GetField { .. }
             | IrInstr::MakeTraitObject { .. }
-            | IrInstr::DynCall { .. }
             | IrInstr::MakeVariant { .. }
             | IrInstr::ExtractVariantField { .. }
             | IrInstr::MakeTuple { .. }
@@ -316,7 +361,6 @@ fn is_side_effecting_for_licm(instr: &IrInstr) -> bool {
             | IrInstr::StrSlice { .. }
             | IrInstr::StrFind { .. }
             | IrInstr::StrReplace { .. }
-            | IrInstr::StrSplit { .. }
             | IrInstr::StrJoin { .. }
             | IrInstr::GetVariantTag { .. }
             | IrInstr::GradValue { .. }

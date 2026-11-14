@@ -326,6 +326,12 @@ impl OrcJitEngine {
     }
 
     pub fn load_module(&self, module: &IrModule) -> Result<OrcJitModule, CodegenError> {
+        if let Err(err) = crate::security::validate_module_ffi(&module.extern_fns) {
+            return Err(CodegenError::Unsupported {
+                backend: "security".into(),
+                detail: format!("E0407: {err}"),
+            });
+        }
         let llvm_ir = crate::codegen::llvm_ir::emit_llvm_ir(module)?;
         let object = crate::codegen::llvm_c_api::compile_llvm_ir_to_object_bytes(
             &llvm_ir,
@@ -390,6 +396,7 @@ impl OrcJitEngine {
             session: Arc::clone(&self.session),
             tracker,
             signatures,
+            state_vars: module.state_vars().to_vec(),
         })
     }
 
@@ -510,6 +517,397 @@ pub struct OrcJitModule {
     session: Arc<OrcSession>,
     tracker: LLVMOrcResourceTrackerRef,
     signatures: HashMap<String, JitSignature>,
+    /// The program's state variables (`var` at the top level).
+    state_vars: Vec<(String, IrType)>,
+}
+
+const MAX_F64_ARGS: usize = 8;
+
+/// One field of a record crossing the host boundary
+/// ([`OrcJitModule::call_record`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum RecordField {
+    F64(f64),
+    I64(i64),
+    Bool(bool),
+}
+
+impl RecordField {
+    /// The zero value for a field of type `ty`, if records may carry it.
+    pub fn zero(ty: &IrType) -> Option<Self> {
+        match ty {
+            IrType::Scalar(DType::F64) => Some(Self::F64(0.0)),
+            IrType::Scalar(DType::I64) => Some(Self::I64(0)),
+            IrType::Scalar(DType::Bool) => Some(Self::Bool(false)),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for RecordField {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::F64(value) => write!(formatter, "{value:?}"),
+            Self::I64(value) => write!(formatter, "{value}"),
+            Self::Bool(value) => write!(formatter, "{value}"),
+        }
+    }
+}
+
+/// The native layout of a record whose fields are all `f64`, `i64` or
+/// `bool`: LLVM's natural struct layout for `%Name = type { ... }`, each field
+/// at its own alignment (8, 8 and 1 bytes) and the whole padded to 8.
+/// Returns (offset, field type) per field and the total size.
+pub fn record_layout(ty: &IrType) -> Result<(Vec<(usize, DType)>, usize), CodegenError> {
+    let IrType::Struct { name, fields } = ty else {
+        return Err(CodegenError::Unsupported {
+            backend: "jit".into(),
+            detail: format!("{ty} is not a record"),
+        });
+    };
+    let mut layout = Vec::with_capacity(fields.len());
+    let mut offset = 0usize;
+    let mut align = 1usize;
+    for (field, field_ty) in fields {
+        let (size, field_align, dtype) = match field_ty {
+            IrType::Scalar(DType::F64) => (8, 8, DType::F64),
+            IrType::Scalar(DType::I64) => (8, 8, DType::I64),
+            IrType::Scalar(DType::Bool) => (1, 1, DType::Bool),
+            other => {
+                return Err(CodegenError::Unsupported {
+                    backend: "jit".into(),
+                    detail: format!(
+                        "field '{field}' of record {name} has type {other}; records cross the host boundary with f64, i64 and bool fields only"
+                    ),
+                })
+            }
+        };
+        offset = offset.div_ceil(field_align) * field_align;
+        layout.push((offset, dtype));
+        offset += size;
+        align = align.max(field_align);
+    }
+    Ok((layout, offset.div_ceil(align).max(1) * align))
+}
+
+extern "C" {
+    fn iris_free_bytes(ptr: *mut c_void);
+}
+
+/// A program state value crossing the host boundary, for state handoff
+/// between generations.
+#[derive(Debug, Clone, PartialEq)]
+pub enum StateValue {
+    I64(i64),
+    F64(f64),
+    Bool(bool),
+    Str(String),
+    /// A list of `i64`, `f64`, `bool` or `str`.
+    List(Vec<StateValue>),
+    /// A record of `f64`, `i64` and `bool` fields, in declaration order.
+    Record(Vec<RecordField>),
+}
+
+/// Runtime functions for reading and building state values. They are the
+/// same functions the JIT's generated code links against.
+mod state_ffi {
+    use crate::runtime_bindings::{IrisList, IrisVal};
+    use std::ffi::c_void;
+    use std::os::raw::{c_char, c_int};
+    extern "C" {
+        pub fn iris_alloc_bytes(bytes: u64) -> *mut c_void;
+        // Typed as in `runtime_bindings`, which declares them too.
+        pub fn iris_list_new() -> *mut IrisList;
+        pub fn iris_list_push(list: *mut IrisList, value: *mut IrisVal);
+        pub fn iris_list_push_i64(list: *mut c_void, value: i64);
+        pub fn iris_list_push_f64(list: *mut c_void, value: f64);
+        pub fn iris_list_len(list: *mut c_void) -> i64;
+        pub fn iris_list_get(list: *mut c_void, index: i64) -> *mut c_void;
+        pub fn iris_unbox_i64(value: *mut c_void) -> i64;
+        pub fn iris_unbox_f64(value: *mut c_void) -> f64;
+        pub fn iris_unbox_bool(value: *mut c_void) -> c_int;
+        pub fn iris_unbox_str(value: *mut c_void) -> *mut c_char;
+        pub fn iris_box_str(text: *const c_char) -> *mut c_void;
+        pub fn iris_box_bool(value: c_int) -> *mut c_void;
+        pub fn iris_drop_box(value: *mut c_void);
+        pub fn iris_retain_kind(ptr: *mut c_void, kind: i32);
+        pub fn iris_release_kind(ptr: *mut c_void, kind: i32);
+    }
+}
+
+/// Whether state handoff can carry a variable of type `ty`.
+pub fn state_type_carried(ty: &IrType) -> bool {
+    match ty {
+        IrType::Scalar(DType::I64 | DType::F64 | DType::Bool) | IrType::Str => true,
+        IrType::List(elem) => matches!(
+            elem.as_ref(),
+            IrType::Scalar(DType::I64 | DType::F64 | DType::Bool) | IrType::Str
+        ),
+        IrType::Struct { .. } => record_layout(ty).is_ok(),
+        _ => false,
+    }
+}
+
+// Refcount kinds (`IRIS_RC_*`) of the GC-tracked state types.
+const RC_STR: i32 = 1;
+const RC_LIST: i32 = 2;
+
+fn unsupported_state(name: &str, ty: &IrType) -> CodegenError {
+    CodegenError::Unsupported {
+        backend: "jit".into(),
+        detail: format!(
+            "state variable '{name}' has type {ty}; state handoff carries i64, f64, bool, str, \
+             lists of those, and records of f64/i64/bool fields"
+        ),
+    }
+}
+
+/// Read the value of type `ty` stored at `at`.
+///
+/// # Safety
+/// `at` must be the address of a program state global of type `ty`.
+unsafe fn read_state_value(
+    at: *mut u8,
+    ty: &IrType,
+    name: &str,
+) -> Result<StateValue, CodegenError> {
+    use state_ffi::*;
+    Ok(match ty {
+        IrType::Scalar(DType::I64) => StateValue::I64(at.cast::<i64>().read()),
+        IrType::Scalar(DType::F64) => StateValue::F64(at.cast::<f64>().read()),
+        IrType::Scalar(DType::Bool) => StateValue::Bool(at.read() & 1 == 1),
+        IrType::Str => {
+            let text = at.cast::<*const c_char>().read();
+            StateValue::Str(if text.is_null() {
+                String::new()
+            } else {
+                CStr::from_ptr(text).to_string_lossy().into_owned()
+            })
+        }
+        IrType::List(elem) => {
+            let list = at.cast::<*mut c_void>().read();
+            let mut items = Vec::new();
+            if !list.is_null() {
+                for index in 0..iris_list_len(list) {
+                    let item = iris_list_get(list, index);
+                    items.push(match elem.as_ref() {
+                        IrType::Scalar(DType::I64) => StateValue::I64(iris_unbox_i64(item)),
+                        IrType::Scalar(DType::F64) => StateValue::F64(iris_unbox_f64(item)),
+                        IrType::Scalar(DType::Bool) => StateValue::Bool(iris_unbox_bool(item) != 0),
+                        IrType::Str => {
+                            let text = iris_unbox_str(item);
+                            StateValue::Str(if text.is_null() {
+                                String::new()
+                            } else {
+                                CStr::from_ptr(text).to_string_lossy().into_owned()
+                            })
+                        }
+                        _ => return Err(unsupported_state(name, ty)),
+                    });
+                }
+            }
+            StateValue::List(items)
+        }
+        IrType::Struct { .. } => {
+            let (layout, _) = record_layout(ty).map_err(|_| unsupported_state(name, ty))?;
+            let record = at.cast::<*mut u8>().read();
+            if record.is_null() {
+                return Err(CodegenError::Unsupported {
+                    backend: "jit".into(),
+                    detail: format!("state variable '{name}' has no value yet"),
+                });
+            }
+            StateValue::Record(
+                layout
+                    .iter()
+                    .map(|&(offset, dtype)| {
+                        let field = record.add(offset);
+                        match dtype {
+                            DType::F64 => RecordField::F64(field.cast::<f64>().read_unaligned()),
+                            DType::I64 => RecordField::I64(field.cast::<i64>().read_unaligned()),
+                            _ => RecordField::Bool(field.read() & 1 == 1),
+                        }
+                    })
+                    .collect(),
+            )
+        }
+        _ => return Err(unsupported_state(name, ty)),
+    })
+}
+
+/// Store `value` (of type `ty`) at `at`, taking a reference on a GC-tracked
+/// value and releasing the one it replaces, as `state_set` does.
+///
+/// # Safety
+/// `at` must be the address of a program state global of type `ty`.
+unsafe fn write_state_value(
+    at: *mut u8,
+    ty: &IrType,
+    name: &str,
+    value: &StateValue,
+) -> Result<(), CodegenError> {
+    use state_ffi::*;
+    let mismatch = || CodegenError::Unsupported {
+        backend: "jit".into(),
+        detail: format!("state variable '{name}' is {ty}; the value given is {value:?}"),
+    };
+    let new_str = |text: &str| -> Result<*mut c_void, CodegenError> {
+        let text = CString::new(text).map_err(|_| CodegenError::Unsupported {
+            backend: "jit".into(),
+            detail: format!("state variable '{name}' holds a string with a NUL byte"),
+        })?;
+        Ok(iris_box_str(text.as_ptr()))
+    };
+    match (ty, value) {
+        (IrType::Scalar(DType::I64), StateValue::I64(v)) => at.cast::<i64>().write(*v),
+        (IrType::Scalar(DType::F64), StateValue::F64(v)) => at.cast::<f64>().write(*v),
+        (IrType::Scalar(DType::Bool), StateValue::Bool(v)) => at.write(u8::from(*v)),
+        (IrType::Str, StateValue::Str(text)) => {
+            // The box copies the string and owns one reference; take the
+            // state's own, then drop the box.
+            let boxed = new_str(text)?;
+            let copy = iris_unbox_str(boxed).cast::<c_void>();
+            iris_retain_kind(copy, RC_STR);
+            iris_drop_box(boxed);
+            let old = at.cast::<*mut c_void>().read();
+            at.cast::<*mut c_void>().write(copy);
+            iris_release_kind(old, RC_STR);
+        }
+        (IrType::List(elem), StateValue::List(items)) => {
+            let typed_list = iris_list_new();
+            let list = typed_list.cast::<c_void>();
+            for item in items {
+                match (elem.as_ref(), item) {
+                    (IrType::Scalar(DType::I64), StateValue::I64(v)) => {
+                        iris_list_push_i64(list, *v)
+                    }
+                    (IrType::Scalar(DType::F64), StateValue::F64(v)) => {
+                        iris_list_push_f64(list, *v)
+                    }
+                    (IrType::Scalar(DType::Bool), StateValue::Bool(v)) => iris_list_push(
+                        typed_list,
+                        iris_box_bool(std::os::raw::c_int::from(*v)).cast(),
+                    ),
+                    (IrType::Str, StateValue::Str(text)) => {
+                        iris_list_push(typed_list, new_str(text)?.cast())
+                    }
+                    _ => return Err(mismatch()),
+                }
+            }
+            iris_retain_kind(list, RC_LIST);
+            let old = at.cast::<*mut c_void>().read();
+            at.cast::<*mut c_void>().write(list);
+            iris_release_kind(old, RC_LIST);
+        }
+        (IrType::Struct { .. }, StateValue::Record(fields)) => {
+            let (layout, size) = record_layout(ty).map_err(|_| unsupported_state(name, ty))?;
+            if layout.len() != fields.len() {
+                return Err(mismatch());
+            }
+            // Records are never freed, so the one this replaces stays valid
+            // for anything still holding it.
+            let record = iris_alloc_bytes(size as u64).cast::<u8>();
+            for (&(offset, dtype), field) in layout.iter().zip(fields) {
+                let at_field = record.add(offset);
+                match (dtype, field) {
+                    (DType::F64, RecordField::F64(v)) => at_field.cast::<f64>().write_unaligned(*v),
+                    (DType::I64, RecordField::I64(v)) => at_field.cast::<i64>().write_unaligned(*v),
+                    (DType::Bool, RecordField::Bool(v)) => at_field.write(u8::from(*v)),
+                    _ => return Err(mismatch()),
+                }
+            }
+            at.cast::<*mut u8>().write(record);
+        }
+        _ => return Err(mismatch()),
+    }
+    Ok(())
+}
+
+/// Native signatures a [`ResolvedEntry`] can be called through.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EntryKind {
+    I64Nullary,
+    I64ToI64,
+    /// `(f64 x n) -> f64`, `1 <= n <= 8`.
+    F64(usize),
+    /// Any other signature; callable only through the name-based methods.
+    Other,
+}
+
+/// A function address resolved and signature-checked once by
+/// [`OrcJitModule::resolve_entry`].
+///
+/// It holds no reference to its module: the caller must keep the owning
+/// [`OrcJitModule`] alive for as long as it calls the entry, which is why
+/// the call methods are `unsafe`.
+#[derive(Debug, Clone, Copy)]
+pub struct ResolvedEntry {
+    address: usize,
+    kind: EntryKind,
+}
+
+impl ResolvedEntry {
+    pub fn kind(&self) -> EntryKind {
+        self.kind
+    }
+
+    fn mismatch(&self, name: &str, requested: &str) -> CodegenError {
+        CodegenError::Unsupported {
+            backend: "jit".into(),
+            detail: format!(
+                "function '{name}' has native signature {:?}, which does not match the requested host ABI {requested}",
+                self.kind
+            ),
+        }
+    }
+
+    /// # Safety
+    /// The module this entry was resolved from must still be alive.
+    pub unsafe fn call_i64_0(&self, name: &str) -> Result<i64, CodegenError> {
+        if self.kind != EntryKind::I64Nullary {
+            return Err(self.mismatch(name, "() -> i64"));
+        }
+        let function: extern "C" fn() -> i64 = std::mem::transmute(self.address);
+        Ok(function())
+    }
+
+    /// # Safety
+    /// The module this entry was resolved from must still be alive.
+    pub unsafe fn call_i64_1(&self, name: &str, arg: i64) -> Result<i64, CodegenError> {
+        if self.kind != EntryKind::I64ToI64 {
+            return Err(self.mismatch(name, "(i64) -> i64"));
+        }
+        let function: extern "C" fn(i64) -> i64 = std::mem::transmute(self.address);
+        Ok(function(arg))
+    }
+
+    /// # Safety
+    /// The module this entry was resolved from must still be alive.
+    pub unsafe fn call_f64_n(&self, name: &str, args: &[f64]) -> Result<f64, CodegenError> {
+        if self.kind != EntryKind::F64(args.len()) {
+            return Err(self.mismatch(name, &format!("({} x f64) -> f64", args.len())));
+        }
+        let address = self.address;
+        macro_rules! call {
+            ($($arg:ident),+) => {{
+                let function: extern "C" fn($($arg: f64),+) -> f64 =
+                    std::mem::transmute(address);
+                let [$($arg),+] = args else { unreachable!() };
+                function($(*$arg),+)
+            }};
+        }
+        Ok(match args.len() {
+            1 => call!(a),
+            2 => call!(a, b),
+            3 => call!(a, b, c),
+            4 => call!(a, b, c, d),
+            5 => call!(a, b, c, d, e),
+            6 => call!(a, b, c, d, e, f),
+            7 => call!(a, b, c, d, e, f, g),
+            8 => call!(a, b, c, d, e, f, g, h),
+            _ => unreachable!("EntryKind::F64 arity is bounded at resolution"),
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -669,11 +1067,50 @@ impl OrcJitModule {
     }
 
     pub fn call_i64_1(&self, name: &str, arg: i64) -> Result<i64, CodegenError> {
+        let entry = self.resolve_entry(name)?;
+        // SAFETY: `entry` was resolved from `self`, which is borrowed for the
+        // whole call, so its code cannot be removed underneath it.
+        unsafe { entry.call_i64_1(name, arg) }
+    }
+
+    /// Call the control-law ABI `(f64, ..., f64) -> f64` with 1..=8 inputs.
+    ///
+    /// Scalar `f64` arguments and results travel in registers under the C ABI
+    /// on every supported host, so no marshalling buffer is involved.
+    pub fn call_f64_n(&self, name: &str, args: &[f64]) -> Result<f64, CodegenError> {
+        let entry = self.resolve_entry(name)?;
+        // SAFETY: as in `call_i64_1`.
+        unsafe { entry.call_f64_n(name, args) }
+    }
+
+    /// Resolve `name` once: check it belongs to this generation, materialize
+    /// it, and classify its signature. Hot paths keep the result next to the
+    /// module that owns the code and skip the ORC symbol lookup (a C-string
+    /// allocation plus a JIT session query) on every call.
+    pub fn resolve_entry(&self, name: &str) -> Result<ResolvedEntry, CodegenError> {
+        let signature = self
+            .signatures
+            .get(name)
+            .ok_or_else(|| CodegenError::Unsupported {
+                backend: "jit".into(),
+                detail: format!("function '{}' is not part of this JIT generation", name),
+            })?;
         let i64_ty = IrType::Scalar(DType::I64);
-        self.require_signature(name, std::slice::from_ref(&i64_ty), &i64_ty)?;
+        let f64_ty = IrType::Scalar(DType::F64);
+        let kind = if signature.result == i64_ty && signature.params.is_empty() {
+            EntryKind::I64Nullary
+        } else if signature.result == i64_ty && signature.params == [i64_ty.clone()] {
+            EntryKind::I64ToI64
+        } else if signature.result == f64_ty
+            && (1..=MAX_F64_ARGS).contains(&signature.params.len())
+            && signature.params.iter().all(|param| *param == f64_ty)
+        {
+            EntryKind::F64(signature.params.len())
+        } else {
+            EntryKind::Other
+        };
         let address = unsafe { self.lookup_address(name)? };
-        let function: extern "C" fn(i64) -> i64 = unsafe { std::mem::transmute(address) };
-        Ok(function(arg))
+        Ok(ResolvedEntry { address, kind })
     }
 
     /// Call the stable IRIS string gateway ABI `(str) -> str`.
@@ -696,6 +1133,179 @@ impl OrcJitModule {
         Ok(unsafe { CStr::from_ptr(result) }
             .to_string_lossy()
             .into_owned())
+    }
+
+    /// The program's state variables, in declaration order.
+    pub fn state_vars(&self) -> &[(String, IrType)] {
+        &self.state_vars
+    }
+
+    /// Give every program state variable its initial value (run
+    /// `__iris_state_init`), as a native binary does before `main`.
+    pub fn init_state(&self) -> Result<(), CodegenError> {
+        if self
+            .signatures
+            .contains_key(crate::ir::module::STATE_INIT_FN)
+        {
+            self.call_i64_0(crate::ir::module::STATE_INIT_FN)?;
+        }
+        Ok(())
+    }
+
+    fn state_address(&self, name: &str) -> Result<*mut u8, CodegenError> {
+        let symbol = CString::new(format!(
+            "{}{name}",
+            crate::codegen::llvm_ir::STATE_GLOBAL_PREFIX
+        ))
+        .map_err(|_| CodegenError::Unsupported {
+            backend: "jit".into(),
+            detail: "state variable name contains a null byte".into(),
+        })?;
+        let mut address = 0;
+        // SAFETY: the JIT session outlives this module, and `symbol` is a
+        // NUL-terminated name.
+        let error =
+            unsafe { (self.session.api.lookup)(self.session.jit, &mut address, symbol.as_ptr()) };
+        self.session.api.check(error, "look up program state")?;
+        if address == 0 {
+            return Err(CodegenError::Unsupported {
+                backend: "jit".into(),
+                detail: format!("LLVM ORC returned a null address for state '{name}'"),
+            });
+        }
+        Ok(address as usize as *mut u8)
+    }
+
+    /// The current value of every state variable.
+    pub fn read_state(&self) -> Result<Vec<(String, StateValue)>, CodegenError> {
+        let names: Vec<String> = self
+            .state_vars
+            .iter()
+            .map(|(name, _)| name.clone())
+            .collect();
+        self.read_state_of(&names)
+    }
+
+    /// The current values of the named state variables.
+    pub fn read_state_of(
+        &self,
+        names: &[String],
+    ) -> Result<Vec<(String, StateValue)>, CodegenError> {
+        self.state_vars
+            .iter()
+            .filter(|(name, _)| names.contains(name))
+            .map(|(name, ty)| {
+                let at = self.state_address(name)?;
+                // SAFETY: `at` is this generation's global for `name`, of `ty`.
+                let value = unsafe { read_state_value(at, ty, name)? };
+                Ok((name.clone(), value))
+            })
+            .collect()
+    }
+
+    /// Set state variable `name` to `value`.
+    pub fn write_state(&self, name: &str, value: &StateValue) -> Result<(), CodegenError> {
+        let ty = self
+            .state_vars
+            .iter()
+            .find(|(var, _)| var == name)
+            .map(|(_, ty)| ty)
+            .ok_or_else(|| CodegenError::Unsupported {
+                backend: "jit".into(),
+                detail: format!("the program has no state variable '{name}'"),
+            })?;
+        let at = self.state_address(name)?;
+        // SAFETY: as in `read_state`.
+        unsafe { write_state_value(at, ty, name, value) }
+    }
+
+    /// Call the record ABI `(record) -> record`, where both records have only
+    /// `f64`, `i64` and `bool` fields. The input is laid out exactly as the
+    /// native `%Name` type in a host buffer (the callee only reads it); the
+    /// returned record, which the callee allocated, is copied out and freed
+    /// unless it is the input itself.
+    pub fn call_record(
+        &self,
+        name: &str,
+        input: &[RecordField],
+    ) -> Result<Vec<RecordField>, CodegenError> {
+        let signature = self
+            .signatures
+            .get(name)
+            .ok_or_else(|| CodegenError::Unsupported {
+                backend: "jit".into(),
+                detail: format!("function '{}' is not part of this JIT generation", name),
+            })?;
+        let [param] = signature.params.as_slice() else {
+            return Err(CodegenError::Unsupported {
+                backend: "jit".into(),
+                detail: format!("function '{name}' does not take exactly one record"),
+            });
+        };
+        let (input_layout, input_size) = record_layout(param)?;
+        let (output_layout, _) = record_layout(&signature.result)?;
+        if input.len() != input_layout.len() {
+            return Err(CodegenError::Unsupported {
+                backend: "jit".into(),
+                detail: format!(
+                    "function '{name}' takes a record of {} fields, given {}",
+                    input_layout.len(),
+                    input.len()
+                ),
+            });
+        }
+        // u64 storage keeps every field naturally aligned.
+        let mut buffer = vec![0u64; input_size.div_ceil(8)];
+        let base = buffer.as_mut_ptr().cast::<u8>();
+        for (index, (&(offset, dtype), value)) in input_layout.iter().zip(input).enumerate() {
+            // SAFETY: `record_layout` keeps every field inside `input_size`.
+            unsafe {
+                let at = base.add(offset);
+                match (dtype, value) {
+                    (DType::F64, RecordField::F64(v)) => at.cast::<f64>().write(*v),
+                    (DType::I64, RecordField::I64(v)) => at.cast::<i64>().write(*v),
+                    (DType::Bool, RecordField::Bool(v)) => at.write(u8::from(*v)),
+                    _ => {
+                        return Err(CodegenError::Unsupported {
+                            backend: "jit".into(),
+                            detail: format!(
+                                "input field {index} of '{name}' is {dtype:?}, given {value:?}"
+                            ),
+                        })
+                    }
+                }
+            }
+        }
+        let address = unsafe { self.lookup_address(name)? };
+        let function: unsafe extern "C" fn(*mut u8) -> *mut u8 =
+            unsafe { std::mem::transmute(address) };
+        let result = unsafe { function(base) };
+        if result.is_null() {
+            return Err(CodegenError::Unsupported {
+                backend: "jit".into(),
+                detail: format!("'{name}' returned a null record"),
+            });
+        }
+        let fields = output_layout
+            .iter()
+            .map(|&(offset, dtype)| unsafe {
+                // SAFETY: the callee returned a `%Output` record, whose layout
+                // `record_layout` reproduces.
+                let at = result.add(offset);
+                match dtype {
+                    DType::F64 => RecordField::F64(at.cast::<f64>().read_unaligned()),
+                    DType::I64 => RecordField::I64(at.cast::<i64>().read_unaligned()),
+                    _ => RecordField::Bool(at.read() & 1 == 1),
+                }
+            })
+            .collect();
+        if result != base {
+            // Records are allocated with `iris_alloc_bytes` and owned by
+            // whoever holds them; the caller of a policy is the only holder.
+            unsafe { iris_free_bytes(result.cast::<c_void>()) };
+        }
+        drop(buffer);
+        Ok(fields)
     }
 
     pub fn call_f64_0(&self, name: &str) -> Result<f64, CodegenError> {

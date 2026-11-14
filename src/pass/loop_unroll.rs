@@ -286,8 +286,8 @@ fn unroll_loops_in_function(module: &mut IrModule, fn_idx: usize, threshold: usi
             });
 
         // Patch the predecessor block(s) that had Br to header → now Br to unrolled.
-        for bi in 0..num_blocks {
-            let term = module.functions[fn_idx].blocks[bi].instrs.last_mut();
+        for block in module.functions[fn_idx].blocks.iter_mut().take(num_blocks) {
+            let term = block.instrs.last_mut();
             if let Some(IrInstr::Br { target, args }) = term {
                 if *target == header_bid && !args.is_empty() {
                     // This is the entry br to the header — redirect to unrolled.

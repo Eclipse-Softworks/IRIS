@@ -21,7 +21,7 @@ pub fn lower_model(model: &AstModel) -> Result<GraphIr, LowerError> {
 
     // --- Inputs ---
     for input in &model.inputs {
-        let ty = lower_type(&input.ty);
+        let ty = lower_type(&input.ty)?;
         let node = GraphNode::Input {
             id: NodeId(0), // placeholder; add_node assigns the real id
             name: input.name.name.clone(),

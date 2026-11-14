@@ -11,7 +11,7 @@
 # Verify installation
 iris --version
 
-# Evaluate a program (native path with interpreter fallback)
+# Evaluate a program (runs natively by default; reports E0302 on native failure, set IRIS_INTERP_FALLBACK=1 for interpreter fallback)
 iris --emit eval hello.iris
 
 # Build a native binary
@@ -98,7 +98,9 @@ These are optional dependencies that unlock accelerated ML performance.
 |---------------------|------------------------------|--------------------------------------|
 | **OpenBLAS**        | Accelerated matmul (10-50×)  | `apt install libopenblas-dev`        |
 | **Intel MKL**       | Accelerated matmul (Intel CPUs) | Via Intel oneAPI toolkit          |
-| **CUDA Toolkit 12+** | GPU acceleration            | https://developer.nvidia.com/cuda    |
+| **NVIDIA driver**   | Running `--gpu cuda` programs (loaded at run time) | https://www.nvidia.com/drivers |
+| **CUDA Toolkit 12+** | libdevice, for `--gpu cuda` code that uses `sin`, `exp`, `pow` and the like (`CUDA_PATH`) | https://developer.nvidia.com/cuda |
+| **TensorRT**        | `--emit tensorrt` engines (`trtexec`, via `TENSORRT_ROOT` or `PATH`) | https://developer.nvidia.com/tensorrt |
 | **ONNX Runtime**    | ONNX model inference         | https://onnxruntime.ai/              |
 | **LibTorch**        | PyTorch model inference      | https://pytorch.org/cppdocs/         |
 | **TensorFlow C API** | TensorFlow model inference  | https://www.tensorflow.org/install/lang_c |
@@ -123,19 +125,20 @@ iris build my_ml_program.iris    # Links against OpenBLAS
 
 ### Enabling ML Backend Inference
 
+IRIS uses a **dynamic runtime loading (`dlopen`)** architecture (see `docs/ml-backends.md` and `src/runtime/iris_ml_dynload.h`). ML backends are resolved dynamically at runtime on first use without compile-time linking; the legacy `IRIS_NATIVE_ML_BACKENDS=1` flag is deprecated and obsolete.
+
+Ensure the shared library is available on your library search path:
+
 ```sh
-# ONNX Runtime
-export ONNXRUNTIME_DIR=/path/to/onnxruntime
-export IRIS_NATIVE_ML_BACKENDS=1
+# ONNX Runtime (onnxruntime.dll / libonnxruntime.so)
+export LD_LIBRARY_PATH=/path/to/onnxruntime/lib:$LD_LIBRARY_PATH
 iris build projects/learning_service/main.iris
 
-# PyTorch (LibTorch)
-export LIBTORCH=/path/to/libtorch
-export IRIS_NATIVE_ML_BACKENDS=1
+# PyTorch (LibTorch) — requires standalone iris_torch_plugin (see docs/ml-backends.md)
+export LD_LIBRARY_PATH=/path/to/libtorch/lib:$LD_LIBRARY_PATH
 
-# TensorFlow
-export TENSORFLOW_DIR=/path/to/tensorflow
-export IRIS_NATIVE_ML_BACKENDS=1
+# TensorFlow (tensorflow.dll / libtensorflow.so)
+export LD_LIBRARY_PATH=/path/to/tensorflow/lib:$LD_LIBRARY_PATH
 ```
 
 ---
@@ -163,8 +166,15 @@ run merely because a target is declared.
 |---------------------------|------------------------------------------------------|---------|
 | `IRIS_CLANG`              | Optional Clang compatibility fallback override       | `clang` |
 | `IRIS_LLVM_C_API`         | Exact LLVM-C shared-library path                      | auto-detected |
+| `IRIS_USE_CLANG`          | Compile programs with clang instead of in process through LLVM-C (`-g` and sanitizer builds always use clang) | off |
+| `IRIS_OPT_LEVEL`          | Optimisation level of native builds, `0`–`3`         | `3`     |
+| `IRIS_VERBOSE`            | Report each native build step and its time           | off     |
+| `IRIS_INTERP_FALLBACK`    | Rerun `--emit eval` in the interpreter when the native build or run fails | off |
+| `IRIS_PANIC_ABORT`        | A failed `assert` or panic calls `abort()` (for a debugger) instead of exiting with 101 | off |
+| `IRIS_FREE_AT_EXIT`       | Free every live object at exit (for leak hunting)    | off     |
+| `IRIS_DEBUG`              | Show compiler-internal detail in diagnostics          | off     |
 | `IRIS_USE_BLAS`           | Enable BLAS-accelerated tensor ops (`1` to enable)   | off     |
-| `IRIS_NATIVE_ML_BACKENDS` | Link real ONNX/PyTorch/TF backends (`1` to enable)  | off     |
+| `IRIS_NATIVE_ML_BACKENDS` | *(Deprecated)* Obsolete compile-time link flag; ML backends now use dynamic `dlopen` loading (see `docs/ml-backends.md`) | off     |
 | `ONNXRUNTIME_DIR`         | Path to ONNX Runtime SDK                             | —       |
 | `LIBTORCH`                | Path to LibTorch (PyTorch C++ API)                   | —       |
 | `TENSORFLOW_DIR`          | Path to TensorFlow C API                             | —       |
@@ -179,7 +189,7 @@ Requires **Rust 1.75+** (stable). No C compiler needed to build IRIS itself —
 only for the programs IRIS compiles.
 
 ```sh
-git clone https://github.com/moon9t/iris.git
+git clone https://github.com/Eclipse-Softworks/IRIS
 cd iris
 
 # Debug build
@@ -188,7 +198,7 @@ cargo build
 # Release build (optimized)
 cargo build --release
 
-# Run tests (1,400+ tests across 110+ suites)
+# Run tests (431 library unit tests via --lib; 229 integration test files in tests/)
 cargo test
 
 # Install globally

@@ -371,6 +371,7 @@ dependencies = [
  "cc",
  "clap",
  "flate2",
+ "libc",
  "libloading",
  "rand",
  "rusqlite",

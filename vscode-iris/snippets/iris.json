@@ -64,17 +64,22 @@
   },
   "Defer": {
     "prefix": "defer",
-    "body": ["defer { $0 };"],
-    "description": "Run a block when the enclosing scope exits"
+    "body": ["defer ${1:cleanup()};"],
+    "description": "Run an expression when the function exits (in reverse order, on every exit path)"
   },
   "Select": {
     "prefix": "select",
     "body": [
-      "select {",
-      "\trecv(${1:ch}) => $0",
-      "}"
+      "select! {",
+      "\t${1:msg} = ${2:ch} => {",
+      "\t\t$3",
+      "\t},",
+      "\tdefault => {",
+      "\t\t$0",
+      "\t}",
+      "};"
     ],
-    "description": "Select over channel operations"
+    "description": "Take a value from a ready channel, or run the default arm"
   },
   "Labeled for loop": {
     "prefix": "labeledfor",
@@ -271,13 +276,13 @@
   "Test function": {
     "prefix": "test",
     "body": [
-      "def test_${1:name}() -> bool {",
-      "\tval ${2:result} = ${3:expr}",
-      "\tassert(${2:result} == ${4:expected})",
-      "\treturn 0",
+      "def test_${1:name}() -> i64 {",
+      "\tval ${2:result} = ${3:1 + 1};",
+      "\tassert(${2:result} == ${4:2});",
+      "\t0",
       "}"
     ],
-    "description": "Define an assertion-backed zero-argument test function"
+    "description": "Test function discovered by `iris test` (returns 0; fails on a failed assert)"
   },
   "Doc comment": {
     "prefix": "///",
@@ -434,7 +439,16 @@
       "\t$0",
       "}"
     ],
-    "description": "Define an async function"
+    "description": "Define an async function (a call returns a task<T>; await it for the result)"
+  },
+  "Concurrent tasks": {
+    "prefix": "tasks",
+    "body": [
+      "val ${1:a} = ${2:work}(${3:1});",
+      "val ${4:b} = ${2:work}(${5:2});",
+      "val ${6:total} = await ${1:a} + await ${4:b};$0"
+    ],
+    "description": "Start async tasks first, then await them, so they run concurrently"
   },
   "Closure": {
     "prefix": "closure",
@@ -501,16 +515,76 @@
     ],
     "description": "Declare a deep learning neural network model architecture"
   },
-  "ROS 2 Node & Publisher": {
+  "ROS 2 Node": {
     "prefix": "ros2",
     "body": [
       "bring std.ros2",
-      "val ${1:ctx} = rcl_init();",
-      "val ${2:node} = node_create(${1:ctx}, \"${3:my_node}\", \"\");",
-      "val ${4:pub} = publisher_create(${2:node}, \"${5:topic_name}\");",
-      "publish_float64(${4:pub}, ${6:42.0});"
+      "",
+      "def main() -> i64 {",
+      "\tval ctx = context_create()",
+      "\tassert(ctx.handle != 0);",
+      "\tval node = node_create(ctx, \"${1:my_node}\", \"\")",
+      "\tval pub_obj = publisher_create(node, \"${2:/chatter}\", \"${3:std_msgs/msg/String}\")",
+      "\tval sub = subscription_create(node, \"${4:/commands}\", \"${5:std_msgs/msg/String}\")",
+      "\tval timer = timer_create(node, ${6:100})",
+      "\twhile context_ok(ctx) {",
+      "\t\tval ev = spin_once(ctx, 100)",
+      "\t\tif is_timer(ev, timer) {",
+      "\t\t\tval m = publisher_msg(pub_obj)",
+      "\t\t\tmsg_set_str(m, \"data\", \"${7:hello}\");",
+      "\t\t\tpublish_msg(pub_obj, m);",
+      "\t\t\tmsg_free(m);",
+      "\t\t};",
+      "\t\tif is_message(ev, sub) {",
+      "\t\t\tlog_info(node, msg_str(ev.message, \"data\"));",
+      "\t\t};$0",
+      "\t};",
+      "\t0",
+      "}"
     ],
-    "description": "Initialize a ROS 2 node and publish telemetry"
+    "description": "A ROS 2 node (rclcpp): a timer-driven publisher and a subscription in one event loop"
+  },
+  "ROS 2 Service": {
+    "prefix": "ros2srv",
+    "body": [
+      "val ${1:srv} = service_create(${2:node}, \"${3:/add_two_ints}\", \"${4:example_interfaces/srv/AddTwoInts}\")",
+      "// in the spin_once loop:",
+      "if is_request(ev, ${1:srv}) {",
+      "\tval req = request_of(ev)",
+      "\tmsg_set_i64(response_of(ev), \"${5:sum}\", msg_i64(req, \"a\") + msg_i64(req, \"b\"));",
+      "\tservice_reply(${1:srv}, ev);",
+      "};"
+    ],
+    "description": "A ROS 2 service: answer EVENT_REQUEST by filling response_of(ev) and calling service_reply"
+  },
+  "ROS 2 Action Server": {
+    "prefix": "ros2action",
+    "body": [
+      "val ${1:server} = action_server_create(${2:node}, \"${3:/fibonacci}\", \"${4:example_interfaces/action/Fibonacci}\")",
+      "// in the spin_once loop:",
+      "if is_goal(ev, ${1:server}) {",
+      "\tval goal = goal_of(ev)",
+      "\tval order = msg_i64(goal_request(goal), \"order\")",
+      "\tmsg_set_json(goal_result_msg(goal), \"sequence\", \"[0, 1]\");",
+      "\tgoal_succeed(goal);",
+      "};",
+      "if is_cancel(ev, ${1:server}) {",
+      "\tgoal_canceled(goal_of(ev));",
+      "};"
+    ],
+    "description": "A ROS 2 action server (rclcpp_action): goals arrive as EVENT_GOAL, cancel requests as EVENT_CANCEL"
+  },
+  "ROS 2 tf2 Lookup": {
+    "prefix": "tflookup",
+    "body": [
+      "val ${1:tf} = tf_buffer_create(${2:node})",
+      "// after spinning, so the listener has heard /tf and /tf_static:",
+      "val ${3:t} = tf_lookup(${1:tf}, \"${4:map}\", \"${5:base_link}\")",
+      "if is_some(${3:t}) {",
+      "\tval x = unwrap(${3:t}).translation.x$0",
+      "};"
+    ],
+    "description": "Look up a transform in a tf2 buffer fed by /tf and /tf_static"
   },
   "Generic Trait": {
     "prefix": "traitg",
@@ -613,14 +687,14 @@
     "prefix": "tx",
     "body": [
       "transaction_begin();",
-      "try {",
-      "  ${1:// transactional state mutations and staged file operations}",
-      "  transaction_commit();",
-      "} catch {",
-      "  transaction_rollback();",
-      "}"
+      "${1:// mutate lists or stage file writes}",
+      "if ${2:keep} {",
+      "\ttransaction_commit();",
+      "} else {",
+      "\ttransaction_rollback();",
+      "};"
     ],
-    "description": "Execute state mutations inside an atomic transactional rollback frame"
+    "description": "Speculative transaction: commit or roll back (enclosing function needs `effect transaction`)"
   },
   "Autonomy v2 step": {
     "prefix": "autonomyv2",
@@ -651,7 +725,7 @@
       "});",
       "val ${8:lookup} = transform_buffer_lookup(${1:buffer}, \"${2:map}\", \"${3:base_link}\")"
     ],
-    "description": "Create a transform buffer, store a stamped transform, and perform frame lookup"
+    "description": "A program-local tf2 buffer: store a stamped transform and look it up (chains through frames)"
   },
   "Set operations": {
     "prefix": "setops",
@@ -663,5 +737,198 @@
       "}"
     ],
     "description": "Create a set, add items, check membership, and convert to a list"
+  },
+  "Try / catch with ?": {
+    "prefix": [
+      "try",
+      "trycatch?"
+    ],
+    "body": [
+      "val ${1:value} = try {",
+      "\tval ${2:v} = ${3:fallible()}?;",
+      "\t${2:v}",
+      "} catch ${4:e} {",
+      "\t${0:-1}",
+      "};"
+    ],
+    "description": "Unwrap results with `?`; any `err` jumps to the catch arm"
+  },
+  "Fallible function": {
+    "prefix": "resultfn",
+    "body": [
+      "def ${1:parse_input}(${2:input}: str) -> result<${3:i64}, str> {",
+      "\tif len(${2:input}) == 0 {",
+      "\t\treturn err(\"${4:empty input}\")",
+      "\t};",
+      "\tok(${0:len(input)})",
+      "}"
+    ],
+    "description": "Function returning result<T, E>; callers propagate errors with `?`"
+  },
+  "If let": {
+    "prefix": "iflet",
+    "body": [
+      "if let some(${1:v}) = ${2:maybe} {",
+      "\t${3:println(to_str(v))};",
+      "} else {",
+      "\t${0:println(\"none\")};",
+      "};"
+    ],
+    "description": "Run a block only when an option holds a value"
+  },
+  "Record with defaults": {
+    "prefix": "recorddefault",
+    "body": [
+      "record ${1:Config} {",
+      "\t${2:host}: ${3:str} = ${4:\"localhost\"},",
+      "\t${5:port}: ${6:i64} = ${7:8080},",
+      "}"
+    ],
+    "description": "Record whose fields have defaults; literals may override only some: `Config { port: 443 }`"
+  },
+  "Extension method": {
+    "prefix": "ext",
+    "body": [
+      "def ${1:double}(${2:x}: ${3:i64}) -> ${3:i64} {",
+      "\t${0:x * 2}",
+      "}"
+    ],
+    "description": "A def whose first parameter is T can be called as a method: `21.double()`"
+  },
+  "Pure control function": {
+    "prefix": [
+      "pure",
+      "effectpure"
+    ],
+    "body": [
+      "def ${1:control}(${2:error}: f64, ${3:rate}: f64) -> f64 effect pure {",
+      "\t${0:2.0 * error - 0.5 * rate}",
+      "}"
+    ],
+    "description": "Function proven free of I/O and allocation under --strict-effects"
+  },
+  "Effect mask": {
+    "prefix": "withpure",
+    "body": [
+      "with ${1:pure} {",
+      "\t$0",
+      "};"
+    ],
+    "description": "Restrict the effects allowed inside a block (checked under --strict-effects)"
+  },
+  "F-string": {
+    "prefix": "fstr",
+    "body": [
+      "f\"${1:value} = {${2:value}}\""
+    ],
+    "description": "Interpolated string"
+  },
+  "Generator with yield": {
+    "prefix": "gen",
+    "body": [
+      "def ${1:evens}(${2:max}: i64) -> list<i64> {",
+      "\tvar ${3:i} = 0;",
+      "\twhile ${3:i} <= ${2:max} {",
+      "\t\tyield ${3:i};",
+      "\t\t${3:i} = ${3:i} + ${4:2};",
+      "\t}",
+      "}"
+    ],
+    "description": "Function that returns every yielded value as a list"
+  },
+  "Const function": {
+    "prefix": "constdef",
+    "body": [
+      "const def ${1:square}(${2:x}: i64) -> i64 { ${0:x * x} }"
+    ],
+    "description": "Function that can be evaluated at compile time"
+  },
+  "Type alias": {
+    "prefix": "type",
+    "body": [
+      "type ${1:Meters} = ${0:f64}"
+    ],
+    "description": "Type alias"
+  },
+  "Macro": {
+    "prefix": "defmacro",
+    "body": [
+      "defmacro ${1:double}(${2:x}) => ${0:x * 2}"
+    ],
+    "description": "Syntactic macro, invoked as `double!(21)`"
+  },
+  "Inline module": {
+    "prefix": "mod",
+    "body": [
+      "mod ${1:geometry} {",
+      "\tpub def ${2:area}(${3:w}: i64, ${4:h}: i64) -> i64 {",
+      "\t\t${0:w * h}",
+      "\t}",
+      "}",
+      "",
+      "bring ${1:geometry}"
+    ],
+    "description": "Inline module and its bring"
+  },
+  "Parallel sum": {
+    "prefix": "parsum",
+    "body": [
+      "val ${1:count} = atomic(0);",
+      "par for ${2:i} in ${3:0}..${4:100} {",
+      "\tatomic_add(${1:count}, ${0:1});",
+      "};"
+    ],
+    "description": "par for combined through an atomic counter"
+  },
+  "Channel worker": {
+    "prefix": "worker",
+    "body": [
+      "val ${1:ch} = channel();",
+      "spawn { send(${1:ch}, ${2:41}) };",
+      "val ${3:reply} = recv(${1:ch});"
+    ],
+    "description": "Spawn a task and receive its result over a channel"
+  },
+  "Loop with break": {
+    "prefix": "loopbreak",
+    "body": [
+      "var ${1:i} = 0;",
+      "loop {",
+      "\t${1:i} = ${1:i} + 1;",
+      "\tif ${1:i} == ${2:3} { break };",
+      "};"
+    ],
+    "description": "Infinite loop exited with break"
+  },
+  "For with step": {
+    "prefix": "forby",
+    "body": [
+      "for ${1:i} in ${2:0}..${3:10} by ${4:2} {",
+      "\t$0",
+      "};"
+    ],
+    "description": "Range loop with a stride"
+  },
+  "Unsafe block": {
+    "prefix": "unsafe",
+    "body": [
+      "val ${1:v} = unsafe {",
+      "\t${0:0}",
+      "};"
+    ],
+    "description": "Block exempt from safety lints (keep it small)"
+  },
+  "When as value": {
+    "prefix": [
+      "whenval",
+      "matchval"
+    ],
+    "body": [
+      "val ${1:result} = when ${2:value} {",
+      "\t${3:0} => ${4:\"zero\"},",
+      "\t_ => ${5:\"other\"},",
+      "};"
+    ],
+    "description": "Pattern match as an expression: every arm yields the value (preferred over assigning a var in arms)"
   }
 }

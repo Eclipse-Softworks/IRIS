@@ -1,0 +1,11 @@
+{
+  "schema": "iris-embedded/1",
+  "target": "cortex-m4f",
+  "triple": "thumbv7em-none-eabihf",
+  "entry": "main",
+  "fingerprint": "911b5e527d621cb0",
+  "allocation_free": true,
+  "recursive_calls": false,
+  "fixed_array_bytes": 32,
+  "reachable_functions": ["clamp_i64", "main"]
+}

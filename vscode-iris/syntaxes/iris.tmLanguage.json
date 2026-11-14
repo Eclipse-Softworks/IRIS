@@ -119,7 +119,7 @@
         },
         {
           "name": "keyword.other.iris",
-          "match": "\\b(val|var|let|bring|mod)\\b"
+          "match": "\\b(val|var|let|bring|mod|where)\\b"
         },
         {
           "name": "keyword.operator.cast.iris",
@@ -171,7 +171,7 @@
         },
         {
           "name": "support.type.iris",
-          "match": "\\b(option|result|list|map|set|tensor|tuple|chan|atomic|grad|sparse|deque|bitset|mutex|task_group|weak_ref|Dual|Cell|Tensor|DiffTensor|MLTensor|LlmClient|LlmMessage|LlmResponse|MetaProgram|MetaEdit|ViabilityBound|ViabilityAssessment|AutonomyV2Decision|ExpectedFreeEnergy|ActiveInferenceDecision|AgentRuntime|AgentStep|ROS2Node|LifecycleNode|Transform|StampedTransform|Vector3|Quaternion|Point|QoSProfile)\\b"
+          "match": "\\b(option|result|list|map|set|tensor|tuple|chan|task|atomic|grad|sparse|deque|bitset|mutex|task_group|weak_ref|Dual|Cell|Tensor|DiffTensor|MLTensor|LlmClient|LlmMessage|LlmResponse|MetaProgram|MetaEdit|ViabilityBound|ViabilityAssessment|AutonomyV2Decision|ExpectedFreeEnergy|ActiveInferenceDecision|AgentRuntime|AgentStep|ROS2Node|LifecycleNode|Transform|StampedTransform|Vector3|Quaternion|Point|QoSProfile)\\b"
         }
       ]
     },
@@ -254,7 +254,7 @@
         {
           "comment": "Concurrency builtins",
           "name": "support.function.builtin.iris",
-          "match": "\\b(atomic|atomic_load|atomic_store|atomic_add|atomic_cas|mutex_new|mutex_lock|mutex_unlock|channel|send|recv|chan_try_recv|chan_len|select|timeout|thread_count|par_for|par_map|par_reduce|task_group_new|task_group_spawn|task_group_join|task_group_cancel|task_group_cancelled|cancellation_requested|async_worker_count|async_queued_tasks)\\b"
+          "match": "\\b(atomic|atomic_load|atomic_store|atomic_add|atomic_cas|mutex_new|mutex_lock|mutex_unlock|channel|send|recv|chan_try_recv|chan_len|select|timeout|thread_count|par_for|par_map|par_reduce|task_group_new|task_group_spawn|task_group_join|task_group_cancel|task_group_cancelled|cancellation_requested|async_worker_count|async_queued_tasks|async_sleep|async_yield|async_recv|async_any|task_done|task_cancel|task_cancelled)\\b"
         },
         {
           "comment": "Deque builtins",
@@ -362,9 +362,9 @@
           "match": "\\b(set_new|set_add|set_contains|set_remove|set_len|set_to_list|weak_ref|weak_alive|weak_upgrade|gc_stats_map|gc_collect_call|reflection_available|validate|eval|eval_i64)\\b"
         },
         {
-          "comment": "AIS Autonomy v2 and ROS 2 v2 robotics stdlib",
+          "comment": "AIS Autonomy v2 and std.ros2 (rclcpp-backed) robotics stdlib",
           "name": "support.function.stdlib.iris",
-          "match": "\\b(autonomy_v2_step|active_inference_select|viability_bound_new|viability_predict|viability_assess|expected_free_energy|agent_runtime_new|agent_record_outcome|agent_production_step|qos_sensor_data|qos_control|lifecycle_new|lifecycle_transition|lifecycle_can_publish|transform_point|transform_inverse|transform_buffer_new|transform_buffer_set|transform_buffer_lookup)\\b"
+          "match": "\\b(autonomy_v2_step|active_inference_select|viability_bound_new|viability_predict|viability_assess|expected_free_energy|agent_runtime_new|agent_record_outcome|agent_production_step|qos_sensor_data|qos_control|qos_latched|context_create|node_create|lifecycle_node_create|spin_once|publisher_create|subscription_create|publish_msg|take_msg|msg_new|msg_from_json|msg_free|msg_f64|msg_i64|msg_str|msg_json|service_create|client_create|client_call|action_server_create|action_client_create|action_send_goal|param_declare_f64|param_f64|lifecycle_configure|lifecycle_activate|lifecycle_deactivate|lifecycle_state|tf_buffer_create|tf_lookup|tf_broadcaster_create|tf_send|timer_create|transform_point|transform_inverse|transform_buffer_new|transform_buffer_set|transform_buffer_lookup)\\b"
         }
       ]
     },

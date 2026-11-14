@@ -11,6 +11,15 @@
 #include <stdint.h>
 #include <stddef.h>
 
+/* Error traps (below) need setjmp: GCC or Clang, and not WebAssembly, whose
+ * setjmp needs the exception-handling proposal. */
+#if (defined(__GNUC__) || defined(__clang__)) && !defined(__wasm__)
+#define IRIS_ERROR_TRAPS 1
+#include <setjmp.h>
+#else
+#define IRIS_ERROR_TRAPS 0
+#endif
+
 #ifdef __wasm__
 /* WASM/WASI preview 1: no threading support.
    wasi-libc provides pthread type definitions via sys/types.h (transitively
@@ -33,6 +42,7 @@
 #define pthread_cond_destroy(c)        ((void)(c),0)
 #define pthread_cond_wait(c, m)        ((void)(c),(void)(m),0)
 #define pthread_cond_signal(c)         ((void)(c),0)
+#define pthread_cond_broadcast(c)      ((void)(c),0)
 #define pthread_detach(t)              ((void)(t),0)
 #define pthread_join(t, r)             ((void)(t),(void)(r),0)
 /* pthread_create uses void* to avoid depending on pthread_t definition
@@ -48,6 +58,8 @@ int iris_wasm_pthread_create(void* t, const void* a, void*(*fn)(void*), void* ar
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
+#include <errno.h>
+#include <time.h>
 typedef SRWLOCK pthread_mutex_t;
 typedef CONDITION_VARIABLE pthread_cond_t;
 typedef HANDLE pthread_t;
@@ -83,8 +95,25 @@ static inline int pthread_cond_wait(pthread_cond_t* cond, pthread_mutex_t* mu) {
 static inline int pthread_cond_signal(pthread_cond_t* cond) {
     WakeConditionVariable(cond); return 0;
 }
+static inline int pthread_cond_broadcast(pthread_cond_t* cond) {
+    WakeAllConditionVariable(cond); return 0;
+}
+/* `ts` is an absolute CLOCK_REALTIME deadline, as in POSIX. */
 static inline int pthread_cond_timedwait(pthread_cond_t* cond, pthread_mutex_t* mu, const struct timespec* ts) {
-    (void)cond; (void)mu; (void)ts; return 0;
+    FILETIME ft;
+    ULARGE_INTEGER now;
+    long long now_ms, deadline_ms, wait_ms;
+    GetSystemTimeAsFileTime(&ft);
+    now.LowPart = ft.dwLowDateTime;
+    now.HighPart = ft.dwHighDateTime;
+    /* FILETIME counts 100 ns ticks from 1601; the deadline counts from 1970. */
+    now_ms = (long long)((now.QuadPart - 116444736000000000ULL) / 10000ULL);
+    deadline_ms = (long long)ts->tv_sec * 1000LL + (long long)(ts->tv_nsec / 1000000L);
+    wait_ms = deadline_ms - now_ms;
+    if (wait_ms <= 0) return ETIMEDOUT;
+    if (wait_ms > 0x7ffffffeLL) wait_ms = 0x7ffffffeLL;
+    if (SleepConditionVariableSRW(cond, mu, (DWORD)wait_ms, 0)) return 0;
+    return GetLastError() == ERROR_TIMEOUT ? ETIMEDOUT : EINVAL;
 }
 static inline int pthread_create(pthread_t* t, const void* attr, void* (*fn)(void*), void* arg) {
     (void)attr;
@@ -156,6 +185,8 @@ typedef enum {
     IRIS_TAG_WEAK_REF = 21,
     /* Flat LLVM record pointer stored in a type-erased collection. */
     IRIS_TAG_NATIVE_OBJECT = 22,
+    /* An `async def` task handle (never freed, so not refcounted). */
+    IRIS_TAG_TASK = 23,
 } IrisTag;
 
 typedef struct IrisVal {
@@ -294,6 +325,9 @@ IrisVal* iris_box_str(const char* s);
 IrisVal* iris_box_list(IrisList* list);
 IrisVal* iris_box_struct(IrisList* fields);
 IrisVal* iris_box_native_object(void* object);
+IrisVal* iris_box_scalar_array(const void* data, int64_t bytes);
+IrisVal* iris_box_array_list(IrisList* l);
+IrisVal* iris_box_task(void* task);
 IrisVal* iris_box_map(IrisMap* map);
 IrisVal* iris_box_option(IrisOption* opt);
 IrisVal* iris_box_result(IrisResult* res);
@@ -320,6 +354,7 @@ IrisMutex*    iris_unbox_mutex(IrisVal* v);
 IrisGrad*     iris_unbox_grad(IrisVal* v);
 IrisSparse*   iris_unbox_sparse(IrisVal* v);
 void*         iris_unbox_native_object(IrisVal* v);
+void*         iris_unbox_task(IrisVal* v);
 
 // ---------------------------------------------------------------------------
 // Print
@@ -442,6 +477,7 @@ int64_t iris_transaction_begin(void);
 int64_t iris_transaction_commit(void);
 int64_t iris_transaction_rollback(void);
 int64_t iris_transaction_depth(void);
+int64_t iris_transaction_recover(const char* dir);
 
 // ---------------------------------------------------------------------------
 // Extended list operations
@@ -505,6 +541,7 @@ void         iris_spawn_fn(void* fn, void* arg);
 int64_t      iris_async_worker_count(void);
 int64_t      iris_async_queued_tasks(void);
 void         iris_par_for(void (*fn)(int64_t, void*), int64_t start, int64_t end, void* arg);
+void iris_par_for_chunked(void (*fn)(int64_t, int64_t, void*), int64_t start, int64_t end, void* arg);
 IrisList*    iris_par_map(IrisList* list, IrisVal* closure,
                           IrisVal* (*invoke)(IrisVal*, IrisVal*));
 void         iris_barrier(void);
@@ -533,7 +570,7 @@ void         iris_chan_send_b(IrisVal* chan, IrisVal* val);
 IrisWeakRef* iris_weak_ref(IrisVal* val);
 int32_t      iris_weak_alive(IrisWeakRef* w);
 IrisVal*     iris_weak_upgrade(IrisWeakRef* w);
-IrisVal*     iris_gc_stats_map(void);
+IrisMap*     iris_gc_stats_map(void);
 int32_t      iris_gc_collect_call(void);
 
 // ---------------------------------------------------------------------------
@@ -696,10 +733,10 @@ int64_t     iris_tensor_backward(IrisTensor* loss);
 IrisTensor* iris_tensor_grad(IrisTensor* t);
 double      iris_tensor_item(IrisTensor* t);
 
-// Legacy stubs (kept for backward compat, deprecated)
-void* iris_tensor_op(void);
-void* iris_tensor_load(void* t, ...);
-void  iris_tensor_store(void* t, ...);
+// `t[i, j, ...]` from generated code: every dimension indexed, or one flat
+// row-major index, as `n` int64_t variadic arguments. Out of range stops (E0403).
+double iris_tensor_get_at(IrisTensor* t, int32_t n, ...);
+void   iris_tensor_set_at(IrisTensor* t, double v, int32_t n, ...);
 
 
 // ---------------------------------------------------------------------------
@@ -765,8 +802,6 @@ IrisVal* iris_get_field(IrisVal* s, int32_t idx);
 IrisVal* iris_make_tuple(int nelems, ...);
 IrisVal* iris_get_element(IrisVal* t, int32_t idx);
 IrisVal* iris_make_closure(void* fn, int ncaptures, ...);
-IrisVal* iris_call_closure(IrisVal* closure, ...);
-void     iris_call_closure_void(IrisVal* closure, ...);
 void*    iris_closure_fn(IrisVal* closure);
 int      iris_closure_ncaptures(IrisVal* closure);
 IrisVal* iris_closure_get_capture(IrisVal* closure, int idx);
@@ -774,14 +809,9 @@ IrisVal* iris_closure_get_capture(IrisVal* closure, int idx);
 // ---------------------------------------------------------------------------
 // Trait Object Helpers (Phase 91)
 // ---------------------------------------------------------------------------
-// A `dyn Trait` value is a fat pointer: { data_ptr, vtable_id }.
-// The vtable is keyed at runtime by an i64 id; the runtime provides a
-// forwarder by method-name lookup using a string-encoded `method_name`.
+// A `dyn Trait` value is a fat pointer: { data_ptr, vtable }. Generated code
+// builds its own and calls through a constant vtable per (trait, type).
 IrisVal* iris_make_trait_object(void* data, void* vtable_id);
-// `iris_dyn_call(obj, method_name_ptr, args_count, ...)` performs the
-// indirect dispatch by reading `obj`'s vtable_id and matching
-// method_name against registered (vtable_id, method_name) pairs.
-IrisVal* iris_dyn_call(IrisVal* obj, const char* method_name, int32_t nargs, ...);
 
 // ---------------------------------------------------------------------------
 // Enum Variant Helpers
@@ -824,6 +854,7 @@ int64_t   iris_http_tls_available(void);
 // ---------------------------------------------------------------------------
 int64_t iris_tcp_connect(const char* host, int64_t port);
 int64_t iris_tcp_listen(int64_t port);
+int64_t iris_tcp_listen_loopback(int64_t port);
 int64_t iris_tcp_accept(int64_t listener);
 char*   iris_tcp_read(int64_t conn);
 void    iris_tcp_write(int64_t conn, const char* data);
@@ -917,6 +948,7 @@ char*     iris_str_pad_left(const char* str, int64_t width, const char* pad);
 char*     iris_str_pad_right(const char* str, int64_t width, const char* pad);
 IrisList* iris_str_chars(const char* str);
 IrisList* iris_str_bytes(const char* str);
+IrisList* iris_file_read_bytes(const char* path);
 int64_t   iris_str_count(const char* str, const char* sub);
 
 // -- Math constants / predicates --
@@ -1022,9 +1054,20 @@ int64_t   iris_gc_stats_freed(void);      // Total freed since start.
 // Returns 0 if allowed, non-zero if denied.
 int       iris_sandbox_check_fs_read(const char* path);
 int       iris_sandbox_check_fs_write(const char* path);
+int       iris_sandbox_check_fs_write_bytes(const char* path, int64_t bytes);
 int       iris_sandbox_check_network(const char* host);
 int       iris_sandbox_check_ffi(const char* lib_path);
+int       iris_sandbox_check_process(const char* cmd);
+void      iris_sandbox_require_fs_read(const char* path);
+void      iris_sandbox_require_fs_write(const char* path);
+void      iris_sandbox_require_fs_write_bytes(const char* path, int64_t bytes);
+void      iris_sandbox_require_network(const char* host);
+void      iris_sandbox_require_ffi(const char* lib_path);
+void      iris_sandbox_require_process(const char* cmd);
 void      iris_sandbox_set_policy(int allow_fs, int allow_net, int allow_ffi);
+void      iris_sandbox_set_profile(int allow_fs_read, int allow_fs_write, int allow_network, int allow_ffi, int allow_process, int lock_policy);
+void      iris_sandbox_set_policy_spec(const char* spec, int lock_policy);
+void      iris_sandbox_sync_env(void);
 
 // ── Adaptive AI runtime (std.adaptive) ────────────────────────────────────
 typedef struct IrisAdaptiveState IrisAdaptiveState;
@@ -1125,5 +1168,48 @@ IrisResult*  iris_meta_apply_edit(const char* source, int64_t start_byte, int64_
 #ifdef __cplusplus
 }
 #endif
+
+
+/* Runtime errors raised by generated code. */
+extern const char* const* iris_loc_files;
+int64_t* iris_loc_slot(void);
+
+/* Error traps, for code that embeds IRIS (a Python extension): while a trap
+ * is pushed on this thread, a runtime error writes its report -- the
+ * `error[E0403]: ...` text with its position -- into the trap and returns to
+ * where `IRIS_TRAP_SET` was called, which then yields nonzero, instead of
+ * ending the process. Pop the trap afterwards either way. Needs a GCC or
+ * Clang build of the runtime, for a target other than WebAssembly
+ * (IRIS_ERROR_TRAPS).
+ *
+ * The C library's setjmp, which restores every callee-saved register; on
+ * 64-bit MinGW called without a frame, so the return restores registers
+ * instead of unwinding, which would need unwind tables generated code does
+ * not always have. */
+typedef struct IrisErrorTrap {
+#if IRIS_ERROR_TRAPS
+    jmp_buf jump;
+#endif
+    struct IrisErrorTrap* prev;
+    char message[4096];
+} IrisErrorTrap;
+void iris_error_trap_push(IrisErrorTrap* trap);
+void iris_error_trap_pop(IrisErrorTrap* trap);
+#if IRIS_ERROR_TRAPS
+#if defined(__MINGW64__) || (defined(__MINGW32__) && defined(_WIN64))
+#define IRIS_TRAP_SET(trap) _setjmp((trap)->jump, NULL)
+#else
+#define IRIS_TRAP_SET(trap) setjmp((trap)->jump)
+#endif
+#endif
+
+/* `--gpu cuda`: run a `par for` kernel from the program's PTX on the GPU. */
+void iris_cuda_launch(const char* ptx, const char* kernel, const char* sig, const char* const* panics,
+                      int32_t npanics, int64_t start, int64_t end, void* env);
+
+/* `--pgo-generate`: a function's block counters, written to the profile at exit. */
+void iris_profile_register(const char* fn, const char* const* labels, int64_t* counts, int64_t n);
+void iris_overflow_abort(int32_t op, int64_t a, int64_t b);
+void iris_div_zero_abort(void);
 
 #endif /* IRIS_RUNTIME_H */

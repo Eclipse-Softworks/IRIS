@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 
-use crate::diagnostics::{byte_to_line_col, error_byte_offset};
+use crate::diagnostics::byte_to_line_col;
 use crate::EmitKind;
 
 // ---------------------------------------------------------------------------
@@ -30,6 +30,10 @@ pub struct LspDiagnostic {
     pub severity: u8,
     /// Optional diagnostic code (e.g. "E0001").
     pub code: Option<String>,
+    /// Changes that resolve it, offered as quick fixes.
+    pub fixes: Vec<crate::diagnostics::Fix>,
+    /// Other places that explain it ("declared here"): range and label.
+    pub related: Vec<((u32, u32, u32, u32), String)>,
 }
 
 /// A code action (quick fix or refactoring) for the LSP client.
@@ -42,6 +46,10 @@ pub struct CodeAction {
     pub edit_range: (u32, u32, u32, u32),
     pub new_text: String,
     pub diagnostic_message: Option<String>,
+    /// Further edits applied with the first, for fixes that touch several places.
+    pub more_edits: Vec<((u32, u32, u32, u32), String)>,
+    /// The quick fix the editor applies by default.
+    pub preferred: bool,
 }
 
 /// An inlay hint displayed inline in the editor.
@@ -65,10 +73,22 @@ pub struct CompletionItem {
     pub sort_text: Option<String>,
 }
 
+/// A collapsible code region returned for `textDocument/foldingRange`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FoldingRange {
+    pub start_line: u32,
+    pub end_line: u32,
+    pub kind: Option<&'static str>,
+}
+
 /// Persistent LSP server state: one entry per open document.
 pub struct LspState {
     /// URI → source text.
     documents: HashMap<String, String>,
+    /// Incremental compilation query engine for parse/IR memoization.
+    query: std::cell::RefCell<crate::query::QueryEngine>,
+    /// Per-URI cached diagnostics keyed by source text hash.
+    cached_diagnostics: std::cell::RefCell<HashMap<String, (u64, Vec<LspDiagnostic>)>>,
     format_options: crate::formatter::FormatOptions,
     max_diagnostics: usize,
 }
@@ -77,6 +97,8 @@ impl Default for LspState {
     fn default() -> Self {
         Self {
             documents: HashMap::new(),
+            query: std::cell::RefCell::new(crate::query::QueryEngine::new()),
+            cached_diagnostics: std::cell::RefCell::new(HashMap::new()),
             format_options: crate::formatter::FormatOptions::default(),
             max_diagnostics: 100,
         }
@@ -119,6 +141,23 @@ static STATIC_COMPLETIONS: &[&str] = &[
     "par",
     "in",
     "to",
+    "let",
+    "match",
+    "effect",
+    "with",
+    "dyn",
+    "resume",
+    "defer",
+    "try",
+    "catch",
+    "raise",
+    "move",
+    "yield",
+    "select",
+    "mod",
+    "unsafe",
+    "defmacro",
+    "by",
     "true",
     "false",
     // types
@@ -139,6 +178,7 @@ static STATIC_COMPLETIONS: &[&str] = &[
     "list",
     "map",
     "chan",
+    "task",
     "atomic",
     "mutex",
     "grad",
@@ -240,6 +280,18 @@ static STATIC_COMPLETIONS: &[&str] = &[
     "str_reverse",
     "time_now_ms",
     "sleep_ms",
+    "async_sleep",
+    "async_yield",
+    "async_readable",
+    "async_writable",
+    "tcp_connect_async",
+    "tcp_write_async",
+    "http_get_async",
+    "async_recv",
+    "async_any",
+    "task_done",
+    "task_cancel",
+    "task_cancelled",
     "db_open",
     "db_exec",
     "db_exec_params",
@@ -678,6 +730,7 @@ fn collect_type_completions(
         "option",
         "result",
         "chan",
+        "task",
         "tensor",
         "atomic",
         "mutex",
@@ -813,18 +866,113 @@ impl LspState {
     /// Called when the editor opens a document. Returns initial diagnostics.
     pub fn open_document(&mut self, uri: &str, text: &str) -> Vec<LspDiagnostic> {
         self.documents.insert(uri.to_owned(), text.to_owned());
+        self.query.borrow_mut().set_source(uri, text);
         self.diagnose(uri)
     }
 
     /// Called when the editor changes a document. Returns updated diagnostics.
     pub fn update_document(&mut self, uri: &str, text: &str) -> Vec<LspDiagnostic> {
         self.documents.insert(uri.to_owned(), text.to_owned());
+        self.query.borrow_mut().set_source(uri, text);
         self.diagnose(uri)
     }
 
     /// Called when the editor closes a document.
     pub fn close_document(&mut self, uri: &str) {
         self.documents.remove(uri);
+        self.cached_diagnostics.borrow_mut().remove(uri);
+    }
+
+    /// Returns incremental query-engine statistics for diagnostics and parsing.
+    pub fn query_stats(&self) -> crate::query::QueryStats {
+        self.query.borrow().stats()
+    }
+
+    /// Computes collapsible folding ranges (`textDocument/foldingRange`) for `uri`.
+    pub fn folding_ranges(&self, uri: &str) -> Vec<FoldingRange> {
+        let Some(source) = self.documents.get(uri) else {
+            return Vec::new();
+        };
+        let mut ranges = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        let mut push_range = |start_line: u32, end_line: u32, kind: Option<&'static str>| {
+            if end_line > start_line && seen.insert((start_line, end_line)) {
+                ranges.push(FoldingRange {
+                    start_line,
+                    end_line,
+                    kind,
+                });
+            }
+        };
+
+        if let Some(ast) = parse_source(source) {
+            let max_byte = source.len() as u32;
+            let span_lines = |span: crate::parser::lexer::Span| {
+                let (sl, _) = byte_to_lsp_pos(source, span.start.0.min(max_byte));
+                let (el, _) = byte_to_lsp_pos(source, span.end.0.min(max_byte));
+                (sl, el)
+            };
+            for f in &ast.functions {
+                let (sl, el) = span_lines(f.span);
+                push_range(sl, el, Some("region"));
+            }
+            for s in &ast.structs {
+                let (sl, el) = span_lines(s.span);
+                push_range(sl, el, Some("region"));
+            }
+            for e in &ast.enums {
+                let (sl, el) = span_lines(e.span);
+                push_range(sl, el, Some("region"));
+            }
+            for t in &ast.traits {
+                let (sl, el) = span_lines(t.span);
+                push_range(sl, el, Some("region"));
+            }
+            for i in &ast.impls {
+                let (sl, el) = span_lines(i.span);
+                push_range(sl, el, Some("region"));
+            }
+            for m in &ast.models {
+                let (sl, el) = span_lines(m.span);
+                push_range(sl, el, Some("region"));
+            }
+        }
+
+        // Group consecutive `//` comment lines and consecutive `bring` import lines.
+        let mut comment_start: Option<u32> = None;
+        let mut comment_end: u32 = 0;
+        let mut import_start: Option<u32> = None;
+        let mut import_end: u32 = 0;
+        for (idx, line) in source.lines().enumerate() {
+            let line_no = idx as u32;
+            let trimmed = line.trim();
+            if trimmed.starts_with("//") {
+                if comment_start.is_none() {
+                    comment_start = Some(line_no);
+                }
+                comment_end = line_no;
+            } else if let Some(start) = comment_start.take() {
+                push_range(start, comment_end, Some("comment"));
+            }
+
+            if trimmed.starts_with("bring ") {
+                if import_start.is_none() {
+                    import_start = Some(line_no);
+                }
+                import_end = line_no;
+            } else if let Some(start) = import_start.take() {
+                push_range(start, import_end, Some("imports"));
+            }
+        }
+        if let Some(start) = comment_start {
+            push_range(start, comment_end, Some("comment"));
+        }
+        if let Some(start) = import_start {
+            push_range(start, import_end, Some("imports"));
+        }
+
+        ranges.sort_by_key(|r| (r.start_line, r.end_line));
+        ranges
     }
 
     /// Returns hover information (type signature) for the identifier at the given position.
@@ -1348,6 +1496,34 @@ impl LspState {
         // Run diagnostics to find actionable errors/warnings.
         let diags = self.diagnose(uri);
 
+        // The compiler's own fixes, for diagnostics on the requested lines.
+        for diag in &diags {
+            if diag.end_line < range_start_line || diag.line > _range_end_line {
+                continue;
+            }
+            for (i, fix) in diag.fixes.iter().enumerate() {
+                let mut edits = fix.edits.iter().map(|e| {
+                    let (l, c) = byte_to_lsp_pos(source, e.start);
+                    let (el, ec) = byte_to_lsp_pos(source, e.end.max(e.start));
+                    ((l, c, el, ec), e.replacement.clone())
+                });
+                let Some((first_range, first_text)) = edits.next() else {
+                    continue;
+                };
+                actions.push(CodeAction {
+                    title: fix.message.clone(),
+                    kind: "quickfix".to_owned(),
+                    edit_uri: uri.to_owned(),
+                    edit_range: first_range,
+                    new_text: first_text,
+                    diagnostic_message: Some(diag.message.clone()),
+                    more_edits: edits.collect(),
+                    preferred: i == 0,
+                });
+            }
+        }
+        let _ = range_start_col;
+
         for diag in &diags {
             // Quick fix: suggest adding missing `bring` for undefined variable that looks like a stdlib function
             if diag.message.contains("cannot find") || diag.message.contains("undefined") {
@@ -1363,6 +1539,8 @@ impl LspState {
                             edit_range: (0, 0, 0, 0),
                             new_text: format!("{}\n", bring_stmt),
                             diagnostic_message: Some(diag.message.clone()),
+                            more_edits: Vec::new(),
+                            preferred: false,
                         });
                     }
                 }
@@ -1378,6 +1556,8 @@ impl LspState {
                         edit_range: (diag.line, diag.character, diag.end_line, diag.end_character),
                         new_text: format!("_{}", name),
                         diagnostic_message: Some(diag.message.clone()),
+                        more_edits: Vec::new(),
+                        preferred: false,
                     });
                 }
             }
@@ -1394,6 +1574,8 @@ impl LspState {
                     edit_range: (line_count, 0, line_count, 0),
                     new_text: "}\n".to_owned(),
                     diagnostic_message: Some(diag.message.clone()),
+                    more_edits: Vec::new(),
+                    preferred: false,
                 });
             }
 
@@ -1412,6 +1594,8 @@ impl LspState {
                     ),
                     new_text: ";".to_owned(),
                     diagnostic_message: Some(diag.message.clone()),
+                    more_edits: Vec::new(),
+                    preferred: false,
                 });
             }
 
@@ -1437,6 +1621,8 @@ impl LspState {
                             ),
                             new_text: format!("/* cast to {} */", expected),
                             diagnostic_message: Some(diag.message.clone()),
+                            more_edits: Vec::new(),
+                            preferred: false,
                         });
                     }
                 }
@@ -1456,6 +1642,8 @@ impl LspState {
                                 edit_range: (func_line + 1, 0, func_line + 1, 0),
                                 new_text: "    panic(\"todo: implement\")\n".to_owned(),
                                 diagnostic_message: Some(diag.message.clone()),
+                                more_edits: Vec::new(),
+                                preferred: false,
                             });
                             let _ = brace_pos;
                         }
@@ -1473,6 +1661,8 @@ impl LspState {
                         edit_range: (diag.line, 0, diag.line, 0),
                         new_text: format!("// {} — TODO: describe this function.\n", name),
                         diagnostic_message: Some(diag.message.clone()),
+                        more_edits: Vec::new(),
+                        preferred: false,
                     });
                 }
             }
@@ -1494,6 +1684,8 @@ impl LspState {
                             ),
                             new_text: snake,
                             diagnostic_message: Some(diag.message.clone()),
+                            more_edits: Vec::new(),
+                            preferred: false,
                         });
                     }
                 }
@@ -1508,6 +1700,8 @@ impl LspState {
                     edit_range: (diag.line, diag.character, diag.end_line, diag.end_character),
                     new_text: String::new(),
                     diagnostic_message: Some(diag.message.clone()),
+                    more_edits: Vec::new(),
+                    preferred: false,
                 });
             }
         }
@@ -1523,6 +1717,8 @@ impl LspState {
                     edit_range: (range_start_line, 0, range_start_line, 0),
                     new_text: format!("    val extracted_{} = {};\n", word, word),
                     diagnostic_message: None,
+                    more_edits: Vec::new(),
+                    preferred: false,
                 });
             }
         }
@@ -1535,6 +1731,8 @@ impl LspState {
             edit_range: (range_start_line, 0, range_start_line, 0),
             new_text: "if true {\n".to_owned(),
             diagnostic_message: None,
+            more_edits: Vec::new(),
+            preferred: false,
         });
 
         actions
@@ -1746,55 +1944,42 @@ impl LspState {
         let Some(source) = self.documents.get(uri) else {
             return Vec::new();
         };
+        let src_hash = Self::fnv1a_64(source.as_bytes());
+        if let Some((cached_hash, cached)) = self.cached_diagnostics.borrow().get(uri) {
+            if *cached_hash == src_hash {
+                return cached.clone();
+            }
+        }
         let module_name = uri_to_module_name(uri);
         let mut diags = Vec::new();
 
-        // Phase 1: Collect ALL parse errors via recovery parser
-        let (_partial_ast, parse_errors) = crate::compile_with_recovery(source);
-        for pe in &parse_errors {
-            let err = crate::error::Error::Parse(pe.clone());
-            let (line, character) = if let Some(byte) = error_byte_offset(&err) {
-                let (l, c) = byte_to_line_col(source, byte);
-                (l.saturating_sub(1), c.saturating_sub(1))
-            } else {
-                (0, 0)
-            };
-            diags.push(LspDiagnostic {
-                line,
-                character,
-                end_line: line,
-                end_character: character + 1,
-                message: format!("{}", err),
-                severity: 1,
-                code: Some(err.diagnostic_code().to_owned()),
-            });
-        }
-
-        // Phase 2: If no parse errors, run full compile for deeper errors
-        if parse_errors.is_empty() {
-            let compile_result = if let Some(path) = uri_to_file_path(uri) {
-                crate::compile_file_text(source, &path, EmitKind::Ir)
-            } else {
-                crate::compile(source, &module_name, EmitKind::Ir)
-            };
-
-            if let Err(e) = compile_result {
-                let (line, character) = if let Some(byte) = error_byte_offset(&e) {
-                    let (l, c) = byte_to_line_col(source, byte);
-                    (l.saturating_sub(1), c.saturating_sub(1))
-                } else {
-                    (0, 0)
-                };
-                let code = Some(e.diagnostic_code().to_owned());
-                diags.push(LspDiagnostic {
-                    line,
-                    character,
-                    end_line: line,
-                    end_character: character + 1,
-                    message: format!("{}", e),
-                    severity: 1,
-                    code,
-                });
+        // Every diagnostic the compiler reports: all parse errors, an error
+        // per function that fails to lower, each with its full span, notes,
+        // related locations and fixes. (This used to show one compile error,
+        // one character wide, after a separate recovery parse.)
+        let compile_result = if let Some(path) = uri_to_file_path(uri) {
+            let mut qe = self.query.borrow_mut();
+            let sid = qe.set_source(uri, source.as_str());
+            let _ = qe.parse(sid);
+            drop(qe);
+            crate::compile_file_text(source, &path, EmitKind::Ir)
+        } else {
+            let mut qe = self.query.borrow_mut();
+            let sid = qe.set_source(uri, source.as_str());
+            qe.compile(sid, &module_name, EmitKind::Ir)
+        };
+        if let Err(e) = compile_result {
+            let main = uri_to_file_path(uri).map(|p| p.display().to_string());
+            for d in crate::diagnostics::error_to_diagnostics(&e) {
+                match main
+                    .as_deref()
+                    .and_then(|m| crate::diagnostics::localize(&d, m))
+                {
+                    Some((path, text, local)) => {
+                        diags.push(brought_file_diagnostic(source, &path, &text, &local))
+                    }
+                    None => diags.push(lsp_diagnostic_from(source, &d)),
+                }
             }
         }
 
@@ -1823,6 +2008,8 @@ impl LspState {
                     message: w.message,
                     severity,
                     code: Some(code.to_owned()),
+                    fixes: Vec::new(),
+                    related: Vec::new(),
                 });
             }
 
@@ -1846,6 +2033,8 @@ impl LspState {
                         ),
                         severity: 4, // Hint
                         code: Some("BP001".to_owned()),
+                        fixes: Vec::new(),
+                        related: Vec::new(),
                     });
                 }
             }
@@ -1873,6 +2062,8 @@ impl LspState {
                             ),
                             severity: 4, // Hint
                             code: Some("BP002".to_owned()),
+                            fixes: Vec::new(),
+                            related: Vec::new(),
                         });
                     }
                 }
@@ -1894,6 +2085,8 @@ impl LspState {
                         ),
                         severity: 4,
                         code: Some("BP003".to_owned()),
+                        fixes: Vec::new(),
+                        related: Vec::new(),
                     });
                 }
             }
@@ -1913,6 +2106,8 @@ impl LspState {
                         ),
                         severity: 4,
                         code: Some("BP004".to_owned()),
+                        fixes: Vec::new(),
+                        related: Vec::new(),
                     });
                 }
             }
@@ -1932,6 +2127,8 @@ impl LspState {
                         ),
                         severity: 2,
                         code: Some("BP005".to_owned()),
+                        fixes: Vec::new(),
+                        related: Vec::new(),
                     });
                 }
             }
@@ -1950,13 +2147,27 @@ impl LspState {
                         message: "Redundant double semicolon.".to_owned(),
                         severity: 4,
                         code: Some("BP006".to_owned()),
+                        fixes: Vec::new(),
+                        related: Vec::new(),
                     });
                 }
             }
         }
 
         diags.truncate(self.max_diagnostics);
+        self.cached_diagnostics
+            .borrow_mut()
+            .insert(uri.to_owned(), (src_hash, diags.clone()));
         diags
+    }
+
+    fn fnv1a_64(bytes: &[u8]) -> u64 {
+        let mut h: u64 = 0xcbf29ce484222325;
+        for &b in bytes {
+            h ^= u64::from(b);
+            h = h.wrapping_mul(0x100000001b3);
+        }
+        h
     }
 
     /// Returns LSP semantic tokens delta-encoded for the given document.
@@ -2243,6 +2454,67 @@ mod tests {
     }
 
     #[test]
+    fn incremental_query_engine_caches_diagnostics_and_early_cuts_off() {
+        let mut s = LspState::new();
+        let uri = "untitled:incremental_test.iris";
+        let d1 = s.open_document(uri, "def main() -> i64 {\n    42\n}\n");
+        assert!(d1.is_empty());
+        let stats1 = s.query_stats();
+        assert_eq!(stats1.revision, 1);
+
+        // Identical update returns cached diagnostics without bumping revision.
+        let d2 = s.update_document(uri, "def main() -> i64 {\n    42\n}\n");
+        assert!(d2.is_empty());
+        assert_eq!(s.query_stats().revision, 1);
+
+        // Comment-only edit triggers QueryEngine structural early cutoff.
+        let d3 = s.update_document(uri, "// comment\ndef main() -> i64 {\n    42\n}\n");
+        assert!(d3.is_empty());
+        let stats3 = s.query_stats();
+        assert_eq!(stats3.revision, 2);
+        assert!(
+            stats3.early_cutoffs >= 1,
+            "expected early cutoff on comment-only edit, got {:?}",
+            stats3
+        );
+    }
+
+    #[test]
+    fn folding_ranges_cover_functions_structs_comments_and_imports() {
+        let src = "// header 1\n// header 2\nbring std.io\nbring std.math\n\nrecord Point {\n    x: i64\n    y: i64\n}\n\ndef main() -> i64 {\n    0\n}\n";
+        let s = state_with(src);
+        let ranges = s.folding_ranges(URI);
+        assert!(
+            ranges
+                .iter()
+                .any(|r| r.kind == Some("comment") && r.start_line == 0 && r.end_line == 1),
+            "missing comment fold: {:?}",
+            ranges
+        );
+        assert!(
+            ranges
+                .iter()
+                .any(|r| r.kind == Some("imports") && r.start_line == 2 && r.end_line == 3),
+            "missing imports fold: {:?}",
+            ranges
+        );
+        assert!(
+            ranges
+                .iter()
+                .any(|r| r.kind == Some("region") && r.start_line == 5 && r.end_line == 8),
+            "missing record fold: {:?}",
+            ranges
+        );
+        assert!(
+            ranges
+                .iter()
+                .any(|r| r.kind == Some("region") && r.start_line == 10 && r.end_line == 12),
+            "missing function fold: {:?}",
+            ranges
+        );
+    }
+
+    #[test]
     fn error_diagnostic_for_parse_error() {
         let mut s = LspState::new();
         let diags = s.open_document(URI, "def broken( -> { }");
@@ -2423,6 +2695,42 @@ mod tests {
         let s = state_with("def my_custom_fn() -> i64 { 0 }");
         let items = s.completions(URI, 0, 0);
         assert!(items.contains(&"my_custom_fn".to_owned()));
+    }
+
+    #[test]
+    fn keyword_hover_explains_with_a_verified_example() {
+        let s = state_with(
+            "def f(log: list<str>) -> i64 {\n    defer list_push(log, \"x\");\n    0\n}",
+        );
+        let text = s.hover(URI, 1, 6).expect("hover on `defer`");
+        assert!(text.contains("**`defer`**"), "{text}");
+        assert!(text.contains("```iris"), "{text}");
+    }
+
+    #[test]
+    fn math_builtin_hover_is_generic_over_the_float_type() {
+        let s = state_with("def f(x: f64) -> f64 { sqrt(x) }");
+        let text = s.hover(URI, 0, 24).expect("hover on `sqrt`");
+        assert!(text.contains("F is f64 or f32"), "{text}");
+        assert!(!text.contains("x: f32"), "{text}");
+    }
+
+    #[test]
+    fn keyword_and_builtin_completions_carry_documentation() {
+        let defer = completion_documentation("defer", 14).expect("keyword docs");
+        assert!(defer.contains("```iris"), "{defer}");
+        assert!(completion_documentation("sqrt", 3).is_some());
+        // A user symbol of a non-builtin kind never borrows builtin docs.
+        assert!(completion_documentation("sqrt", 6).is_none());
+        assert!(completion_documentation("my_fn", 3).is_none());
+        let s = state_with("def main() -> i64 { 0 }");
+        let items = s.completions(URI, 0, 0);
+        for keyword in ["defer", "yield", "select", "unsafe", "defmacro", "effect"] {
+            assert!(
+                items.contains(&keyword.to_owned()),
+                "missing completion {keyword}"
+            );
+        }
     }
 
     #[test]
@@ -2828,6 +3136,23 @@ fn completion_kind_for(label: &str) -> u8 {
             | "par"
             | "in"
             | "to"
+            | "let"
+            | "match"
+            | "effect"
+            | "with"
+            | "dyn"
+            | "resume"
+            | "defer"
+            | "try"
+            | "catch"
+            | "raise"
+            | "move"
+            | "yield"
+            | "select"
+            | "mod"
+            | "unsafe"
+            | "defmacro"
+            | "by"
     ) {
         14 // Keyword
     } else if matches!(
@@ -2874,6 +3199,7 @@ fn completion_detail_for(label: &str) -> Option<&'static str> {
         "output" => "model output declaration",
         "bring" => "import a file or stdlib module",
         "chan" => "channel type: chan<T>",
+        "task" => "task type: task<T>, what an async def returns",
         "channel" => "channel constructor",
         "tensor" => "tensor type: tensor<dtype, [dims]>",
         "option" => "optional type: option<T>",
@@ -3850,7 +4176,7 @@ fn hover_brought_stdlib_symbol(
 }
 
 /// Converts an AstType to a display string.
-fn ast_type_str(ty: &crate::parser::ast::AstType) -> String {
+pub(crate) fn ast_type_str(ty: &crate::parser::ast::AstType) -> String {
     use crate::parser::ast::{AstScalarKind, AstType};
     match ty {
         AstType::Scalar(k, _) => match k {
@@ -4245,22 +4571,34 @@ fn find_binding_in_block(
 fn builtin_hover(name: &str) -> Option<String> {
     let sig = match name {
         // Math
-        "sin"   => "def sin(x: f32) -> f32\nSine of x (radians)",
-        "cos"   => "def cos(x: f32) -> f32\nCosine of x (radians)",
-        "tan"   => "def tan(x: f32) -> f32\nTangent of x (radians)",
-        "exp"   => "def exp(x: f32) -> f32\ne^x",
-        "log"   => "def log(x: f32) -> f32\nNatural logarithm",
-        "log2"  => "def log2(x: f32) -> f32\nBase-2 logarithm",
-        "sqrt"  => "def sqrt(x: f32) -> f32\nSquare root",
-        "abs"   => "def abs(x: f32) -> f32\nAbsolute value",
-        "floor" => "def floor(x: f32) -> f32\nFloor",
-        "ceil"  => "def ceil(x: f32) -> f32\nCeiling",
-        "round" => "def round(x: f32) -> f32\nRound to nearest",
-        "sign"  => "def sign(x: f32) -> f32\nSign: -1, 0, or 1",
-        "pow"   => "def pow(base: f32, exp: f32) -> f32\nPower",
-        "min"   => "def min(a: f32, b: f32) -> f32\nMinimum of two values",
-        "max"   => "def max(a: f32, b: f32) -> f32\nMaximum of two values",
-        "clamp" => "def clamp(x: f32, lo: f32, hi: f32) -> f32\nClamp x to [lo, hi]",
+        // Float math is generic over F (f64 or f32); abs, min, max and clamp also
+        // accept integers (N). Checked against the lowerer's typing.
+        "sin" => "def sin(x: F) -> F\nSine of x (radians). F is f64 or f32.",
+        "cos" => "def cos(x: F) -> F\nCosine of x (radians). F is f64 or f32.",
+        "tan" => "def tan(x: F) -> F\nTangent of x (radians). F is f64 or f32.",
+        "exp" => "def exp(x: F) -> F\ne^x. F is f64 or f32.",
+        "log" => "def log(x: F) -> F\nNatural logarithm. F is f64 or f32.",
+        "log2" => "def log2(x: F) -> F\nBase-2 logarithm. F is f64 or f32.",
+        "sqrt" => "def sqrt(x: F) -> F\nSquare root. F is f64 or f32.",
+        "abs" => "def abs(x: N) -> N\nAbsolute value of an integer or float.",
+        "floor" => "def floor(x: F) -> F\nRound down. F is f64 or f32.",
+        "ceil" => "def ceil(x: F) -> F\nRound up. F is f64 or f32.",
+        "round" => "def round(x: F) -> F\nRound to nearest. F is f64 or f32.",
+        "sign" => "def sign(x: F) -> F\nSign: -1, 0, or 1.",
+        "pow" => "def pow(base: F, exp: F) -> F\nbase raised to exp. F is f64 or f32.",
+        "min" => "def min(a: N, b: N) -> N\nSmaller of two integers or floats.",
+        "max" => "def max(a: N, b: N) -> N\nLarger of two integers or floats.",
+        "clamp" => "def clamp(x: N, lo: N, hi: N) -> N\nClamp x to [lo, hi]; integers or floats.",
+        "println" => "def println(v: T) -> ()\nPrint a value followed by a newline.",
+        "list" => "def list(items: T...) -> list<T>\nNew list: `list(1, 2, 3)`, or `list()` with an annotated binding such as `val xs: list<f64> = list()`.",
+        "list_push" => "def list_push(lst: list<T>, v: T) -> ()\nAppend an element (same as push).",
+        "none" => "def none() -> option<T>\nThe empty option.",
+        "format" => "def format(template: str, args...) -> str\nReplace each `{}` in template with the next argument. f-strings (`f\"x = {x}\"`) are usually clearer.",
+        "to_f64" => "def to_f64(x: N) -> f64\nConvert a number to f64 (or write `x to f64`).",
+        "transaction_begin" => "def transaction_begin() -> ()\nStart a speculative transaction; later list and file writes can be rolled back. Requires `effect transaction`.",
+        "transaction_commit" => "def transaction_commit() -> ()\nKeep the writes made since transaction_begin.",
+        "transaction_rollback" => "def transaction_rollback() -> ()\nUndo the writes made since transaction_begin.",
+        "transaction_depth" => "def transaction_depth() -> i64\nNumber of open transactions.",
         // String
         "len"         => "def len(s: str) -> i64\nByte length of string (or collection size)",
         "concat"      => "def concat(a: str, b: str) -> str\nConcatenate two strings",
@@ -4320,6 +4658,19 @@ fn builtin_hover(name: &str) -> Option<String> {
         // Time
         "time_now_ms"   => "def time_now_ms() -> i64\nCurrent time in milliseconds since epoch",
         "sleep_ms" => "def sleep_ms(ms: i64) -> i64\nSleep for ms milliseconds",
+        // Tasks (`async def` / `await`)
+        "async_sleep" => "def async_sleep(ms: i64) -> task<i64>\nA task that completes after ms milliseconds; `await` it to pause without blocking the thread",
+        "async_yield" => "def async_yield() -> task<i64>\n`await async_yield()` lets every other ready task run first",
+        "async_readable" => "def async_readable(socket: i64) -> task<i64>\nA task that completes when the socket (a listener's or a stream's handle) can be read without blocking: a pending connection, data, or end of stream. `std.net` builds `tcp_accept_async` and `tcp_read_async` on it",
+        "async_writable" => "def async_writable(socket: i64) -> task<i64>\nA task that completes when the socket can be written without blocking",
+        "tcp_connect_async" => "def tcp_connect_async(host: str, port: i64) -> task<i64>\nNon-blocking async TCP connect returning a stream handle task",
+        "tcp_write_async" => "def tcp_write_async(socket: i64, data: str) -> task<i64>\nNon-blocking async TCP write returning a status task",
+        "http_get_async" => "def http_get_async(url: str) -> task<str>\nNon-blocking async HTTP/HTTPS GET returning the response body task",
+        "async_recv" => "def async_recv(ch: chan<T>) -> task<T>\nA task that completes with the channel's next value (`await ch` inside an async def does this)",
+        "task_done" => "def task_done(t: task<T>) -> bool\nWhether the task has finished",
+        "async_any" => "def async_any(t1: task<A>, t2: task<B>, ...) -> task<i64>\nThe index of the first task to finish (also takes one list<task<T>>); losing timers and receives are cancelled",
+        "task_cancel" => "def task_cancel(t: task<T>) -> i64\nStop the task: it never resumes, and awaiting it is an error",
+        "task_cancelled" => "def task_cancelled(t: task<T>) -> bool\nWhether the task was cancelled",
         // Database (SQLite)
         "db_open"  => "def db_open(path: str) -> i64\nOpen a SQLite database, returns handle",
         "db_exec"  => "def db_exec(db: i64, sql: str) -> i64\nExecute SQL (INSERT/UPDATE/DELETE/CREATE), returns 0 on success",
@@ -4474,8 +4825,22 @@ fn builtin_hover(name: &str) -> Option<String> {
     )
 }
 
+/// Markdown documentation for a keyword, type or builtin completion item.
+/// User-defined symbols (variables, functions, fields) get none, so a local
+/// named like a builtin is never described as the builtin.
+fn completion_documentation(label: &str, kind: u8) -> Option<String> {
+    // 14 Keyword, 7 Class (types), 3 Function (builtins).
+    if !matches!(kind, 14 | 7 | 3) || !STATIC_COMPLETIONS.contains(&label) {
+        return None;
+    }
+    keyword_hover(label).or_else(|| builtin_hover(label))
+}
+
 /// Returns hover info for a keyword.
 fn keyword_hover(name: &str) -> Option<String> {
+    if let Some(doc) = crate::lsp_docs::hover(name) {
+        return Some(doc);
+    }
     let info = match name {
         "def" => "**def** — Define a function",
         "pub" => "**pub** — Export a function or record for use from other files",
@@ -4658,7 +5023,8 @@ pub fn run_lsp_server() -> std::io::Result<()> {
                                 "full": true
                             },
                             "documentHighlightProvider": true,
-                            "callHierarchyProvider": true
+                            "callHierarchyProvider": true,
+                            "foldingRangeProvider": true
                         },
                         "serverInfo": { "name": "iris-lsp", "version": env!("CARGO_PKG_VERSION") }
                     }),
@@ -4746,6 +5112,10 @@ pub fn run_lsp_server() -> std::io::Result<()> {
                         }
                         if let Some(sort_text) = item.sort_text {
                             value["sortText"] = serde_json::json!(sort_text);
+                        }
+                        if let Some(doc) = completion_documentation(&item.label, item.kind) {
+                            value["documentation"] =
+                                serde_json::json!({ "kind": "markdown", "value": doc });
                         }
                         value
                     })
@@ -4874,30 +5244,37 @@ pub fn run_lsp_server() -> std::io::Result<()> {
                 let el = range["end"]["line"].as_u64().unwrap_or(0) as u32;
                 let ec = range["end"]["character"].as_u64().unwrap_or(0) as u32;
                 let actions = state.code_actions(&uri, sl, sc, el, ec);
-                let result: Vec<serde_json::Value> = actions.into_iter().map(|a| {
-                    let mut action = serde_json::json!({
-                        "title": a.title,
-                        "kind": a.kind,
-                        "edit": {
-                            "changes": {
-                                &a.edit_uri: [{
-                                    "range": {
-                                        "start": { "line": a.edit_range.0, "character": a.edit_range.1 },
-                                        "end":   { "line": a.edit_range.2, "character": a.edit_range.3 }
-                                    },
-                                    "newText": a.new_text
-                                }]
-                            }
+                let result: Vec<serde_json::Value> = actions
+                    .into_iter()
+                    .map(|a| {
+                        let edit = |r: (u32, u32, u32, u32), text: &str| {
+                            serde_json::json!({
+                                "range": {
+                                    "start": { "line": r.0, "character": r.1 },
+                                    "end":   { "line": r.2, "character": r.3 }
+                                },
+                                "newText": text
+                            })
+                        };
+                        let mut edits = vec![edit(a.edit_range, &a.new_text)];
+                        edits.extend(a.more_edits.iter().map(|(r, t)| edit(*r, t)));
+                        let mut action = serde_json::json!({
+                            "title": a.title,
+                            "kind": a.kind,
+                            "edit": { "changes": { &a.edit_uri: edits } }
+                        });
+                        if a.preferred {
+                            action["isPreferred"] = serde_json::json!(true);
                         }
-                    });
-                    if let Some(msg) = &a.diagnostic_message {
-                        action["diagnostics"] = serde_json::json!([{
-                            "message": msg,
-                            "source": "iris"
-                        }]);
-                    }
-                    action
-                }).collect();
+                        if let Some(msg) = &a.diagnostic_message {
+                            action["diagnostics"] = serde_json::json!([{
+                                "message": msg,
+                                "source": "iris"
+                            }]);
+                        }
+                        action
+                    })
+                    .collect();
                 write_message(
                     &mut stdout.lock(),
                     &make_response(request_id.clone(), serde_json::json!(result)),
@@ -4987,6 +5364,30 @@ pub fn run_lsp_server() -> std::io::Result<()> {
                 write_message(
                     &mut stdout.lock(),
                     &make_response(request_id.clone(), serde_json::json!(result)),
+                )?;
+            }
+            "textDocument/foldingRange" => {
+                let uri = params["textDocument"]["uri"]
+                    .as_str()
+                    .unwrap_or("")
+                    .to_owned();
+                let ranges: Vec<serde_json::Value> = state
+                    .folding_ranges(&uri)
+                    .into_iter()
+                    .map(|r| {
+                        let mut obj = serde_json::json!({
+                            "startLine": r.start_line,
+                            "endLine": r.end_line,
+                        });
+                        if let Some(kind) = r.kind {
+                            obj["kind"] = serde_json::json!(kind);
+                        }
+                        obj
+                    })
+                    .collect();
+                write_message(
+                    &mut stdout.lock(),
+                    &make_response(request_id.clone(), serde_json::json!(ranges)),
                 )?;
             }
             "textDocument/prepareCallHierarchy" => {
@@ -5766,6 +6167,22 @@ fn make_diagnostics_notification(uri: &str, diags: &[LspDiagnostic]) -> String {
                 "message": d.message,
                 "source": "iris",
             });
+            if !d.related.is_empty() {
+                diag["relatedInformation"] = serde_json::json!(d
+                    .related
+                    .iter()
+                    .map(|(r, label)| serde_json::json!({
+                        "location": {
+                            "uri": uri,
+                            "range": {
+                                "start": { "line": r.0, "character": r.1 },
+                                "end": { "line": r.2, "character": r.3 }
+                            }
+                        },
+                        "message": label
+                    }))
+                    .collect::<Vec<_>>());
+            }
             if let Some(code) = &d.code {
                 diag["code"] = serde_json::json!(code);
                 if code == "W0001" || code == "W0002" {
@@ -5794,12 +6211,115 @@ fn write_message(writer: &mut impl std::io::Write, body: &str) -> std::io::Resul
 // Code action helpers
 // ---------------------------------------------------------------------------
 
-/// Extracts a single-quoted name from an error message like "cannot find 'foo'".
+/// An error in a file this document brings, shown on the `bring` that names
+/// that file (or the first line), its own position in the message.
+fn brought_file_diagnostic(
+    source: &str,
+    path: &str,
+    text: &str,
+    d: &crate::diagnostics::Diagnostic,
+) -> LspDiagnostic {
+    let mut shown = lsp_diagnostic_from(text, d);
+    shown.message = format!(
+        "in {path}:{}:{}: {}",
+        shown.line + 1,
+        shown.character + 1,
+        shown.message
+    );
+    let stem = std::path::Path::new(path)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(path);
+    let (line, width) = source
+        .lines()
+        .enumerate()
+        .find(|(_, l)| l.trim_start().starts_with("bring") && l.contains(stem))
+        .map(|(i, l)| (i as u32, l.trim_end().len() as u32))
+        .unwrap_or((0, 1));
+    shown.line = line;
+    shown.character = 0;
+    shown.end_line = line;
+    shown.end_character = width.max(1);
+    shown.fixes.clear();
+    shown.related.clear();
+    shown
+}
+
+/// A compiler diagnostic as the editor shows it: notes and help folded into
+/// the message, secondary spans as related locations, fixes kept for quick
+/// fixes.
+fn lsp_diagnostic_from(source: &str, d: &crate::diagnostics::Diagnostic) -> LspDiagnostic {
+    let range = |start: u32, end: u32| -> (u32, u32, u32, u32) {
+        let (start, end) = crate::diagnostics::token_span(source, start, end);
+        let (l, c) = byte_to_lsp_pos(source, start);
+        let (el, ec) = byte_to_lsp_pos(source, end.max(start + 1));
+        (l, c, el, ec)
+    };
+    let (line, character, end_line, end_character) = d
+        .spans
+        .iter()
+        .find(|s| s.is_primary)
+        .or(d.spans.first())
+        .map(|s| range(s.start, s.end))
+        .unwrap_or((0, 0, 0, 1));
+    let mut message = d.message.clone();
+    for note in &d.notes {
+        message.push_str(&format!("\nnote: {note}"));
+    }
+    for help in &d.helps {
+        message.push_str(&format!("\nhelp: {help}"));
+    }
+    let related = d
+        .spans
+        .iter()
+        .filter(|s| !s.is_primary)
+        .map(|s| (range(s.start, s.end), s.label.clone().unwrap_or_default()))
+        .collect();
+    LspDiagnostic {
+        line,
+        character,
+        end_line,
+        end_character,
+        message,
+        severity: match d.level {
+            crate::diagnostics::DiagnosticLevel::Error => 1,
+            crate::diagnostics::DiagnosticLevel::Warning => 2,
+            crate::diagnostics::DiagnosticLevel::Note => 3,
+            crate::diagnostics::DiagnosticLevel::Help => 4,
+        },
+        code: d.code.clone(),
+        fixes: d.fixes.clone(),
+        related,
+    }
+}
+
+/// Extracts a quoted name from an error message like "cannot find `foo`" or
+/// "cannot find 'foo'".
 fn extract_quoted_name(msg: &str) -> Option<String> {
-    let start = msg.find('\'')?;
+    let start = msg.find(['\'', '`'])?;
+    let quote = msg[start..].chars().next()?;
     let rest = &msg[start + 1..];
-    let end = rest.find('\'')?;
+    let end = rest.find(quote)?;
     Some(rest[..end].to_owned())
+}
+
+/// Names of the builtin functions: the completion list without keywords and
+/// module paths. Used for did-you-mean suggestions in diagnostics.
+pub fn builtin_function_names() -> &'static [&'static str] {
+    static NAMES: std::sync::OnceLock<Vec<&'static str>> = std::sync::OnceLock::new();
+    NAMES.get_or_init(|| {
+        STATIC_COMPLETIONS
+            .iter()
+            .copied()
+            .filter(|name| !name.contains('.'))
+            .filter(|name| {
+                matches!(
+                    crate::parser::lexer::Lexer::new(name).tokenize().ok().as_deref(),
+                    Some([first, ..]) if matches!(first.node, crate::parser::lexer::Token::Ident(_))
+                )
+            })
+            .collect()
+    })
 }
 
 /// Suggests a `bring` statement if `name` matches a known stdlib function or module.
@@ -5937,6 +6457,23 @@ fn is_keyword(word: &str) -> bool {
     matches!(
         word,
         "def"
+            | "let"
+            | "match"
+            | "effect"
+            | "with"
+            | "dyn"
+            | "resume"
+            | "defer"
+            | "try"
+            | "catch"
+            | "raise"
+            | "move"
+            | "yield"
+            | "select"
+            | "mod"
+            | "unsafe"
+            | "defmacro"
+            | "by"
             | "val"
             | "var"
             | "for"
@@ -6055,6 +6592,7 @@ fn format_ir_type_for_lsp(ty: &crate::ir::types::IrType) -> String {
             format_ir_type_for_lsp(err)
         ),
         IrType::Chan(inner) => format!("chan<{}>", format_ir_type_for_lsp(inner)),
+        IrType::Task(inner) => format!("task<{}>", format_ir_type_for_lsp(inner)),
         IrType::Atomic(inner) => format!("atomic<{}>", format_ir_type_for_lsp(inner)),
         IrType::Mutex(inner) => format!("mutex<{}>", format_ir_type_for_lsp(inner)),
         IrType::Grad(inner) => format!("grad<{}>", format_ir_type_for_lsp(inner)),

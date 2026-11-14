@@ -1,0 +1,95 @@
+// std.ais: an online world model keeps a plant viable while its dynamics
+// change under it.
+//
+// A heated tank: T' = T + 0.1 * (-0.5 * (T - ambient) + 15 * u) for a control
+// u of idle (0), heat (1) or cool (-1). Halfway through, a heat wave raises
+// the ambient temperature from 20 to 75. The autopilot starts knowing
+// nothing: it fits the plant by recursive least squares as it runs, and
+// chooses the action whose predicted trajectory stays viable. A thermostat
+// that only heats or idles drifts with the ambient past the critical bound.
+bring std.ais
+
+def plant(t: f64, u: f64, ambient: f64) -> f64 {
+    t + 0.1 * (0.0 - 0.5 * (t - ambient) + 15.0 * u)
+}
+
+def ambient_at(step: i64) -> f64 {
+    if step < 150 { 20.0 } else { 75.0 }
+}
+
+def controls() -> list<list<f64>> {
+    val idle: list<f64> = list(0.0)
+    val heat: list<f64> = list(1.0)
+    val cool: list<f64> = list(0.0 - 1.0)
+    list(idle, heat, cool)
+}
+
+def main() -> i64 {
+    // ── The model identifies the plant exactly ─────────────────────────────
+    // Noise-free samples of T' = 0.95 T + 1.5 u + 0.05 * 20.
+    var wm = wm_new(1, 1, 1.0)
+    var temp = 30.0
+    for i in 0..40 {
+        val u = to_f64(i % 3 - 1)
+        val next = plant(temp, u, 20.0)
+        wm = wm_learn(wm, list(temp), list(u), list(next))
+        temp = next
+    }
+    val w_t = list_get(wm.w, 0)
+    val w_u = list_get(wm.w, 1)
+    val w_1 = list_get(wm.w, 2)
+    println("fitted: T' = " + to_str(w_t) + " T + " + to_str(w_u) + " u + " + to_str(w_1))
+    assert(abs(w_t - 0.95) < 1.0e-6 && abs(w_u - 1.5) < 1.0e-6 && abs(w_1 - 1.0) < 1.0e-5)
+    val pred = list_get(wm_predict(wm, list(40.0), list(1.0)), 0)
+    assert(abs(pred - plant(40.0, 1.0, 20.0)) < 1.0e-4)
+
+    // ── The autopilot keeps the tank viable through the heat wave ──────────
+    val bounds: list<ViabilityBound> = list(viability_bound_new("temperature", 45.0, 60.0, 35.0, 72.0, 1.0, 2))
+    val safety = safety_policy_new()
+    // Never heat a tank that is already warm, whatever the model says.
+    safety_forbid_when(safety, "no heat above 58", 0, ">", 58.0, 1, 5)
+    // Past 70, cooling is mandatory.
+    safety_require_when(safety, "cool above 70", 0, ">", 70.0, 2, 10)
+    var pilot = autopilot_new(1, controls(), bounds, safety, 5, 0.9)
+    var t = 50.0
+    var in_band = 0
+    var critical = 0
+    var heat_above_58 = 0
+    var lowest = 1000.0
+    var highest = 0.0 - 1000.0
+    val steps = 300
+    for step in 0..steps {
+        val r = autopilot_step(pilot, list(t))
+        pilot = r.pilot
+        if r.action == 1 && t > 58.0 { heat_above_58 = heat_above_58 + 1 }
+        val u = list_get(list_get(controls(), r.action), 0)
+        t = plant(t, u, ambient_at(step))
+        // Judge after a 20-step warm-up while the model is being fitted.
+        if step >= 20 {
+            if t >= 45.0 && t <= 60.0 { in_band = in_band + 1 }
+            if t <= 35.0 || t >= 72.0 { critical = critical + 1 }
+            if t < lowest { lowest = t }
+            if t > highest { highest = t }
+        }
+    }
+    val judged = steps - 20
+    println("autopilot: in band " + to_str(in_band) + "/" + to_str(judged) + ", critical " + to_str(critical) + ", range " + to_str(lowest) + ".." + to_str(highest) + ", safety interventions " + to_str(pilot.safety.interventions))
+    assert(critical == 0)
+    assert(in_band * 100 >= judged * 95, "in band " + to_str(in_band))
+    assert(heat_above_58 == 0)
+
+    // ── A thermostat without a model goes critical ─────────────────────────
+    var tt = 50.0
+    var thermo_critical = 0
+    var thermo_highest = 0.0
+    for step in 0..steps {
+        val u = if tt < 50.0 { 1.0 } else { 0.0 }
+        tt = plant(tt, u, ambient_at(step))
+        if tt >= 72.0 { thermo_critical = thermo_critical + 1 }
+        if tt > thermo_highest { thermo_highest = tt }
+    }
+    println("thermostat: critical " + to_str(thermo_critical) + " steps, highest " + to_str(thermo_highest))
+    assert(thermo_critical > 50)
+    println("std.ais world model: ok")
+    return 0
+}

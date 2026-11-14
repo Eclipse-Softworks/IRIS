@@ -1,0 +1,10 @@
+// expect: E0116 at 4:5
+// message: may end without returning
+
+def sign(x: i64) -> i64 {
+    if x > 0 {
+        return 1
+    }
+}
+
+def main() -> i64 { sign(3) }

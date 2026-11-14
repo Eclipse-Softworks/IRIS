@@ -1,0 +1,36 @@
+// Program state: `var` at the top level is one variable per running program,
+// initialised before main (natively by a constructor, in the interpreter on
+// first use) and readable and writable from every function.
+record Stats { count: i64, total: f64 }
+
+var count: i64 = 0
+var total: f64 = 0.0
+var history: list<f64> = list()
+var label: str = "start"
+var stats: Stats = Stats { count: 0, total: 0.0 }
+
+def step(x: f64) -> f64 {
+    count = count + 1;
+    total += x;
+    push(history, x);
+    stats.count = stats.count + 1;
+    total / (count to f64)
+}
+
+def main() -> i64 {
+    println(to_str(step(2.0)));
+    println(to_str(step(4.0)));
+    var i = 0;
+    while i < 3 {
+        count += 10;
+        i = i + 1;
+    }
+    label = concat(label, "!");
+    println(label);
+    println(to_str(count));
+    println(to_str(len(history)));
+    println(to_str(stats.count));
+    assert(count == 32);
+    assert(stats.count == 2);
+    0
+}

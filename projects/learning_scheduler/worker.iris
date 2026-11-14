@@ -1,0 +1,46 @@
+bring "domain.iris" 
+bring std.async 
+bring std.time
+
+def compute(identifier: i64, work: i64) -> i64 {
+    var checksum = identifier + 1;
+    for tick in 0 .. (work * 2000) {
+        checksum = (checksum * 17 + tick) % 1000003;
+    };
+    return checksum
+}
+
+// Execute the replay's dispatch order in waves of at most two real CPU jobs.
+// These measurements are actual wall time, not the replay's logical latency.
+def execute_wave(jobs: list<Job>, plan: Report, wave: i64) -> i64 {
+    val results: chan<i64> = channel(2);
+    val group = new_task_group();
+    var launched = 0;
+    for slot in 0 .. 2 {
+        val position = wave * 2 + slot;
+        if position < list_len(jobs) {
+            val job = list_get(jobs, list_get(plan.order, position));
+            val identifier = job.id;
+            val work = job.work;
+            spawn(group) { send(results, compute(identifier, work)); };
+            launched = launched + 1;
+        };
+    };
+    task_group_join(group);
+    var checksum = 0;
+    for index in 0 .. launched { checksum = checksum + recv(results) };
+    assert(launched >= 1 && launched <= 2);
+    return checksum
+}
+
+pub def execute(jobs: list<Job>, plan: Report) -> i64 {
+    var checksum = 0;
+    val started = now_ms();
+    for wave in 0 .. ((list_len(jobs) + 1) / 2) {
+        checksum = checksum + execute_wave(jobs, plan, wave);
+    };
+    val elapsed = now_ms() - started;
+    println(f"CPU jobs complete: count={list_len(jobs)} wall_ms={elapsed} checksum={checksum}");
+    println(f"Resources: max_in_flight=2 channel_capacity=2 pool_workers={async_worker_count()}");
+    return checksum
+}
