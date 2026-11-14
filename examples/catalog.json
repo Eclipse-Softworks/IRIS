@@ -4,7 +4,9 @@
     {
       "path": "projects/learning_scheduler/main.iris",
       "mode": "native",
-      "env": { "IRIS_SCHEDULER_DEMO": "1" },
+      "env": {
+        "IRIS_SCHEDULER_DEMO": "1"
+      },
       "expected": "learning scheduler: session complete"
     },
     {
@@ -12,11 +14,31 @@
       "mode": "dual",
       "expected": "learning scheduler: training, policies, aging, recovery, persistence verified"
     },
-    { "path": "projects/learning_scheduler/domain.iris", "mode": "module", "expected": "" },
-    { "path": "projects/learning_scheduler/learning.iris", "mode": "module", "expected": "" },
-    { "path": "projects/learning_scheduler/checkpoint.iris", "mode": "module", "expected": "" },
-    { "path": "projects/learning_scheduler/commands.iris", "mode": "module", "expected": "" },
-    { "path": "projects/learning_scheduler/worker.iris", "mode": "module", "expected": "" },
+    {
+      "path": "projects/learning_scheduler/domain.iris",
+      "mode": "module",
+      "expected": ""
+    },
+    {
+      "path": "projects/learning_scheduler/learning.iris",
+      "mode": "module",
+      "expected": ""
+    },
+    {
+      "path": "projects/learning_scheduler/checkpoint.iris",
+      "mode": "module",
+      "expected": ""
+    },
+    {
+      "path": "projects/learning_scheduler/commands.iris",
+      "mode": "module",
+      "expected": ""
+    },
+    {
+      "path": "projects/learning_scheduler/worker.iris",
+      "mode": "module",
+      "expected": ""
+    },
     {
       "path": "projects/learning_robot/uno_control.iris",
       "mode": "module",
@@ -492,18 +514,46 @@
       "mode": "manual",
       "expected": "self-upgrading service: upgraded, refused, rolled back, upgraded again"
     },
-    { "path": "projects/uno_controls/toggle.iris", "mode": "module", "expected": "" },
-    { "path": "projects/uno_controls/pid.iris", "mode": "module", "expected": "" },
-    { "path": "projects/uno_controls/modes.iris", "mode": "module", "expected": "" },
+    {
+      "path": "projects/uno_controls/toggle.iris",
+      "mode": "module",
+      "expected": ""
+    },
+    {
+      "path": "projects/uno_controls/pid.iris",
+      "mode": "module",
+      "expected": ""
+    },
+    {
+      "path": "projects/uno_controls/modes.iris",
+      "mode": "module",
+      "expected": ""
+    },
     {
       "path": "projects/uno_controls/simulate.iris",
       "mode": "dual",
       "expected": "uno controls: toggle, debounced modes and fixed-point PID checked"
     },
-    { "path": "projects/uno_controls/uno_toggle.iris", "mode": "embedded", "expected": "" },
-    { "path": "projects/uno_controls/uno_pid.iris", "mode": "embedded", "expected": "" },
-    { "path": "projects/uno_controls/uno_modes.iris", "mode": "embedded", "expected": "" },
-    { "path": "projects/async_gateway/gateway.iris", "mode": "module", "expected": "" },
+    {
+      "path": "projects/uno_controls/uno_toggle.iris",
+      "mode": "embedded",
+      "expected": ""
+    },
+    {
+      "path": "projects/uno_controls/uno_pid.iris",
+      "mode": "embedded",
+      "expected": ""
+    },
+    {
+      "path": "projects/uno_controls/uno_modes.iris",
+      "mode": "embedded",
+      "expected": ""
+    },
+    {
+      "path": "projects/async_gateway/gateway.iris",
+      "mode": "module",
+      "expected": ""
+    },
     {
       "path": "projects/async_gateway/selftest.iris",
       "mode": "dual",
@@ -514,29 +564,81 @@
       "mode": "manual",
       "expected": "async gateway: stopped after"
     },
-    { "path": "projects/cli_tools/csvkit.iris", "mode": "module", "expected": "" },
-    { "path": "projects/cli_tools/logs.iris", "mode": "module", "expected": "" },
-    { "path": "projects/cli_tools/packets.iris", "mode": "module", "expected": "" },
+    {
+      "path": "projects/cli_tools/csvkit.iris",
+      "mode": "module",
+      "expected": ""
+    },
+    {
+      "path": "projects/cli_tools/logs.iris",
+      "mode": "module",
+      "expected": ""
+    },
+    {
+      "path": "projects/cli_tools/packets.iris",
+      "mode": "module",
+      "expected": ""
+    },
     {
       "path": "projects/cli_tools/selftest.iris",
       "mode": "manual",
       "expected": "cli tools: csv, json lines, logs, pcap and TLS fingerprints match the reference"
     },
-    { "path": "projects/cli_tools/csvq.iris", "mode": "manual", "expected": "" },
-    { "path": "projects/cli_tools/logstat.iris", "mode": "manual", "expected": "" },
-    { "path": "projects/cli_tools/pcapinspect.iris", "mode": "manual", "expected": "" },
-    { "path": "projects/cli_tools/tlsfp.iris", "mode": "manual", "expected": "" },
-    { "path": "projects/llm_agent/tools.iris", "mode": "module", "expected": "" },
-    { "path": "projects/llm_agent/scripted.iris", "mode": "module", "expected": "" },
-    { "path": "projects/llm_agent/agent.iris", "mode": "module", "expected": "" },
+    {
+      "path": "projects/cli_tools/csvq.iris",
+      "mode": "manual",
+      "expected": ""
+    },
+    {
+      "path": "projects/cli_tools/logstat.iris",
+      "mode": "manual",
+      "expected": ""
+    },
+    {
+      "path": "projects/cli_tools/pcapinspect.iris",
+      "mode": "manual",
+      "expected": ""
+    },
+    {
+      "path": "projects/cli_tools/tlsfp.iris",
+      "mode": "manual",
+      "expected": ""
+    },
+    {
+      "path": "projects/llm_agent/tools.iris",
+      "mode": "module",
+      "expected": ""
+    },
+    {
+      "path": "projects/llm_agent/scripted.iris",
+      "mode": "module",
+      "expected": ""
+    },
+    {
+      "path": "projects/llm_agent/agent.iris",
+      "mode": "module",
+      "expected": ""
+    },
     {
       "path": "projects/llm_agent/selftest.iris",
       "mode": "dual",
       "expected": "llm agent: tool chain, typed results, refused calls and the step limit checked"
     },
-    { "path": "projects/llm_agent/main.iris", "mode": "manual", "expected": "" },
-    { "path": "projects/gridworld_inference/world.iris", "mode": "module", "expected": "" },
-    { "path": "projects/gridworld_inference/agent.iris", "mode": "module", "expected": "" },
+    {
+      "path": "projects/llm_agent/main.iris",
+      "mode": "manual",
+      "expected": ""
+    },
+    {
+      "path": "projects/gridworld_inference/world.iris",
+      "mode": "module",
+      "expected": ""
+    },
+    {
+      "path": "projects/gridworld_inference/agent.iris",
+      "mode": "module",
+      "expected": ""
+    },
     {
       "path": "projects/gridworld_inference/run.iris",
       "mode": "dual",
@@ -550,6 +652,306 @@
     {
       "path": "projects/autonomous_service/service.iris",
       "mode": "module",
+      "expected": ""
+    },
+    {
+      "path": "projects/algorithmic_code_evolution/evolved_policy.iris",
+      "mode": "module",
+      "expected": ""
+    },
+    {
+      "path": "projects/algorithmic_code_evolution/verify_evolved.iris",
+      "mode": "manual",
+      "expected": ""
+    },
+    {
+      "path": "projects/artificial_life_ecosystem/brain.iris",
+      "mode": "module",
+      "expected": ""
+    },
+    {
+      "path": "projects/artificial_life_ecosystem/main.iris",
+      "mode": "module",
+      "expected": ""
+    },
+    {
+      "path": "projects/artificial_life_ecosystem/world.iris",
+      "mode": "module",
+      "expected": ""
+    },
+    {
+      "path": "projects/autonomous_deep_space_probe/adaptation.iris",
+      "mode": "module",
+      "expected": ""
+    },
+    {
+      "path": "projects/autonomous_deep_space_probe/main.iris",
+      "mode": "manual",
+      "expected": ""
+    },
+    {
+      "path": "projects/autonomous_deep_space_probe/physics.iris",
+      "mode": "module",
+      "expected": ""
+    },
+    {
+      "path": "projects/autonomous_deep_space_probe/supervisor.iris",
+      "mode": "module",
+      "expected": ""
+    },
+    {
+      "path": "projects/autonomous_deep_space_probe/traits.iris",
+      "mode": "module",
+      "expected": ""
+    },
+    {
+      "path": "projects/autonomous_deep_space_probe/types.iris",
+      "mode": "module",
+      "expected": ""
+    },
+    {
+      "path": "projects/autonomous_drone_hunter/environment.iris",
+      "mode": "module",
+      "expected": ""
+    },
+    {
+      "path": "projects/autonomous_drone_hunter/guidance.iris",
+      "mode": "module",
+      "expected": ""
+    },
+    {
+      "path": "projects/autonomous_drone_hunter/main.iris",
+      "mode": "module",
+      "expected": ""
+    },
+    {
+      "path": "projects/autonomous_drone_hunter/math_3d.iris",
+      "mode": "module",
+      "expected": ""
+    },
+    {
+      "path": "projects/autonomous_drone_hunter/reporter.iris",
+      "mode": "module",
+      "expected": ""
+    },
+    {
+      "path": "projects/autonomous_drone_hunter/sensors.iris",
+      "mode": "module",
+      "expected": ""
+    },
+    {
+      "path": "projects/autonomous_drone_hunter/types.iris",
+      "mode": "module",
+      "expected": ""
+    },
+    {
+      "path": "projects/chaotic_discovery/discovered_attractor.iris",
+      "mode": "manual",
+      "expected": ""
+    },
+    {
+      "path": "projects/continuous_background_learning/controller.iris",
+      "mode": "module",
+      "expected": ""
+    },
+    {
+      "path": "projects/continuous_background_learning/display.iris",
+      "mode": "module",
+      "expected": ""
+    },
+    {
+      "path": "projects/continuous_background_learning/learner.iris",
+      "mode": "module",
+      "expected": ""
+    },
+    {
+      "path": "projects/continuous_background_learning/main.iris",
+      "mode": "module",
+      "expected": ""
+    },
+    {
+      "path": "projects/continuous_background_learning/plant.iris",
+      "mode": "module",
+      "expected": ""
+    },
+    {
+      "path": "projects/continuous_background_learning/types.iris",
+      "mode": "module",
+      "expected": ""
+    },
+    {
+      "path": "projects/cyber_operations_center/main.iris",
+      "mode": "module",
+      "expected": ""
+    },
+    {
+      "path": "projects/cyber_operations_center/server.iris",
+      "mode": "module",
+      "expected": ""
+    },
+    {
+      "path": "projects/hello_iris/main.iris",
+      "mode": "manual",
+      "expected": ""
+    },
+    {
+      "path": "projects/intrusion_detection_system/adversary_sim.iris",
+      "mode": "manual",
+      "expected": ""
+    },
+    {
+      "path": "projects/intrusion_detection_system/attack_client.iris",
+      "mode": "manual",
+      "expected": ""
+    },
+    {
+      "path": "projects/intrusion_detection_system/live_ids_server.iris",
+      "mode": "manual",
+      "expected": ""
+    },
+    {
+      "path": "projects/intrusion_detection_system/main.iris",
+      "mode": "manual",
+      "expected": ""
+    },
+    {
+      "path": "projects/intrusion_detection_system/real_world_engine.iris",
+      "mode": "manual",
+      "expected": ""
+    },
+    {
+      "path": "projects/intrusion_detection_system/server.iris",
+      "mode": "module",
+      "expected": ""
+    },
+    {
+      "path": "projects/intrusion_detection_system/test_server.iris",
+      "mode": "manual",
+      "expected": ""
+    },
+    {
+      "path": "projects/jit_superoptimizer/ir.iris",
+      "mode": "module",
+      "expected": ""
+    },
+    {
+      "path": "projects/jit_superoptimizer/main.iris",
+      "mode": "module",
+      "expected": ""
+    },
+    {
+      "path": "projects/jit_superoptimizer/synthesizer.iris",
+      "mode": "module",
+      "expected": ""
+    },
+    {
+      "path": "projects/jit_superoptimizer/verifier.iris",
+      "mode": "module",
+      "expected": ""
+    },
+    {
+      "path": "projects/mission_intelligence/display.iris",
+      "mode": "module",
+      "expected": ""
+    },
+    {
+      "path": "projects/mission_intelligence/environment.iris",
+      "mode": "module",
+      "expected": ""
+    },
+    {
+      "path": "projects/mission_intelligence/inference.iris",
+      "mode": "module",
+      "expected": ""
+    },
+    {
+      "path": "projects/mission_intelligence/main.iris",
+      "mode": "module",
+      "expected": ""
+    },
+    {
+      "path": "projects/mission_intelligence/planner.iris",
+      "mode": "module",
+      "expected": ""
+    },
+    {
+      "path": "projects/mission_intelligence/safety.iris",
+      "mode": "module",
+      "expected": ""
+    },
+    {
+      "path": "projects/mission_intelligence/types.iris",
+      "mode": "module",
+      "expected": ""
+    },
+    {
+      "path": "projects/native_adaptive_plant/main.iris",
+      "mode": "manual",
+      "expected": ""
+    },
+    {
+      "path": "projects/navier_stokes/cavity_flow.iris",
+      "mode": "manual",
+      "expected": ""
+    },
+    {
+      "path": "projects/quadrotor_autopilot/controller.iris",
+      "mode": "module",
+      "expected": ""
+    },
+    {
+      "path": "projects/quadrotor_autopilot/ekf.iris",
+      "mode": "module",
+      "expected": ""
+    },
+    {
+      "path": "projects/quadrotor_autopilot/main.iris",
+      "mode": "module",
+      "expected": ""
+    },
+    {
+      "path": "projects/quadrotor_autopilot/math_utils.iris",
+      "mode": "module",
+      "expected": ""
+    },
+    {
+      "path": "projects/quadrotor_autopilot/physics.iris",
+      "mode": "module",
+      "expected": ""
+    },
+    {
+      "path": "projects/quantum_simulator/algorithms.iris",
+      "mode": "module",
+      "expected": ""
+    },
+    {
+      "path": "projects/quantum_simulator/circuit.iris",
+      "mode": "module",
+      "expected": ""
+    },
+    {
+      "path": "projects/quantum_simulator/complex.iris",
+      "mode": "module",
+      "expected": ""
+    },
+    {
+      "path": "projects/quantum_simulator/main.iris",
+      "mode": "module",
+      "expected": ""
+    },
+    {
+      "path": "projects/quantum_simulator/schrodinger.iris",
+      "mode": "module",
+      "expected": ""
+    },
+    {
+      "path": "projects/realtime_embedded_actuator/controller.iris",
+      "mode": "embedded",
+      "expected": ""
+    },
+    {
+      "path": "projects/realtime_embedded_actuator/test_controller.iris",
+      "mode": "manual",
       "expected": ""
     }
   ]

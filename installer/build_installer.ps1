@@ -1,4 +1,4 @@
-# build_installer.ps1 - Build the IRIS Windows EXE installer (Inno Setup)
+﻿# build_installer.ps1 - Build the IRIS Windows EXE installer (Inno Setup)
 # Run from the project root:
 #   powershell -ExecutionPolicy Bypass -File installer\build_installer.ps1
 #
@@ -263,7 +263,7 @@ $DistDir = Join-Path $InstallerDir "dist"
 New-Item -ItemType Directory -Force -Path $DistDir | Out-Null
 
 $IssFile = Join-Path $InstallerDir "iris.iss"
-& $Iscc $IssFile
+& $Iscc "/DAppVersion=$Version" $IssFile
 if ($LASTEXITCODE -ne 0) { Write-Error "Inno Setup compilation failed"; throw "Inno Setup compilation failed" }
 
 # ---------------------------------------------------------------------------

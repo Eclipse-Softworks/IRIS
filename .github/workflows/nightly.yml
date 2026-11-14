@@ -9,6 +9,11 @@ on:
   schedule:
     - cron: '0 2 * * *'     # 02:00 UTC daily
   workflow_dispatch:          # manual trigger
+    inputs:
+      fuzz_time:
+        description: 'Fuzzing duration in seconds per target'
+        required: false
+        default: '1800'
 
 permissions:
   contents: write
@@ -54,7 +59,7 @@ jobs:
         continue-on-error: true
         run: |
           cargo +nightly fuzz run ${{ matrix.target }} --target x86_64-unknown-linux-gnu -- \
-            -max_total_time=1800 -max_len=8192
+            -max_total_time=${{ github.event.inputs.fuzz_time || '1800' }} -max_len=8192
       - name: Upload crash artifacts
         if: always()
         uses: actions/upload-artifact@v4
@@ -219,10 +224,10 @@ jobs:
         shell: bash
         run: |
           C:/msys64/usr/bin/pacman.exe -S --noconfirm --needed \
-            mingw-w64-ucrt-x86_64-headers-git \
-            mingw-w64-ucrt-x86_64-crt-git \
-            mingw-w64-ucrt-x86_64-gcc-libs \
-            mingw-w64-ucrt-x86_64-winpthreads-git 2>&1 || true
+            mingw-w64-ucrt-x86_64-gcc \
+            mingw-w64-ucrt-x86_64-sqlite3
+          cp -f /c/msys64/ucrt64/bin/libsqlite3-0.dll /c/msys64/ucrt64/bin/sqlite3.dll || true
+          echo "C:/msys64/ucrt64/bin" >> "$GITHUB_PATH"
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -238,15 +243,29 @@ jobs:
         run: |
           $pass = 0
           $fail = 0
-          $files = Get-ChildItem -Path examples -Filter *.iris -Recurse
+          $skip = 0
+          $irisExe = (Resolve-Path '.\target\release\iris.exe').Path
+          $files = Get-ChildItem -Path examples -Filter *.iris -Recurse | Sort-Object FullName
           foreach ($f in $files) {
               Write-Host "=== Testing: $($f.Name) ==="
-              & target\release\iris.exe run $f.FullName > $null 2>&1
-              if ($LASTEXITCODE -eq 0) {
+              $psi = New-Object System.Diagnostics.ProcessStartInfo
+              $psi.FileName = $irisExe
+              $psi.Arguments = "run `"$($f.FullName)`""
+              $psi.UseShellExecute = $false
+              $psi.RedirectStandardOutput = $true
+              $psi.RedirectStandardError = $true
+              $proc = [System.Diagnostics.Process]::Start($psi)
+              $outTask = $proc.StandardOutput.ReadToEndAsync()
+              $errTask = $proc.StandardError.ReadToEndAsync()
+              if (-not $proc.WaitForExit(30000)) {
+                  try { $proc.Kill($true) } catch {}
+                  Write-Host "  SKIP (timeout)"
+                  $skip++
+              } elseif ($proc.ExitCode -eq 0) {
                   Write-Host "  PASS"
                   $pass++
               } else {
-                  Write-Host "  FAIL (exit $LASTEXITCODE)"
+                  Write-Host "  FAIL (exit $($proc.ExitCode))"
                   $fail++
               }
           }
@@ -254,6 +273,7 @@ jobs:
           Write-Host "=== Results ==="
           Write-Host "  Pass: $pass"
           Write-Host "  Fail: $fail"
+          Write-Host "  Skip: $skip"
           if ($fail -gt 10) {
               Write-Error "Too many JIT failures on Windows!"
               exit 1

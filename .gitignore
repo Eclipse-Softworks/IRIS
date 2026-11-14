@@ -70,6 +70,7 @@ vscode-iris/*.vsix
 *.zip
 *.pdf
 *.log
+!projects/cli_tools/samples/*.log
 *.bak
 *.ll
 *.typst

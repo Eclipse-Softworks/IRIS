@@ -7,3 +7,10 @@ src/runtime/*.h  text eol=lf
 
 # Prebuilt object files must never be line-ending converted.
 src/runtime/prebuilt/**  binary
+
+# Sample inputs for CLI tools must keep LF line endings across platforms.
+projects/cli_tools/samples/*.csv   text eol=lf
+projects/cli_tools/samples/*.jsonl text eol=lf
+projects/cli_tools/samples/*.json  text eol=lf
+projects/cli_tools/samples/*.log   text eol=lf
+projects/cli_tools/samples/*.pcap  binary

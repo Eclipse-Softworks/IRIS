@@ -29,6 +29,9 @@ pub def csv_records(text: str) -> list<list<str>> {
                     quoted = false
                 };
                 run = i + 1
+            } else if c == 13 && i + 1 < n && str_index(text, i + 1) == 10 {
+                field = field + slice(text, run, i);
+                run = i + 1
             }
         } else if c == 34 {
             field = field + slice(text, run, i);

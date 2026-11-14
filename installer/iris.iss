@@ -9,7 +9,9 @@
 ;   or via:    powershell -ExecutionPolicy Bypass -File installer\build_installer.ps1
 
 #define AppName      "IRIS Language"
-#define AppVersion   "1.0.0-rc2"
+#ifndef AppVersion
+  #define AppVersion "1.0.0-rc2"
+#endif
 #define AppPublisher "IRIS Language Project"
 #define AppURL       "https://github.com/Eclipse-Softworks/IRIS"
 #define AppExeName   "iris.exe"

@@ -128,14 +128,12 @@ impl<'m> Lowerer<'m> {
         let result_has_guards = is_result_when && arms.iter().any(|a| a.guard.is_some());
 
         if is_option_when && !option_has_guards {
-            return self.lower_thir_option_when_with_keep_ref(
-                scrut_val, &scrut_ty, arms, span, keep_ref,
-            );
+            return self
+                .lower_thir_option_when_with_keep_ref(scrut_val, &scrut_ty, arms, span, keep_ref);
         }
         if is_result_when && !result_has_guards {
-            return self.lower_thir_result_when_with_keep_ref(
-                scrut_val, &scrut_ty, arms, span, keep_ref,
-            );
+            return self
+                .lower_thir_result_when_with_keep_ref(scrut_val, &scrut_ty, arms, span, keep_ref);
         }
 
         let is_enum_scrut = matches!(&scrut_ty, IrType::Enum { .. });
@@ -288,7 +286,8 @@ impl<'m> Lowerer<'m> {
         for arm in arms {
             let _ = collect_rebound_vars_in_thir_expr(&arm.body, &mut rebound_names);
         }
-        rebound_names.retain(|name| outer_scope.contains_key(name) && !outer_cells.contains_key(name));
+        rebound_names
+            .retain(|name| outer_scope.contains_key(name) && !outer_cells.contains_key(name));
 
         let mut fallback_ty: Option<IrType> = None;
         let mut pending_branches = Vec::new();
@@ -368,7 +367,8 @@ impl<'m> Lowerer<'m> {
         self.cell_vars = outer_cells;
 
         let default_ty = fallback_ty.unwrap_or(IrType::Scalar(DType::I64));
-        let result_ty = self.emit_when_merge_branches(merge_bb, &default_ty, pending_branches, span);
+        let result_ty =
+            self.emit_when_merge_branches(merge_bb, &default_ty, pending_branches, span);
         let result = self
             .builder
             .add_block_param(merge_bb, Some("when_result"), result_ty.clone());
@@ -448,7 +448,8 @@ impl<'m> Lowerer<'m> {
         for arm in arms {
             let _ = collect_rebound_vars_in_thir_expr(&arm.body, &mut rebound_names);
         }
-        rebound_names.retain(|name| outer_scope.contains_key(name) && !outer_cells.contains_key(name));
+        rebound_names
+            .retain(|name| outer_scope.contains_key(name) && !outer_cells.contains_key(name));
 
         let unit_ty = IrType::Scalar(DType::I64);
         let partial = some_arm.is_none() || none_arm.is_none();
@@ -553,7 +554,8 @@ impl<'m> Lowerer<'m> {
         self.scope = outer_scope;
         self.cell_vars = outer_cells;
         let default_ty = first_ty.unwrap_or(unit_ty);
-        let result_ty = self.emit_when_merge_branches(merge_bb, &default_ty, pending_branches, span);
+        let result_ty =
+            self.emit_when_merge_branches(merge_bb, &default_ty, pending_branches, span);
         let result =
             self.builder
                 .add_block_param(merge_bb, Some("option_result"), result_ty.clone());
@@ -632,7 +634,8 @@ impl<'m> Lowerer<'m> {
         for arm in arms {
             let _ = collect_rebound_vars_in_thir_expr(&arm.body, &mut rebound_names);
         }
-        rebound_names.retain(|name| outer_scope.contains_key(name) && !outer_cells.contains_key(name));
+        rebound_names
+            .retain(|name| outer_scope.contains_key(name) && !outer_cells.contains_key(name));
 
         let unit_ty = IrType::Scalar(DType::I64);
         let partial = ok_arm.is_none() || err_arm.is_none();
@@ -752,7 +755,8 @@ impl<'m> Lowerer<'m> {
         self.scope = outer_scope;
         self.cell_vars = outer_cells;
         let default_ty = first_ty.unwrap_or(unit_ty);
-        let result_ty = self.emit_when_merge_branches(merge_bb, &default_ty, pending_branches, span);
+        let result_ty =
+            self.emit_when_merge_branches(merge_bb, &default_ty, pending_branches, span);
         let result =
             self.builder
                 .add_block_param(merge_bb, Some("result_result"), result_ty.clone());
@@ -1481,11 +1485,8 @@ impl<'m> Lowerer<'m> {
         };
         if !self.builder.is_current_block_terminated() {
             let some_scope = self.scope.clone();
-            let rebound_vals = Self::collect_pending_when_rebound_vals(
-                &rebound_names,
-                &some_scope,
-                &outer_scope,
-            );
+            let rebound_vals =
+                Self::collect_pending_when_rebound_vals(&rebound_names, &some_scope, &outer_scope);
             pending_branches.push((
                 self.builder.current_block(),
                 some_val,
@@ -1520,11 +1521,8 @@ impl<'m> Lowerer<'m> {
         };
         if !self.builder.is_current_block_terminated() {
             let none_scope = self.scope.clone();
-            let rebound_vals = Self::collect_pending_when_rebound_vals(
-                &rebound_names,
-                &none_scope,
-                &outer_scope,
-            );
+            let rebound_vals =
+                Self::collect_pending_when_rebound_vals(&rebound_names, &none_scope, &outer_scope);
             pending_branches.push((
                 self.builder.current_block(),
                 none_val,
@@ -1536,8 +1534,7 @@ impl<'m> Lowerer<'m> {
 
         self.scope = outer_scope;
         self.cell_vars = outer_cells;
-        let result_ty =
-            self.emit_when_merge_branches(merge_bb, &unit_ty, pending_branches, span);
+        let result_ty = self.emit_when_merge_branches(merge_bb, &unit_ty, pending_branches, span);
         let result =
             self.builder
                 .add_block_param(merge_bb, Some("option_result"), result_ty.clone());
@@ -1655,50 +1652,43 @@ impl<'m> Lowerer<'m> {
         self.builder.set_current_block(ok_bb);
         self.scope = outer_scope.clone();
         self.cell_vars = outer_cells.clone();
-        let (ok_val, ok_ty, ok_is_shared, result_ty): (
-            ValueId,
-            IrType,
-            bool,
-            Option<IrType>,
-        ) = if let Some(arm) = ok_arm {
-            if let AstWhenPattern::ResultOk {
-                binding: Some(ref bind_name),
-            } = arm.pattern
-            {
-                let unwrapped = self.builder.fresh_value();
-                self.builder.push_instr(
-                    IrInstr::ResultUnwrap {
-                        result: unwrapped,
-                        operand: scrut_val,
-                        result_ty: ok_inner_ty.clone(),
-                    },
-                    Some(ok_inner_ty.clone()),
-                );
-                self.bind_scope_var(bind_name.clone(), unwrapped, ok_inner_ty.clone());
-            }
-            let (v, ty) = if keep_ref {
-                self.lower_expr_keep_ref(&arm.body)?
+        let (ok_val, ok_ty, ok_is_shared, result_ty): (ValueId, IrType, bool, Option<IrType>) =
+            if let Some(arm) = ok_arm {
+                if let AstWhenPattern::ResultOk {
+                    binding: Some(ref bind_name),
+                } = arm.pattern
+                {
+                    let unwrapped = self.builder.fresh_value();
+                    self.builder.push_instr(
+                        IrInstr::ResultUnwrap {
+                            result: unwrapped,
+                            operand: scrut_val,
+                            result_ty: ok_inner_ty.clone(),
+                        },
+                        Some(ok_inner_ty.clone()),
+                    );
+                    self.bind_scope_var(bind_name.clone(), unwrapped, ok_inner_ty.clone());
+                }
+                let (v, ty) = if keep_ref {
+                    self.lower_expr_keep_ref(&arm.body)?
+                } else {
+                    self.lower_expr(&arm.body)?
+                };
+                // The covered arm keeps its value even when the match is partial;
+                // see the same fix in `lower_option_when` (#54).
+                (
+                    v,
+                    ty.clone(),
+                    Self::expr_is_shared_borrow_ast(&arm.body),
+                    Some(ty),
+                )
             } else {
-                self.lower_expr(&arm.body)?
+                (unit_val, unit_ty.clone(), false, Some(unit_ty.clone()))
             };
-            // The covered arm keeps its value even when the match is partial;
-            // see the same fix in `lower_option_when` (#54).
-            (
-                v,
-                ty.clone(),
-                Self::expr_is_shared_borrow_ast(&arm.body),
-                Some(ty),
-            )
-        } else {
-            (unit_val, unit_ty.clone(), false, Some(unit_ty.clone()))
-        };
         if !self.builder.is_current_block_terminated() {
             let ok_scope = self.scope.clone();
-            let rebound_vals = Self::collect_pending_when_rebound_vals(
-                &rebound_names,
-                &ok_scope,
-                &outer_scope,
-            );
+            let rebound_vals =
+                Self::collect_pending_when_rebound_vals(&rebound_names, &ok_scope, &outer_scope);
             pending_branches.push((
                 self.builder.current_block(),
                 ok_val,
@@ -1748,11 +1738,8 @@ impl<'m> Lowerer<'m> {
         };
         if !self.builder.is_current_block_terminated() {
             let err_scope = self.scope.clone();
-            let rebound_vals = Self::collect_pending_when_rebound_vals(
-                &rebound_names,
-                &err_scope,
-                &outer_scope,
-            );
+            let rebound_vals =
+                Self::collect_pending_when_rebound_vals(&rebound_names, &err_scope, &outer_scope);
             pending_branches.push((
                 self.builder.current_block(),
                 err_val,
@@ -1764,8 +1751,7 @@ impl<'m> Lowerer<'m> {
 
         self.scope = outer_scope;
         self.cell_vars = outer_cells;
-        let result_ty =
-            self.emit_when_merge_branches(merge_bb, &unit_ty, pending_branches, span);
+        let result_ty = self.emit_when_merge_branches(merge_bb, &unit_ty, pending_branches, span);
         let result =
             self.builder
                 .add_block_param(merge_bb, Some("result_result"), result_ty.clone());
@@ -3031,11 +3017,7 @@ impl<'m> Lowerer<'m> {
                                 },
                                 Some(elem_ty.clone()),
                             );
-                            self.bind_scope_var(
-                                variant_name.clone(),
-                                elem_val,
-                                elem_ty.clone(),
-                            );
+                            self.bind_scope_var(variant_name.clone(), elem_val, elem_ty.clone());
                         }
                     }
                 }

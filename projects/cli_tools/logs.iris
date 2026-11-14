@@ -92,7 +92,7 @@ def most(counts: map<str, i64>, order: list<str>) -> str {
 }
 
 pub def analyze(text: str, scan_threshold: i64) -> LogStats {
-    val lines = split(text, "\n");
+    val lines = split(str_replace(text, "\r\n", "\n"), "\n");
     // Counts by status class; index 2 is 2xx, and so on.
     val classes: list<i64> = list();
     var c = 0;

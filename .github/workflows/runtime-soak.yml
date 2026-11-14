@@ -34,7 +34,7 @@ jobs:
             runner: windows-latest
             shell_family: windows
           - label: macos-arm64
-            runner: macos-14
+            runner: macos-latest
             shell_family: unix
             timeout_cmd: gtimeout
 
