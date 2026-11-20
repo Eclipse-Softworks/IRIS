@@ -176,6 +176,9 @@ pub struct Parser<'t> {
     depth: usize,
     /// Nesting depth of `(...)` / `[...]` expression groups (reset inside `{ ... }` blocks).
     expr_group_depth: usize,
+    /// Next stable scope id for a parsed `{ ... }` block. `0` is reserved for
+    /// compiler-synthesized blocks that have no source-level scope.
+    next_block_scope_id: u32,
 }
 
 fn skip_balanced_tokens(
@@ -303,7 +306,15 @@ impl<'t> Parser<'t> {
             max_errors: 50,
             depth: 0,
             expr_group_depth: 0,
+            next_block_scope_id: 1,
         }
+    }
+
+    /// Allocate the next stable source-level block scope id.
+    fn fresh_block_scope_id(&mut self) -> u32 {
+        let id = self.next_block_scope_id;
+        self.next_block_scope_id = self.next_block_scope_id.saturating_add(1);
+        id
     }
 
     /// Whether a line break comes before the current token.
@@ -2808,6 +2819,7 @@ impl<'t> Parser<'t> {
 
     fn parse_block_inner(&mut self) -> Result<AstBlock, ParseError> {
         let start = self.expect(&Token::LBrace)?;
+        let scope_id = self.fresh_block_scope_id();
         let mut stmts = Vec::new();
         let mut tail: Option<Box<AstExpr>> = None;
 
@@ -3072,6 +3084,7 @@ impl<'t> Parser<'t> {
 
         let end = self.expect(&Token::RBrace)?;
         Ok(AstBlock {
+            scope_id,
             stmts,
             tail,
             span: start.merge(end),
@@ -3113,10 +3126,11 @@ impl<'t> Parser<'t> {
             });
         }
 
-        // Refutable pattern binding: let some(x) = expr, let none = expr, let _ = expr,
-        // let ok(x) = expr, let err(e) = expr, let Enum.Variant(x) = expr
+        // Refutable pattern binding: let some(x) = expr, let none = expr,
+        // let ok(x) = expr, let err(e) = expr, let Enum.Variant(x) = expr.
+        // Note: `let _ = expr` is irrefutable and parses as a normal `AstStmt::Let`
+        // so it never synthesizes a unreachable `panic(...)` arm or spurious `throw` effect.
         let is_refutable = match self.peek_tok() {
-            Token::Ident(ref name) if name == "_" => true,
             Token::Ident(ref name) if name == "none" => !self
                 .tokens
                 .get(self.pos + 1)
@@ -3939,6 +3953,7 @@ impl<'t> Parser<'t> {
         let when_span = span.merge(end_span);
         let mut arms = Vec::new();
         let then_tail = AstExpr::Block(AstBlock {
+            scope_id: 0,
             stmts: vec![],
             tail: Some(Box::new(AstExpr::Block(then_block))),
             span: when_span,
@@ -3993,6 +4008,7 @@ impl<'t> Parser<'t> {
             let elif_expr = self.parse_primary()?;
             let elif_span = elif_expr.span();
             let eb = AstBlock {
+                scope_id: 0,
                 stmts: vec![],
                 tail: Some(Box::new(elif_expr)),
                 span: elif_span_start.merge(elif_span),
@@ -4622,6 +4638,7 @@ impl<'t> Parser<'t> {
                 span,
             };
             let break_block = AstBlock {
+                scope_id: 0,
                 stmts: vec![break_stmt],
                 tail: Some(Box::new(AstExpr::IntLit { value: 0, span })),
                 span,
@@ -4631,6 +4648,7 @@ impl<'t> Parser<'t> {
                     pattern,
                     guard: None,
                     body: Box::new(AstExpr::Block(AstBlock {
+                        scope_id: 0,
                         stmts: vec![],
                         tail: Some(Box::new(AstExpr::Block(body))),
                         span,
@@ -4654,6 +4672,7 @@ impl<'t> Parser<'t> {
                 span,
             };
             let loop_body = AstBlock {
+                scope_id: 0,
                 stmts: vec![],
                 tail: Some(Box::new(when_expr)),
                 span,
@@ -4774,6 +4793,7 @@ impl<'t> Parser<'t> {
                 span,
             });
             let inner_body = AstBlock {
+                scope_id: 0,
                 stmts: inner_stmts,
                 tail: None,
                 span: body.span,
@@ -4791,6 +4811,7 @@ impl<'t> Parser<'t> {
                 span,
             });
             return Ok(AstStmt::Expr(Box::new(AstExpr::Block(AstBlock {
+                scope_id: 0,
                 stmts,
                 tail: None,
                 span,
@@ -5508,7 +5529,32 @@ mod tests {
         errors
     }
 
-    // -- Functions --------------------------------------------------------
+    // -- Structured block scopes -------------------------------------------
+
+    #[test]
+    fn parse_assigns_unique_scope_ids_to_nested_blocks() {
+        let m = parse_ok(
+            r#"
+            def main() -> i64 {
+                val x = { val a = 1; a }
+                { val b = 2; b + x }
+            }
+            "#,
+        );
+        let body = &m.functions[0].body;
+        assert!(body.scope_id > 0, "source blocks get a real scope id");
+        let AstStmt::Let { init, .. } = &body.stmts[0] else {
+            panic!("expected a let binding");
+        };
+        let AstExpr::Block(inner) = init.as_ref() else {
+            panic!("expected a block initializer");
+        };
+        let AstExpr::Block(tail) = body.tail.as_deref().expect("tail block") else {
+            panic!("expected a tail block");
+        };
+        let ids = [body.scope_id, inner.scope_id, tail.scope_id];
+        assert_eq!(ids, [1, 2, 3], "scope ids are stable and source-ordered");
+    }
 
     #[test]
     fn parse_empty_function() {

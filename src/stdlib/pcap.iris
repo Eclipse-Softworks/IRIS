@@ -68,7 +68,7 @@ pub record TcpSegment {
 }
 
 /// Format 6 MAC address bytes into standard colon-delimited string (e.g. 00:1a:2b:3c:4d:5e)
-pub def pcap_format_mac(buf: ByteBuffer, offset: i64) -> str {
+pub def pcap_format_mac(buf: ByteBuffer, offset: i64) -> str effect alloc {
     val hex_chars = "0123456789abcdef";
     var out = "";
     for i in 0 .. 6 {
@@ -82,7 +82,7 @@ pub def pcap_format_mac(buf: ByteBuffer, offset: i64) -> str {
 }
 
 /// Format 4 IPv4 bytes into dot-decimal string (e.g. 192.168.1.1)
-pub def pcap_format_ip(buf: ByteBuffer, offset: i64) -> str {
+pub def pcap_format_ip(buf: ByteBuffer, offset: i64) -> str effect alloc {
     val b0 = to_str(byte_buffer_get(buf, offset));
     val b1 = to_str(byte_buffer_get(buf, offset + 1));
     val b2 = to_str(byte_buffer_get(buf, offset + 2));
@@ -91,7 +91,7 @@ pub def pcap_format_ip(buf: ByteBuffer, offset: i64) -> str {
 }
 
 /// Create a standard PCAP 2.4 global header (big-endian magic 0xa1b2c3d4, snaplen 65535, Ethernet network=1)
-pub def pcap_create_global_header(snaplen: i64) -> ByteBuffer {
+pub def pcap_create_global_header(snaplen: i64) -> ByteBuffer effect alloc {
     var buf = byte_buffer_new();
     buf = byte_buffer_write_u32_be(buf, 0xa1b2_c3d4); // magic
     buf = byte_buffer_write_u16_be(buf, 2);           // version major
@@ -104,7 +104,7 @@ pub def pcap_create_global_header(snaplen: i64) -> ByteBuffer {
 }
 
 /// Create a PCAP packet record with header and payload
-pub def pcap_create_packet_record(frame: ByteBuffer, ts_sec: i64, ts_usec: i64) -> ByteBuffer {
+pub def pcap_create_packet_record(frame: ByteBuffer, ts_sec: i64, ts_usec: i64) -> ByteBuffer effect alloc {
     var buf = byte_buffer_new();
     buf = byte_buffer_write_u32_be(buf, ts_sec);
     buf = byte_buffer_write_u32_be(buf, ts_usec);
@@ -116,7 +116,7 @@ pub def pcap_create_packet_record(frame: ByteBuffer, ts_sec: i64, ts_usec: i64) 
 
 /// Parse PCAP global header from start of buffer: classic libpcap in either
 /// byte order, microsecond or nanosecond timestamps (not pcapng).
-pub def pcap_parse_global_header(buf: ByteBuffer) -> result<PcapGlobalHeader, str> {
+pub def pcap_parse_global_header(buf: ByteBuffer) -> result<PcapGlobalHeader, str> effect alloc {
     if buf.len < 24 {
         return err("pcap buffer too small for global header (< 24 bytes)")
     }
@@ -143,7 +143,7 @@ pub def pcap_parse_global_header(buf: ByteBuffer) -> result<PcapGlobalHeader, st
 
 /// The packet record starting at `offset` (24 for the first), read in the
 /// capture's byte order. The next record starts at `offset + 16 + incl_len`.
-pub def pcap_read_packet(buf: ByteBuffer, offset: i64, header: PcapGlobalHeader) -> result<PcapPacket, str> {
+pub def pcap_read_packet(buf: ByteBuffer, offset: i64, header: PcapGlobalHeader) -> result<PcapPacket, str> effect alloc {
     if offset + 16 > buf.len {
         return err("pcap packet header truncated at byte " + to_str(offset))
     }
@@ -165,7 +165,7 @@ pub def pcap_read_packet(buf: ByteBuffer, offset: i64, header: PcapGlobalHeader)
 }
 
 /// Dissect Ethernet II frame
-pub def dissect_ethernet(frame: ByteBuffer) -> result<EthernetFrame, str> {
+pub def dissect_ethernet(frame: ByteBuffer) -> result<EthernetFrame, str> effect alloc {
     if frame.len < 14 {
         return err("ethernet frame too short (< 14 bytes)")
     }
@@ -182,7 +182,7 @@ pub def dissect_ethernet(frame: ByteBuffer) -> result<EthernetFrame, str> {
 }
 
 /// Dissect IPv4 packet
-pub def dissect_ipv4(buf: ByteBuffer) -> result<Ipv4Packet, str> {
+pub def dissect_ipv4(buf: ByteBuffer) -> result<Ipv4Packet, str> effect alloc {
     if buf.len < 20 {
         return err("ipv4 packet too short (< 20 bytes)")
     }
@@ -218,7 +218,7 @@ pub def dissect_ipv4(buf: ByteBuffer) -> result<Ipv4Packet, str> {
 }
 
 /// Dissect TCP segment
-pub def dissect_tcp(buf: ByteBuffer) -> result<TcpSegment, str> {
+pub def dissect_tcp(buf: ByteBuffer) -> result<TcpSegment, str> effect alloc {
     if buf.len < 20 {
         return err("tcp segment too short (< 20 bytes)")
     }
@@ -256,7 +256,7 @@ pub def dissect_tcp(buf: ByteBuffer) -> result<TcpSegment, str> {
 }
 
 /// Dissect UDP datagram
-pub def dissect_udp(buf: ByteBuffer) -> result<UdpDatagram, str> {
+pub def dissect_udp(buf: ByteBuffer) -> result<UdpDatagram, str> effect alloc {
     if buf.len < 8 {
         return err("udp datagram too short (< 8 bytes)")
     }

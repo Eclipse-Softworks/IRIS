@@ -1,0 +1,1864 @@
+// CLI orchestrator, type-state witnesses, generics, HKTs F[_], const generics,
+// and end-to-end neural cryptography pipeline entry point.
+
+bring std.os
+bring std.math
+bring std.ui
+bring domain
+bring web_corpus
+bring classifier_net
+bring forge_net
+bring render
+
+/// Parsed CLI options for the neural_cipher workstation.
+pub record CliConfig {
+    mode: str = "sweep",
+    workers: i64 = 3,
+    epochs: i64 = 18,
+    forge_steps: i64 = 180,
+    message: str = "Adversarial neural cipher protects live telemetry!",
+    key_text: str = "iris-neural-crypto-2026",
+    state_dir: str = "",
+    json_path: str = "",
+    offline: bool = false,
+    show_help: bool = false,
+    gui_mode: bool = false,
+}
+
+/// Higher-kinded singleton container `SingleBox[T]`.
+pub record SingleBox[T] {
+    value: T,
+}
+
+/// Higher-kinded optional container `OptionBox[T]`.
+pub record OptionBox[T] {
+    maybe: option<T>,
+}
+
+/// Higher-kinded sequence container `ListBox[T]`.
+pub record ListBox[T] {
+    items: list<T>,
+}
+
+/// Stack-allocated ranking window bounded cleanly by const generic `N`.
+pub record TopModelsWindow[T, const N: usize] {
+    slots: [T; N],
+    len: i64,
+}
+
+/// Type-state witness certifying corpus acquisition and block splitting.
+pub record CorpusReadyWitness {
+    sources_count: i64,
+    train_blocks: i64,
+    val_blocks: i64,
+}
+
+/// Type-state witness certifying a trained classifier tournament.
+pub record ClassifierTrainedWitness {
+    winner_arch: str,
+    val_acc: f64,
+    workers_used: i64,
+}
+
+/// Type-state witness certifying forged neural cipher attestation.
+pub record ForgedCipherWitness {
+    cipher_name: str,
+    bob_acc: f64,
+    eve_acc: f64,
+    sac: f64,
+}
+
+/// Type-state envelope parameterized by stage witness `S`, HKT constructor `F[_]`, and element `T`.
+pub record StageEnvelope[S, F[_], T] {
+    witness: S,
+    container: F<T>,
+}
+
+/// Stage-sealed payload bundle ensuring transition witnesses cannot be spoofed.
+pub record StageBox[S, P] {
+    witness: S,
+    payload: P,
+}
+
+/// Higher-kinded container algebra inspecting container kind and cardinality across `F[_]`.
+pub trait HktContainer[F[_]] {
+    def container_kind(self: Self) -> str
+    def cardinality(self: Self) -> i64 effect alloc
+    def is_populated(self: Self) -> bool effect alloc
+}
+
+impl HktContainer[list] for ListBox<TrainedClassifier> {
+    def container_kind(self: Self) -> str {
+        return "ListBox<TrainedClassifier>"
+    }
+
+    def cardinality(self: Self) -> i64 effect alloc {
+        return list_len(self.items)
+    }
+
+    def is_populated(self: Self) -> bool effect alloc {
+        return list_len(self.items) > 0
+    }
+}
+
+impl HktContainer[option] for OptionBox<ForgedCipherWitness> {
+    def container_kind(self: Self) -> str {
+        return "OptionBox<ForgedCipherWitness>"
+    }
+
+    def cardinality(self: Self) -> i64 effect alloc {
+        return if is_some(self.maybe) { 1 } else { 0 }
+    }
+
+    def is_populated(self: Self) -> bool effect alloc {
+        return is_some(self.maybe)
+    }
+}
+
+impl HktContainer[SingleBox] for SingleBox<TrainedClassifier> {
+    def container_kind(self: Self) -> str {
+        return "SingleBox<TrainedClassifier>"
+    }
+
+    def cardinality(self: Self) -> i64 effect alloc {
+        return 1
+    }
+
+    def is_populated(self: Self) -> bool effect alloc {
+        return true
+    }
+}
+
+/// Polymorphic summary interface supporting bounded generic rendering.
+pub trait CipherSummarizable {
+    def summarize(self: Self) -> str effect alloc, io
+}
+
+impl[T] CipherSummarizable for list<T> {
+    def summarize(self: Self) -> str effect alloc, io {
+        return f"list_batch(count={list_len(self)})"
+    }
+}
+
+impl[T] CipherSummarizable for option<T> {
+    def summarize(self: Self) -> str effect alloc, io {
+        return if is_some(self) { "option_present" } else { "option_empty" }
+    }
+}
+
+impl CipherSummarizable for SingleBox<TrainedClassifier> {
+    def summarize(self: Self) -> str effect alloc, io {
+        return f"classifier(arch={self.value.arch_name}, acc={fmt_pct(self.value.val_acc)})"
+    }
+}
+
+impl CipherSummarizable for SingleBox<NeuralForgeArtifact> {
+    def summarize(self: Self) -> str effect alloc, io {
+        return f"forge(bob={fmt_pct(self.value.bob_final_acc)}, eve={fmt_pct(self.value.eve_final_acc)}, sac={fmt_f4(self.value.sac_score)})"
+    }
+}
+
+impl CipherSummarizable for SingleBox<ForgedCipherWitness> {
+    def summarize(self: Self) -> str effect alloc, io {
+        return f"forged({self.value.cipher_name}, bob={fmt_pct(self.value.bob_acc)}, eve={fmt_pct(self.value.eve_acc)})"
+    }
+}
+
+/// Render any type satisfying `CipherSummarizable` via bounded parametric polymorphism.
+pub def render_bounded[T where T: CipherSummarizable](item: T) -> str effect alloc, io {
+    return item.summarize()
+}
+
+/// Parametric HKT identity preserving container shape without inspecting elements.
+pub def passthrough_hkt[F[_], T](container: F<T>) -> F<T> {
+    return container
+}
+
+/// Seal a stage payload `P` behind a witness token `S`.
+pub def seal_stage[S, P](witness: S, payload: P) -> StageBox<S, P> {
+    return StageBox { witness: witness, payload: payload }
+}
+
+/// Generic functor map over arbitrary element types in `list<A>`.
+pub def map_list_gen[A, B](xs: list<A>, f: |A| -> B) -> list<B> effect alloc {
+    val out: list<B> = list()
+    for i in 0..list_len(xs) {
+        val _ = list_push(out, f(list_get(xs, i)))
+    }
+    return out
+}
+
+/// Generic predicate filter over `list<T>`.
+pub def filter_list_gen[T](xs: list<T>, pred: |T| -> bool) -> list<T> effect alloc {
+    val out: list<T> = list()
+    for i in 0..list_len(xs) {
+        val item = list_get(xs, i)
+        val _ = if pred(item) { list_push(out, item) } else { 0 }
+    }
+    return out
+}
+
+/// Generic left fold over `list<A>` into accumulator `B`.
+pub def fold_list_gen[A, B](xs: list<A>, init: B, step: |B, A| -> B) -> B effect alloc {
+    var acc = init
+    for i in 0..list_len(xs) {
+        acc = step(acc, list_get(xs, i))
+    }
+    return acc
+}
+
+/// Generic functor map over `option<A>`.
+pub def map_option_gen[A, B](opt: option<A>, f: |A| -> B) -> option<B> {
+    return when opt {
+        some(v) => some(f(v)),
+        none => none(),
+    }
+}
+
+/// Generic functor map over `SingleBox<A>`.
+pub def map_single_gen[A, B](box_val: SingleBox<A>, f: |A| -> B) -> SingleBox<B> {
+    return SingleBox { value: f(box_val.value) }
+}
+
+def insert_top_model4(
+    w: TopModelsWindow<TrainedClassifier, 4>,
+    item: TrainedClassifier,
+) -> TopModelsWindow<TrainedClassifier, 4> {
+    var slots = w.slots
+    var len = w.len
+    if len < 4 {
+        slots[len] = item
+        len = len + 1
+    } else if item.val_acc > slots[3].val_acc {
+        slots[3] = item
+    }
+    for _pass in 0..4 {
+        for j in 0..4 {
+            if j + 1 < len && slots[j].val_acc < slots[j + 1].val_acc {
+                val tmp = slots[j]
+                slots[j] = slots[j + 1]
+                slots[j + 1] = tmp
+            }
+        }
+    }
+    return TopModelsWindow { slots: slots, len: len }
+}
+
+def collect_top4_window(
+    cands: list<TrainedClassifier>,
+) -> TopModelsWindow<TrainedClassifier, 4> effect alloc {
+    val seed = TrainedClassifier {
+        worker_id: 0,
+        arch_name: "seed",
+        model: MlpWeights {
+            weights: list(),
+            biases: list(),
+            shapes: list(),
+            use_relu: 0,
+        },
+        train_loss: 0.0,
+        val_loss: 0.0,
+        val_acc: 0.0,
+        per_class_acc: list(),
+    }
+    var win = TopModelsWindow {
+        slots: [seed, seed, seed, seed],
+        len: 0,
+    }
+    for i in 0..list_len(cands) {
+        win = insert_top_model4(win, list_get(cands, i))
+    }
+    return win
+}
+
+// ---------------------------------------------------------------------------
+// CLI parsing
+// ---------------------------------------------------------------------------
+
+def with_string_flag(cfg: CliConfig, flag: str, v: str) -> CliConfig {
+    return CliConfig {
+        mode: if flag == "--mode" { v } else { cfg.mode },
+        workers: cfg.workers,
+        epochs: cfg.epochs,
+        forge_steps: cfg.forge_steps,
+        message: if flag == "--message" { v } else { cfg.message },
+        key_text: if flag == "--key" { v } else { cfg.key_text },
+        state_dir: if flag == "--state-dir" { v } else { cfg.state_dir },
+        json_path: if flag == "--json" { v } else { cfg.json_path },
+        offline: cfg.offline,
+        show_help: cfg.show_help,
+        gui_mode: cfg.gui_mode,
+    }
+}
+
+def with_num_flag(cfg: CliConfig, flag: str, n: i64) -> CliConfig {
+    return CliConfig {
+        mode: cfg.mode,
+        workers: if flag == "--workers" { n } else { cfg.workers },
+        epochs: if flag == "--epochs" { n } else { cfg.epochs },
+        forge_steps: if flag == "--steps" { n } else { cfg.forge_steps },
+        message: cfg.message,
+        key_text: cfg.key_text,
+        state_dir: cfg.state_dir,
+        json_path: cfg.json_path,
+        offline: cfg.offline,
+        show_help: cfg.show_help,
+        gui_mode: cfg.gui_mode,
+    }
+}
+
+def with_bool_flags(
+    cfg: CliConfig,
+    offline: bool,
+    show_help: bool,
+    gui_mode: bool,
+) -> CliConfig {
+    return CliConfig {
+        mode: cfg.mode,
+        workers: cfg.workers,
+        epochs: cfg.epochs,
+        forge_steps: cfg.forge_steps,
+        message: cfg.message,
+        key_text: cfg.key_text,
+        state_dir: cfg.state_dir,
+        json_path: cfg.json_path,
+        offline: offline,
+        show_help: show_help,
+        gui_mode: gui_mode,
+    }
+}
+
+def require_flag_value(argv: list<str>, i: i64, flag: str) -> result<str, StageError> effect alloc {
+    if i + 1 >= list_len(argv) {
+        return err(StageError.InvalidArgs(concat(flag, " requires a value")))
+    }
+    return ok(list_get(argv, i + 1))
+}
+
+def step_cli_arg(
+    argv: list<str>,
+    i: i64,
+    cfg: CliConfig,
+) -> result<(i64, CliConfig), StageError> effect alloc {
+    val flag = list_get(argv, i)
+    if flag == "--help" || flag == "-h" {
+        return ok((i + 1, with_bool_flags(cfg, cfg.offline, true, cfg.gui_mode)))
+    }
+    if flag == "--offline" {
+        return ok((i + 1, with_bool_flags(cfg, true, cfg.show_help, cfg.gui_mode)))
+    }
+    if flag == "--gui" {
+        return ok((i + 1, with_bool_flags(cfg, cfg.offline, cfg.show_help, true)))
+    }
+    if flag == "--workers" || flag == "--epochs" || flag == "--steps" {
+        val raw = require_flag_value(argv, i, flag)?
+        val parsed = parse_i64(raw)
+        if is_none(parsed) {
+            return err(StageError.InvalidArgs(concat("invalid integer for ", flag)))
+        }
+        return ok((i + 2, with_num_flag(cfg, flag, unwrap(parsed))))
+    }
+    if flag == "--mode"
+        || flag == "--message"
+        || flag == "--key"
+        || flag == "--state-dir"
+        || flag == "--json" {
+        val v = require_flag_value(argv, i, flag)?
+        return ok((i + 2, with_string_flag(cfg, flag, v)))
+    }
+    return err(StageError.InvalidArgs(concat("unknown flag: ", flag)))
+}
+
+def validate_cli_config(cfg: CliConfig) -> result<CliConfig, StageError> {
+    val mode_ok = cfg.mode == "sweep"
+        || cfg.mode == "train"
+        || cfg.mode == "forge"
+        || cfg.mode == "eval"
+    if !mode_ok {
+        return err(StageError.InvalidArgs(concat("unknown mode: ", cfg.mode)))
+    }
+    return ok(
+        CliConfig {
+            mode: cfg.mode,
+            workers: clamp_i64(cfg.workers, 1, 4),
+            epochs: if cfg.epochs < 1 { 1 } else { cfg.epochs },
+            forge_steps: if cfg.forge_steps < 40 { 40 } else { cfg.forge_steps },
+            message: cfg.message,
+            key_text: cfg.key_text,
+            state_dir: cfg.state_dir,
+            json_path: cfg.json_path,
+            offline: cfg.offline,
+            show_help: cfg.show_help,
+            gui_mode: cfg.gui_mode,
+        },
+    )
+}
+
+/// Parse command-line arguments into validated `CliConfig`.
+pub def parse_cli_args(argv: list<str>) -> result<CliConfig, StageError> effect alloc, throw {
+    var cfg = CliConfig {}
+    var i = 1
+    while i < list_len(argv) {
+        val step = step_cli_arg(argv, i, cfg)?
+        i = step.0
+        cfg = step.1
+    }
+    return validate_cli_config(cfg)
+}
+
+def print_usage() -> i64 effect io {
+    println("neural_cipher -- Neural Cryptography Workstation")
+    println("Usage: neural_cipher [OPTIONS]")
+    println("  --mode <sweep|train|forge|eval>  Pipeline mode (default: sweep)")
+    println("  --workers <1-4>    Parallel training workers (default: 3)")
+    println("  --epochs <n>       Classifier epochs per candidate (default: 18)")
+    println("  --steps <n>        Neural forge optimization steps (default: 180)")
+    println("  --message <text>   Demo plaintext roundtrip message")
+    println("  --key <text>       Symmetric key material")
+    println("  --state-dir <dir>  Directory for classifier + forge weights")
+    println("  --json <path>      Write deterministic JSON report")
+    println("  --offline          Use the offline reference corpus")
+    println("  --gui              Launch the interactive native GUI")
+    println("  --help             Show this help message")
+    return 0
+}
+
+// ---------------------------------------------------------------------------
+// Pipeline stages
+// ---------------------------------------------------------------------------
+
+def acquire_corpus_stage(
+    cfg: CliConfig,
+) -> result<
+    StageBox<CorpusReadyWitness, (list<str>, list<PlainBlock>, list<PlainBlock>)>,
+    StageError
+> effect net, alloc, thread, throw {
+    val chunks = fetch_live_corpus(cfg.offline)?
+    val splits = split_corpus_blocks(chunks, 92, 24)
+    val train_blocks = splits.0
+    val val_blocks = splits.1
+    val sources: list<str> = list()
+    var i = 0
+    while i < list_len(chunks) {
+        val ch = list_get(chunks, i)
+        var seen = false
+        var j = 0
+        while j < list_len(sources) {
+            if list_get(sources, j) == ch.source {
+                seen = true
+            }
+            j = j + 1
+        }
+        if !seen {
+            list_push(sources, ch.source)
+        }
+        i = i + 1
+    }
+    val witness = CorpusReadyWitness {
+        sources_count: list_len(sources),
+        train_blocks: list_len(train_blocks),
+        val_blocks: list_len(val_blocks),
+    }
+    return ok(seal_stage(witness, (sources, train_blocks, val_blocks)))
+}
+
+def acquire_classifier_stage(
+    cfg: CliConfig,
+    train_blocks: list<PlainBlock>,
+    val_blocks: list<PlainBlock>,
+) -> result<
+    (StageBox<ClassifierTrainedWitness, (TrainedClassifier, list<TrainedClassifier>)>, FeatureDataset),
+    StageError
+> effect fs, alloc, random, thread, throw, time {
+    val ds = build_feature_dataset(train_blocks, val_blocks, cfg.workers)
+    if cfg.mode == "eval" {
+        if len(cfg.state_dir) == 0 {
+            return err(StageError.InvalidArgs("--mode eval requires --state-dir"))
+        }
+        val loaded = load_classifier_state(cfg.state_dir)?
+        val cands: list<TrainedClassifier> = list()
+        list_push(cands, loaded)
+        val witness = ClassifierTrainedWitness {
+            winner_arch: loaded.arch_name,
+            val_acc: loaded.val_acc,
+            workers_used: 1,
+        }
+        return ok((seal_stage(witness, (loaded, cands)), ds))
+    }
+    val trained = train_classifier_tournament(ds, cfg.workers, cfg.epochs)
+    val winner = trained.0
+    val cands = trained.1
+    if len(cfg.state_dir) > 0 {
+        val _saved = save_classifier_state(cfg.state_dir, winner)?
+    }
+    val witness = ClassifierTrainedWitness {
+        winner_arch: winner.arch_name,
+        val_acc: winner.val_acc,
+        workers_used: list_len(cands),
+    }
+    return ok((seal_stage(witness, (winner, cands)), ds))
+}
+
+def build_loaded_forge_artifact(
+    cfg: CliConfig,
+    key: KeySchedule,
+) -> result<NeuralForgeArtifact, StageError> effect fs, alloc, throw {
+    val kernel = load_forge_kernel(cfg.state_dir)?
+    val probe = str_to_u8("Loaded neural forge attestation probe 2026.")
+    val ct = neural_forge_encrypt_bytes(probe, key, kernel, 77)
+    val dec = neural_forge_decrypt_bytes(ct, key, kernel, 77)?
+    var ok_count = 0
+    if list_len(probe) == list_len(dec) {
+        var i = 0
+        while i < list_len(probe) {
+            if list_get(probe, i) == list_get(dec, i) {
+                ok_count = ok_count + 1
+            }
+            i = i + 1
+        }
+    }
+    val metrics = summarize_cipher_metrics(ct)
+    return ok(
+        NeuralForgeArtifact {
+            kernel: kernel,
+            key_label: key.label,
+            bob_init_acc: 0.0,
+            bob_final_acc: 0.0,
+            eve_init_acc: 0.0,
+            eve_final_acc: 0.0,
+            sac_score: metrics.entropy_norm,
+            entropy_norm: metrics.entropy_norm,
+            roundtrip_passed: ok_count,
+            roundtrip_total: list_len(probe),
+            epoch_bob_acc: list(),
+            epoch_eve_acc: list(),
+            classifier_label: "loaded",
+            classifier_conf: 0.0,
+        },
+    )
+}
+
+def evaluate_ai_attack_on_forge(
+    art: NeuralForgeArtifact,
+    winner: TrainedClassifier,
+    key: KeySchedule,
+) -> NeuralForgeArtifact effect alloc {
+    val probe = str_to_u8("neural cipher attack surface probe message 2026")
+    val ct = neural_forge_encrypt_bytes(probe, key, art.kernel, 101)
+    val pred = classify_ciphertext(winner, ct)
+    var best = 0.0
+    var i = 0
+    while i < list_len(pred.probs) {
+        val p = list_get(pred.probs, i)
+        if p > best {
+            best = p
+        }
+        i = i + 1
+    }
+    return attach_classifier_attack(art, family_name(pred.family), best)
+}
+
+def acquire_forge_stage(
+    cfg: CliConfig,
+    train_blocks: list<PlainBlock>,
+    key: KeySchedule,
+    winner: TrainedClassifier,
+) -> result<StageBox<ForgedCipherWitness, NeuralForgeArtifact>, StageError> effect fs, alloc, random, thread, throw, time {
+    var art = if cfg.mode == "eval" {
+        build_loaded_forge_artifact(cfg, key)?
+    } else {
+        train_neural_forge(train_blocks, key, default_forge_config(cfg.forge_steps), cfg.workers)
+    }
+    if cfg.mode != "eval" && len(cfg.state_dir) > 0 {
+        val _saved = save_forge_kernel(cfg.state_dir, art.kernel)?
+    }
+    art = evaluate_ai_attack_on_forge(art, winner, key)
+    val witness = ForgedCipherWitness {
+        cipher_name: "NeuralFeistel-6R-CBC",
+        bob_acc: art.bob_final_acc,
+        eve_acc: art.eve_final_acc,
+        sac: art.sac_score,
+    }
+    return ok(seal_stage(witness, art))
+}
+
+def build_hkt_diagnostics(
+    winner: TrainedClassifier,
+    cands: list<TrainedClassifier>,
+    forge: NeuralForgeArtifact,
+    witness: ForgedCipherWitness,
+) -> str effect alloc, io {
+    val win4 = collect_top4_window(cands)
+    val cand_box = passthrough_hkt(ListBox { items: cands })
+    val single = map_single_gen(
+        SingleBox { value: winner },
+        |c: TrainedClassifier| c.arch_name,
+    )
+    val forge_opt = map_option_gen(some(forge.roundtrip_passed), |rt: i64| rt)
+    val rt_count = if is_some(forge_opt) { unwrap(forge_opt) } else { 0 }
+    val opt_box = OptionBox { maybe: some(witness) }
+    val top_arch = if win4.len > 0 { win4.slots[0].arch_name } else { "none" }
+    val forge_summary = render_bounded(SingleBox { value: forge })
+    return f"top4={win4.len} best={top_arch} kind={cand_box.container_kind()} n={cand_box.cardinality()} live={cand_box.is_populated()} opt={opt_box.cardinality()} winner={single.value} forge={forge_summary} rt={rt_count} cands={render_bounded(cands)}"
+}
+
+def assemble_final_report(
+    cfg: CliConfig,
+    meta: (list<str>, i64, i64),
+    clf: (TrainedClassifier, list<TrainedClassifier>),
+    forge_box: StageBox<ForgedCipherWitness, NeuralForgeArtifact>,
+    key: KeySchedule,
+) -> result<PipelineReport, StageError> effect alloc, io, throw {
+    val winner = clf.0
+    val cands = clf.1
+    val forge = forge_box.payload
+    val msg_bytes = str_to_u8(cfg.message)
+    val ct_bytes = neural_forge_encrypt_bytes(msg_bytes, key, forge.kernel, 101)
+    val dec_bytes = neural_forge_decrypt_bytes(ct_bytes, key, forge.kernel, 101)?
+    val dec_str = u8_to_ascii_preview(dec_bytes)
+    val hkt_summary = build_hkt_diagnostics(winner, cands, forge, forge_box.witness)
+    return ok(
+        PipelineReport {
+            mode: cfg.mode,
+            offline: cfg.offline,
+            source_names: meta.0,
+            n_train: meta.1,
+            n_val: meta.2,
+            winner: winner,
+            candidates: cands,
+            simd_rms: simd_weight_energy(winner.model.weights),
+            forge: forge,
+            demo_plain: cfg.message,
+            demo_ct_hex: u8_to_hex(ct_bytes),
+            demo_dec: dec_str,
+            demo_ok: dec_str == cfg.message,
+            hkt_summary: hkt_summary,
+        },
+    )
+}
+
+/// Execute the complete corpus -> classifier -> forge -> report pipeline.
+pub def execute_pipeline(
+    cfg: CliConfig,
+) -> result<PipelineReport, StageError> effect net, fs, io, alloc, random, thread, throw, time {
+    val corpus_box = acquire_corpus_stage(cfg)?
+    val sources = corpus_box.payload.0
+    val train_blocks = corpus_box.payload.1
+    val val_blocks = corpus_box.payload.2
+    val clf_pair = acquire_classifier_stage(cfg, train_blocks, val_blocks)?
+    val clf_box = clf_pair.0
+    val ds = clf_pair.1
+    val winner = clf_box.payload.0
+    val cands = clf_box.payload.1
+    val key = make_key_schedule("cli-key", str_to_u8(cfg.key_text))?
+    val forge_box = acquire_forge_stage(cfg, train_blocks, key, winner)?
+    return assemble_final_report(
+        cfg,
+        (sources, ds.n_train, ds.n_val),
+        (winner, cands),
+        forge_box,
+        key,
+    )
+}
+
+def main() -> i64 effect net, ffi, fs, io, alloc, random, env, thread, throw, time {
+    val raw_args = args()
+    val cfg = when parse_cli_args(raw_args) {
+        ok(c) => c,
+        err(e) => {
+            println(stage_error_text(e))
+            return 1
+        },
+    }
+    if cfg.show_help {
+        return print_usage()
+    }
+    if cfg.gui_mode {
+        return when launch_neural_cipher_gui(cfg) {
+            ok(code) => code,
+            err(e) => {
+                println(stage_error_text(e))
+                1
+            },
+        }
+    }
+    val report = when execute_pipeline(cfg) {
+        ok(r) => r,
+        err(e) => {
+            println(stage_error_text(e))
+            return 1
+        },
+    }
+    val _p = print_pipeline_report(report)
+    if len(cfg.json_path) > 0 {
+        when write_report_json(cfg.json_path, report) {
+            ok(_) => println(f"wrote json report: {cfg.json_path}"),
+            err(e) => {
+                println(stage_error_text(e))
+                return 1
+            },
+        }
+    }
+    0
+}
+
+def test_hkt_generics_and_cli_parsing() -> i64 effect alloc, io, throw {
+    val res = parse_cli_args(
+        list(
+            "neural_cipher",
+            "--mode",
+            "sweep",
+            "--workers",
+            "2",
+            "--epochs",
+            "10",
+            "--steps",
+            "80",
+            "--offline",
+        ),
+    )
+    assert(is_ok(res))
+    val cfg = unwrap(res)
+    assert(cfg.offline)
+    assert(cfg.workers == 2)
+    val items = list(1, 2, 3)
+    val mapped = map_list_gen(items, |x: i64| x * 2)
+    val kept = filter_list_gen(mapped, |x: i64| x > 2)
+    val total = fold_list_gen(kept, 0, |acc: i64, x: i64| acc + x)
+    assert(total == 10)
+    assert(render_bounded(items) == "list_batch(count=3)")
+    0
+}
+
+def test_end_to_end_offline_sweep_and_state_reload() -> i64 effect alloc, fs, io, net, random, thread, throw, time {
+    val state_dir = "C:/Users/Moon/.gemini/antigravity/brain/77312d71-0c64-478c-86a7-62661ea2150c/scratch/nc_test_state"
+    val json_file = "C:/Users/Moon/.gemini/antigravity/brain/77312d71-0c64-478c-86a7-62661ea2150c/scratch/nc_test_report.json"
+    val cfg = unwrap(
+        parse_cli_args(
+            list(
+                "neural_cipher",
+                "--mode",
+                "sweep",
+                "--workers",
+                "2",
+                "--epochs",
+                "10",
+                "--steps",
+                "160",
+                "--message",
+                "Secret!",
+                "--state-dir",
+                state_dir,
+                "--json",
+                json_file,
+                "--offline",
+            ),
+        ),
+    )
+    val rep = unwrap(execute_pipeline(cfg))
+    assert(rep.demo_ok)
+    assert(rep.winner.val_acc >= 0.70)
+    assert(rep.forge.bob_final_acc >= 0.75)
+    assert(rep.forge.roundtrip_passed == 100)
+    val _w = write_report_json(json_file, rep)
+    val eval_cfg = unwrap(
+        parse_cli_args(
+            list(
+                "neural_cipher",
+                "--mode",
+                "eval",
+                "--message",
+                "Reloaded!",
+                "--state-dir",
+                state_dir,
+                "--offline",
+            ),
+        ),
+    )
+    val eval_rep = unwrap(execute_pipeline(eval_cfg))
+    assert(eval_rep.demo_ok)
+    assert(eval_rep.demo_dec == "Reloaded!")
+    0
+}
+
+// ---------------------------------------------------------------------------
+// Interactive GUI console
+// ---------------------------------------------------------------------------
+
+/// Live progress state streamed from the background pipeline worker.
+pub record NcGuiProgress {
+    stage: str = "idle",
+    detail: str = "Press RUN PIPELINE to train the classifier and forge.",
+    val_acc: f64 = 0.0,
+    bob_acc: f64 = 0.0,
+    eve_acc: f64 = 0.0,
+    done: bool = false,
+    error: str = "",
+}
+
+/// One worker message carrying streamed progress and an optional final report.
+pub record NcGuiMsg {
+    progress: NcGuiProgress,
+    report: option<PipelineReport>,
+}
+
+/// Full interactive console state.
+pub record NcGuiState {
+    cfg: CliConfig = CliConfig {},
+    progress: NcGuiProgress = NcGuiProgress {},
+    report: option<PipelineReport> = none(),
+    running: bool = false,
+    frame: i64 = 0,
+    phase: f64 = 0.0,
+    log: list<str> = list(),
+    ui_st: UiState = UiState {},
+    // One detached UI state per native window (primary first).
+    ui_states: list<UiState> = list(),
+    window_open: list<bool> = list(),
+    show_forge: bool = true,
+    show_classifier: bool = true,
+    show_network: bool = true,
+}
+
+def nc_gui_set_progress(s: NcGuiState, p: NcGuiProgress) -> NcGuiState {
+    return NcGuiState {
+        cfg: s.cfg,
+        progress: p,
+        report: s.report,
+        running: s.running,
+        frame: s.frame,
+        phase: s.phase,
+        log: s.log,
+        ui_st: s.ui_st,
+        ui_states: s.ui_states,
+        window_open: s.window_open,
+        show_forge: s.show_forge,
+        show_classifier: s.show_classifier,
+        show_network: s.show_network,
+    }
+}
+
+def nc_gui_set_report(s: NcGuiState, r: option<PipelineReport>) -> NcGuiState {
+    return NcGuiState {
+        cfg: s.cfg,
+        progress: s.progress,
+        report: r,
+        running: s.running,
+        frame: s.frame,
+        phase: s.phase,
+        log: s.log,
+        ui_st: s.ui_st,
+        ui_states: s.ui_states,
+        window_open: s.window_open,
+        show_forge: s.show_forge,
+        show_classifier: s.show_classifier,
+        show_network: s.show_network,
+    }
+}
+
+def nc_gui_set_running(s: NcGuiState, v: bool) -> NcGuiState {
+    return NcGuiState {
+        cfg: s.cfg,
+        progress: s.progress,
+        report: s.report,
+        running: v,
+        frame: s.frame,
+        phase: s.phase,
+        log: s.log,
+        ui_st: s.ui_st,
+        ui_states: s.ui_states,
+        window_open: s.window_open,
+        show_forge: s.show_forge,
+        show_classifier: s.show_classifier,
+        show_network: s.show_network,
+    }
+}
+
+def nc_gui_set_cfg(s: NcGuiState, c: CliConfig) -> NcGuiState {
+    return NcGuiState {
+        cfg: c,
+        progress: s.progress,
+        report: s.report,
+        running: s.running,
+        frame: s.frame,
+        phase: s.phase,
+        log: s.log,
+        ui_st: s.ui_st,
+        ui_states: s.ui_states,
+        window_open: s.window_open,
+        show_forge: s.show_forge,
+        show_classifier: s.show_classifier,
+        show_network: s.show_network,
+    }
+}
+
+def nc_gui_set_log(s: NcGuiState, l: list<str>) -> NcGuiState {
+    return NcGuiState {
+        cfg: s.cfg,
+        progress: s.progress,
+        report: s.report,
+        running: s.running,
+        frame: s.frame,
+        phase: s.phase,
+        log: l,
+        ui_st: s.ui_st,
+        ui_states: s.ui_states,
+        window_open: s.window_open,
+        show_forge: s.show_forge,
+        show_classifier: s.show_classifier,
+        show_network: s.show_network,
+    }
+}
+
+def nc_gui_set_ui(s: NcGuiState, u: UiState) -> NcGuiState {
+    return NcGuiState {
+        cfg: s.cfg,
+        progress: s.progress,
+        report: s.report,
+        running: s.running,
+        frame: s.frame,
+        phase: s.phase,
+        log: s.log,
+        ui_st: u,
+        ui_states: s.ui_states,
+        window_open: s.window_open,
+        show_forge: s.show_forge,
+        show_classifier: s.show_classifier,
+        show_network: s.show_network,
+    }
+}
+
+def nc_gui_set_ui_state(s: NcGuiState, w: i64, u: UiState) -> NcGuiState effect alloc {
+    var states: list<UiState> = list()
+    var i = 0
+    while i < list_len(s.ui_states) {
+        list_push(states, if i == w { u } else { list_get(s.ui_states, i) })
+        i = i + 1
+    }
+    return NcGuiState {
+        cfg: s.cfg,
+        progress: s.progress,
+        report: s.report,
+        running: s.running,
+        frame: s.frame,
+        phase: s.phase,
+        log: s.log,
+        ui_st: s.ui_st,
+        ui_states: states,
+        window_open: s.window_open,
+        show_forge: s.show_forge,
+        show_classifier: s.show_classifier,
+        show_network: s.show_network,
+    }
+}
+
+def nc_gui_set_window_open(s: NcGuiState, w: i64, open: bool) -> NcGuiState effect alloc {
+    var flags: list<bool> = list()
+    var i = 0
+    while i < list_len(s.window_open) {
+        list_push(flags, if i == w { open } else { list_get(s.window_open, i) })
+        i = i + 1
+    }
+    return NcGuiState {
+        cfg: s.cfg,
+        progress: s.progress,
+        report: s.report,
+        running: s.running,
+        frame: s.frame,
+        phase: s.phase,
+        log: s.log,
+        ui_st: s.ui_st,
+        ui_states: s.ui_states,
+        window_open: flags,
+        show_forge: s.show_forge,
+        show_classifier: s.show_classifier,
+        show_network: s.show_network,
+    }
+}
+
+def nc_gui_set_flags(
+    s: NcGuiState,
+    forge: bool,
+    clf: bool,
+    net: bool,
+) -> NcGuiState {
+    return NcGuiState {
+        cfg: s.cfg,
+        progress: s.progress,
+        report: s.report,
+        running: s.running,
+        frame: s.frame,
+        phase: s.phase,
+        log: s.log,
+        ui_st: s.ui_st,
+        ui_states: s.ui_states,
+        window_open: s.window_open,
+        show_forge: forge,
+        show_classifier: clf,
+        show_network: net,
+    }
+}
+
+def nc_gui_advance(s: NcGuiState) -> NcGuiState {
+    var ph = s.phase + 0.09
+    if ph > 628.0 {
+        ph = 0.0
+    }
+    return NcGuiState {
+        cfg: s.cfg,
+        progress: s.progress,
+        report: s.report,
+        running: s.running,
+        frame: s.frame + 1,
+        phase: ph,
+        log: s.log,
+        ui_st: s.ui_st,
+        ui_states: s.ui_states,
+        window_open: s.window_open,
+        show_forge: s.show_forge,
+        show_classifier: s.show_classifier,
+        show_network: s.show_network,
+    }
+}
+
+def nc_gui_push_log(s: NcGuiState, line: str) -> NcGuiState effect alloc {
+    var out: list<str> = list()
+    var start = 0
+    if list_len(s.log) >= 8 {
+        start = list_len(s.log) - 7
+    }
+    var i = start
+    while i < list_len(s.log) {
+        list_push(out, list_get(s.log, i))
+        i = i + 1
+    }
+    list_push(out, line)
+    return nc_gui_set_log(s, out)
+}
+
+def nc_gui_cfg_with_offline(cfg: CliConfig, v: bool) -> CliConfig {
+    return with_bool_flags(cfg, v, cfg.show_help, cfg.gui_mode)
+}
+
+def nc_gui_cfg_with_mode(cfg: CliConfig) -> CliConfig {
+    val next = if cfg.mode == "sweep" {
+        "train"
+    } else if cfg.mode == "train" {
+        "forge"
+    } else {
+        "sweep"
+    }
+    return CliConfig {
+        mode: next,
+        workers: cfg.workers,
+        epochs: cfg.epochs,
+        forge_steps: cfg.forge_steps,
+        message: cfg.message,
+        key_text: cfg.key_text,
+        state_dir: cfg.state_dir,
+        json_path: cfg.json_path,
+        offline: cfg.offline,
+        show_help: cfg.show_help,
+        gui_mode: cfg.gui_mode,
+    }
+}
+
+def nc_gui_apply_msg(s: NcGuiState, m: NcGuiMsg) -> NcGuiState effect alloc {
+    var out = nc_gui_set_progress(s, m.progress)
+    if m.progress.done {
+        out = nc_gui_set_running(out, false)
+        if len(m.progress.error) > 0 {
+            out = nc_gui_push_log(out, concat("ERROR: ", m.progress.error))
+        } else {
+            out = nc_gui_set_report(out, m.report)
+            out = nc_gui_push_log(out, concat("complete: ", m.progress.detail))
+        }
+    } else {
+        out = nc_gui_push_log(
+            out,
+            concat(
+                concat(concat("[", m.progress.stage), "] "),
+                m.progress.detail,
+            ),
+        )
+    }
+    return out
+}
+
+def nc_gui_apply_action(
+    s: NcGuiState,
+    action: str,
+    job_ch: chan<CliConfig>,
+) -> NcGuiState effect alloc, thread {
+    if len(action) == 0 {
+        return s
+    }
+    if action == "run" {
+        if s.running {
+            return s
+        }
+        send(job_ch, s.cfg)
+        var out = nc_gui_set_running(s, true)
+        out = nc_gui_set_progress(
+            out,
+            NcGuiProgress {
+                stage: "starting",
+                detail: "Dispatching pipeline worker...",
+                val_acc: 0.0,
+                bob_acc: 0.0,
+                eve_acc: 0.0,
+                done: false,
+                error: "",
+            },
+        )
+        out = nc_gui_push_log(out, "RUN: pipeline dispatched")
+        return out
+    }
+    if action == "cycle_mode" {
+        return nc_gui_set_cfg(s, nc_gui_cfg_with_mode(s.cfg))
+    }
+    if action == "toggle_offline" {
+        return nc_gui_set_cfg(s, nc_gui_cfg_with_offline(s.cfg, !s.cfg.offline))
+    }
+    if action == "toggle_forge" {
+        return nc_gui_set_flags(s, !s.show_forge, s.show_classifier, s.show_network)
+    }
+    if action == "toggle_classifier" {
+        return nc_gui_set_flags(s, s.show_forge, !s.show_classifier, s.show_network)
+    }
+    if action == "toggle_network" {
+        return nc_gui_set_flags(s, s.show_forge, s.show_classifier, !s.show_network)
+    }
+    return s
+}
+
+def nc_gui_worker_loop(
+    job_ch: chan<CliConfig>,
+    prog_ch: chan<NcGuiMsg>,
+) -> i64 effect net, fs, io, alloc, random, thread, throw, time {
+    while true {
+        val job = recv(job_ch)
+        send(
+            prog_ch,
+            NcGuiMsg {
+                progress: NcGuiProgress {
+                    stage: "training",
+                    detail: "Harvesting corpus, training classifier, forging cipher...",
+                    val_acc: 0.0,
+                    bob_acc: 0.0,
+                    eve_acc: 0.0,
+                    done: false,
+                    error: "",
+                },
+                report: none(),
+            },
+        )
+        when execute_pipeline(job) {
+            ok(rep) => {
+                send(
+                    prog_ch,
+                    NcGuiMsg {
+                        progress: NcGuiProgress {
+                            stage: "complete",
+                            detail: f"{rep.winner.arch_name} | bob {fmt_pct(rep.forge.bob_final_acc)} | eve {fmt_pct(rep.forge.eve_final_acc)}",
+                            val_acc: rep.winner.val_acc,
+                            bob_acc: rep.forge.bob_final_acc,
+                            eve_acc: rep.forge.eve_final_acc,
+                            done: true,
+                            error: "",
+                        },
+                        report: some(rep),
+                    },
+                )
+            },
+            err(e) => {
+                val msg = stage_error_text(e)
+                send(
+                    prog_ch,
+                    NcGuiMsg {
+                        progress: NcGuiProgress {
+                            stage: "error",
+                            detail: msg,
+                            val_acc: 0.0,
+                            bob_acc: 0.0,
+                            eve_acc: 0.0,
+                            done: true,
+                            error: msg,
+                        },
+                        report: none(),
+                    },
+                )
+            },
+        }
+    }
+    return 0
+}
+
+def nc_gui_spawn_worker(
+    job_ch: chan<CliConfig>,
+    prog_ch: chan<NcGuiMsg>,
+) -> i64 effect net, fs, io, alloc, random, thread, throw, time {
+    spawn {
+        val _ = nc_gui_worker_loop(job_ch, prog_ch)
+    }
+    return 0
+}
+
+def nc_gui_series(
+    label: str,
+    ys: list<f64>,
+    tone: UiTone,
+    fill: bool,
+) -> ChartSeries effect alloc {
+    val xs: list<f64> = list()
+    var i = 0
+    while i < list_len(ys) {
+        list_push(xs, to_f64(i))
+        i = i + 1
+    }
+    return ChartSeries {
+        label: label,
+        xs: xs,
+        ys: ys,
+        tone: tone,
+        fill: fill,
+    }
+}
+
+def nc_gui_header(s: NcGuiState, tree: UiTree) -> i64 effect alloc {
+    val status = if s.running {
+        "TRAINING"
+    } else if len(s.progress.error) > 0 {
+        "ERROR"
+    } else if is_some(s.report) {
+        "REPORT READY"
+    } else {
+        "IDLE"
+    }
+    val tone = if s.running {
+        UiTone.Warning
+    } else if len(s.progress.error) > 0 {
+        UiTone.Danger
+    } else if is_some(s.report) {
+        UiTone.Success
+    } else {
+        UiTone.Neutral
+    }
+    return ui_row(
+        tree,
+        "nc_hdr",
+        UiStyle {
+            gap: 8.0,
+            padding: 8.0,
+            align: UiAlign.Center,
+        },
+        list(
+            ui_heading(tree, "nc_title", "NEURAL CIPHER - LIVE WORKSTATION", UiTone.Accent),
+            ui_badge(tree, "nc_status", status, tone),
+            ui_button_tone(tree, "nc_run", "RUN PIPELINE", "run", UiTone.Primary),
+            ui_button(tree, "nc_mode", f"mode: {s.cfg.mode}", "cycle_mode"),
+            ui_toggle(tree, "nc_off", "offline", s.cfg.offline, UiTone.Secondary),
+            ui_toggle(tree, "nc_forge", "forge", s.show_forge, UiTone.Secondary),
+            ui_toggle(tree, "nc_clf", "classifier", s.show_classifier, UiTone.Secondary),
+            ui_toggle(tree, "nc_net", "network", s.show_network, UiTone.Secondary),
+        ),
+    )
+}
+
+def nc_gui_classifier_card(s: NcGuiState, tree: UiTree) -> i64 effect alloc {
+    val items: list<i64> = list()
+    list_push(items, ui_heading(tree, "nc_clf_h", "CLASSIFIER TOURNAMENT", UiTone.Primary))
+    if is_some(s.report) {
+        val rep = unwrap(s.report)
+        list_push(
+            items,
+            ui_label(
+                tree,
+                "nc_clf_win",
+                f"winner {rep.winner.arch_name} | val_acc {fmt_pct(rep.winner.val_acc)} | loss {fmt_f4(rep.winner.val_loss)} | simd_rms {fmt_f4(rep.simd_rms)}",
+                UiStyle { font_size: 12.0 },
+            ),
+        )
+        val ys: list<f64> = list()
+        var i = 0
+        while i < list_len(rep.candidates) {
+            list_push(ys, list_get(rep.candidates, i).val_acc)
+            i = i + 1
+        }
+        if list_len(ys) > 1 {
+            list_push(
+                items,
+                ui_sparkline(
+                    tree,
+                    "nc_clf_chart",
+                    nc_gui_series("validation accuracy by candidate", ys, UiTone.Accent, true),
+                    UiStyle { min_h: 96.0, flex: 1.0 },
+                ),
+            )
+        }
+        var j = 0
+        while j < list_len(rep.candidates) {
+            val c = list_get(rep.candidates, j)
+            list_push(
+                items,
+                ui_label(
+                    tree,
+                    f"nc_clf_row_{j}",
+                    f"#{j + 1} {c.arch_name} acc {fmt_pct(c.val_acc)} loss {fmt_f4(c.val_loss)}",
+                    UiStyle { font_size: 11.0, monospace: true },
+                ),
+            )
+            j = j + 1
+        }
+    } else {
+        list_push(
+            items,
+            ui_label(
+                tree,
+                "nc_clf_empty",
+                "Awaiting first run. The tournament trains up to four MLP candidates.",
+                UiStyle { font_size: 12.0 },
+            ),
+        )
+    }
+    return ui_card(
+        tree,
+        "nc_clf_card",
+        UiStyle { padding: 12.0, gap: 7.0, flex: 1.0 },
+        items,
+    )
+}
+
+def nc_gui_forge_card(s: NcGuiState, tree: UiTree) -> i64 effect alloc {
+    val items: list<i64> = list()
+    list_push(items, ui_heading(tree, "nc_forge_h", "NEURAL FORGE", UiTone.Accent))
+    if is_some(s.report) {
+        val forge = unwrap(s.report).forge
+        list_push(
+            items,
+            ui_row(
+                tree,
+                "nc_forge_badges",
+                UiStyle { gap: 6.0 },
+                list(
+                    ui_badge(tree, "nc_bob", f"bob {fmt_pct(forge.bob_final_acc)}", UiTone.Success),
+                    ui_badge(tree, "nc_eve", f"eve {fmt_pct(forge.eve_final_acc)}", UiTone.Danger),
+                    ui_badge(tree, "nc_sac", f"sac {fmt_f4(forge.sac_score)}", UiTone.Warning),
+                    ui_badge(
+                        tree,
+                        "nc_rt",
+                        f"rt {forge.roundtrip_passed}/{forge.roundtrip_total}",
+                        UiTone.Neutral,
+                    ),
+                    ui_badge(
+                        tree,
+                        "nc_attack",
+                        f"attack {forge.classifier_label} {fmt_pct(forge.classifier_conf)}",
+                        UiTone.Warning,
+                    ),
+                ),
+            ),
+        )
+        if list_len(forge.epoch_bob_acc) > 1 {
+            list_push(
+                items,
+                ui_line_chart(
+                    tree,
+                    "nc_bob_chart",
+                    nc_gui_series("Bob decryption accuracy", forge.epoch_bob_acc, UiTone.Success, true),
+                    UiStyle { min_h: 92.0, flex: 1.0 },
+                ),
+            )
+        }
+        if list_len(forge.epoch_eve_acc) > 1 {
+            list_push(
+                items,
+                ui_line_chart(
+                    tree,
+                    "nc_eve_chart",
+                    nc_gui_series("Eve adversarial accuracy", forge.epoch_eve_acc, UiTone.Danger, true),
+                    UiStyle { min_h: 92.0, flex: 1.0 },
+                ),
+            )
+        }
+        list_push(
+            items,
+            ui_label(
+                tree,
+                "nc_forge_meta",
+                f"entropy {fmt_f4(forge.entropy_norm)} | key {forge.key_label} | arch {forge.kernel.hidden} hidden",
+                UiStyle { font_size: 11.0, monospace: true },
+            ),
+        )
+    } else {
+        list_push(
+            items,
+            ui_label(
+                tree,
+                "nc_forge_empty",
+                "Neural-Feistel forge statistics appear here after training.",
+                UiStyle { font_size: 12.0 },
+            ),
+        )
+    }
+    return ui_card(
+        tree,
+        "nc_forge_card",
+        UiStyle { padding: 12.0, gap: 7.0, flex: 1.0 },
+        items,
+    )
+}
+
+def nc_gui_network_card(s: NcGuiState, tree: UiTree) -> i64 effect alloc {
+    val items: list<i64> = list()
+    list_push(items, ui_heading(tree, "nc_net_h", "NEURAL ACTIVATION LATTICE", UiTone.Secondary))
+    list_push(
+        items,
+        ui_row(
+            tree,
+            "nc_net_badges",
+            UiStyle { gap: 6.0 },
+            list(
+                ui_badge(tree, "nc_l_in", "input 16", UiTone.Accent),
+                ui_badge(tree, "nc_l_h1", "hidden 24", UiTone.Primary),
+                ui_badge(tree, "nc_l_alice", "alice 24", UiTone.Success),
+                ui_badge(tree, "nc_l_eve", "eve 24", UiTone.Danger),
+                ui_badge(tree, "nc_l_out", "classes 6", UiTone.Warning),
+            ),
+        ),
+    )
+    val ys: list<f64> = list()
+    var i = 0
+    while i < 52 {
+        val v = 0.5 + 0.5 * sin(s.phase * 2.4 + to_f64(i) * 0.48)
+        list_push(ys, v)
+        i = i + 1
+    }
+    list_push(
+        items,
+        ui_sparkline(
+            tree,
+            "nc_net_chart",
+            nc_gui_series("live per-neuron activation wave", ys, UiTone.Primary, true),
+            UiStyle { min_h: 104.0, flex: 1.0 },
+        ),
+    )
+    val motion = if s.running { "weights flowing" } else { "idle" }
+    list_push(
+        items,
+        ui_label(
+            tree,
+            "nc_net_caption",
+            f"phase {fmt_f4(s.phase)} | frame {s.frame} | {motion}",
+            UiStyle { font_size: 11.0, monospace: true },
+        ),
+    )
+    return ui_card(
+        tree,
+        "nc_net_card",
+        UiStyle { padding: 12.0, gap: 7.0, flex: 1.0 },
+        items,
+    )
+}
+
+def nc_gui_left_column(s: NcGuiState, tree: UiTree) -> i64 effect alloc {
+    val panels: list<i64> = list()
+    if s.show_classifier {
+        list_push(panels, nc_gui_classifier_card(s, tree))
+    }
+    if s.show_forge {
+        list_push(panels, nc_gui_forge_card(s, tree))
+    }
+    if s.show_network {
+        list_push(panels, nc_gui_network_card(s, tree))
+    }
+    if list_len(panels) == 0 {
+        list_push(
+            panels,
+            ui_label(
+                tree,
+                "nc_all_hidden",
+                "All analysis panels are hidden. Re-enable one in the header.",
+                UiStyle { font_size: 12.0 },
+            ),
+        )
+    }
+    return ui_col(
+        tree,
+        "nc_left_col",
+        UiStyle {
+            gap: 10.0,
+            flex: 1.35,
+            align: UiAlign.Stretch,
+        },
+        panels,
+    )
+}
+
+def nc_gui_progress_card(s: NcGuiState, tree: UiTree) -> i64 effect alloc {
+    val items: list<i64> = list()
+    list_push(items, ui_heading(tree, "nc_prog_h", "PIPELINE PROGRESS", UiTone.Warning))
+    val stage_tone = if len(s.progress.error) > 0 {
+        UiTone.Danger
+    } else if s.running {
+        UiTone.Warning
+    } else if s.progress.done {
+        UiTone.Success
+    } else {
+        UiTone.Neutral
+    }
+    list_push(
+        items,
+        ui_row(
+            tree,
+            "nc_prog_row",
+            UiStyle { gap: 8.0, align: UiAlign.Center },
+            list(
+                ui_badge(tree, "nc_prog_stage", s.progress.stage, stage_tone),
+                ui_label(
+                    tree,
+                    "nc_prog_detail",
+                    s.progress.detail,
+                    UiStyle { font_size: 12.0 },
+                ),
+            ),
+        ),
+    )
+    val ratio = if is_some(s.report) {
+        clamp_f64(s.progress.val_acc, 0.0, 1.0)
+    } else if s.running {
+        0.0
+    } else {
+        0.0
+    }
+    val pulse = 0.5 + 0.5 * sin(s.phase * 3.1)
+    val bar_w = if s.running {
+        40.0 + 200.0 * pulse
+    } else {
+        240.0 * ratio
+    }
+    list_push(
+        items,
+        ui_col(
+            tree,
+            "nc_bar_track",
+            UiStyle {
+                bg: rgba(30, 34, 46, 255),
+                radius: 6.0,
+                min_h: 12.0,
+                max_h: 12.0,
+                min_w: 248.0,
+                max_w: 248.0,
+            },
+            list(
+                ui_col(
+                    tree,
+                    "nc_bar_fill",
+                    UiStyle {
+                        bg: if s.running { rgba(255, 176, 64, 255) } else { rgba(80, 220, 160, 255) },
+                        radius: 6.0,
+                        min_h: 12.0,
+                        max_h: 12.0,
+                        min_w: bar_w,
+                        max_w: bar_w,
+                    },
+                    list(),
+                ),
+            ),
+        ),
+    )
+    list_push(
+        items,
+        ui_label(
+            tree,
+            "nc_prog_stats",
+            f"val_acc {fmt_pct(s.progress.val_acc)} | bob {fmt_pct(s.progress.bob_acc)} | eve {fmt_pct(s.progress.eve_acc)}",
+            UiStyle { font_size: 12.0, monospace: true },
+        ),
+    )
+    return ui_card(
+        tree,
+        "nc_prog_card",
+        UiStyle { padding: 12.0, gap: 8.0, flex: 0.0 },
+        items,
+    )
+}
+
+def nc_gui_log_card(s: NcGuiState, tree: UiTree) -> i64 effect alloc {
+    val items: list<i64> = list()
+    list_push(items, ui_heading(tree, "nc_log_h", "EVENT LOG", UiTone.Secondary))
+    if list_len(s.log) == 0 {
+        list_push(
+            items,
+            ui_label(tree, "nc_log_empty", "(quiet)", UiStyle { font_size: 11.0, monospace: true }),
+        )
+    }
+    var i = 0
+    while i < list_len(s.log) {
+        list_push(
+            items,
+            ui_label(
+                tree,
+                f"nc_log_{i}",
+                list_get(s.log, i),
+                UiStyle { font_size: 11.0, monospace: true },
+            ),
+        )
+        i = i + 1
+    }
+    return ui_card(
+        tree,
+        "nc_log_card",
+        UiStyle { padding: 12.0, gap: 6.0, flex: 1.0 },
+        items,
+    )
+}
+
+def nc_gui_demo_card(s: NcGuiState, tree: UiTree) -> i64 effect alloc {
+    val items: list<i64> = list()
+    list_push(items, ui_heading(tree, "nc_demo_h", "ROUNDTRIP DEMO", UiTone.Success))
+    if is_some(s.report) {
+        val rep = unwrap(s.report)
+        list_push(
+            items,
+            ui_row(
+                tree,
+                "nc_demo_row",
+                UiStyle { gap: 8.0, align: UiAlign.Center },
+                list(
+                    ui_badge(
+                        tree,
+                        "nc_demo_ok",
+                        if rep.demo_ok { "ROUNDTRIP OK" } else { "ROUNDTRIP FAILED" },
+                        if rep.demo_ok { UiTone.Success } else { UiTone.Danger },
+                    ),
+                    ui_label(
+                        tree,
+                        "nc_demo_plain",
+                        concat("plain: ", rep.demo_plain),
+                        UiStyle { font_size: 11.0, monospace: true },
+                    ),
+                ),
+            ),
+        )
+        list_push(
+            items,
+            ui_label(
+                tree,
+                "nc_demo_ct",
+                concat("ct:    ", rep.demo_ct_hex),
+                UiStyle { font_size: 10.0, monospace: true },
+            ),
+        )
+        list_push(
+            items,
+            ui_label(
+                tree,
+                "nc_demo_dec",
+                concat("dec:   ", rep.demo_dec),
+                UiStyle { font_size: 11.0, monospace: true },
+            ),
+        )
+        list_push(
+            items,
+            ui_label(
+                tree,
+                "nc_demo_hkt",
+                concat("hkt:   ", rep.hkt_summary),
+                UiStyle { font_size: 10.0, monospace: true },
+            ),
+        )
+    } else {
+        list_push(
+            items,
+            ui_label(
+                tree,
+                "nc_demo_empty",
+                "Encrypt/decrypt demo and HKT diagnostics appear after a run.",
+                UiStyle { font_size: 12.0 },
+            ),
+        )
+    }
+    return ui_card(
+        tree,
+        "nc_demo_card",
+        UiStyle { padding: 12.0, gap: 6.0, flex: 0.0 },
+        items,
+    )
+}
+
+def nc_gui_right_column(s: NcGuiState, tree: UiTree) -> i64 effect alloc {
+    return ui_col(
+        tree,
+        "nc_right_col",
+        UiStyle {
+            gap: 10.0,
+            flex: 1.0,
+            align: UiAlign.Stretch,
+        },
+        list(
+            nc_gui_progress_card(s, tree),
+            nc_gui_log_card(s, tree),
+            nc_gui_demo_card(s, tree),
+        ),
+    )
+}
+
+def nc_gui_build_tree_window(s: NcGuiState, w: i64, tree: UiTree) -> i64 effect alloc {
+    val root_style = UiStyle {
+        padding: 10.0,
+        gap: 8.0,
+        align: UiAlign.Stretch,
+    }
+    if w == 0 {
+        val panels: list<i64> = list()
+        list_push(panels, nc_gui_header(s, tree))
+        list_push(panels, nc_gui_progress_card(s, tree))
+        if s.show_network {
+            list_push(panels, nc_gui_network_card(s, tree))
+        }
+        return ui_col(tree, "nc_root", root_style, panels)
+    }
+    if w == 1 {
+        val panels: list<i64> = list()
+        if s.show_classifier {
+            list_push(panels, nc_gui_classifier_card(s, tree))
+        }
+        if s.show_forge {
+            list_push(panels, nc_gui_forge_card(s, tree))
+        }
+        if list_len(panels) == 0 {
+            list_push(
+                panels,
+                ui_label(
+                    tree,
+                    "nc_analysis_empty",
+                    "Analysis panels are hidden. Re-enable them in the main window.",
+                    UiStyle { font_size: 12.0 },
+                ),
+            )
+        }
+        return ui_col(tree, "nc_root", root_style, panels)
+    }
+    return ui_col(
+        tree,
+        "nc_root",
+        root_style,
+        list(nc_gui_demo_card(s, tree), nc_gui_log_card(s, tree)),
+    )
+}
+
+/// Launch the interactive desktop workstation and pump frames until the window closes.
+pub def launch_neural_cipher_gui(
+    cfg: CliConfig,
+) -> result<i64, StageError> effect net, fs, io, ffi, alloc, random, thread, throw, time {
+    val opened = ui_open_native_host(
+        UiHostMode.Desktop,
+        "Neural Cipher - Live Workstation",
+        1440,
+        900,
+        "",
+    )
+    val lib = when opened {
+        ok(h) => h,
+        err(msg) => {
+            return err(StageError.IoFailure(msg))
+        },
+    }
+    defer {
+        val _closed = ui_close_native_host(lib)
+    }
+    // One shared host/event loop, three independent native windows.
+    val wid_analysis = ui_native_window_create(lib, "Neural Cipher - Classifier & Forge", 960, 780)
+    val wid_diag = ui_native_window_create(lib, "Neural Cipher - Demo & Event Log", 860, 720)
+    val win_ids = list(1, wid_analysis, wid_diag)
+
+    val job_ch: chan<CliConfig> = channel(4)
+    val prog_ch: chan<NcGuiMsg> = channel(64)
+    val _worker = nc_gui_spawn_worker(job_ch, prog_ch)
+
+    val buf0 = draw_buf_new(65536)
+    val buf1 = draw_buf_new(65536)
+    val buf2 = draw_buf_new(65536)
+    defer {
+        val _f0 = draw_buf_free(buf0)
+        val _f1 = draw_buf_free(buf1)
+        val _f2 = draw_buf_free(buf2)
+    }
+    val bufs = list(buf0, buf1, buf2)
+
+    var states: list<UiState> = list()
+    list_push(states, UiState {})
+    list_push(states, UiState {})
+    list_push(states, UiState {})
+    var app = NcGuiState {
+        cfg: cfg,
+        ui_states: states,
+        window_open: list(true, true, true),
+    }
+    app = nc_gui_push_log(app, "Console ready. Press RUN PIPELINE to begin.")
+    app = nc_gui_push_log(app, "Three windows: control, analysis, diagnostics.")
+
+    var alive = true
+    while alive {
+        // Worker progress is shared by all windows; drain it once per frame.
+        var draining = true
+        while draining {
+            val maybe = chan_try_recv(prog_ch)
+            if is_none(maybe) {
+                draining = false
+            } else {
+                app = nc_gui_apply_msg(app, unwrap(maybe))
+            }
+        }
+        app = nc_gui_advance(app)
+
+        var w = 0
+        while w < list_len(win_ids) {
+            val wid = list_get(win_ids, w)
+            if list_get(app.window_open, w) && ui_native_window_is_open(lib, wid) {
+                val metrics = ui_native_window_metrics(lib, wid)
+                if metrics.is_open {
+                    val vw = if metrics.width > 0.0 { metrics.width } else { 960.0 }
+                    val vh = if metrics.height > 0.0 { metrics.height } else { 720.0 }
+                    val ui_st = list_get(app.ui_states, w)
+                    val buf = list_get(bufs, w)
+                    val pool = ui_frame_pool_begin()
+                    var tree = ui_with_theme(obsidian_theme())
+                    val root = nc_gui_build_tree_window(app, w, tree)
+                    tree = ui_layout(ui_set_root(tree, root), vw, vh)
+                    val painted = ui_paint(tree, ui_st, buf)
+                    val _submitted = ui_native_submit_window(lib, wid, painted)
+                    val timeout = if w == 0 { 8 } else { 0 }
+                    val events = ui_native_poll_window(lib, wid, timeout)
+                    val next_ui = ui_process_events(tree, ui_clear_events(ui_st), events)
+                    // Keep everything that survives this frame on the main
+                    // heap while the pool is paused, then reclaim the widgets.
+                    val _paused = ui_frame_pool_pause()
+                    app = nc_gui_apply_action(app, next_ui.dispatched_action, job_ch)
+                    app = nc_gui_set_ui_state(app, w, ui_state_detach(ui_clear_events(next_ui)))
+                    if next_ui.close_requested {
+                        app = nc_gui_set_window_open(app, w, false)
+                        val _closed = ui_native_window_close(lib, wid)
+                    }
+                    val _resumed = ui_frame_pool_resume(pool)
+                    val _freed = ui_frame_pool_destroy(pool)
+                } else {
+                    app = nc_gui_set_window_open(app, w, false)
+                }
+            }
+            w = w + 1
+        }
+
+        var any_open = false
+        var k = 0
+        while k < list_len(app.window_open) {
+            if list_get(app.window_open, k) {
+                any_open = true
+            }
+            k = k + 1
+        }
+        alive = any_open
+    }
+    return ok(0)
+}

@@ -1,0 +1,525 @@
+// std.ui_widgets -- modern, animated components for IRIS native UI.
+//
+// These are immediate-mode overlay painters: draw them into the same DrawBuffer
+// after `ui_paint`, using rects obtained from `ui_node_rect(tree, key)`. They
+// cover visuals the core layout tree does not yet model natively: a living
+// neural graph, navigation rail, search, segmented controls, rings, legends,
+// toasts and status chips. All motion is driven by `std.ui_motion`.
+
+pub bring std.ui_protocol
+pub bring std.ui_theme
+pub bring std.ui_icons
+pub bring std.ui_motion
+
+pub record UiGraphNode {
+    x: f64 = 0.5,
+    y: f64 = 0.5,
+    r: f64 = 1.5,
+    tone: i64 = 0,
+    phase: f64 = 0.0,
+}
+
+pub record UiGraphLink {
+    a: i64 = 0,
+    b: i64 = 0,
+    strength: f64 = 0.5,
+}
+
+/// A deterministic, brain-shaped node/link graph.
+pub record UiNeuralGraph {
+    nodes: list<UiGraphNode> = list(),
+    links: list<UiGraphLink> = list(),
+}
+
+def g_hash(i: i64, salt: f64) -> f64 {
+    val x = sin(to_f64(i) * 12.9898 + salt * 78.233) * 43758.5453
+    return x - to_f64(x to i64)
+}
+
+/// Build a brain/spine shaped graph with deterministic pseudo-random placement.
+pub def ui_neural_graph_new(count: i64) -> UiNeuralGraph effect alloc {
+    val nodes: list<UiGraphNode> = list()
+    var i = 0
+    while i < count {
+        val u = g_hash(i, 1.0)
+        val v = g_hash(i, 2.0)
+        val w = g_hash(i, 3.0)
+        var x = 0.5
+        var y = 0.5
+        if i < count / 3 {
+            // upper cortex cluster
+            val ang = u * 6.28318
+            val rad = 0.06 + v * 0.12
+            x = 0.5 + cos(ang) * rad * 0.85
+            y = 0.16 + sin(ang) * rad
+        } else if i < (count * 2) / 3 {
+            // spinal column
+            val t = (to_f64(i - count / 3) / to_f64(count / 3 + 1))
+            x = 0.5 + (w - 0.5) * 0.035 + sin(t * 12.0) * 0.012
+            y = 0.30 + t * 0.46
+        } else {
+            // lower lobes
+            val ang = u * 6.28318
+            val rad = 0.08 + v * 0.18
+            x = 0.5 + cos(ang) * rad
+            y = 0.80 + sin(ang) * rad * 0.7
+        }
+        list_push(
+            nodes,
+            UiGraphNode {
+                x: x,
+                y: y,
+                r: 2.0 + w * 2.6,
+                tone: (i * 7) % 6,
+                phase: v * 6.28318,
+            },
+        )
+        i = i + 1
+    }
+    val links: list<UiGraphLink> = list()
+    i = 0
+    while i < count {
+        val a = list_get(nodes, i)
+        var best = -1
+        var best_d = 1000000.0
+        var j = 0
+        while j < i {
+            val b = list_get(nodes, j)
+            val dx = a.x - b.x
+            val dy = a.y - b.y
+            val d = dx * dx + dy * dy
+            if d < best_d {
+                best_d = d
+                best = j
+            }
+            j = j + 1
+        }
+        if best >= 0 {
+            list_push(links, UiGraphLink { a: best, b: i, strength: 0.35 + g_hash(i, 4.0) * 0.5 })
+        }
+        if i > 2 {
+            list_push(links, UiGraphLink { a: i - 2, b: i, strength: 0.25 })
+        }
+        i = i + 1
+    }
+    return UiNeuralGraph { nodes: nodes, links: links }
+}
+
+/// Draw the living brain view. `growth` (0..1) reveals the graph outward.
+pub def draw_neural_graph(
+    buf: DrawBuffer,
+    r: UiRect,
+    g: UiNeuralGraph,
+    clock: UiClock,
+    palette: list<UiColor>,
+    bg: UiColor,
+    growth: f64,
+) -> DrawBuffer effect ffi, alloc {
+    var b = draw_cmd_round_rect(
+        buf,
+        r,
+        12.0,
+        UiStyle { bg: bg, border: UiColor { r: 36, g: 40, b: 50, a: 255 }, border_width: 1.0 },
+    )
+    val px = r.x + 8.0
+    val py = r.y + 8.0
+    val pw = max(1.0, r.w - 16.0)
+    val ph = max(1.0, r.h - 16.0)
+    val clear = UiColor { r: 0, g: 0, b: 0, a: 0 }
+    val revealed = (to_f64(list_len(g.nodes)) * motion_clamp01(growth)) to i64
+    var li = 0
+    while li < list_len(g.links) {
+        val l = list_get(g.links, li)
+        if l.a < revealed && l.b < revealed {
+            val a = list_get(g.nodes, l.a)
+            val z = list_get(g.nodes, l.b)
+            val amp = 0.55 + 0.45 * motion_pulse(clock, 1.3, a.phase)
+            val edge = mix_color(bg, list_get(palette, 0), l.strength * 0.55 * amp)
+            b = draw_cmd_line(
+                b,
+                UiRect {
+                    x: px + a.x * pw,
+                    y: py + a.y * ph,
+                    w: px + z.x * pw,
+                    h: py + z.y * ph,
+                },
+                edge,
+                0.8,
+                false,
+            )
+        }
+        li = li + 1
+    }
+    var i = 0
+    while i < revealed {
+        val n = list_get(g.nodes, i)
+        val col = list_get(palette, n.tone % list_len(palette))
+        val pulse = 0.75 + 0.25 * motion_pulse(clock, 2.1, n.phase)
+        val cx = px + n.x * pw
+        val cy = py + n.y * ph
+        val rad = n.r * pulse
+        b = draw_cmd_circle(b, cx, cy, rad * 2.4, UiStyle { bg: mix_color(bg, col, 0.07), border: clear, border_width: 0.0 })
+        b = draw_cmd_circle(b, cx, cy, rad, UiStyle { bg: col, border: clear, border_width: 0.0 })
+        i = i + 1
+    }
+    return b
+}
+
+/// A minimalist left navigation rail with icon buttons and a search field.
+pub def draw_nav_rail(
+    buf: DrawBuffer,
+    r: UiRect,
+    items: list<str>,
+    icons: list<UiIcon>,
+    selected: i64,
+    hovered: i64,
+    search: str,
+    focused: bool,
+    theme: UiTheme,
+    clock: UiClock,
+) -> DrawBuffer effect ffi, alloc {
+    var b = draw_cmd_round_rect(
+        buf,
+        r,
+        10.0,
+        UiStyle { bg: theme.surface, border: theme.border, border_width: 1.0 },
+    )
+    val search_r = UiRect { x: r.x + 10.0, y: r.y + 12.0, w: r.w - 20.0, h: 32.0 }
+    b = draw_search_box(b, search_r, search, "Search...", focused, theme, clock)
+    val top = r.y + 56.0
+    var i = 0
+    while i < list_len(items) {
+        val iy = top + to_f64(i) * 34.0
+        val row = UiRect { x: r.x + 8.0, y: iy, w: r.w - 16.0, h: 30.0 }
+        val is_sel = i == selected
+        val is_hov = i == hovered
+        val bg = if is_sel { mix_color(theme.surface, theme.primary, 0.22) } else if is_hov { theme.panel_alt } else { theme.surface }
+        b = draw_cmd_round_rect(b, row, 6.0, UiStyle { bg: bg, border: UiColor { r: 0, g: 0, b: 0, a: 0 }, border_width: 0.0 })
+        if is_sel {
+            val glow = 0.55 + 0.45 * motion_pulse(clock, 2.0, 0.0)
+            b = draw_cmd_round_rect(
+                b,
+                UiRect { x: row.x, y: row.y + 6.0, w: 3.0, h: 18.0 },
+                1.5,
+                UiStyle { bg: mix_color(theme.bg, theme.primary, glow), border: UiColor { r: 0, g: 0, b: 0, a: 0 }, border_width: 0.0 },
+            )
+        }
+        val icon_r = UiRect { x: row.x + 9.0, y: row.y + 7.0, w: 16.0, h: 16.0 }
+        b = draw_icon(b, list_get(icons, i), icon_r, if is_sel { theme.primary } else { theme.fg_muted })
+        b = draw_cmd_text(
+            b,
+            UiRect { x: row.x + 34.0, y: row.y + 6.0, w: row.w - 40.0, h: 18.0 },
+            list_get(items, i),
+            UiStyle { fg: if is_sel { theme.fg } else { theme.fg_muted }, font_size: 12.0, bold: is_sel },
+        )
+        i = i + 1
+    }
+    return b
+}
+
+/// Index of the nav item under a pointer, or -1.
+pub def nav_item_at(r: UiRect, ev: HostEvent, count: i64) -> i64 {
+    if ev.x < r.x || ev.x > r.x + r.w {
+        return -1
+    }
+    val top = r.y + 56.0
+    val idx = ((ev.y - top) / 34.0) to i64
+    if idx >= 0 && idx < count && ev.y <= top + to_f64(idx + 1) * 34.0 {
+        return idx
+    }
+    return -1
+}
+
+pub def draw_search_box(
+    buf: DrawBuffer,
+    r: UiRect,
+    text: str,
+    placeholder: str,
+    focused: bool,
+    theme: UiTheme,
+    clock: UiClock,
+) -> DrawBuffer effect ffi, alloc {
+    var b = draw_cmd_round_rect(
+        buf,
+        r,
+        6.0,
+        UiStyle { bg: theme.bg, border: if focused { theme.cyan } else { theme.border }, border_width: if focused { 1.5 } else { 1.0 } },
+    )
+    b = draw_icon(b, UiIcon.Search, UiRect { x: r.x + 8.0, y: r.y + 8.0, w: 16.0, h: 16.0 }, theme.fg_muted)
+    val shown = if len(text) > 0 { text } else { placeholder }
+    b = draw_cmd_text(
+        b,
+        UiRect { x: r.x + 32.0, y: r.y + 7.0, w: r.w - 40.0, h: 18.0 },
+        shown,
+        UiStyle { fg: if len(text) > 0 { theme.fg } else { theme.fg_muted }, font_size: 12.0, monospace: true },
+    )
+    if focused {
+        val blink = motion_pulse(clock, 6.0, 0.0)
+        if blink > 0.45 {
+            val cx = r.x + 32.0 + to_f64(len(shown)) * 7.3
+            b = draw_cmd_line(
+                b,
+                UiRect { x: cx, y: r.y + 7.0, w: cx, h: r.y + 23.0 },
+                theme.cyan,
+                1.5,
+                false,
+            )
+        }
+    }
+    return b
+}
+
+/// Animated segmented control. `anim` is an eased 0..1 position of the pill.
+pub def draw_segmented(
+    buf: DrawBuffer,
+    r: UiRect,
+    options: list<str>,
+    selected: i64,
+    prev_selected: i64,
+    anim: f64,
+    theme: UiTheme,
+) -> DrawBuffer effect ffi, alloc {
+    var b = draw_cmd_round_rect(
+        buf,
+        r,
+        8.0,
+        UiStyle { bg: theme.bg, border: theme.border, border_width: 1.0 },
+    )
+    val n = list_len(options)
+    if n <= 0 {
+        return b
+    }
+    val seg_w = r.w / to_f64(n)
+    val k = motion_clamp01(anim)
+    val pill_x = r.x + seg_w * motion_lerp(to_f64(prev_selected), to_f64(selected), k) + 3.0
+    b = draw_cmd_round_rect(
+        b,
+        UiRect { x: pill_x, y: r.y + 3.0, w: seg_w - 6.0, h: r.h - 6.0 },
+        6.0,
+        UiStyle { bg: mix_color(theme.surface, theme.primary, 0.30), border: theme.primary, border_width: 1.0 },
+    )
+    var i = 0
+    while i < n {
+        b = draw_cmd_text(
+            b,
+            UiRect { x: r.x + seg_w * to_f64(i), y: r.y + (r.h - 16.0) * 0.5, w: seg_w, h: 18.0 },
+            list_get(options, i),
+            UiStyle {
+                fg: if i == selected { theme.fg } else { theme.fg_muted },
+                font_size: 11.0,
+                bold: i == selected,
+                align: UiAlign.Center,
+            },
+        )
+        i = i + 1
+    }
+    return b
+}
+
+pub def segmented_at(r: UiRect, ev: HostEvent, count: i64) -> i64 {
+    if ev.x < r.x || ev.x > r.x + r.w || ev.y < r.y || ev.y > r.y + r.h {
+        return -1
+    }
+    val idx = (((ev.x - r.x) / r.w) * to_f64(count)) to i64
+    if idx < 0 { return 0 }
+    if idx >= count { return count - 1 }
+    return idx
+}
+
+/// Circular progress ring, drawn as a polyline arc.
+pub def draw_progress_ring(
+    buf: DrawBuffer,
+    r: UiRect,
+    value: f64,
+    color: UiColor,
+    track: UiColor,
+    thickness: f64,
+    label: str,
+    theme: UiTheme,
+) -> DrawBuffer effect ffi, alloc {
+    val cx = r.x + r.w * 0.5
+    val cy = r.y + r.h * 0.5 - 6.0
+    val rad = min(r.w, r.h - 16.0) * 0.42
+    val clear = UiColor { r: 0, g: 0, b: 0, a: 0 }
+    val xs: list<f64> = list()
+    val ys: list<f64> = list()
+    var i = 0
+    while i <= 40 {
+        val a = -1.5707963 + to_f64(i) / 40.0 * 6.28318
+        list_push(xs, cx + cos(a) * rad)
+        list_push(ys, cy + sin(a) * rad)
+        i = i + 1
+    }
+    var b = draw_cmd_polyline(buf, xs, ys, track, clear)
+    val vx: list<f64> = list()
+    val vy: list<f64> = list()
+    val steps = (40.0 * motion_clamp01(value)) to i64 + 1
+    i = 0
+    while i <= steps {
+        val a = -1.5707963 + to_f64(i) / 40.0 * 6.28318
+        list_push(vx, cx + cos(a) * rad)
+        list_push(vy, cy + sin(a) * rad)
+        i = i + 1
+    }
+    b = draw_cmd_polyline(b, vx, vy, color, clear)
+    if len(label) > 0 {
+        b = draw_cmd_text(
+            b,
+            UiRect { x: r.x, y: r.y + r.h - 22.0, w: r.w, h: 20.0 },
+            label,
+            UiStyle { fg: theme.fg, font_size: 11.0, bold: true, align: UiAlign.Center, monospace: true },
+        )
+    }
+    return b
+}
+
+/// Colour-coded legend with counts, in the style of a data organism.
+pub def draw_legend(
+    buf: DrawBuffer,
+    r: UiRect,
+    labels: list<str>,
+    colors: list<UiColor>,
+    counts: list<i64>,
+    theme: UiTheme,
+) -> DrawBuffer effect ffi, alloc {
+    var b = buf
+    var i = 0
+    val col_w = r.w / to_f64(if list_len(labels) > 0 { list_len(labels) } else { 1 })
+    while i < list_len(labels) {
+        val x = r.x + col_w * to_f64(i)
+        b = draw_cmd_circle(
+            b,
+            x + 5.0,
+            r.y + 6.0,
+            3.0,
+            UiStyle { bg: list_get(colors, i), border: UiColor { r: 0, g: 0, b: 0, a: 0 }, border_width: 0.0 },
+        )
+        b = draw_cmd_text(
+            b,
+            UiRect { x: x + 12.0, y: r.y - 1.0, w: col_w - 16.0, h: 14.0 },
+            list_get(labels, i),
+            UiStyle { fg: theme.fg_muted, font_size: 9.0 },
+        )
+        b = draw_cmd_text(
+            b,
+            UiRect { x: x + 12.0, y: r.y + 11.0, w: col_w - 16.0, h: 14.0 },
+            to_str(list_get(counts, i)),
+            UiStyle { fg: theme.fg, font_size: 10.0, monospace: true, bold: true },
+        )
+        i = i + 1
+    }
+    return b
+}
+
+pub def draw_divider(buf: DrawBuffer, x: f64, y: f64, w: f64, color: UiColor) -> DrawBuffer effect ffi, alloc {
+    return draw_cmd_line(buf, UiRect { x: x, y: y, w: x + w, h: y }, color, 1.0, false)
+}
+
+pub def draw_kbd(buf: DrawBuffer, r: UiRect, text: str, theme: UiTheme) -> DrawBuffer effect ffi, alloc {
+    var b = draw_cmd_round_rect(
+        buf,
+        r,
+        4.0,
+        UiStyle { bg: theme.panel_alt, border: theme.border, border_width: 1.0 },
+    )
+    return draw_cmd_text(
+        b,
+        UiRect { x: r.x, y: r.y + (r.h - 14.0) * 0.5, w: r.w, h: 16.0 },
+        text,
+        UiStyle { fg: theme.fg_muted, font_size: 10.0, monospace: true, align: UiAlign.Center },
+    )
+}
+
+/// A small statistic tile with a value, label and optional sparkline.
+pub def draw_metric_tile(
+    buf: DrawBuffer,
+    r: UiRect,
+    value: str,
+    label: str,
+    series: list<f64>,
+    color: UiColor,
+    theme: UiTheme,
+) -> DrawBuffer effect ffi, alloc {
+    var b = draw_cmd_round_rect(
+        buf,
+        r,
+        8.0,
+        UiStyle { bg: theme.panel, border: theme.border, border_width: 1.0 },
+    )
+    b = draw_cmd_text(
+        b,
+        UiRect { x: r.x + 10.0, y: r.y + 8.0, w: r.w - 20.0, h: 26.0 },
+        value,
+        UiStyle { fg: color, font_size: 20.0, bold: true, monospace: true },
+    )
+    b = draw_cmd_text(
+        b,
+        UiRect { x: r.x + 10.0, y: r.y + 34.0, w: r.w - 20.0, h: 16.0 },
+        label,
+        UiStyle { fg: theme.fg_muted, font_size: 10.0 },
+    )
+    if list_len(series) > 1 {
+        val xs: list<f64> = list()
+        val ys: list<f64> = list()
+        var i = 0
+        while i < list_len(series) {
+            list_push(xs, r.x + 10.0 + (r.w - 20.0) * to_f64(i) / to_f64(list_len(series) - 1))
+            list_push(ys, r.y + r.h - 14.0 - (r.h - 58.0) * list_get(series, i))
+            i = i + 1
+        }
+        b = draw_cmd_polyline(b, xs, ys, color, mix_color(theme.bg, color, 0.10))
+    }
+    return b
+}
+
+pub def draw_glow(buf: DrawBuffer, cx: f64, cy: f64, radius: f64, color: UiColor, bg: UiColor, intensity: f64) -> DrawBuffer effect ffi, alloc {
+    var b = buf
+    var i = 3
+    while i > 0 {
+        val k = to_f64(i) / 3.0
+        b = draw_cmd_circle(
+            b,
+            cx,
+            cy,
+            radius * k,
+            UiStyle { bg: mix_color(bg, color, intensity * (1.0 - k) * 0.5), border: UiColor { r: 0, g: 0, b: 0, a: 0 }, border_width: 0.0 },
+        )
+        i = i - 1
+    }
+    return draw_cmd_circle(b, cx, cy, radius * 0.5, UiStyle { bg: color, border: UiColor { r: 0, g: 0, b: 0, a: 0 }, border_width: 0.0 })
+}
+
+pub def draw_spinner(buf: DrawBuffer, r: UiRect, clock: UiClock, color: UiColor, bg: UiColor) -> DrawBuffer effect ffi, alloc {
+    val cx = r.x + r.w * 0.5
+    val cy = r.y + r.h * 0.5
+    val rad = min(r.w, r.h) * 0.36
+    val spin = clock.now * 4.0
+    val xs: list<f64> = list()
+    val ys: list<f64> = list()
+    var i = 0
+    while i <= 14 {
+        val a = spin + to_f64(i) / 14.0 * 4.2
+        list_push(xs, cx + cos(a) * rad)
+        list_push(ys, cy + sin(a) * rad)
+        i = i + 1
+    }
+    return draw_cmd_polyline(buf, xs, ys, color, bg)
+}
+
+pub def draw_toast(buf: DrawBuffer, r: UiRect, text: str, color: UiColor, theme: UiTheme, alpha: f64) -> DrawBuffer effect ffi, alloc {
+    var b = draw_cmd_round_rect(
+        buf,
+        r,
+        8.0,
+        UiStyle { bg: mix_color(theme.bg, theme.panel, alpha), border: color, border_width: 1.0 },
+    )
+    b = draw_glow(b, r.x + 14.0, r.y + r.h * 0.5, 5.0, color, theme.bg, alpha)
+    return draw_cmd_text(
+        b,
+        UiRect { x: r.x + 28.0, y: r.y + (r.h - 16.0) * 0.5, w: r.w - 36.0, h: 18.0 },
+        text,
+        UiStyle { fg: theme.fg, font_size: 12.0, bold: true },
+    )
+}
+
+

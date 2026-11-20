@@ -1,0 +1,274 @@
+bring std.fs
+bring std.crypto
+bring "domain.iris"
+
+record DraftPkg {
+    active: bool,
+    name: str,
+    version: str,
+    source: str,
+    checksum: str,
+    in_deps: bool,
+    deps: list<str>,
+}
+
+def empty_draft(active: bool) -> DraftPkg effect alloc {
+    val ds: list<str> = list()
+    return DraftPkg {
+        active: active,
+        name: "",
+        version: "",
+        source: "",
+        checksum: "",
+        in_deps: false,
+        deps: ds,
+    }
+}
+
+def strip_toml_quotes(raw: str) -> str {
+    val s = trim(raw)
+    val n = len(s)
+    if n >= 2 && starts_with(s, "\"") && ends_with(s, "\"") {
+        return slice(s, 1, n - 1)
+    }
+    return s
+}
+
+def extract_kv_value(line: str, prefix: str) -> str {
+    val n = len(line)
+    val p = len(prefix)
+    if n <= p {
+        return ""
+    }
+    return strip_toml_quotes(slice(line, p, n))
+}
+
+def clean_dep_entry(line: str) -> str {
+    val no_comma = if ends_with(line, ",") {
+        slice(line, 0, len(line) - 1)
+    } else {
+        line
+    }
+    val inner = strip_toml_quotes(no_comma)
+    val n = len(inner)
+    var cut = n
+    for i in 0..n {
+        val sp = cut == n && str_index(inner, i) == 32
+        cut = if sp { i } else { cut }
+    }
+    return slice(inner, 0, cut)
+}
+
+def classify_origin(source_str: str) -> PackageOrigin {
+    if len(source_str) == 0 {
+        return PackageOrigin.WorkspaceLocal
+    }
+    if contains(source_str, "crates.io-index") {
+        return PackageOrigin.CratesIo
+    }
+    return PackageOrigin.OtherSource(source_str)
+}
+
+def flush_draft(d: DraftPkg) -> result<LockedPackage, AuditError> effect alloc {
+    val pkg_name = parse_package_name(d.name)?
+    val pkg_ver = parse_semver(d.version)?
+    val origin = classify_origin(d.source)
+    val csum = if len(d.checksum) > 0 {
+        val parsed = parse_sha256(d.checksum)?
+        some(parsed)
+    } else {
+        none()
+    }
+    return ok(
+        LockedPackage {
+            name: pkg_name,
+            version: pkg_ver,
+            origin: origin,
+            checksum: csum,
+            dep_count: list_len(d.deps),
+            deps: d.deps,
+        },
+    )
+}
+
+def step_dep_line(d: DraftPkg, line: str) -> DraftPkg effect alloc {
+    if line == "]" {
+        return DraftPkg {
+            active: d.active,
+            name: d.name,
+            version: d.version,
+            source: d.source,
+            checksum: d.checksum,
+            in_deps: false,
+            deps: d.deps,
+        }
+    }
+    val dep_name = clean_dep_entry(line)
+    val _ = if len(dep_name) > 0 { list_push(d.deps, dep_name) } else { 0 }
+    return d
+}
+
+def step_kv_line(d: DraftPkg, line: str) -> DraftPkg effect alloc {
+    val name = if starts_with(line, "name = ") { extract_kv_value(line, "name = ") } else { d.name }
+    val version = if starts_with(line, "version = ") {
+        extract_kv_value(line, "version = ")
+    } else {
+        d.version
+    }
+    val source = if starts_with(line, "source = ") {
+        extract_kv_value(line, "source = ")
+    } else {
+        d.source
+    }
+    val checksum = if starts_with(line, "checksum = ") {
+        extract_kv_value(line, "checksum = ")
+    } else {
+        d.checksum
+    }
+    val in_deps = line == "dependencies = ["
+    return DraftPkg {
+        active: d.active,
+        name: name,
+        version: version,
+        source: source,
+        checksum: checksum,
+        in_deps: in_deps,
+        deps: d.deps,
+    }
+}
+
+def list_has_str(xs: list<str>, target: str) -> bool effect alloc {
+    for i in 0..list_len(xs) {
+        if list_get(xs, i) == target {
+            return true
+        }
+    }
+    return false
+}
+
+def analyze_lock_packages(pkgs: list<LockedPackage>) -> (list<str>, i64, i64) effect alloc {
+    val seen: list<str> = list()
+    val dups: list<str> = list()
+    var ws_count = 0
+    var missing_csum = 0
+    for i in 0..list_len(pkgs) {
+        val p = list_get(pkgs, i)
+        val already_seen = list_has_str(seen, p.name.value)
+        val already_dup = list_has_str(dups, p.name.value)
+        val _ = if already_seen && !already_dup { list_push(dups, p.name.value) } else { 0 }
+        val _2 = if !already_seen { list_push(seen, p.name.value) } else { 0 }
+        val is_ws = when p.origin {
+            PackageOrigin.WorkspaceLocal => true,
+            _ => false,
+        }
+        val needs_csum = !is_ws && !is_some(p.checksum)
+        ws_count = if is_ws { ws_count + 1 } else { ws_count }
+        missing_csum = if needs_csum { missing_csum + 1 } else { missing_csum }
+    }
+    return (dups, ws_count, missing_csum)
+}
+
+/// Parse raw `Cargo.lock` TOML text into a typed `LockfileReport` with SHA-256 hash.
+pub def parse_cargo_lock_text(
+    path: str,
+    raw: str,
+) -> result<LockfileReport, AuditError> effect alloc, io {
+    val lock_sha = parse_sha256(hash_sha256(raw))?
+    val lines = split(raw, "\n")
+    val pkgs: list<LockedPackage> = list()
+    var draft = empty_draft(false)
+    for i in 0..list_len(lines) {
+        val line = trim(list_get(lines, i))
+        if line == "[[package]]" {
+            if draft.active {
+                val flushed = flush_draft(draft)?
+                val _ = list_push(pkgs, flushed)
+            }
+            draft = empty_draft(true)
+        } else if draft.active && draft.in_deps {
+            draft = step_dep_line(draft, line)
+        } else if draft.active && len(line) > 0 && !starts_with(line, "#") {
+            draft = step_kv_line(draft, line)
+        }
+    }
+    if draft.active {
+        val last_pkg = flush_draft(draft)?
+        val _ = list_push(pkgs, last_pkg)
+    }
+    val metrics = analyze_lock_packages(pkgs)
+    return ok(
+        LockfileReport {
+            path: path,
+            sha256: lock_sha,
+            packages: pkgs,
+            duplicate_names: metrics.0,
+            workspace_count: metrics.1,
+            missing_checksum_count: metrics.2,
+        },
+    )
+}
+
+/// Load and parse a `Cargo.lock` file from disk via strict filesystem effects.
+pub def load_cargo_lock(path: str) -> result<LockfileReport, AuditError> effect fs, io, alloc {
+    if !path_exists(path) {
+        return err(AuditError.LockfileReadFailed(concat("lockfile not found: ", path)))
+    }
+    val raw_res = read_text(path)
+    return when raw_res {
+        ok(raw) => parse_cargo_lock_text(path, raw),
+        err(msg) => err(AuditError.LockfileReadFailed(msg)),
+    }
+}
+
+/// Select up to `limit` registry-backed crates from a parsed lockfile report.
+pub def select_lock_candidates(
+    report: LockfileReport,
+    limit: i64,
+) -> list<LockedPackage> effect alloc {
+    val out: list<LockedPackage> = list()
+    val cap = if limit <= 0 { list_len(report.packages) } else { limit }
+    for i in 0..list_len(report.packages) {
+        val pkg = list_get(report.packages, i)
+        val is_crates_io = when pkg.origin {
+            PackageOrigin.CratesIo => true,
+            _ => false,
+        }
+        val _ = if is_crates_io && list_len(out) < cap { list_push(out, pkg) } else { 0 }
+    }
+    return out
+}
+
+/// Find the first locked package matching `target_name` in `report`, if present.
+pub def find_locked_crate(
+    report: LockfileReport,
+    target_name: str,
+) -> option<LockedPackage> effect alloc {
+    for i in 0..list_len(report.packages) {
+        val pkg = list_get(report.packages, i)
+        if pkg.name.value == target_name {
+            return some(pkg)
+        }
+    }
+    return none()
+}
+
+def test_parse_cargo_lock_real_shape() -> i64 effect alloc, io, throw {
+    val sample = "version = 3\n\n[[package]]\nname = \"alpha\"\nversion = \"1.2.3\"\nsource = \"registry+https://github.com/rust-lang/crates.io-index\"\nchecksum = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"\ndependencies = [\n \"beta 0.2.0\",\n]\n\n[[package]]\nname = \"alpha\"\nversion = \"2.0.0\"\nsource = \"registry+https://github.com/rust-lang/crates.io-index\"\nchecksum = \"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"\n\n[[package]]\nname = \"local_app\"\nversion = \"0.1.0\"\n"
+    val parsed = parse_cargo_lock_text("sample.lock", sample)
+    assert(is_ok(parsed))
+    val rep = unwrap(parsed)
+    assert(list_len(rep.packages) == 3)
+    assert(list_len(rep.duplicate_names) == 1)
+    assert(rep.workspace_count == 1)
+    assert(rep.missing_checksum_count == 0)
+    assert(is_some(find_locked_crate(rep, "alpha")))
+    assert(!is_some(find_locked_crate(rep, "missing")))
+    return 0
+}
+
+def test_reject_invalid_sha256_in_lockfile() -> i64 effect alloc, io, throw {
+    val bad = "[[package]]\nname = \"broken\"\nversion = \"0.1.0\"\nsource = \"registry+https://github.com/rust-lang/crates.io-index\"\nchecksum = \"not-hex\"\n"
+    val parsed = parse_cargo_lock_text("bad.lock", bad)
+    assert(is_err(parsed))
+    return 0
+}

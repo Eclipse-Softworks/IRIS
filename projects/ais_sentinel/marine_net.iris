@@ -1,0 +1,495 @@
+bring std.http
+bring std.json
+bring domain
+
+/// Live Open-Meteo Marine wave surface reading at a coordinate.
+pub record MarineReading {
+    wave_height_m: f64,
+    wave_dir_deg: f64,
+    wave_period_s: f64,
+    current_knots: f64 = 0.0,
+    sea_temp_c: f64 = 0.0,
+    observed_iso: str = "",
+    sheltered: bool,
+}
+
+/// Live Open-Meteo atmospheric wind and barometric reading at a coordinate.
+pub record WindReading {
+    wind_knots: f64,
+    gust_knots: f64,
+    wind_dir_deg: f64,
+    pressure_hpa: f64,
+    observed_iso: str,
+}
+
+/// Validated AIS encounter scenario with own-ship state and target contacts.
+pub record CorridorScenario {
+    corridor_name: str,
+    own_ship: VesselContact,
+    targets: list<VesselContact>,
+}
+
+/// Specification record for constructing a validated `VesselContact`.
+pub record ContactSpec {
+    label: str,
+    mmsi_raw: i64,
+    lat_deg: f64,
+    lon_deg: f64,
+    sog_kn: f64,
+    cog_deg: f64,
+    heading_deg: i64,
+    nav_status: NavStatus,
+}
+
+def extract_json_metric(body: str, path: str) -> option<f64> effect alloc {
+    val raw = trim(json_query(body, path))
+    if len(raw) == 0 || raw == "null" {
+        return none()
+    }
+    return safe_parse_float(raw)
+}
+
+def check_api_error(body: str) -> result<bool, AisError> effect alloc {
+    val err_flag = trim(json_query(body, "error"))
+    if err_flag == "true" {
+        val reason = trim(json_query(body, "reason"))
+        return err(AisError.NetworkFailed(f"Open-Meteo API error: {reason}"))
+    }
+    return ok(true)
+}
+
+/// Parse an Open-Meteo Marine `/v1/marine` JSON response into `MarineReading`.
+pub def parse_open_meteo_marine(body: str) -> result<MarineReading, AisError> effect alloc {
+    val _ok = check_api_error(body)?
+    val wh = extract_json_metric(body, "current.wave_height")
+    val wd = extract_json_metric(body, "current.wave_direction")
+    val wp = extract_json_metric(body, "current.wave_period")
+    val cur_kmh = extract_json_metric(body, "current.ocean_current_velocity")
+    val sst = extract_json_metric(body, "current.sea_surface_temperature")
+    val raw_iso = trim(json_query(body, "current.time"))
+    val obs_iso = if len(raw_iso) > 0 && raw_iso != "null" { raw_iso } else { "" }
+    val cur_kn = if is_some(cur_kmh) { unwrap(cur_kmh) / 1.852 } else { 0.0 }
+    val sea_c = if is_some(sst) { unwrap(sst) } else { 0.0 }
+    if is_none(wh) {
+        return ok(
+            MarineReading {
+                wave_height_m: 0.0,
+                wave_dir_deg: 0.0,
+                wave_period_s: 0.0,
+                current_knots: cur_kn,
+                sea_temp_c: sea_c,
+                observed_iso: obs_iso,
+                sheltered: true,
+            },
+        )
+    }
+    return ok(
+        MarineReading {
+            wave_height_m: unwrap(wh),
+            wave_dir_deg: if is_some(wd) { unwrap(wd) } else { 0.0 },
+            wave_period_s: if is_some(wp) { unwrap(wp) } else { 0.0 },
+            current_knots: cur_kn,
+            sea_temp_c: sea_c,
+            observed_iso: obs_iso,
+            sheltered: false,
+        },
+    )
+}
+
+/// Parse an Open-Meteo Forecast `/v1/forecast` JSON response into `WindReading`.
+pub def parse_open_meteo_wind(body: str) -> result<WindReading, AisError> effect alloc {
+    val _ok = check_api_error(body)?
+    val spd = extract_json_metric(body, "current.wind_speed_10m")
+    if is_none(spd) {
+        return err(AisError.ParseFailed("missing current.wind_speed_10m in forecast payload"))
+    }
+    val gst = extract_json_metric(body, "current.wind_gusts_10m")
+    val dir = extract_json_metric(body, "current.wind_direction_10m")
+    val pres = extract_json_metric(body, "current.surface_pressure")
+    val raw_iso = trim(json_query(body, "current.time"))
+    val obs_iso = if len(raw_iso) > 0 && raw_iso != "null" { raw_iso } else { "live-utc" }
+    return ok(
+        WindReading {
+            wind_knots: unwrap(spd),
+            gust_knots: if is_some(gst) { unwrap(gst) } else { unwrap(spd) },
+            wind_dir_deg: if is_some(dir) { unwrap(dir) } else { 0.0 },
+            pressure_hpa: if is_some(pres) { unwrap(pres) } else { 1013.25 },
+            observed_iso: obs_iso,
+        },
+    )
+}
+
+/// Build the Open-Meteo Marine live surface wave, current, and SST URL for `(lat, lon)`.
+pub def build_marine_url(lat: f64, lon: f64) -> str effect alloc {
+    val slat = to_str(lat)
+    val slon = to_str(lon)
+    return f"https://marine-api.open-meteo.com/v1/marine?latitude={slat}&longitude={slon}&current=wave_height,wave_direction,wave_period,ocean_current_velocity,ocean_current_direction,sea_surface_temperature"
+}
+
+/// Build the Open-Meteo Forecast live wind/pressure URL (in knots) for `(lat, lon)`.
+pub def build_wind_url(lat: f64, lon: f64) -> str effect alloc {
+    val slat = to_str(lat)
+    val slon = to_str(lon)
+    return f"https://api.open-meteo.com/v1/forecast?latitude={slat}&longitude={slon}&current=wind_speed_10m,wind_direction_10m,wind_gusts_10m,surface_pressure&wind_speed_unit=kn"
+}
+
+def fetch_http_body(url: str) -> result<str, AisError> effect net, alloc {
+    val req = HttpRequest {
+        method: "GET",
+        url: url,
+        headers: "Accept: application/json",
+        body: "",
+        timeout_ms: 8000,
+    }
+    return when http_send(req) {
+        ok(resp) => if resp.status < 200 || resp.status >= 300 {
+            err(AisError.NetworkFailed(f"HTTP {resp.status} from {url}"))
+        } else {
+            ok(resp.body)
+        },
+        err(msg) => err(AisError.NetworkFailed(f"HTTP transport error for {url}: {msg}")),
+    }
+}
+
+def combine_marine_and_wind(
+    lat: f64,
+    lon: f64,
+    marine_body: str,
+    wind_body: str,
+) -> result<(MarineWeather, str), AisError> effect alloc {
+    val m = parse_open_meteo_marine(marine_body)?
+    val w = parse_open_meteo_wind(wind_body)?
+    val note_text = if m.sheltered { "open-meteo-live (sheltered wave)" } else { "open-meteo-live" }
+    val obs_iso = if len(w.observed_iso) > 0 && w.observed_iso != "live-utc" {
+        w.observed_iso
+    } else if len(m.observed_iso) > 0 {
+        m.observed_iso
+    } else {
+        "live-utc"
+    }
+    val combined = MarineWeather {
+        lat: lat,
+        lon: lon,
+        wave_height_m: m.wave_height_m,
+        wave_dir_deg: m.wave_dir_deg,
+        wave_period_s: m.wave_period_s,
+        wind_knots: w.wind_knots,
+        gust_knots: w.gust_knots,
+        wind_dir_deg: w.wind_dir_deg,
+        pressure_hpa: w.pressure_hpa,
+        current_knots: m.current_knots,
+        sea_temp_c: m.sea_temp_c,
+        observed_iso: obs_iso,
+        live_ok: true,
+        note: note_text,
+    }
+    return ok((combined, obs_iso))
+}
+
+/// Fetch live wave, current, SST, wind, gust, and pressure conditions concurrently from Open-Meteo.
+pub def fetch_live_weather_pair(
+    lat: f64,
+    lon: f64,
+) -> result<(MarineWeather, str), AisError> effect net, alloc, thread {
+    val wind_url = build_wind_url(lat, lon)
+    val marine_ch: chan<result<str, AisError>> = channel(1)
+    spawn {
+        send(marine_ch, fetch_http_body(build_marine_url(lat, lon)))
+    }
+    val wind_res = fetch_http_body(wind_url)
+    val marine_res = recv(marine_ch)
+    val marine_body = marine_res?
+    val wind_body = wind_res?
+    return combine_marine_and_wind(lat, lon, marine_body, wind_body)
+}
+
+/// Fetch live `MarineWeather` without separate timestamp tuple.
+pub def fetch_live_marine_weather(
+    lat: f64,
+    lon: f64,
+) -> result<MarineWeather, AisError> effect net, alloc, thread {
+    val pair = fetch_live_weather_pair(lat, lon)?
+    return ok(pair.0)
+}
+
+/// Explicit offline fallback climatology used only when `--offline` is selected.
+pub def offline_baseline_weather(lat: f64, lon: f64) -> MarineWeather effect alloc {
+    return MarineWeather {
+        lat: lat,
+        lon: lon,
+        wave_height_m: 1.4,
+        wave_dir_deg: 245.0,
+        wave_period_s: 5.2,
+        wind_knots: 16.5,
+        gust_knots: 24.0,
+        wind_dir_deg: 240.0,
+        pressure_hpa: 1008.0,
+        current_knots: 0.6,
+        sea_temp_c: 9.4,
+        observed_iso: "offline-sim",
+        live_ok: false,
+        note: "offline-baseline",
+    }
+}
+
+/// Construct and validate a `VesselContact` from raw specification fields.
+pub def materialize_contact(spec: ContactSpec) -> result<VesselContact, AisError> effect alloc {
+    val mmsi = parse_mmsi(spec.mmsi_raw)?
+    val lat = parse_geo_lat(spec.lat_deg)?
+    val lon = parse_geo_lon(spec.lon_deg)?
+    val sog = parse_knots(spec.sog_kn)?
+    return ok(
+        VesselContact {
+            label: spec.label,
+            mmsi: mmsi,
+            msg_type: 1,
+            lat: lat,
+            lon: lon,
+            sog: sog,
+            cog_deg: spec.cog_deg,
+            heading_deg: spec.heading_deg,
+            nav_status: spec.nav_status,
+        },
+    )
+}
+
+def push_wp(
+    out: list<VesselContact>,
+    label: str,
+    mmsi_raw: i64,
+    pos: (f64, f64),
+    kin: (f64, f64, NavStatus),
+) -> result<bool, AisError> effect alloc {
+    val c = materialize_contact(
+        ContactSpec {
+            label: label,
+            mmsi_raw: mmsi_raw,
+            lat_deg: pos.0,
+            lon_deg: pos.1,
+            sog_kn: kin.0,
+            cog_deg: kin.1,
+            heading_deg: kin.1 to i64,
+            nav_status: kin.2,
+        },
+    )?
+    list_push(out, c)
+    return ok(true)
+}
+
+def make_own(
+    label: str,
+    mmsi: i64,
+    pos: (f64, f64),
+    kin: (f64, f64, NavStatus),
+) -> result<VesselContact, AisError> effect alloc {
+    return materialize_contact(
+        ContactSpec {
+            label: label,
+            mmsi_raw: mmsi,
+            lat_deg: pos.0,
+            lon_deg: pos.1,
+            sog_kn: kin.0,
+            cog_deg: kin.1,
+            heading_deg: kin.1 to i64,
+            nav_status: kin.2,
+        },
+    )
+}
+
+def gulf_of_finland_scenario() -> result<CorridorScenario, AisError> effect alloc {
+    val own = make_own(
+        "PV-Turva (Own)",
+        230001000,
+        (60.05, 24.95),
+        (14.0, 245.0, NavStatus.UnderWayEngine),
+    )?
+    val targets: list<VesselContact> = list()
+    val _1 = push_wp(
+        targets,
+        "M/V Finnmaid",
+        230992750,
+        (60.012, 24.835),
+        (16.5, 62.0, NavStatus.UnderWayEngine),
+    )?
+    val _2 = push_wp(
+        targets,
+        "M/T Nordic Sky",
+        230645000,
+        (59.935, 24.48),
+        (12.8, 258.0, NavStatus.ConstrainedDraught),
+    )?
+    val _3 = push_wp(
+        targets,
+        "M/V Kotka Star",
+        265541000,
+        (60.195, 26.82),
+        (11.2, 210.0, NavStatus.UnderWayEngine),
+    )?
+    val _4 = push_wp(
+        targets,
+        "R/V Aranda",
+        230120000,
+        (59.972, 25.61),
+        (9.4, 85.0, NavStatus.RestrictedManeuver),
+    )?
+    return ok(
+        CorridorScenario { corridor_name: "gulf_of_finland", own_ship: own, targets: targets },
+    )
+}
+
+def dover_strait_scenario() -> result<CorridorScenario, AisError> effect alloc {
+    val own = make_own(
+        "UKCG Guardian (Own)",
+        235008200,
+        (51.08, 1.48),
+        (15.0, 220.0, NavStatus.UnderWayEngine),
+    )?
+    val targets: list<VesselContact> = list()
+    val _1 = push_wp(
+        targets,
+        "M/V Kent Crossing",
+        235092100,
+        (51.022, 1.425),
+        (18.2, 38.0, NavStatus.UnderWayEngine),
+    )?
+    val _2 = push_wp(
+        targets,
+        "M/T Rhine Carrier",
+        244710000,
+        (51.185, 1.72),
+        (13.5, 215.0, NavStatus.ConstrainedDraught),
+    )?
+    val _3 = push_wp(
+        targets,
+        "M/V Elbe Express",
+        211342000,
+        (50.945, 1.31),
+        (14.8, 52.0, NavStatus.UnderWayEngine),
+    )?
+    return ok(CorridorScenario { corridor_name: "dover_strait", own_ship: own, targets: targets })
+}
+
+def skagerrak_scenario() -> result<CorridorScenario, AisError> effect alloc {
+    val own = make_own(
+        "KV Sortland (Own)",
+        257004100,
+        (57.86, 10.52),
+        (16.0, 238.0, NavStatus.UnderWayEngine),
+    )?
+    val targets: list<VesselContact> = list()
+    val _1 = push_wp(
+        targets,
+        "M/V Oslo Viking",
+        258742000,
+        (57.792, 10.69),
+        (17.5, 192.0, NavStatus.UnderWayEngine),
+    )?
+    val _2 = push_wp(
+        targets,
+        "M/T Bohus Trader",
+        266118000,
+        (57.92, 11.18),
+        (12.0, 245.0, NavStatus.ConstrainedDraught),
+    )?
+    val _3 = push_wp(
+        targets,
+        "M/V Jutland Link",
+        219442000,
+        (57.48, 9.45),
+        (15.2, 74.0, NavStatus.UnderWayEngine),
+    )?
+    return ok(CorridorScenario { corridor_name: "skagerrak", own_ship: own, targets: targets })
+}
+
+def aland_sea_scenario() -> result<CorridorScenario, AisError> effect alloc {
+    val own = make_own(
+        "M/S Aland Guard (Own)",
+        230982100,
+        (59.95, 19.50),
+        (14.5, 342.0, NavStatus.UnderWayEngine),
+    )?
+    val targets: list<VesselContact> = list()
+    val _1 = push_wp(
+        targets,
+        "M/S Viking Grace",
+        230629000,
+        (59.985, 19.62),
+        (19.2, 165.0, NavStatus.UnderWayEngine),
+    )?
+    val _2 = push_wp(
+        targets,
+        "M/T Mariehamn Spirit",
+        230645000,
+        (59.89, 19.38),
+        (12.4, 24.0, NavStatus.ConstrainedDraught),
+    )?
+    val _3 = push_wp(
+        targets,
+        "M/V Bothnia Trader",
+        265712000,
+        (60.03, 19.44),
+        (13.8, 178.0, NavStatus.UnderWayEngine),
+    )?
+    return ok(CorridorScenario { corridor_name: "aland_sea", own_ship: own, targets: targets })
+}
+
+/// Build validated maritime TSS corridor waypoints for the selected `CorridorKind`.
+pub def corridor_scenario(kind: CorridorKind) -> result<CorridorScenario, AisError> effect alloc {
+    return when kind {
+        CorridorKind.GulfOfFinland => gulf_of_finland_scenario(),
+        CorridorKind.AlandSea => aland_sea_scenario(),
+        CorridorKind.DoverStrait => dover_strait_scenario(),
+        CorridorKind.Skagerrak => skagerrak_scenario(),
+        CorridorKind.CustomCoord => gulf_of_finland_scenario(),
+    }
+}
+
+/// Synthesize a nearby patrol own-ship contact relative to a custom target `(lat, lon)`.
+pub def custom_own_ship(
+    target_lat: GeoLat,
+    target_lon: GeoLon,
+) -> result<VesselContact, AisError> effect alloc {
+    val own_lat = if target_lat.deg + 0.04 <= 90.0 {
+        target_lat.deg + 0.04
+    } else {
+        target_lat.deg - 0.04
+    }
+    val own_lon = if target_lon.deg + 0.04 <= 180.0 {
+        target_lon.deg + 0.04
+    } else {
+        target_lon.deg - 0.04
+    }
+    return materialize_contact(
+        ContactSpec {
+            label: "AIS-Sentinel Patrol",
+            mmsi_raw: 230009999,
+            lat_deg: own_lat,
+            lon_deg: own_lon,
+            sog_kn: 12.0,
+            cog_deg: 225.0,
+            heading_deg: 225,
+            nav_status: NavStatus.UnderWayEngine,
+        },
+    )
+}
+
+def test_parse_open_meteo_marine_and_wind() -> i64 effect alloc, throw {
+    val m_json = "{\"latitude\":60.15,\"current\":{\"time\":\"2026-11-15T00:00\",\"wave_height\":0.85,\"wave_direction\":242,\"wave_period\":4.1,\"ocean_current_velocity\":1.852,\"sea_surface_temperature\":8.6}}"
+    val w_json = "{\"latitude\":60.15,\"current\":{\"time\":\"2026-11-15T00:00\",\"wind_speed_10m\":14.2,\"wind_direction_10m\":238,\"wind_gusts_10m\":21.5,\"surface_pressure\":1004.8}}"
+    val mr = parse_open_meteo_marine(m_json)
+    val wr = parse_open_meteo_wind(w_json)
+    assert(is_ok(mr))
+    assert(is_ok(wr))
+    val m = unwrap(mr)
+    val w = unwrap(wr)
+    assert(!m.sheltered && m.wave_height_m > 0.8 && m.wave_period_s > 4.0)
+    assert(m.current_knots > 0.99 && m.current_knots < 1.01 && m.sea_temp_c > 8.5)
+    assert(m.observed_iso == "2026-11-15T00:00")
+    assert(w.wind_knots > 14.0 && w.gust_knots > 21.0 && w.pressure_hpa > 1004.0)
+    val sheltered_json = "{\"current\":{\"wave_height\":null,\"wave_direction\":null}}"
+    val sr = parse_open_meteo_marine(sheltered_json)
+    assert(is_ok(sr) && unwrap(sr).sheltered)
+    val aland = corridor_scenario(CorridorKind.AlandSea)
+    assert(is_ok(aland) && len(unwrap(aland).targets) == 3)
+    return 0
+}

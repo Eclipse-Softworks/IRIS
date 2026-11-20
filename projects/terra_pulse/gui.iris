@@ -1,0 +1,1566 @@
+bring std.math
+bring std.time
+bring std.ui
+bring "domain.iris"
+bring "analytics.iris"
+bring "telemetry.iris"
+bring "parser.iris"
+bring "store.iris"
+bring "render.iris"
+bring "gui_theme.iris"
+bring "gui_state.iris"
+bring "gui_map.iris"
+
+/// Kind discriminator for asynchronous worker messages sent to the desktop UI loop.
+pub choice WorkerReplyKind {
+    LiveSnapshot,
+    ProbedWeather,
+    BundleExported,
+    WorkerError,
+}
+
+/// Typed asynchronous response envelope sent from background worker to the UI thread.
+pub record WorkerReply {
+    kind: WorkerReplyKind = WorkerReplyKind.WorkerError,
+    snap: ObservatorySnapshot,
+    delta: HistoryDelta,
+    runs: list<StoredRunSummary>,
+    weather: SurfaceWeather,
+    stage1_ms: i64 = 0,
+    stage2_ms: i64 = 0,
+    note: str = "",
+}
+
+def make_worker_reply_base(kind: WorkerReplyKind, note: str) -> WorkerReply effect alloc {
+    val empty_runs: list<StoredRunSummary> = list()
+    return WorkerReply {
+        kind: kind,
+        snap: empty_observatory_snapshot(),
+        delta: HistoryDelta {
+            prior_runs: 0,
+            stored_events_total: 0,
+            new_events_count: 0,
+            has_previous: false,
+            prev_kp: 0.0,
+            prev_gr_b: 1.0,
+            prev_max_mag: 0.0,
+        },
+        runs: empty_runs,
+        weather: SurfaceWeather {
+            label: "",
+            lat: 0.0,
+            lon: 0.0,
+            temp_c: 0.0,
+            pressure_hpa: 0.0,
+            wind_kmh: 0.0,
+        },
+        note: note,
+    }
+}
+
+record WorkerRuntimeCfg {
+    feed_slug: str,
+    db_path: str,
+    svg_path: str,
+    json_path: str,
+    enable_db: bool,
+    auto_sync: bool,
+}
+
+record GuiEventPick {
+    ui_st: UiState,
+    pick_id: str,
+    hover_id: str,
+    hover_lon: f64,
+    hover_lat: f64,
+    in_map: bool,
+    wheel_steps: f64,
+}
+
+record DesktopGuiEnv {
+    lib: NativeUiLib,
+    tick_ch: chan<WorkerReply>,
+    cmd_ch: chan<GuiWorkerCmd>,
+    stop_ch: chan<i64>,
+}
+
+record DesktopGuiCtx {
+    app: TelemetryGuiState,
+    ui_st: UiState,
+    buf: DrawBuffer,
+    last_w: f64 = -1.0,
+    last_h: f64 = -1.0,
+    rendered: bool = false,
+    running: bool = true,
+}
+
+def build_header_bar(tree: UiTree, st: TelemetryGuiState) -> i64 effect alloc {
+    val a = st.snap.analytics
+    val sync_txt = if st.loading {
+        "SYNCING..."
+    } else if st.tick > 0 {
+        f"POLL #{st.tick}"
+    } else {
+        "INIT"
+    }
+    val run_txt = f"STORED {st.delta.stored_events_total} (+{st.delta.new_events_count})"
+    val kids = list(
+        tp_section_title(tree, "hdr_brand", "TERRA PULSE  |  Planetary Telemetry Console"),
+        ui_badge(
+            tree,
+            "hdr_alert",
+            alert_severity_label(a.overall_alert),
+            tp_alert_tone(a.overall_alert),
+        ),
+        ui_badge(tree, "hdr_feed", st.feed_slug, UiTone.Neutral),
+        ui_badge(tree, "hdr_sync", sync_txt, UiTone.Neutral),
+        ui_badge(tree, "hdr_db", run_txt, UiTone.Neutral),
+        ui_spacer(tree, 1.0, 10.0, 4.0),
+        ui_toggle(tree, "tog_auto_sync", "Auto Sync", st.auto_sync, UiTone.Secondary),
+        tp_button(tree, "btn_export", "Export SVG/JSON", "act_export_bundle", false),
+        tp_cta_button(
+            tree,
+            "btn_refresh",
+            if st.loading { "Syncing..." } else { "Refresh Live" },
+            "act_refresh_now",
+        ),
+    )
+    val row = ui_row(tree, "hdr_row", UiStyle { gap: 8.0, align: UiAlign.Center }, kids)
+    return ui_card(
+        tree,
+        "hdr_card",
+        UiStyle {
+            bg: tree.theme.panel,
+            border: tree.theme.border,
+            border_width: 1.0,
+            padding: 9.0,
+            min_h: 52.0,
+        },
+        list(row),
+    )
+}
+
+def build_kpi_ribbon(tree: UiTree, st: TelemetryGuiState) -> i64 effect alloc {
+    val a = st.snap.analytics
+    val iss = st.snap.iss
+    val top_place = if list_len(st.snap.events) > 0 && a.strongest_idx < list_len(st.snap.events) {
+        tp_fit_width(list_get(st.snap.events, a.strongest_idx).place, 24)
+    } else {
+        "Awaiting USGS feed"
+    }
+    val k1 = tp_kpi_card(
+        tree,
+        "kpi_mag",
+        "PEAK SEISMIC",
+        if a.total_quakes > 0 { f"M {format_fixed_2(a.max_magnitude)}" } else { "--" },
+        f"{a.total_quakes} events ({a.shallow_count}S/{a.intermediate_count}M/{a.deep_count}D)",
+    )
+    val k2 = tp_kpi_card(
+        tree,
+        "kpi_energy",
+        "RADIATED ENERGY",
+        if a.total_quakes > 0 { f"{format_fixed_2(a.total_energy_log10_j)} log10 J" } else { "--" },
+        top_place,
+    )
+    val k3 = tp_kpi_card(
+        tree,
+        "kpi_kp",
+        "GEOMAGNETIC KP / AD",
+        f"Kp {format_fixed_2(a.kp_latest)}  (Max {format_fixed_1(a.kp_peak)})",
+        f"GR b={format_fixed_2(a.gr_fit.b_value)}  R^2={format_fixed_2(a.gr_fit.r2_score)}",
+    )
+    val k4 = tp_kpi_card(
+        tree,
+        "kpi_iss",
+        "ISS EPHEMERIS",
+        if iss.timestamp_s > 0 { f"{format_fixed_1(iss.altitude_km)} km" } else { "--" },
+        if iss.timestamp_s > 0 {
+            f"{iss.visibility} | Near {format_fixed_0(a.closest_iss_km)} km"
+        } else {
+            "Awaiting orbital vector"
+        },
+    )
+    return ui_row(tree, "kpi_row", UiStyle { gap: 8.0, min_h: 72.0 }, list(k1, k2, k3, k4))
+}
+
+def build_viewport_toolbar(tree: UiTree, st: TelemetryGuiState) -> i64 effect alloc {
+    val views = list(
+        tp_button(
+            tree,
+            "tab_map",
+            "Global Map",
+            "act_view_map",
+            workspace_view_eq(st.active_view, WorkspaceView.GlobalMap),
+        ),
+        tp_button(
+            tree,
+            "tab_ad",
+            "AD Regression",
+            "act_view_ad",
+            workspace_view_eq(st.active_view, WorkspaceView.AdFitView),
+        ),
+        tp_button(
+            tree,
+            "tab_kp",
+            "Kp & Archive",
+            "act_view_kp",
+            workspace_view_eq(st.active_view, WorkspaceView.GeomagneticView),
+        ),
+        tp_button(
+            tree,
+            "tab_wx",
+            "Atmosphere",
+            "act_view_wx",
+            workspace_view_eq(st.active_view, WorkspaceView.AtmosphericView),
+        ),
+        ui_spacer(tree, 1.0, 8.0, 4.0),
+        tp_button(tree, "btn_zout", "-", "act_zoom_out", false),
+        tp_button(tree, "btn_zrst", "Reset", "act_map_reset", false),
+        tp_button(tree, "btn_zin", "+", "act_zoom_in", false),
+        tp_button(tree, "btn_f_iss", "ISS", "act_focus_iss", false),
+        tp_button(tree, "btn_f_eq", "Focus EQ", "act_focus_eq", false),
+    )
+    return ui_row(tree, "vp_toolbar", UiStyle { gap: 6.0, align: UiAlign.Center }, views)
+}
+
+def build_layer_toggles_row(tree: UiTree, st: TelemetryGuiState) -> i64 effect alloc {
+    val m = st.map
+    val cursor_txt = if st.hover_in_map {
+        f"Cursor ({format_fixed_2(st.hover_lat)}, {format_fixed_2(st.hover_lon)})"
+    } else {
+        f"View Center ({format_fixed_1(m.center_lat)}, {format_fixed_1(m.center_lon)})"
+    }
+    val kids = list(
+        ui_toggle(tree, "tog_arcs", "Arcs", m.show_arcs, UiTone.Secondary),
+        ui_toggle(tree, "tog_footprint", "ISS Ring", m.show_footprint, UiTone.Secondary),
+        ui_toggle(tree, "tog_wx", "Weather", m.show_weather, UiTone.Secondary),
+        ui_toggle(tree, "tog_labels", "Labels", m.show_labels, UiTone.Secondary),
+        ui_spacer(tree, 1.0, 6.0, 4.0),
+        tp_muted_text(tree, "vp_cursor_lbl", cursor_txt),
+    )
+    return ui_row(tree, "vp_layers_row", UiStyle { gap: 10.0, align: UiAlign.Center }, kids)
+}
+
+def build_viewport_card(tree: UiTree, st: TelemetryGuiState) -> i64 effect alloc {
+    val bar = build_viewport_toolbar(tree, st)
+    val layers = build_layer_toggles_row(tree, st)
+    val empty_kids: list<i64> = list()
+    val canvas_slot = ui_card(
+        tree,
+        "map_viewport",
+        UiStyle {
+            bg: rgb(14, 18, 25),
+            border: tree.theme.border,
+            border_width: 1.0,
+            padding: 2.0,
+            flex: 1.0,
+            min_h: 320.0,
+        },
+        empty_kids,
+    )
+    val latency_txt = if st.tick > 0 {
+        f"S1 {st.last_stage1_ms}ms  S2 {st.last_stage2_ms}ms  |  {st.status_note}"
+    } else {
+        st.status_note
+    }
+    val footer = tp_muted_text(tree, "vp_status_footer", tp_fit_width(latency_txt, 92))
+    return ui_card(
+        tree,
+        "vp_outer_card",
+        UiStyle {
+            bg: tree.theme.panel,
+            border: tree.theme.border,
+            border_width: 1.0,
+            padding: 10.0,
+            gap: 8.0,
+            flex: 1.0,
+        },
+        list(bar, layers, canvas_slot, footer),
+    )
+}
+
+def build_feed_buttons_row(tree: UiTree, feed_slug: str) -> i64 effect alloc {
+    val lbl = tp_muted_text(tree, "flt_feed_lbl", "Feed:  ")
+    return ui_row(
+        tree,
+        "flt_feeds_row",
+        UiStyle { gap: 6.0, align: UiAlign.Center },
+        list(
+            lbl,
+            tp_button(tree, "fd_all", "all_day", "act_feed_all_day", feed_slug == "all_day"),
+            tp_button(tree, "fd_25d", "2.5_day", "act_feed_2.5_day", feed_slug == "2.5_day"),
+            tp_button(tree, "fd_25w", "2.5_week", "act_feed_2.5_week", feed_slug == "2.5_week"),
+            tp_button(tree, "fd_45w", "4.5_week", "act_feed_4.5_week", feed_slug == "4.5_week"),
+            ui_spacer(tree, 1.0, 2.0, 2.0),
+        ),
+    )
+}
+
+def build_depth_buttons_row(tree: UiTree, depth_filter: DepthFilter) -> i64 effect alloc {
+    val lbl = tp_muted_text(tree, "flt_dep_lbl", "Depth:")
+    return ui_row(
+        tree,
+        "flt_depth_row",
+        UiStyle { gap: 6.0, align: UiAlign.Center },
+        list(
+            lbl,
+            tp_button(
+                tree,
+                "df_all",
+                "All",
+                "act_flt_all",
+                depth_filter_eq(depth_filter, DepthFilter.AllRegimes),
+            ),
+            tp_button(
+                tree,
+                "df_sh",
+                "Shallow",
+                "act_flt_shallow",
+                depth_filter_eq(depth_filter, DepthFilter.ShallowOnly),
+            ),
+            tp_button(
+                tree,
+                "df_md",
+                "Mid",
+                "act_flt_mid",
+                depth_filter_eq(depth_filter, DepthFilter.MidOnly),
+            ),
+            tp_button(
+                tree,
+                "df_dp",
+                "Deep",
+                "act_flt_deep",
+                depth_filter_eq(depth_filter, DepthFilter.DeepOnly),
+            ),
+            ui_spacer(tree, 1.0, 2.0, 2.0),
+        ),
+    )
+}
+
+def build_filter_panel(tree: UiTree, st: TelemetryGuiState) -> i64 effect alloc {
+    val feeds = build_feed_buttons_row(tree, st.feed_slug)
+    val depths = build_depth_buttons_row(tree, st.depth_filter)
+    val slider = ui_slider_range(
+        tree,
+        "sldr_min_mag",
+        f"Minimum Magnitude Filter (M >= {format_fixed_1(st.min_mag)})",
+        st.min_mag,
+        UiSize { w: 0.0, h: 7.0 },
+    )
+    val search_row = ui_row(
+        tree,
+        "flt_search_row",
+        UiStyle { gap: 6.0, align: UiAlign.Center },
+        list(
+            ui_text_input(
+                tree,
+                "inp_search",
+                st.search_text,
+                "Filter place, USGS ID, magType...",
+                UiStyle { flex: 1.0, min_h: 30.0 },
+            ),
+            tp_button(tree, "btn_clr_search", "Clear", "act_clear_search", false),
+        ),
+    )
+    return ui_card(
+        tree,
+        "flt_card",
+        UiStyle {
+            bg: tree.theme.panel,
+            border: tree.theme.border,
+            border_width: 1.0,
+            padding: 10.0,
+            gap: 6.0,
+        },
+        list(feeds, depths, slider, search_row),
+    )
+}
+
+def format_catalog_row_text(ev: SeismicEvent) -> str effect alloc, throw {
+    val mag_s = tp_fit_width(f"M{format_fixed_1(ev.magnitude)}", 6)
+    val dep_s = tp_fit_width(f"{format_fixed_0(ev.coord.depth_km)}km", 6)
+    val plc_s = tp_fit_width(ev.place, 24)
+    val tim_s = tp_short_time_utc(ev.time_utc)
+    return f"{mag_s} {dep_s} {plc_s} {tim_s}"
+}
+
+def build_catalog_header_row(
+    tree: UiTree,
+    shown_cnt: i64,
+    total_cnt: i64,
+    page: i64,
+    total_pages: i64,
+) -> i64 effect alloc {
+    return ui_row(
+        tree,
+        "cat_top_row",
+        UiStyle { gap: 6.0, align: UiAlign.Center },
+        list(
+            tp_section_title(tree, "cat_title", f"SEISMIC CATALOG ({shown_cnt}/{total_cnt})"),
+            ui_spacer(tree, 1.0, 4.0, 4.0),
+            tp_button(tree, "btn_prev_p", "<", "act_page_prev", false),
+            tp_muted_text(tree, "cat_page_lbl", f"{page + 1}/{total_pages}"),
+            tp_button(tree, "btn_next_p", ">", "act_page_next", false),
+        ),
+    )
+}
+
+def append_catalog_rows(
+    tree: UiTree,
+    st: TelemetryGuiState,
+    idxs: list<i64>,
+    bounds: (i64, i64),
+    rows: list<i64>,
+) -> i64 effect alloc, throw {
+    if list_len(idxs) == 0 {
+        return 0
+    }
+    for k in bounds.0..bounds.1 {
+        if k < 0 || k >= list_len(idxs) {
+            continue
+        }
+        val ev = list_get(st.snap.events, list_get(idxs, k))
+        val is_sel = ev.event_id == st.selected_event_id
+        val row_node = ui_table_row_selectable(
+            tree,
+            f"sel_eq_{ev.event_id}",
+            format_catalog_row_text(ev),
+            is_sel,
+            if is_sel { UiTone.Secondary } else { tp_event_row_tone(ev) },
+        )
+        val _ = list_push(rows, row_node)
+    }
+    if list_len(idxs) == 0 {
+        val _ = list_push(
+            rows,
+            tp_muted_text(tree, "cat_empty_lbl", "No seismic events match active filter criteria."),
+        )
+    }
+    return 0
+}
+
+def build_catalog_panel(tree: UiTree, st: TelemetryGuiState) -> i64 effect alloc, throw {
+    val idxs = filtered_event_indices(st)
+    val total = list_len(idxs)
+    val page_size = 8
+    val total_pages = if total == 0 { 1 } else { ((total - 1) / page_size) + 1 }
+    val page = if st.table_page >= total_pages {
+        total_pages - 1
+    } else if st.table_page < 0 {
+        0
+    } else {
+        st.table_page
+    }
+    val start_i = page * page_size
+    val end_i = if start_i + page_size < total { start_i + page_size } else { total }
+    val hdr_row = build_catalog_header_row(tree, total, list_len(st.snap.events), page, total_pages)
+    val rows: list<
+        i64
+    > = list(
+        hdr_row,
+        ui_table_header(
+            tree,
+            "cat_col_hdr",
+            "MAG    DEPTH  LOCATION                 UTC     ",
+            UiStyle {},
+        ),
+    )
+    val _ = append_catalog_rows(tree, st, idxs, (start_i, end_i), rows)
+    return ui_card(
+        tree,
+        "cat_card",
+        UiStyle {
+            bg: tree.theme.panel,
+            border: tree.theme.border,
+            border_width: 1.0,
+            padding: 10.0,
+            gap: 4.0,
+            flex: 1.0,
+        },
+        rows,
+    )
+}
+
+def build_inspector_detail_rows(
+    tree: UiTree,
+    st: TelemetryGuiState,
+    ev: SeismicEvent,
+    hdr: i64,
+) -> list<i64> effect alloc {
+    val d_iss = if st.snap.iss.timestamp_s > 0 {
+        haversine_km(
+            ev.coord.lat_deg,
+            ev.coord.lon_deg,
+            st.snap.iss.latitude,
+            st.snap.iss.longitude,
+        )
+    } else {
+        0.0
+    }
+    val reg = depth_regime_label(depth_regime(ev.coord.depth_km))
+    val l1 = f"{ev.event_id}  |  {tp_fit_width(ev.place, 34)}"
+    val l2 = f"M{format_fixed_2(ev.magnitude)} ({ev.mag_type})  |  ({format_fixed_2(ev.coord.lat_deg)}, {format_fixed_2(ev.coord.lon_deg)})  |  {format_fixed_1(ev.coord.depth_km)} km [{reg}]"
+    val l3 = f"Energy: {format_fixed_2(seismic_log10_energy_j(ev.magnitude))} log10 J   |   Stn={ev.station_count}  Gap={format_fixed_0(ev.gap_deg)} deg"
+    val l4 = f"ISS Distance: {format_fixed_1(d_iss)} km   |   Observed: {ev.time_utc}"
+    return list(
+        hdr,
+        tp_mono_text(tree, "insp_l1", l1),
+        tp_mono_text(tree, "insp_l2", l2),
+        tp_muted_text(tree, "insp_l3", l3),
+        tp_muted_text(tree, "insp_l4", l4),
+    )
+}
+
+def build_inspector_panel(tree: UiTree, st: TelemetryGuiState) -> i64 effect alloc {
+    val hdr = ui_row(
+        tree,
+        "insp_hdr_row",
+        UiStyle { gap: 6.0, align: UiAlign.Center },
+        list(
+            tp_section_title(tree, "insp_title", "ENTITY INSPECTOR"),
+            ui_spacer(tree, 1.0, 4.0, 4.0),
+            tp_button(tree, "btn_insp_focus", "Center Map", "act_focus_eq", false),
+            tp_cta_button(
+                tree,
+                "btn_probe_wx",
+                if st.weather_probing { "Probing..." } else { "Probe Weather" },
+                "act_probe_wx",
+            ),
+        ),
+    )
+    val lines = when resolve_selected_event_idx(st) {
+        some(idx) => build_inspector_detail_rows(tree, st, list_get(st.snap.events, idx), hdr),
+        none => list(
+            hdr,
+            tp_muted_text(
+                tree,
+                "insp_empty",
+                "Select an event on the Global Map or Catalog table.",
+            ),
+        ),
+    }
+    return ui_card(
+        tree,
+        "insp_card",
+        UiStyle {
+            bg: tree.theme.panel,
+            border: tree.theme.border,
+            border_width: 1.0,
+            padding: 10.0,
+            gap: 4.0,
+            min_h: 138.0,
+        },
+        lines,
+    )
+}
+
+/// Build the full TerraPulse enterprise desktop widget hierarchy inside `tree`.
+pub def build_terra_pulse_tree(st: TelemetryGuiState, tree: UiTree) -> i64 effect alloc, throw {
+    val hdr = build_header_bar(tree, st)
+    val kpis = build_kpi_ribbon(tree, st)
+    val vp = build_viewport_card(tree, st)
+    val left_col = ui_col(
+        tree,
+        "left_col",
+        UiStyle { gap: 8.0, flex: 1.55, align: UiAlign.Stretch },
+        list(kpis, vp),
+    )
+    val flt = build_filter_panel(tree, st)
+    val cat = build_catalog_panel(tree, st)
+    val insp = build_inspector_panel(tree, st)
+    val right_col = ui_col(
+        tree,
+        "right_col",
+        UiStyle { gap: 8.0, flex: 1.0, min_w: 420.0, max_w: 500.0, align: UiAlign.Stretch },
+        list(flt, cat, insp),
+    )
+    val body = ui_row(
+        tree,
+        "body_split",
+        UiStyle { gap: 10.0, flex: 1.0, align: UiAlign.Stretch },
+        list(left_col, right_col),
+    )
+    return ui_col(
+        tree,
+        "tp_root",
+        UiStyle { padding: 10.0, gap: 8.0, align: UiAlign.Stretch },
+        list(hdr, body),
+    )
+}
+
+record WorkerLoopState {
+    cfg: WorkerRuntimeCfg,
+    last_snap: ObservatorySnapshot,
+    last_delta: HistoryDelta,
+    force_now: bool,
+    stop: bool,
+    elapsed_ms: i64,
+}
+
+def make_worker_error_reply(err_val: TelemetryError) -> WorkerReply effect alloc {
+    return make_worker_reply_base(WorkerReplyKind.WorkerError, format_telemetry_error(err_val))
+}
+
+def persist_worker_snapshot(
+    wcfg: WorkerRuntimeCfg,
+    snap: ObservatorySnapshot,
+) -> (HistoryDelta, list<StoredRunSummary>) effect ffi, alloc, time {
+    val a = snap.analytics
+    val empty_runs: list<StoredRunSummary> = list()
+    val fallback = HistoryDelta {
+        prior_runs: 0,
+        stored_events_total: list_len(snap.events),
+        new_events_count: list_len(snap.events),
+        has_previous: false,
+        prev_kp: a.kp_latest,
+        prev_gr_b: a.gr_fit.b_value,
+        prev_max_mag: a.max_magnitude,
+    }
+    if !wcfg.enable_db {
+        return (fallback, empty_runs)
+    }
+    val delta = when persist_observatory_run(wcfg.db_path, snap) {
+        ok(d) => d,
+        err(_) => fallback,
+    }
+    val recent = when fetch_recent_runs(wcfg.db_path, 6) {
+        ok(r) => r,
+        err(_) => empty_runs,
+    }
+    return (delta, recent)
+}
+
+def clone_telemetry_error_detached(e: TelemetryError) -> TelemetryError {
+    return when e {
+        TelemetryError.Transport(m) => TelemetryError.Transport(clone_str_detached(m)),
+        TelemetryError.HttpCode(c, m) => TelemetryError.HttpCode(c, clone_str_detached(m)),
+        TelemetryError.MalformedPayload(m) => {
+            TelemetryError.MalformedPayload(clone_str_detached(m))
+        },
+        TelemetryError.Storage(m) => TelemetryError.Storage(clone_str_detached(m)),
+    }
+}
+
+def zero_surface_weather() -> SurfaceWeather {
+    return SurfaceWeather {
+        label: "",
+        lat: 0.0,
+        lon: 0.0,
+        temp_c: 0.0,
+        pressure_hpa: 0.0,
+        wind_kmh: 0.0,
+    }
+}
+
+def parse_stage1_bodies(
+    usgs_body: str,
+    noaa_body: str,
+    iss_body: str,
+) -> result<ObservatorySnapshot, TelemetryError> effect alloc, thread {
+    val events = parse_usgs_csv(usgs_body)?
+    val kps = parse_noaa_kp_json(noaa_body)?
+    val iss = parse_iss_json(iss_body)?
+    val analytics = analyze_observatory_feeds(events, kps, iss)
+    val wx: list<SurfaceWeather> = list()
+    return ok(
+        ObservatorySnapshot {
+            events: events,
+            kps: kps,
+            iss: iss,
+            weather: wx,
+            analytics: analytics,
+        },
+    )
+}
+
+record Stage1RawBodies {
+    usgs: str,
+    noaa: str,
+    iss: str,
+}
+
+def run_stage1_in_pool(
+    pool: i64,
+    raw: Stage1RawBodies,
+    ok_out: list<ObservatorySnapshot>,
+    err_out: list<TelemetryError>,
+) -> i64 effect ffi, alloc, thread {
+    val res = parse_stage1_bodies(raw.usgs, raw.noaa, raw.iss)
+    return when res {
+        ok(snap_tmp) => {
+            val _p = ui_frame_pool_pause()
+            val _pu = list_push(ok_out, clone_snapshot_detached(snap_tmp))
+            val _r = ui_frame_pool_resume(pool)
+            0
+        },
+        err(e) => {
+            val _p = ui_frame_pool_pause()
+            val _pe = list_push(err_out, clone_telemetry_error_detached(e))
+            val _r = ui_frame_pool_resume(pool)
+            1
+        },
+    }
+}
+
+def parse_stage1_and_analyze_pooled(
+    usgs_body: str,
+    noaa_body: str,
+    iss_body: str,
+) -> result<ObservatorySnapshot, TelemetryError> effect ffi, alloc, thread {
+    val ok_out: list<ObservatorySnapshot> = list()
+    val err_out: list<TelemetryError> = list()
+    val raw = Stage1RawBodies { usgs: usgs_body, noaa: noaa_body, iss: iss_body }
+    val pool = ui_frame_pool_begin()
+    val status = run_stage1_in_pool(pool, raw, ok_out, err_out)
+    val _freed = ui_frame_pool_destroy(pool)
+    if status == 0 && list_len(ok_out) > 0 {
+        return ok(list_get(ok_out, 0))
+    }
+    if list_len(err_out) > 0 {
+        return err(list_get(err_out, 0))
+    }
+    return err(TelemetryError.MalformedPayload("empty pooled stage1 result"))
+}
+
+def attach_stage2_weather(
+    snap1: ObservatorySnapshot,
+) -> (ObservatorySnapshot, i64) effect net, alloc, thread, time, throw {
+    val (weather, ms2) = fetch_stage2_weather(snap1.events, snap1.iss, snap1.analytics)
+    val snap = ObservatorySnapshot {
+        events: snap1.events,
+        kps: snap1.kps,
+        iss: snap1.iss,
+        weather: weather,
+        analytics: snap1.analytics,
+    }
+    return (snap, ms2)
+}
+
+def fetch_worker_snapshot_reply(
+    wcfg: WorkerRuntimeCfg,
+) -> WorkerReply effect net, ffi, alloc, thread, time, throw {
+    val usgs_url = when resolve_usgs_feed_url(wcfg.feed_slug) {
+        ok(u) => u,
+        err(e) => {
+            return make_worker_error_reply(e)
+        },
+    }
+    val raw1 = when fetch_stage1_raw(usgs_url) {
+        ok(s) => s,
+        err(e) => {
+            return make_worker_error_reply(e)
+        },
+    }
+    val (usgs_body, noaa_body, iss_body, ms1) = raw1
+    val snap1 = when parse_stage1_and_analyze_pooled(usgs_body, noaa_body, iss_body) {
+        ok(s) => s,
+        err(e) => {
+            return make_worker_error_reply(e)
+        },
+    }
+    val (snap, ms2) = attach_stage2_weather(snap1)
+    val (delta, recent) = persist_worker_snapshot(wcfg, snap)
+    return WorkerReply {
+        kind: WorkerReplyKind.LiveSnapshot,
+        snap: snap,
+        delta: delta,
+        runs: recent,
+        weather: zero_surface_weather(),
+        stage1_ms: ms1,
+        stage2_ms: ms2,
+        note: f"Live USGS ({wcfg.feed_slug}) + NOAA + ISS + Open-Meteo synced",
+    }
+}
+
+def run_worker_fetch_cycle(
+    ws: WorkerLoopState,
+    tick_ch: chan<WorkerReply>,
+) -> WorkerLoopState effect net, ffi, alloc, thread, time, throw {
+    val pkt = fetch_worker_snapshot_reply(ws.cfg)
+    var next_snap = ws.last_snap
+    var next_delta = ws.last_delta
+    when pkt.kind {
+        WorkerReplyKind.LiveSnapshot => {
+            next_snap = pkt.snap
+            next_delta = pkt.delta
+        },
+        _ => {},
+    }
+    send(tick_ch, pkt)
+    return WorkerLoopState {
+        cfg: ws.cfg,
+        last_snap: next_snap,
+        last_delta: next_delta,
+        force_now: false,
+        stop: ws.stop,
+        elapsed_ms: 0,
+    }
+}
+
+def send_worker_error(tick_ch: chan<WorkerReply>, e: TelemetryError) -> i64 effect alloc {
+    val pkt = make_worker_reply_base(WorkerReplyKind.WorkerError, format_telemetry_error(e))
+    send(tick_ch, pkt)
+    return 1
+}
+
+def make_probed_weather_reply(wx: SurfaceWeather) -> WorkerReply effect alloc {
+    val empty_runs: list<StoredRunSummary> = list()
+    return WorkerReply {
+        kind: WorkerReplyKind.ProbedWeather,
+        snap: empty_observatory_snapshot(),
+        delta: HistoryDelta {
+            prior_runs: 0,
+            stored_events_total: 0,
+            new_events_count: 0,
+            has_previous: false,
+            prev_kp: 0.0,
+            prev_gr_b: 1.0,
+            prev_max_mag: 0.0,
+        },
+        runs: empty_runs,
+        weather: wx,
+        note: "",
+    }
+}
+
+def run_worker_probe_weather(
+    label: str,
+    lat: f64,
+    lon: f64,
+    tick_ch: chan<WorkerReply>,
+) -> i64 effect net, alloc {
+    val url = build_open_meteo_url(lat, lon)
+    when live_http_get(url) {
+        ok(body) => {
+            when parse_open_meteo_json(label, lat, lon, body) {
+                ok(wx) => {
+                    send(tick_ch, make_probed_weather_reply(wx))
+                    return 0
+                },
+                err(e) => {
+                    return send_worker_error(tick_ch, e)
+                },
+            }
+        },
+        err(e) => {
+            return send_worker_error(tick_ch, e)
+        },
+    }
+    return 0
+}
+
+def export_worker_bundle(
+    cfg: WorkerRuntimeCfg,
+    snap: ObservatorySnapshot,
+    delta: HistoryDelta,
+) -> WorkerReply effect fs, alloc {
+    val svg_xml = build_observatory_svg(snap)
+    val svg_res = write_text_checked(cfg.svg_path, svg_xml)
+    val json_str = build_summary_json(snap, delta)
+    val json_res = write_text_checked(cfg.json_path, json_str)
+    if is_err(svg_res) || is_err(json_res) {
+        return make_worker_reply_base(
+            WorkerReplyKind.WorkerError,
+            "Failed exporting SVG/JSON report bundle",
+        )
+    }
+    return make_worker_reply_base(
+        WorkerReplyKind.BundleExported,
+        f"Exported {cfg.svg_path} & {cfg.json_path}",
+    )
+}
+
+def worker_apply_cmd(
+    ws: WorkerLoopState,
+    cmd: GuiWorkerCmd,
+    tick_ch: chan<WorkerReply>,
+) -> WorkerLoopState effect net, fs, alloc {
+    return when cmd {
+        GuiWorkerCmd.NoOp => ws,
+        GuiWorkerCmd.FetchFeed(slug) => WorkerLoopState {
+            cfg: WorkerRuntimeCfg {
+                feed_slug: slug,
+                db_path: ws.cfg.db_path,
+                svg_path: ws.cfg.svg_path,
+                json_path: ws.cfg.json_path,
+                enable_db: ws.cfg.enable_db,
+                auto_sync: ws.cfg.auto_sync,
+            },
+            last_snap: ws.last_snap,
+            last_delta: ws.last_delta,
+            force_now: true,
+            stop: ws.stop,
+            elapsed_ms: ws.elapsed_ms,
+        },
+        GuiWorkerCmd.SetAutoSync(en) => WorkerLoopState {
+            cfg: WorkerRuntimeCfg {
+                feed_slug: ws.cfg.feed_slug,
+                db_path: ws.cfg.db_path,
+                svg_path: ws.cfg.svg_path,
+                json_path: ws.cfg.json_path,
+                enable_db: ws.cfg.enable_db,
+                auto_sync: en,
+            },
+            last_snap: ws.last_snap,
+            last_delta: ws.last_delta,
+            force_now: ws.force_now,
+            stop: ws.stop,
+            elapsed_ms: ws.elapsed_ms,
+        },
+        GuiWorkerCmd.ProbeWeather(lbl, lat, lon) => {
+            val _pw = run_worker_probe_weather(lbl, lat, lon, tick_ch)
+            ws
+        },
+        GuiWorkerCmd.ExportBundle => {
+            send(tick_ch, export_worker_bundle(ws.cfg, ws.last_snap, ws.last_delta))
+            ws
+        },
+    }
+}
+
+def drain_worker_cmd_queue(
+    ws: WorkerLoopState,
+    cmd_ch: chan<GuiWorkerCmd>,
+    tick_ch: chan<WorkerReply>,
+) -> WorkerLoopState effect net, fs, alloc, thread, throw {
+    var cur = ws
+    while !cur.stop {
+        val next_cmd = chan_try_recv(cmd_ch)
+        if is_none(next_cmd) {
+            break
+        }
+        cur = worker_apply_cmd(cur, unwrap(next_cmd), tick_ch)
+    }
+    return cur
+}
+
+def run_worker_event_loop(
+    wcfg: WorkerRuntimeCfg,
+    tick_ch: chan<WorkerReply>,
+    cmd_ch: chan<GuiWorkerCmd>,
+    stop_ch: chan<i64>,
+) -> i64 effect net, ffi, fs, alloc, thread, time, throw {
+    val empty_delta = HistoryDelta {
+        prior_runs: 0,
+        stored_events_total: 0,
+        new_events_count: 0,
+        has_previous: false,
+        prev_kp: 0.0,
+        prev_gr_b: 1.0,
+        prev_max_mag: 0.0,
+    }
+    var ws = WorkerLoopState {
+        cfg: wcfg,
+        last_snap: empty_observatory_snapshot(),
+        last_delta: empty_delta,
+        force_now: true,
+        stop: false,
+        elapsed_ms: 0,
+    }
+    while !ws.stop {
+        if is_some(chan_try_recv(stop_ch)) {
+            break
+        }
+        ws = drain_worker_cmd_queue(ws, cmd_ch, tick_ch)
+        val auto_due = ws.cfg.auto_sync && ws.elapsed_ms >= 20000
+        if ws.force_now || auto_due {
+            ws = run_worker_fetch_cycle(ws, tick_ch)
+        }
+        val _sl = sleep(50)
+        ws = WorkerLoopState {
+            cfg: ws.cfg,
+            last_snap: ws.last_snap,
+            last_delta: ws.last_delta,
+            force_now: ws.force_now,
+            stop: ws.stop,
+            elapsed_ms: ws.elapsed_ms + 50,
+        }
+    }
+    return 0
+}
+
+def spawn_telemetry_worker(
+    opts: GuiLaunchOpts,
+    tick_ch: chan<WorkerReply>,
+    cmd_ch: chan<GuiWorkerCmd>,
+    stop_ch: chan<i64>,
+) -> i64 effect net, ffi, fs, alloc, thread, time, throw {
+    val wcfg = WorkerRuntimeCfg {
+        feed_slug: clone_str_detached(opts.feed_slug),
+        db_path: clone_str_detached(opts.db_path),
+        svg_path: clone_str_detached(opts.svg_path),
+        json_path: clone_str_detached(opts.json_path),
+        enable_db: opts.enable_db,
+        auto_sync: true,
+    }
+    spawn {
+        val _ = run_worker_event_loop(wcfg, tick_ch, cmd_ch, stop_ch)
+    }
+    return 0
+}
+
+def gui_with_status_note(cur: TelemetryGuiState, note: str, clear_busy: bool) -> TelemetryGuiState {
+    return TelemetryGuiState {
+        feed_slug: cur.feed_slug,
+        active_view: cur.active_view,
+        depth_filter: cur.depth_filter,
+        min_mag: cur.min_mag,
+        search_text: cur.search_text,
+        selected_event_id: cur.selected_event_id,
+        table_page: cur.table_page,
+        auto_sync: cur.auto_sync,
+        loading: if clear_busy { false } else { cur.loading },
+        weather_probing: if clear_busy { false } else { cur.weather_probing },
+        tick: cur.tick,
+        last_stage1_ms: cur.last_stage1_ms,
+        last_stage2_ms: cur.last_stage2_ms,
+        hover_lat: cur.hover_lat,
+        hover_lon: cur.hover_lon,
+        hover_in_map: cur.hover_in_map,
+        hovered_event_id: cur.hovered_event_id,
+        status_note: note,
+        db_path: cur.db_path,
+        svg_path: cur.svg_path,
+        json_path: cur.json_path,
+        enable_db: cur.enable_db,
+        map: cur.map,
+        snap: cur.snap,
+        delta: cur.delta,
+        recent_runs: cur.recent_runs,
+        probed_weather: cur.probed_weather,
+    }
+}
+
+def apply_worker_reply_packet(
+    cur: TelemetryGuiState,
+    pkt: WorkerReply,
+) -> TelemetryGuiState effect alloc {
+    return when pkt.kind {
+        WorkerReplyKind.LiveSnapshot => apply_live_snapshot(
+            cur,
+            pkt.snap,
+            pkt.delta,
+            pkt.runs,
+            (pkt.stage1_ms, pkt.stage2_ms, pkt.note),
+        ),
+        WorkerReplyKind.ProbedWeather => append_probed_weather(cur, pkt.weather),
+        WorkerReplyKind.BundleExported => gui_with_status_note(cur, pkt.note, false),
+        WorkerReplyKind.WorkerError => gui_with_status_note(
+            cur,
+            concat("Sync error: ", pkt.note),
+            true,
+        ),
+    }
+}
+
+def drain_worker_replies(
+    tick_ch: chan<WorkerReply>,
+    app: TelemetryGuiState,
+) -> (TelemetryGuiState, bool) effect alloc, thread, throw {
+    var cur = app
+    var changed = false
+    while true {
+        val msg = chan_try_recv(tick_ch)
+        if is_none(msg) {
+            break
+        }
+        changed = true
+        cur = apply_worker_reply_packet(cur, unwrap(msg))
+    }
+    return (cur, changed)
+}
+
+def extract_map_event_interactions(
+    app: TelemetryGuiState,
+    map_r: UiRect,
+    events: list<HostEvent>,
+    px_end: f64,
+    py_end: f64,
+) -> (str, str, f64, f64, bool, f64) effect alloc {
+    var pick_id = ""
+    var wheel_steps = 0.0
+    for i in 0..list_len(events) {
+        val ev = list_get(events, i)
+        when ev.kind {
+            UiEventKind.PointerUp => {
+                if ev.button == 0 && rect_contains(map_r, ev.x, ev.y) {
+                    when hit_test_map_quake(app, map_r, ev.x, ev.y) {
+                        some(eid) => {
+                            pick_id = eid
+                        },
+                        none => {},
+                    }
+                }
+            },
+            UiEventKind.Wheel => {
+                if rect_contains(map_r, px_end, py_end) {
+                    wheel_steps = wheel_steps + ev.y
+                }
+            },
+            _ => {},
+        }
+    }
+    val in_map = workspace_view_eq(app.active_view, WorkspaceView.GlobalMap)
+        && rect_contains(map_r, px_end, py_end)
+    var hov_lon = app.hover_lon
+    var hov_lat = app.hover_lat
+    var hov_id = ""
+    if in_map {
+        val proj = build_map_projection(map_r, app.map)
+        val geo = screen_to_map(proj, px_end, py_end)
+        hov_lon = geo.0
+        hov_lat = geo.1
+        when hit_test_map_quake(app, map_r, px_end, py_end) {
+            some(eid) => {
+                hov_id = eid
+            },
+            none => {},
+        }
+    }
+    return (pick_id, hov_id, hov_lon, hov_lat, in_map, wheel_steps)
+}
+
+def eval_gui_events_in_pool(
+    pool: i64,
+    ctx: DesktopGuiCtx,
+    events: list<HostEvent>,
+    size: UiSize,
+    out_picks: list<GuiEventPick>,
+) -> i64 effect ffi, alloc, throw {
+    var tree = ui_with_theme(tp_enterprise_theme())
+    val root = build_terra_pulse_tree(ctx.app, tree)
+    tree = ui_layout(ui_set_root(tree, root), size.w, size.h)
+    val next_ui = ui_process_events(tree, ui_clear_events(ctx.ui_st), events)
+    val map_r = when ui_find_node_key(tree, "map_viewport") {
+        some(idx) => list_get(tree.nodes, idx).layout,
+        none => UiRect {},
+    }
+    val m = extract_map_event_interactions(
+        ctx.app,
+        map_r,
+        events,
+        next_ui.pointer_x,
+        next_ui.pointer_y,
+    )
+    val _p = ui_frame_pool_pause()
+    val clean_ui = ui_state_detach(next_ui)
+    val _ = list_push(
+        out_picks,
+        GuiEventPick {
+            ui_st: clean_ui,
+            pick_id: clone_str_detached(m.0),
+            hover_id: clone_str_detached(m.1),
+            hover_lon: m.2,
+            hover_lat: m.3,
+            in_map: m.4,
+            wheel_steps: m.5,
+        },
+    )
+    val _r = ui_frame_pool_resume(pool)
+    return 0
+}
+
+def apply_map_wheel_zoom(st: TelemetryGuiState, pick: GuiEventPick) -> MapViewport {
+    val m = st.map
+    if abs_f64(pick.wheel_steps) <= 0.01
+        || !workspace_view_eq(st.active_view, WorkspaceView.GlobalMap) {
+        return m
+    }
+    val factor = if pick.wheel_steps > 0.0 { 1.25 } else { 0.8 }
+    val next_z = clamp_f64(m.zoom * factor, 1.0, 6.0)
+    val cl_lon = if pick.wheel_steps > 0.0 && pick.in_map {
+        (m.center_lon * 0.5) + (pick.hover_lon * 0.5)
+    } else if next_z <= 1.05 {
+        0.0
+    } else {
+        m.center_lon
+    }
+    val cl_lat = if pick.wheel_steps > 0.0 && pick.in_map {
+        (m.center_lat * 0.5) + (pick.hover_lat * 0.5)
+    } else if next_z <= 1.05 {
+        10.0
+    } else {
+        m.center_lat
+    }
+    return MapViewport {
+        zoom: next_z,
+        center_lon: clamp_f64(cl_lon, -180.0, 180.0),
+        center_lat: clamp_f64(cl_lat, -82.0, 82.0),
+        focus: if next_z <= 1.05 { MapFocusMode.WorldView } else { m.focus },
+        show_arcs: m.show_arcs,
+        show_weather: m.show_weather,
+        show_footprint: m.show_footprint,
+        show_labels: m.show_labels,
+    }
+}
+
+def apply_hover_and_wheel(st: TelemetryGuiState, pick: GuiEventPick) -> TelemetryGuiState {
+    return TelemetryGuiState {
+        feed_slug: st.feed_slug,
+        active_view: st.active_view,
+        depth_filter: st.depth_filter,
+        min_mag: st.min_mag,
+        search_text: st.search_text,
+        selected_event_id: st.selected_event_id,
+        table_page: st.table_page,
+        auto_sync: st.auto_sync,
+        loading: st.loading,
+        weather_probing: st.weather_probing,
+        tick: st.tick,
+        last_stage1_ms: st.last_stage1_ms,
+        last_stage2_ms: st.last_stage2_ms,
+        hover_lat: pick.hover_lat,
+        hover_lon: pick.hover_lon,
+        hover_in_map: pick.in_map,
+        hovered_event_id: pick.hover_id,
+        status_note: st.status_note,
+        db_path: st.db_path,
+        svg_path: st.svg_path,
+        json_path: st.json_path,
+        enable_db: st.enable_db,
+        map: apply_map_wheel_zoom(st, pick),
+        snap: st.snap,
+        delta: st.delta,
+        recent_runs: st.recent_runs,
+        probed_weather: st.probed_weather,
+    }
+}
+
+def paint_terra_pulse_in_pool(
+    app: TelemetryGuiState,
+    ui_st: UiState,
+    buf: DrawBuffer,
+    size: UiSize,
+) -> i64 effect ffi, alloc, throw {
+    var tree = ui_with_theme(tp_enterprise_theme())
+    val root = build_terra_pulse_tree(app, tree)
+    tree = ui_layout(ui_set_root(tree, root), size.w, size.h)
+    val painted = ui_paint(tree, ui_st, buf)
+    val _done = paint_active_viewport_overlay(painted, tree, app)
+    return 0
+}
+
+def render_desktop_frame_pooled(
+    env: DesktopGuiEnv,
+    ctx: DesktopGuiCtx,
+    size: UiSize,
+) -> DesktopGuiCtx effect ffi, alloc, throw {
+    val pool = ui_frame_pool_begin()
+    val _ok = paint_terra_pulse_in_pool(ctx.app, ctx.ui_st, ctx.buf, size)
+    val _freed = ui_frame_pool_destroy(pool)
+    val _sub = ui_native_submit(env.lib, ctx.buf)
+    val clean_ui = ui_state_mark_clean(ctx.ui_st)
+    return DesktopGuiCtx {
+        app: ctx.app,
+        ui_st: clean_ui,
+        buf: ctx.buf,
+        last_w: size.w,
+        last_h: size.h,
+        rendered: true,
+        running: !clean_ui.close_requested,
+    }
+}
+
+def process_polled_events(
+    env: DesktopGuiEnv,
+    ctx: DesktopGuiCtx,
+    size: UiSize,
+) -> DesktopGuiCtx effect ffi, alloc, throw {
+    val pool = ui_frame_pool_begin()
+    val events = ui_native_poll(env.lib, 16)
+    if list_len(events) == 0 {
+        val _d = ui_frame_pool_destroy(pool)
+        return ctx
+    }
+    val out_picks: list<GuiEventPick> = list()
+    val _ev_rc = eval_gui_events_in_pool(pool, ctx, events, size, out_picks)
+    if list_len(out_picks) == 0 {
+        val _d = ui_frame_pool_destroy(pool)
+        return ctx
+    }
+    val pick = list_get(out_picks, 0)
+    // The pick itself was detached onto the main heap; everything else from
+    // the poll (the event list, HostEvent records, transient trees) dies here.
+    val _d = ui_frame_pool_destroy(pool)
+    var next_app = apply_hover_and_wheel(ctx.app, pick)
+    val hover_changed = next_app.hover_in_map != ctx.app.hover_in_map
+        || next_app.hovered_event_id != ctx.app.hovered_event_id
+        || (next_app.hover_in_map && abs_f64(next_app.hover_lon - ctx.app.hover_lon) > 0.25)
+    val red = reduce_gui_interaction(next_app, pick.ui_st, pick.pick_id)
+    next_app = red.0
+    when red.1 {
+        GuiWorkerCmd.NoOp => {},
+        _ => {
+            send(env.cmd_ch, red.1)
+        },
+    }
+    val settled_ui = if pick.ui_st.dirty || hover_changed || len(pick.pick_id) > 0 {
+        set_dirty_ui(ui_clear_events(red.2))
+    } else {
+        ui_clear_events(red.2)
+    }
+    return DesktopGuiCtx {
+        app: next_app,
+        ui_st: settled_ui,
+        buf: ctx.buf,
+        last_w: ctx.last_w,
+        last_h: ctx.last_h,
+        rendered: ctx.rendered,
+        running: !settled_ui.close_requested,
+    }
+}
+
+def set_dirty_ui(st: UiState) -> UiState {
+    return UiState {
+        hovered_key: st.hovered_key,
+        active_key: st.active_key,
+        focused_key: st.focused_key,
+        pointer_x: st.pointer_x,
+        pointer_y: st.pointer_y,
+        pointer_down: st.pointer_down,
+        dragging_key: st.dragging_key,
+        scroll_offset: st.scroll_offset,
+        dispatched_action: st.dispatched_action,
+        last_text_key: st.last_text_key,
+        last_text_val: st.last_text_val,
+        last_toggle_key: st.last_toggle_key,
+        last_toggle_val: st.last_toggle_val,
+        has_toggle_change: st.has_toggle_change,
+        last_slider_key: st.last_slider_key,
+        last_slider_val: st.last_slider_val,
+        has_slider_change: st.has_slider_change,
+        close_requested: st.close_requested,
+        dirty: true,
+    }
+}
+
+def desktop_gui_step(
+    env: DesktopGuiEnv,
+    ctx: DesktopGuiCtx,
+) -> DesktopGuiCtx effect ffi, alloc, thread, throw {
+    val metrics = ui_native_metrics(env.lib)
+    if !metrics.is_open {
+        return DesktopGuiCtx {
+            app: ctx.app,
+            ui_st: ctx.ui_st,
+            buf: ctx.buf,
+            last_w: ctx.last_w,
+            last_h: ctx.last_h,
+            rendered: ctx.rendered,
+            running: false,
+        }
+    }
+    val size = UiSize {
+        w: if metrics.width > 100.0 { metrics.width } else { 1380.0 },
+        h: if metrics.height > 100.0 { metrics.height } else { 840.0 },
+    }
+    val synced = drain_worker_replies(env.tick_ch, ctx.app)
+    // Rebuild the context only when the worker changed it; otherwise reuse it.
+    // (Records are never freed individually, so each avoidable rebuild leaks
+    // a context per frame — this is the idle hot path.)
+    var cur = if synced.1 {
+        DesktopGuiCtx {
+            app: synced.0,
+            ui_st: set_dirty_ui(ctx.ui_st),
+            buf: ctx.buf,
+            last_w: ctx.last_w,
+            last_h: ctx.last_h,
+            rendered: ctx.rendered,
+            running: ctx.running,
+        }
+    } else {
+        ctx
+    }
+    if !cur.rendered || cur.ui_st.dirty || size.w != cur.last_w || size.h != cur.last_h {
+        cur = render_desktop_frame_pooled(env, cur, size)
+    }
+    return process_polled_events(env, cur, size)
+}
+
+/// Launch interactive TerraPulse Enterprise Desktop Console with live background telemetry threads.
+pub def launch_terra_pulse_gui(
+    opts: GuiLaunchOpts,
+) -> result<i64, TelemetryError> effect net, ffi, fs, alloc, thread, time, throw {
+    val opened = ui_open_native_host(
+        UiHostMode.Desktop,
+        "TerraPulse — Enterprise Planetary Telemetry Console",
+        1380,
+        840,
+        "",
+    )
+    val lib = when opened {
+        ok(h) => h,
+        err(msg) => {
+            return err(TelemetryError.Transport(concat("failed opening UI host: ", msg)))
+        },
+    }
+    defer {
+        val _cl = ui_close_native_host(lib)
+    }
+    val tick_ch: chan<WorkerReply> = channel(16)
+    val cmd_ch: chan<GuiWorkerCmd> = channel(16)
+    val stop_ch: chan<i64> = channel(4)
+    val _w = spawn_telemetry_worker(opts, tick_ch, cmd_ch, stop_ch)
+    defer {
+        send(stop_ch, 1)
+    }
+    val buf = draw_buf_new(32768)
+    defer {
+        val _fb = draw_buf_free(buf)
+    }
+    var ctx = DesktopGuiCtx {
+        app: gui_state_init(opts),
+        ui_st: ui_state_new(),
+        buf: buf,
+    }
+    val env = DesktopGuiEnv { lib: lib, tick_ch: tick_ch, cmd_ch: cmd_ch, stop_ch: stop_ch }
+    while ctx.running {
+        ctx = desktop_gui_step(env, ctx)
+    }
+    return ok(0)
+}
+
+/// Render a full TerraPulse enterprise frame offscreen via headless `iris_ui_host` and verify buffer health.
+pub def render_terra_pulse_headless(
+    st: TelemetryGuiState,
+    w: i64,
+    h: i64,
+    png_path: str,
+) -> result<(UiColor, i64), TelemetryError> effect ffi, alloc, throw {
+    val opened = ui_open_native_host(UiHostMode.Headless, "TerraPulse Headless", w, h, "")
+    val lib = when opened {
+        ok(l) => l,
+        err(msg) => {
+            return err(TelemetryError.Transport(msg))
+        },
+    }
+    defer {
+        val _cl = ui_close_native_host(lib)
+    }
+    val buf = draw_buf_new(32768)
+    defer {
+        val _fb = draw_buf_free(buf)
+    }
+    var tree = ui_with_theme(tp_enterprise_theme())
+    val root = build_terra_pulse_tree(st, tree)
+    tree = ui_layout(ui_set_root(tree, root), to_f64(w), to_f64(h))
+    val ui_st = ui_state_new()
+    var painted = ui_paint(tree, ui_st, buf)
+    painted = paint_active_viewport_overlay(painted, tree, st)
+    val finished = draw_buf_finish(painted)
+    val cmd_cnt = finished.cmd_count
+    val _sub = ui_native_submit(lib, finished)
+    val px = ui_native_sample_pixel(lib, w / 2, h / 2)
+    if len(png_path) > 0 {
+        val rc = ui_native_save_png(lib, png_path)
+        if rc != 0 {
+            return err(TelemetryError.Storage(f"failed saving headless GUI PNG (rc={rc})"))
+        }
+    }
+    return ok((px, cmd_cnt))
+}
+
+def sample_gui_test_events() -> list<SeismicEvent> effect alloc {
+    val ev1 = SeismicEvent {
+        event_id: "us7000gui1",
+        time_utc: "2026-11-15T08:15:30Z",
+        coord: GeoCoord { lat_deg: 36.2, lon_deg: 141.0, depth_km: 32.0 },
+        magnitude: 5.5,
+        mag_type: "mww",
+        place: "Near Honshu, Japan",
+        station_count: 55,
+        gap_deg: 24.0,
+        rms_sec: 0.3,
+    }
+    val ev2 = SeismicEvent {
+        event_id: "us7000gui2",
+        time_utc: "2026-11-15T07:05:10Z",
+        coord: GeoCoord { lat_deg: -18.2, lon_deg: -177.8, depth_km: 420.0 },
+        magnitude: 4.3,
+        mag_type: "mb",
+        place: "Fiji Region",
+        station_count: 22,
+        gap_deg: 68.0,
+        rms_sec: 0.4,
+    }
+    return list(ev1, ev2)
+}
+
+def sample_gui_test_state() -> TelemetryGuiState effect alloc, thread {
+    val base = gui_state_init(GuiLaunchOpts {})
+    val events = sample_gui_test_events()
+    val kps = list(
+        GeomagneticSample { time_tag: "t0", kp_index: 2.33, a_running: 12.0, station_count: 8 },
+        GeomagneticSample { time_tag: "t1", kp_index: 4.33, a_running: 30.0, station_count: 8 },
+    )
+    val iss = OrbitalState {
+        name: "iss",
+        latitude: 14.2,
+        longitude: 52.5,
+        altitude_km: 416.2,
+        velocity_kmh: 27591.0,
+        footprint_km: 4480.0,
+        visibility: "daylight",
+        timestamp_s: 1794690639,
+        solar_lat: -18.0,
+        solar_lon: 110.0,
+    }
+    val wx = list(
+        SurfaceWeather {
+            label: "Epicenter #1",
+            lat: 36.2,
+            lon: 141.0,
+            temp_c: 14.5,
+            pressure_hpa: 1014.0,
+            wind_kmh: 11.2,
+            humidity_pct: 64.0,
+        },
+    )
+    val snap = ObservatorySnapshot {
+        events: events,
+        kps: kps,
+        iss: iss,
+        weather: wx,
+        analytics: analyze_observatory_feeds(events, kps, iss),
+    }
+    return apply_live_snapshot(base, snap, base.delta, list(), (95, 64, "Test live bundle"))
+}
+
+def test_enterprise_gui_headless_all_views() -> i64 effect ffi, alloc, thread, throw {
+    val st = sample_gui_test_state()
+    val res_map = render_terra_pulse_headless(st, 1380, 840, "")
+    assert(is_ok(res_map))
+    val pair_map = unwrap(res_map)
+    assert(pair_map.1 > 60 && pair_map.0.a == 255)
+
+    val st_ad = reduce_gui_interaction(st, UiState { dispatched_action: "act_view_ad" }, "").0
+    assert(is_ok(render_terra_pulse_headless(st_ad, 1380, 840, "")))
+
+    val st_kp = reduce_gui_interaction(st, UiState { dispatched_action: "act_view_kp" }, "").0
+    assert(is_ok(render_terra_pulse_headless(st_kp, 1380, 840, "")))
+
+    val st_wx = reduce_gui_interaction(st, UiState { dispatched_action: "act_view_wx" }, "").0
+    assert(is_ok(render_terra_pulse_headless(st_wx, 1380, 840, "")))
+    return 0
+}
+
+def test_gui_stage1_pool_detachment() -> i64 effect ffi, alloc, thread, throw {
+    val usgs = concat(
+        "time,latitude,longitude,depth,mag,magType,nst,gap,rms,id,place\n",
+        concat(
+            "2026-11-15T08:15:30Z,36.2,141.0,32.0,5.5,mww,55,24,0.3,us7001,\"Honshu, Japan\"\n",
+            "2026-11-15T07:05:10Z,-18.2,-177.8,420.0,4.3,mb,22,68,0.4,us7002,Fiji Region\n",
+        ),
+    )
+    val kp = "[{\"time_tag\":\"2026-11-15T00:00:00\",\"Kp\":3.67,\"a_running\":22,\"station_count\":8}]"
+    val iss = "{\"name\":\"iss\",\"latitude\":14.2,\"longitude\":52.5,\"altitude\":416.2,\"velocity\":27591.0,\"footprint\":4480.0,\"visibility\":\"daylight\",\"timestamp\":1794690639,\"solar_lat\":-18.0,\"solar_lon\":110.0}"
+    val r1 = parse_stage1_and_analyze_pooled(usgs, kp, iss)
+    assert(is_ok(r1))
+    val snap = unwrap(r1)
+    assert(list_len(snap.events) == 2 && snap.iss.name == "iss")
+    assert(list_get(snap.events, 0).place == "Honshu, Japan")
+    assert(snap.analytics.total_quakes == 2 && abs_f64(snap.analytics.max_magnitude - 5.5) < 0.01)
+    val bad = parse_stage1_and_analyze_pooled("bad,header\n1,2\n", kp, iss)
+    assert(is_err(bad))
+    return 0
+}

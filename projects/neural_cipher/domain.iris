@@ -1,0 +1,604 @@
+// Domain types, real classical/modern cipher primitives, and statistical cryptanalysis features.
+
+bring std.buffer
+bring std.crypto
+bring std.math
+
+/// Cryptographic cipher families classified or synthesized by neural_cipher.
+pub choice CipherFamily {
+    Caesar,
+    XorRepeating,
+    Vigenere,
+    RailFence,
+    Rc4Stream,
+    Aes128Cbc,
+    NeuralFeistel,
+}
+
+/// Typed pipeline error variants across corpus harvesting, ML training, and crypto.
+pub choice StageError {
+    InvalidPlaintext(str),
+    NetworkFetchError(str),
+    InvalidArgs(str),
+    CryptoError(str),
+    IoFailure(str),
+}
+
+/// Validated plaintext corpus chunk fetched from live public datasets.
+pub record CorpusChunk {
+    source: str,
+    text: str,
+}
+
+/// Validated plaintext byte block prepared for cipher generation.
+pub record PlainBlock {
+    source: str,
+    bytes: list<i64>,
+}
+
+/// Validated symmetric key schedule with minimum key material length.
+pub record KeySchedule {
+    label: str,
+    bytes: list<i64>,
+}
+
+/// Labeled ciphertext sample paired with its originating corpus source.
+pub record CipherSample {
+    family: CipherFamily,
+    bytes: list<i64>,
+    source: str,
+}
+
+/// Extracted statistical and side-channel cryptanalysis summary metrics.
+pub record CipherMetrics {
+    entropy_norm: f64,
+    ic_norm: f64,
+    printable_ratio: f64,
+    english_top_ratio: f64,
+    max_autocorr: f64,
+    byte_std_norm: f64,
+    block16_aligned: f64,
+    unique_norm: f64,
+}
+
+/// Return the canonical machine label for a cipher family.
+pub def family_name(f: CipherFamily) -> str {
+    when f {
+        CipherFamily.Caesar => "caesar",
+        CipherFamily.XorRepeating => "xor_repeating",
+        CipherFamily.Vigenere => "vigenere",
+        CipherFamily.RailFence => "rail_fence",
+        CipherFamily.Rc4Stream => "rc4_stream",
+        CipherFamily.Aes128Cbc => "aes128_cbc",
+        CipherFamily.NeuralFeistel => "neural_feistel",
+    }
+}
+
+/// Map a cipher family to its integer class index in [0, 6].
+pub def family_to_id(f: CipherFamily) -> i64 {
+    when f {
+        CipherFamily.Caesar => 0,
+        CipherFamily.XorRepeating => 1,
+        CipherFamily.Vigenere => 2,
+        CipherFamily.RailFence => 3,
+        CipherFamily.Rc4Stream => 4,
+        CipherFamily.Aes128Cbc => 5,
+        CipherFamily.NeuralFeistel => 6,
+    }
+}
+
+/// Reconstruct a cipher family from an integer class index.
+pub def family_from_id(id: i64) -> CipherFamily {
+    if id == 0 {
+        return CipherFamily.Caesar
+    }
+    if id == 1 {
+        return CipherFamily.XorRepeating
+    }
+    if id == 2 {
+        return CipherFamily.Vigenere
+    }
+    if id == 3 {
+        return CipherFamily.RailFence
+    }
+    if id == 4 {
+        return CipherFamily.Rc4Stream
+    }
+    if id == 5 {
+        return CipherFamily.Aes128Cbc
+    }
+    CipherFamily.NeuralFeistel
+}
+
+/// Format a typed StageError for user and JSON diagnostics.
+pub def stage_error_text(e: StageError) -> str effect alloc {
+    when e {
+        StageError.InvalidPlaintext(msg) => concat("invalid plaintext: ", msg),
+        StageError.NetworkFetchError(msg) => concat("network error: ", msg),
+        StageError.InvalidArgs(msg) => concat("invalid args: ", msg),
+        StageError.CryptoError(msg) => concat("crypto error: ", msg),
+        StageError.IoFailure(msg) => concat("io failure: ", msg),
+    }
+}
+
+/// Validate and construct a live corpus chunk (at least 32 characters).
+pub def make_corpus_chunk(source: str, text: str) -> result<CorpusChunk, StageError> effect alloc {
+    if len(source) == 0 {
+        return err(StageError.InvalidPlaintext("empty source name"))
+    }
+    if len(text) < 32 {
+        return err(StageError.InvalidPlaintext(concat(source, " below minimum 32 bytes")))
+    }
+    ok(
+        CorpusChunk {
+            source: source,
+            text: text,
+        },
+    )
+}
+
+/// Validate and construct a plaintext byte block from raw UTF-8/ASCII bytes.
+pub def make_plain_block(source: str, bytes: list<i64>) -> result<PlainBlock, StageError> effect alloc {
+    if list_len(bytes) < 16 {
+        return err(StageError.InvalidPlaintext("block shorter than 16 bytes"))
+    }
+    ok(
+        PlainBlock {
+            source: source,
+            bytes: bytes,
+        },
+    )
+}
+
+/// Derive a non-empty symmetric KeySchedule from seed bytes.
+pub def make_key_schedule(label: str, raw: list<i64>) -> result<KeySchedule, StageError> effect alloc {
+    val n = list_len(raw)
+    if n < 3 {
+        return err(StageError.CryptoError("key must be at least 3 bytes"))
+    }
+    val expanded: list<i64> = list()
+    var i = 0
+    while i < 16 {
+        val b = band(list_get(raw, i % n) + i * 37 + 19, 255)
+        list_push(expanded, b)
+        i = i + 1
+    }
+    ok(
+        KeySchedule {
+            label: label,
+            bytes: expanded,
+        },
+    )
+}
+
+/// Convert a string into a list of unsigned byte integers in [0, 255].
+pub def str_to_u8(s: str) -> list<i64> effect alloc {
+    val raw = str_bytes(s)
+    val out: list<i64> = list()
+    val n = list_len(raw)
+    var i = 0
+    while i < n {
+        list_push(out, band(list_get(raw, i), 255))
+        i = i + 1
+    }
+    out
+}
+
+/// Encode raw unsigned bytes as lowercase hexadecimal text.
+pub def u8_to_hex(bytes: list<i64>) -> str effect alloc {
+    byte_buffer_to_hex(
+        ByteBuffer {
+            data: bytes,
+            len: list_len(bytes),
+        },
+    )
+}
+
+/// Convert raw ASCII bytes to a printable string safely for CLI preview.
+pub def u8_to_ascii_preview(bytes: list<i64>) -> str effect alloc {
+    byte_buffer_to_ascii_lossy(
+        ByteBuffer {
+            data: bytes,
+            len: list_len(bytes),
+        },
+    )
+}
+
+/// Count set bits in the low 8 bits of an integer.
+pub def popcount_byte(v: i64) -> i64 {
+    val x = band(v, 255)
+    var c = 0
+    var b = 0
+    while b < 8 {
+        if band(x, shl(1, b)) != 0 {
+            c = c + 1
+        }
+        b = b + 1
+    }
+    c
+}
+
+/// Encrypt printable ASCII bytes with a keyed Caesar byte shift modulo 95.
+pub def encrypt_caesar(plain: list<i64>, shift: i64) -> list<i64> effect alloc {
+    val out: list<i64> = list()
+    val eff_shift = ((shift % 94) + 94) % 94
+    val s = if eff_shift == 0 { 13 } else { eff_shift }
+    val n = list_len(plain)
+    var i = 0
+    while i < n {
+        val b = band(list_get(plain, i), 255)
+        val c = if b >= 32 && b <= 126 { 32 + ((b - 32 + s) % 95) } else { b }
+        list_push(out, c)
+        i = i + 1
+    }
+    out
+}
+
+/// Encrypt bytes with a repeating XOR key across period [4..7].
+pub def encrypt_xor_repeating(
+    plain: list<i64>,
+    key: list<i64>,
+    period: i64,
+) -> list<i64> effect alloc {
+    val klen = if period < 3 { 4 } else { period }
+    val out: list<i64> = list()
+    val n = list_len(plain)
+    val kn = list_len(key)
+    var i = 0
+    while i < n {
+        val kb = band(list_get(key, (i % klen) % kn), 127)
+        val k_eff = if kb == 0 { 85 } else { kb }
+        list_push(out, band(bxor(list_get(plain, i), k_eff), 255))
+        i = i + 1
+    }
+    out
+}
+
+/// Encrypt printable ASCII bytes using polyalphabetic Vigenere over [32..126].
+pub def encrypt_vigenere(plain: list<i64>, key: list<i64>, period: i64) -> list<i64> effect alloc {
+    val klen = if period < 3 { 5 } else { period }
+    val out: list<i64> = list()
+    val n = list_len(plain)
+    val kn = list_len(key)
+    var i = 0
+    while i < n {
+        val b = band(list_get(plain, i), 255)
+        val k = 1 + (band(list_get(key, (i % klen) % kn), 63) % 90)
+        val c = if b >= 32 && b <= 126 { 32 + ((b - 32 + k) % 95) } else { b }
+        list_push(out, c)
+        i = i + 1
+    }
+    out
+}
+
+/// Encrypt bytes using classical multi-rail transposition preserving unigram counts.
+pub def encrypt_rail_fence(plain: list<i64>, rails: i64) -> list<i64> effect alloc {
+    val r_count = if rails < 2 { 3 } else { rails }
+    val n = list_len(plain)
+    val buckets: list<list<i64>> = list()
+    var r = 0
+    while r < r_count {
+        list_push(buckets, list())
+        r = r + 1
+    }
+    var rail = 0
+    var dir = 1
+    var i = 0
+    while i < n {
+        list_push(list_get(buckets, rail), list_get(plain, i))
+        val next_dir = if rail == 0 {
+            1
+        } else if rail == r_count - 1 {
+            -1
+        } else {
+            dir
+        }
+        dir = next_dir
+        rail = rail + dir
+        i = i + 1
+    }
+    flatten_int_buckets(buckets)
+}
+
+def flatten_int_buckets(buckets: list<list<i64>>) -> list<i64> effect alloc {
+    val out: list<i64> = list()
+    val nb = list_len(buckets)
+    var b = 0
+    while b < nb {
+        val row = list_get(buckets, b)
+        val nr = list_len(row)
+        var j = 0
+        while j < nr {
+            list_push(out, list_get(row, j))
+            j = j + 1
+        }
+        b = b + 1
+    }
+    out
+}
+
+/// Encrypt or decrypt bytes using RC4 stream cipher (KSA + PRGA).
+pub def rc4_crypt(plain: list<i64>, key: list<i64>) -> list<i64> effect alloc {
+    val s: list<i64> = list()
+    var i = 0
+    while i < 256 {
+        list_push(s, i)
+        i = i + 1
+    }
+    val klen = list_len(key)
+    var j = 0
+    i = 0
+    while i < 256 {
+        val si = list_get(s, i)
+        val ki = list_get(key, i % klen)
+        j = (j + si + ki) % 256
+        val sj = list_get(s, j)
+        list_set(s, i, sj)
+        list_set(s, j, si)
+        i = i + 1
+    }
+    rc4_prga(s, plain)
+}
+
+def rc4_prga(s: list<i64>, plain: list<i64>) -> list<i64> effect alloc {
+    val out: list<i64> = list()
+    val n = list_len(plain)
+    var i = 0
+    var j = 0
+    var k = 0
+    while k < n {
+        i = (i + 1) % 256
+        val si = list_get(s, i)
+        j = (j + si) % 256
+        val sj = list_get(s, j)
+        list_set(s, i, sj)
+        list_set(s, j, si)
+        val ks = list_get(s, (si + sj) % 256)
+        list_push(out, band(bxor(list_get(plain, k), ks), 255))
+        k = k + 1
+    }
+    out
+}
+
+/// Encrypt bytes with real std.crypto AES-128-CBC and PKCS#7 padding.
+pub def encrypt_aes128_cbc(
+    plain: list<i64>,
+    key: KeySchedule,
+    iv_seed: i64,
+) -> list<i64> effect alloc {
+    val iv_bytes: list<i64> = list()
+    var i = 0
+    while i < 16 {
+        list_push(iv_bytes, band(iv_seed * 29 + i * 53 + list_get(key.bytes, i), 255))
+        i = i + 1
+    }
+    val iv_buf = ByteBuffer {
+        data: iv_bytes,
+        len: 16,
+    }
+    val key_buf = ByteBuffer {
+        data: key.bytes,
+        len: 16,
+    }
+    val pt_buf = ByteBuffer {
+        data: plain,
+        len: list_len(plain),
+    }
+    val ct = aes128_encrypt_cbc(key_buf, iv_buf, pt_buf)
+    ct.data
+}
+
+/// Dispatch real encryption for a given classical or modern cipher family.
+pub def encrypt_for_family(
+    fam: CipherFamily,
+    plain: list<i64>,
+    key: KeySchedule,
+    variant: i64,
+) -> list<i64> effect alloc {
+    when fam {
+        CipherFamily.Caesar => encrypt_caesar(plain, 3 + (variant % 22)),
+        CipherFamily.XorRepeating => encrypt_xor_repeating(plain, key.bytes, 4 + (variant % 4)),
+        CipherFamily.Vigenere => encrypt_vigenere(plain, key.bytes, 4 + (variant % 4)),
+        CipherFamily.RailFence => encrypt_rail_fence(plain, 3 + (variant % 3)),
+        CipherFamily.Rc4Stream => rc4_crypt(plain, key.bytes),
+        CipherFamily.Aes128Cbc => encrypt_aes128_cbc(plain, key, variant + 17),
+        CipherFamily.NeuralFeistel => rc4_crypt(plain, key.bytes),
+    }
+}
+
+def compute_byte_hist(bytes: list<i64>) -> list<i64> effect alloc {
+    val counts: list<i64> = list()
+    var c = 0
+    while c < 256 {
+        list_push(counts, 0)
+        c = c + 1
+    }
+    val n = list_len(bytes)
+    var i = 0
+    while i < n {
+        val b = band(list_get(bytes, i), 255)
+        list_set(counts, b, list_get(counts, b) + 1)
+        i = i + 1
+    }
+    counts
+}
+
+def autocorr_lag(bytes: list<i64>, lag: i64) -> f64 effect alloc {
+    val n = list_len(bytes)
+    if n <= lag {
+        return 0.0
+    }
+    var eq = 0
+    var i = 0
+    while i + lag < n {
+        if list_get(bytes, i) == list_get(bytes, i + lag) {
+            eq = eq + 1
+        }
+        i = i + 1
+    }
+    to_f64(eq) / to_f64(n - lag)
+}
+
+def clamp01(v: f64) -> f64 {
+    if v < 0.0 {
+        return 0.0
+    }
+    if v > 1.0 {
+        return 1.0
+    }
+    v
+}
+
+def is_english_top_byte(b: i64) -> bool {
+    b == 32 || b == 101 || b == 116 || b == 97 || b == 111
+}
+
+/// Extract the 16-dimensional cryptanalytic feature vector from raw ciphertext bytes.
+pub def extract_cipher_features(bytes: list<i64>) -> list<f64> effect alloc {
+    val n = list_len(bytes)
+    val nf = if n > 0 { to_f64(n) } else { 1.0 }
+    val hist = compute_byte_hist(bytes)
+    val entropy_ic_uniq = compute_hist_stats(hist, n)
+    val scalar_stats = compute_byte_scalars(bytes, n)
+    val feat: list<f64> = list()
+    list_push(feat, list_get(entropy_ic_uniq, 0))
+    list_push(feat, list_get(entropy_ic_uniq, 1))
+    list_push(feat, clamp01(autocorr_lag(bytes, 2) * 5.0))
+    list_push(feat, clamp01(autocorr_lag(bytes, 3) * 5.0))
+    list_push(feat, clamp01(autocorr_lag(bytes, 4) * 5.0))
+    list_push(feat, clamp01(autocorr_lag(bytes, 5) * 5.0))
+    list_push(feat, clamp01(autocorr_lag(bytes, 6) * 5.0))
+    list_push(feat, list_get(scalar_stats, 0))
+    list_push(feat, list_get(scalar_stats, 1))
+    list_push(feat, if n > 0 && (n % 16) == 0 { 1.0 } else { 0.0 })
+    list_push(feat, list_get(scalar_stats, 2))
+    list_push(feat, list_get(scalar_stats, 3))
+    list_push(feat, clamp01(list_get(entropy_ic_uniq, 3) * 4.0))
+    list_push(feat, clamp01(list_get(scalar_stats, 4) / nf * 2.5))
+    list_push(feat, list_get(scalar_stats, 5))
+    list_push(feat, list_get(entropy_ic_uniq, 2))
+    feat
+}
+
+def compute_hist_stats(hist: list<i64>, n: i64) -> list<f64> effect alloc {
+    val nf = if n > 0 { to_f64(n) } else { 1.0 }
+    var h = 0.0
+    var ic_sum = 0.0
+    var uniq = 0
+    var max_c = 0
+    var c = 0
+    while c < 256 {
+        val cnt = list_get(hist, c)
+        if cnt > 0 {
+            uniq = uniq + 1
+            if cnt > max_c {
+                max_c = cnt
+            }
+            val p = to_f64(cnt) / nf
+            h = h - p * (log(p) / log(2.0))
+            ic_sum = ic_sum + to_f64(cnt * (cnt - 1))
+        }
+        c = c + 1
+    }
+    val denom = if n > 1 { to_f64(n * (n - 1)) } else { 1.0 }
+    val out: list<f64> = list()
+    list_push(out, clamp01(h / 8.0))
+    list_push(out, clamp01((ic_sum / denom) * 15.0))
+    list_push(out, clamp01(to_f64(uniq) / 128.0))
+    list_push(out, to_f64(max_c) / nf)
+    out
+}
+
+def compute_byte_scalars(bytes: list<i64>, n: i64) -> list<f64> effect alloc {
+    val nf = if n > 0 { to_f64(n) } else { 1.0 }
+    var print_c = 0
+    var high_c = 0
+    var sum_v = 0.0
+    var eng_c = 0
+    var diff_sum = 0.0
+    var i = 0
+    while i < n {
+        val b = band(list_get(bytes, i), 255)
+        if b >= 32 && b <= 126 {
+            print_c = print_c + 1
+        }
+        if b >= 128 {
+            high_c = high_c + 1
+        }
+        if is_english_top_byte(b) {
+            eng_c = eng_c + 1
+        }
+        sum_v = sum_v + to_f64(b)
+        if i > 0 {
+            val prev = band(list_get(bytes, i - 1), 255)
+            val d = if b >= prev { b - prev } else { prev - b }
+            diff_sum = diff_sum + to_f64(d)
+        }
+        i = i + 1
+    }
+    val mean = sum_v / nf
+    val std_v = compute_byte_std(bytes, n, mean)
+    val diff_denom = if n > 1 { to_f64(n - 1) } else { 1.0 }
+    val out: list<f64> = list()
+    list_push(out, to_f64(print_c) / nf)
+    list_push(out, to_f64(high_c) / nf)
+    list_push(out, clamp01(mean / 255.0))
+    list_push(out, clamp01(std_v / 90.0))
+    list_push(out, to_f64(eng_c))
+    list_push(out, clamp01((diff_sum / diff_denom) / 128.0))
+    out
+}
+
+def compute_byte_std(bytes: list<i64>, n: i64, mean: f64) -> f64 effect alloc {
+    val nf = if n > 0 { to_f64(n) } else { 1.0 }
+    var var_sum = 0.0
+    var i = 0
+    while i < n {
+        val d = to_f64(band(list_get(bytes, i), 255)) - mean
+        var_sum = var_sum + d * d
+        i = i + 1
+    }
+    sqrt(var_sum / nf)
+}
+
+/// Summarize ciphertext statistical health into a readable CipherMetrics struct.
+pub def summarize_cipher_metrics(bytes: list<i64>) -> CipherMetrics effect alloc {
+    val f = extract_cipher_features(bytes)
+    var max_ac = list_get(f, 2)
+    var k = 3
+    while k <= 6 {
+        val ak = list_get(f, k)
+        if ak > max_ac {
+            max_ac = ak
+        }
+        k = k + 1
+    }
+    CipherMetrics {
+        entropy_norm: list_get(f, 0),
+        ic_norm: list_get(f, 1),
+        printable_ratio: list_get(f, 7),
+        english_top_ratio: list_get(f, 13),
+        max_autocorr: max_ac / 5.0,
+        byte_std_norm: list_get(f, 11),
+        block16_aligned: list_get(f, 9),
+        unique_norm: list_get(f, 15),
+    }
+}
+
+def test_roundtrip_rc4_and_aes() -> i64 effect alloc, throw {
+    val pt = str_to_u8("Neural cryptography discovers novel cipher structures from scratch.")
+    val key = unwrap(make_key_schedule("k1", str_to_u8("secret-neural-key")))
+    val ct_rc4 = rc4_crypt(pt, key.bytes)
+    val dec_rc4 = rc4_crypt(ct_rc4, key.bytes)
+    assert(list_len(dec_rc4) == list_len(pt))
+    assert(list_get(dec_rc4, 0) == list_get(pt, 0))
+    assert(list_get(dec_rc4, 15) == list_get(pt, 15))
+    val ct_aes = encrypt_aes128_cbc(pt, key, 42)
+    assert(list_len(ct_aes) % 16 == 0)
+    val f_aes = extract_cipher_features(ct_aes)
+    val f_caesar = extract_cipher_features(encrypt_caesar(pt, 7))
+    assert(list_len(f_aes) == 16)
+    assert(list_get(f_caesar, 7) > 0.9)
+    assert(list_get(f_aes, 9) == 1.0)
+    0
+}

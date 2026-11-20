@@ -2670,11 +2670,7 @@ mod tests {
         let text = s.hover(URI, 1, 22).expect("stdlib function hover");
         assert!(text.contains("std.llm"), "{}", text);
         assert!(text.contains("def llm_chat("), "{}", text);
-        assert!(
-            text.contains("effect net, env, alloc, io, throw"),
-            "{}",
-            text
-        );
+        assert!(text.contains("effect net, env, alloc, throw"), "{}", text);
     }
 
     #[test]

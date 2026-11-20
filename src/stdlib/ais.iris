@@ -22,7 +22,7 @@ pub record RunningStats {
     mean: f64,
     m2: f64,
     lowest: f64,
-    highest: f64
+    highest: f64,
 }
 
 pub def running_stats_new() -> RunningStats {
@@ -34,9 +34,11 @@ pub def running_stats_update(rs: RunningStats, x: f64) -> RunningStats {
     val d = x - rs.mean
     val nm = rs.mean + d / to_f64(nc)
     RunningStats {
-        count: nc, mean: nm, m2: rs.m2 + d * (x - nm),
+        count: nc,
+        mean: nm,
+        m2: rs.m2 + d * (x - nm),
         lowest: if x < rs.lowest { x } else { rs.lowest },
-        highest: if x > rs.highest { x } else { rs.highest }
+        highest: if x > rs.highest { x } else { rs.highest },
     }
 }
 
@@ -51,24 +53,34 @@ pub def running_stats_std(rs: RunningStats) -> f64 {
 pub record WorldModel {
     weights: list<f64>,
     n_state_dim: i64,
-    n_action_dim: i64
+    n_action_dim: i64,
 }
 
 pub def world_model_new(n_state_dim: i64, n_action_dim: i64) -> WorldModel effect random {
     val w: list<f64> = list()
-    for i in 0 .. ((n_state_dim + n_action_dim) * n_state_dim) { list_push(w, (random() - 0.5) * 0.1) }
+    for i in 0..((n_state_dim + n_action_dim) * n_state_dim) {
+        list_push(w, (random() - 0.5) * 0.1)
+    }
     WorldModel { weights: w, n_state_dim: n_state_dim, n_action_dim: n_action_dim }
 }
 
-pub def world_model_predict_state(wm: WorldModel, state: list<f64>, action: list<f64>) -> list<f64> {
+pub def world_model_predict_state(
+    wm: WorldModel,
+    state: list<f64>,
+    action: list<f64>,
+) -> list<f64> {
     val ns = wm.n_state_dim
     val na = wm.n_action_dim
     val ni = ns + na
     val res: list<f64> = list()
-    for o in 0 .. ns {
+    for o in 0..ns {
         var s = 0.0
-        for i in 0 .. ns { s = s + list_get(wm.weights, o * ni + i) * list_get(state, i) }
-        for i in 0 .. na { s = s + list_get(wm.weights, o * ni + ns + i) * list_get(action, i) }
+        for i in 0..ns {
+            s = s + list_get(wm.weights, o * ni + i) * list_get(state, i)
+        }
+        for i in 0..na {
+            s = s + list_get(wm.weights, o * ni + ns + i) * list_get(action, i)
+        }
         list_push(res, s)
     }
     res
@@ -77,7 +89,7 @@ pub def world_model_predict_state(wm: WorldModel, state: list<f64>, action: list
 pub record Genome {
     genes: list<f64>,
     fitness: f64,
-    age: i64
+    age: i64,
 }
 
 pub record Population {
@@ -86,27 +98,31 @@ pub record Population {
     mutation_rate: f64,
     generation: i64,
     best_fitness: f64,
-    avg_fitness: f64
+    avg_fitness: f64,
 }
 
 pub def genome_random(n_genes: i64, scale: f64) -> Genome effect random {
     val genes: list<f64> = list()
-    for i in 0 .. n_genes { list_push(genes, (random() - 0.5) * 2.0 * scale) }
+    for i in 0..n_genes { list_push(genes, (random() - 0.5) * 2.0 * scale) }
     Genome { genes: genes, fitness: 0.0, age: 0 }
 }
 
 pub def population_new(pop_size: i64, n_genes: i64, mut_rate: f64) -> Population {
     val genomes: list<Genome> = list()
-    for i in 0 .. pop_size { list_push(genomes, genome_random(n_genes, 1.0)) }
+    for i in 0..pop_size { list_push(genomes, genome_random(n_genes, 1.0)) }
     Population {
-        genomes: genomes, pop_size: pop_size, mutation_rate: mut_rate,
-        generation: 0, best_fitness: -1.0e30, avg_fitness: 0.0
+        genomes: genomes,
+        pop_size: pop_size,
+        mutation_rate: mut_rate,
+        generation: 0,
+        best_fitness: -1.0e30,
+        avg_fitness: 0.0,
     }
 }
 
 pub def genome_mutate(g: Genome, rate: f64, scale: f64) -> Genome effect random {
     val new_genes: list<f64> = list()
-    for i in 0 .. list_len(g.genes) {
+    for i in 0..list_len(g.genes) {
         val gene = list_get(g.genes, i)
         val mutated = if random() < rate { gene + (random() - 0.5) * 2.0 * scale } else { gene }
         list_push(new_genes, mutated)
@@ -119,11 +135,14 @@ pub def genome_crossover(a: Genome, b: Genome) -> Genome effect random {
     val nb = list_len(b.genes)
     val n = if na < nb { na } else { nb }
     val new_genes: list<f64> = list()
-    for i in 0 .. n {
-        list_push(new_genes, if random() < 0.5 { list_get(a.genes, i) } else { list_get(b.genes, i) })
+    for i in 0..n {
+        list_push(
+            new_genes,
+            if random() < 0.5 { list_get(a.genes, i) } else { list_get(b.genes, i) },
+        )
     }
     val longer = if na > nb { a.genes } else { b.genes }
-    for i in n .. list_len(longer) { list_push(new_genes, list_get(longer, i)) }
+    for i in n..list_len(longer) { list_push(new_genes, list_get(longer, i)) }
     Genome { genes: new_genes, fitness: 0.0, age: 0 }
 }
 
@@ -134,7 +153,7 @@ pub record KnowledgeBase {
     world_model_params: list<f64>,
     strategies_tried: list<i64>,
     strategy_performance: list<f64>,
-    n_strategies: i64
+    n_strategies: i64,
 }
 
 pub record MAPEKAgent {
@@ -145,14 +164,18 @@ pub record MAPEKAgent {
     execute_fn: (i64) -> f64,
     max_steps: i64,
     step: i64,
-    total_reward: f64
+    total_reward: f64,
 }
 
 pub def kb_new(n_strategies: i64) -> KnowledgeBase {
     KnowledgeBase {
-        observations: list(), actions_taken: list(), rewards_received: list(),
-        world_model_params: list(), strategies_tried: list(),
-        strategy_performance: list(), n_strategies: n_strategies
+        observations: list(),
+        actions_taken: list(),
+        rewards_received: list(),
+        world_model_params: list(),
+        strategies_tried: list(),
+        strategy_performance: list(),
+        n_strategies: n_strategies,
     }
 }
 
@@ -168,13 +191,17 @@ pub def mapek_agent_new(
     analyze: (list<f64>, KnowledgeBase) -> list<f64>,
     plan: (list<f64>, KnowledgeBase) -> i64,
     execute: (i64) -> f64,
-    max_steps: i64
+    max_steps: i64,
 ) -> MAPEKAgent {
     MAPEKAgent {
         kb: kb_new(4),
-        monitor_fn: monitor, analyze_fn: analyze,
-        plan_fn: plan, execute_fn: execute,
-        max_steps: max_steps, step: 0, total_reward: 0.0
+        monitor_fn: monitor,
+        analyze_fn: analyze,
+        plan_fn: plan,
+        execute_fn: execute,
+        max_steps: max_steps,
+        step: 0,
+        total_reward: 0.0,
     }
 }
 
@@ -184,19 +211,23 @@ pub record HomeostaticVariable {
     tolerance: f64,
     correction_gain: f64,
     integral: f64,
-    last_error: f64
+    last_error: f64,
 }
 
 pub record Homeostat {
     variables: list<HomeostaticVariable>,
     health: f64,
-    allostatic_load: f64
+    allostatic_load: f64,
 }
 
 pub def homeovar_new(set_point: f64, tolerance: f64, gain: f64) -> HomeostaticVariable {
     HomeostaticVariable {
-        current_value: set_point, set_point: set_point, tolerance: tolerance,
-        correction_gain: gain, integral: 0.0, last_error: 0.0
+        current_value: set_point,
+        set_point: set_point,
+        tolerance: tolerance,
+        correction_gain: gain,
+        integral: 0.0,
+        last_error: 0.0,
     }
 }
 
@@ -212,7 +243,7 @@ pub def homeostat_add_var(h: Homeostat, v: HomeostaticVariable) -> Homeostat {
 pub record BeliefState {
     probs: list<f64>,
     entropy: f64,
-    confidence: f64
+    confidence: f64,
 }
 
 // All three tables hold log-probabilities. likelihood: P(o | s) at
@@ -223,21 +254,25 @@ pub record GenerativeModel {
     transitions: list<f64>,
     n_states: i64,
     n_obs: i64,
-    n_actions: i64
+    n_actions: i64,
 }
 
 pub def genmodel_new(n_states: i64, n_obs: i64, n_actions: i64) -> GenerativeModel {
     val ns = if n_states <= 0 { 1 } else { n_states }
     val no = if n_obs <= 0 { 1 } else { n_obs }
     val sp: list<f64> = list()
-    for i in 0 .. ns { list_push(sp, 0.0 - log(to_f64(ns))) }
+    for i in 0..ns { list_push(sp, 0.0 - log(to_f64(ns))) }
     val lh: list<f64> = list()
-    for i in 0 .. (no * ns) { list_push(lh, 0.0 - log(to_f64(no))) }
+    for i in 0..(no * ns) { list_push(lh, 0.0 - log(to_f64(no))) }
     val tr: list<f64> = list()
-    for i in 0 .. (ns * n_actions * ns) { list_push(tr, 0.0 - log(to_f64(ns))) }
+    for i in 0..(ns * n_actions * ns) { list_push(tr, 0.0 - log(to_f64(ns))) }
     GenerativeModel {
-        state_prior: sp, likelihood: lh, transitions: tr,
-        n_states: ns, n_obs: no, n_actions: n_actions
+        state_prior: sp,
+        likelihood: lh,
+        transitions: tr,
+        n_states: ns,
+        n_obs: no,
+        n_actions: n_actions,
     }
 }
 
@@ -245,44 +280,62 @@ pub record EWCState {
     importance_weights: list<f64>,
     old_params: list<f64>,
     n_tasks: i64,
-    lambda_ewc: f64
+    lambda_ewc: f64,
 }
 
 pub def ewc_new(n_params: i64, lambda_ewc: f64) -> EWCState {
     val imp: list<f64> = list()
     val old: list<f64> = list()
-    for i in 0 .. n_params { list_push(imp, 0.0); list_push(old, 0.0) }
+    for i in 0..n_params {
+        list_push(imp, 0.0);
+        list_push(old, 0.0)
+    }
     EWCState { importance_weights: imp, old_params: old, n_tasks: 0, lambda_ewc: lambda_ewc }
 }
 
 pub def one_hot(action: i64, n_actions: i64) -> list<f64> {
     val v: list<f64> = list()
-    for i in 0 .. n_actions { list_push(v, if i == action { 1.0 } else { 0.0 }) }
+    for i in 0..n_actions { list_push(v, if i == action { 1.0 } else { 0.0 }) }
     v
 }
 
 pub def normal_sample() -> f64 effect random {
     var u1 = random()
-    if u1 < 0.000000000001 { u1 = 0.000000000001 }
+    if u1 < 0.000000000001 {
+        u1 = 0.000000000001
+    }
     sqrt(0.0 - 2.0 * log(u1)) * cos(2.0 * 3.141592653589793 * random())
 }
 
 pub def normalize_input(data: list<f64>) -> list<f64> {
     val n = list_len(data)
-    if n == 0 { return data }
+    if n == 0 {
+        return data
+    }
     var mn = list_get(data, 0)
     var mx = list_get(data, 0)
-    for i in 1 .. n { val v = list_get(data, i); if v < mn { mn = v }; if v > mx { mx = v } }
+    for i in 1..n {
+        val v = list_get(data, i);
+        if v < mn {
+            mn = v
+        };
+        if v > mx {
+            mx = v
+        }
+    }
     val rng = mx - mn
     val res: list<f64> = list()
-    if rng < 1.0e-10 { for i in 0 .. n { list_push(res, 0.0) } }
-    else { for i in 0 .. n { list_push(res, (list_get(data, i) - mn) / rng) } }
+    if rng < 1.0e-10 {
+        for i in 0..n { list_push(res, 0.0) }
+    } else {
+        for i in 0..n { list_push(res, (list_get(data, i) - mn) / rng) }
+    }
     res
 }
 
 pub def clip_list(values: list<f64>, low: f64, high: f64) -> list<f64> {
     val res: list<f64> = list()
-    for i in 0 .. list_len(values) {
+    for i in 0..list_len(values) {
         val v = list_get(values, i)
         list_push(res, if v < low { low } else { if v > high { high } else { v } })
     }
@@ -291,19 +344,26 @@ pub def clip_list(values: list<f64>, low: f64, high: f64) -> list<f64> {
 
 pub def argmax(values: list<f64>) -> i64 {
     val n = list_len(values)
-    if n <= 0 { return -1 }
+    if n <= 0 {
+        return -1
+    }
     var best_i = 0
     var best_v = list_get(values, 0)
-    for i in 1 .. n {
+    for i in 1..n {
         val v = list_get(values, i)
-        if v > best_v { best_v = v; best_i = i }
+        if v > best_v {
+            best_v = v;
+            best_i = i
+        }
     }
     best_i
 }
 
 pub def epsilon_greedy(values: list<f64>, epsilon: f64) -> i64 effect random {
     val n = list_len(values)
-    if n <= 0 { return -1 }
+    if n <= 0 {
+        return -1
+    }
     val eps = if epsilon < 0.0 { 0.0 } else { if epsilon > 1.0 { 1.0 } else { epsilon } }
     // random_range is half-open: (0, n) can return every action. (0, n - 1)
     // never explored the last one, and with two actions never explored.
@@ -312,39 +372,66 @@ pub def epsilon_greedy(values: list<f64>, epsilon: f64) -> i64 effect random {
 
 pub def softmax_sample(logits: list<f64>) -> i64 effect random {
     val n = list_len(logits)
-    if n <= 0 { return -1 }
+    if n <= 0 {
+        return -1
+    }
     var mx = list_get(logits, 0)
-    for i in 1 .. n { val v = list_get(logits, i); if v > mx { mx = v } }
+    for i in 1..n {
+        val v = list_get(logits, i);
+        if v > mx {
+            mx = v
+        }
+    }
     val probs: list<f64> = list()
     var total = 0.0
-    for i in 0 .. n { val e = exp(list_get(logits, i) - mx); list_push(probs, e); total = total + e }
-    if total <= 1.0e-15 { return 0 }
+    for i in 0..n {
+        val e = exp(list_get(logits, i) - mx);
+        list_push(probs, e);
+        total = total + e
+    }
+    if total <= 1.0e-15 {
+        return 0
+    }
     val r = random() * total
     var cum = 0.0
-    for i in 0 .. n { cum = cum + list_get(probs, i); if cum >= r { return i } }
+    for i in 0..n {
+        cum = cum + list_get(probs, i);
+        if cum >= r {
+            return i
+        }
+    }
     n - 1
 }
 
 pub def boltzmann_sample(logits: list<f64>, temperature: f64) -> i64 {
     val n = list_len(logits)
-    if n <= 0 { return -1 }
+    if n <= 0 {
+        return -1
+    }
     val scaled: list<f64> = list()
     val temp = if temperature < 0.001 { 0.001 } else { temperature }
-    for i in 0 .. n { list_push(scaled, list_get(logits, i) / temp) }
+    for i in 0..n { list_push(scaled, list_get(logits, i) / temp) }
     softmax_sample(scaled)
 }
 
 pub def ucb_select(means: list<f64>, counts: list<i64>, total_pulls: i64) -> i64 {
     val n = list_len(means)
-    if n <= 0 { return -1 }
+    if n <= 0 {
+        return -1
+    }
     var best_a = 0
     var best_ucb = -1.0e30
-    for i in 0 .. n {
+    for i in 0..n {
         val c = list_get(counts, i)
-        val ucb = if c <= 0 { 1.0e30 } else {
+        val ucb = if c <= 0 {
+            1.0e30
+        } else {
             list_get(means, i) + sqrt(2.0 * log(to_f64(total_pulls + 1)) / to_f64(c))
         }
-        if ucb > best_ucb { best_ucb = ucb; best_a = i }
+        if ucb > best_ucb {
+            best_ucb = ucb;
+            best_a = i
+        }
     }
     best_a
 }
@@ -352,8 +439,10 @@ pub def ucb_select(means: list<f64>, counts: list<i64>, total_pulls: i64) -> i64
 pub def discount_rewards(rewards: list<f64>, gamma: f64) -> list<f64> {
     val n = list_len(rewards)
     val ret: list<f64> = list()
-    if n <= 0 { return ret }
-    for i in 0 .. n { list_push(ret, 0.0) }
+    if n <= 0 {
+        return ret
+    }
+    for i in 0..n { list_push(ret, 0.0) }
     var rs = 0.0
     var i = n - 1
     while i >= 0 {
@@ -367,8 +456,10 @@ pub def discount_rewards(rewards: list<f64>, gamma: f64) -> list<f64> {
 pub def gae(rewards: list<f64>, values: list<f64>, gamma: f64, lambda: f64) -> list<f64> {
     val n = list_len(rewards)
     val adv: list<f64> = list()
-    if n <= 0 { return adv }
-    for i in 0 .. n { list_push(adv, 0.0) }
+    if n <= 0 {
+        return adv
+    }
+    for i in 0..n { list_push(adv, 0.0) }
     var r = 0.0
     var i = n - 1
     while i >= 0 {
@@ -383,32 +474,48 @@ pub def gae(rewards: list<f64>, values: list<f64>, gamma: f64, lambda: f64) -> l
 
 pub def normalize_list(values: list<f64>) -> list<f64> {
     val n = list_len(values)
-    if n == 0 { return values }
+    if n == 0 {
+        return values
+    }
     var s = 0.0
-    for i in 0 .. n { s = s + list_get(values, i) }
+    for i in 0..n {
+        s = s + list_get(values, i)
+    }
     val m = s / to_f64(n)
     var vs = 0.0
-    for i in 0 .. n { val d = list_get(values, i) - m; vs = vs + d * d }
+    for i in 0..n {
+        val d = list_get(values, i) - m;
+        vs = vs + d * d
+    }
     val sd = sqrt(vs / to_f64(n) + 1.0e-8)
     val res: list<f64> = list()
-    for i in 0 .. n { list_push(res, (list_get(values, i) - m) / sd) }
+    for i in 0..n { list_push(res, (list_get(values, i) - m) / sd) }
     res
 }
 
 pub def list_mean(vals: list<f64>) -> f64 {
     val n = list_len(vals)
-    if n <= 0 { return 0.0 }
+    if n <= 0 {
+        return 0.0
+    }
     var s = 0.0
-    for i in 0 .. n { s = s + list_get(vals, i) }
+    for i in 0..n {
+        s = s + list_get(vals, i)
+    }
     s / to_f64(n)
 }
 
 pub def list_std(vals: list<f64>) -> f64 {
     val n = list_len(vals)
-    if n <= 1 { return 0.0 }
+    if n <= 1 {
+        return 0.0
+    }
     val m = list_mean(vals)
     var s = 0.0
-    for i in 0 .. n { val d = list_get(vals, i) - m; s = s + d * d }
+    for i in 0..n {
+        val d = list_get(vals, i) - m;
+        s = s + d * d
+    }
     sqrt(s / to_f64(n - 1))
 }
 
@@ -416,23 +523,23 @@ pub def list_std(vals: list<f64>) -> f64 {
 pub record SensorReading {
     values: list<f64>,
     timestamp: i64,
-    confidence: f64
+    confidence: f64,
 }
 
 pub record Constraint {
     name: str,
-    severity: i64
+    severity: i64,
 }
 
 pub record Constitution {
     constraints: list<Constraint>,
     total_violations: i64,
-    safety_mode: i64
+    safety_mode: i64,
 }
 
 pub record MetaCognition {
     performance_history: list<f64>,
-    self_efficacy: f64
+    self_efficacy: f64,
 }
 
 pub record MASState {
@@ -440,13 +547,13 @@ pub record MASState {
     roles: list<str>,
     role_assignments: list<i64>,
     consensus_threshold: f64,
-    step: i64
+    step: i64,
 }
 
 // EWC penalty
 pub def ewc_penalty(ewc: EWCState, current_params: list<f64>) -> f64 {
     var pen = 0.0
-    for i in 0 .. list_len(current_params) {
+    for i in 0..list_len(current_params) {
         val d = list_get(current_params, i) - list_get(ewc.old_params, i)
         pen = pen + list_get(ewc.importance_weights, i) * d * d
     }
@@ -454,21 +561,29 @@ pub def ewc_penalty(ewc: EWCState, current_params: list<f64>) -> f64 {
 }
 
 // Homeostatic update
-pub def homeostat_update(h: Homeostat, sensor_values: list<f64>, dt: f64) -> (Homeostat, list<f64>) {
+pub def homeostat_update(
+    h: Homeostat,
+    sensor_values: list<f64>,
+    dt: f64,
+) -> (Homeostat, list<f64>) {
     val n_vars = list_len(h.variables)
     val n_sensors = list_len(sensor_values)
     val corrections: list<f64> = list()
     var total_deviation = 0.0
     var new_vars: list<HomeostaticVariable> = list()
-    for i in 0 .. n_vars {
+    for i in 0..n_vars {
         val v = list_get(h.variables, i)
         val sensor_val = if i < n_sensors { list_get(sensor_values, i) } else { v.current_value }
         val error = v.set_point - sensor_val
         val new_integral = v.integral + error * dt
         val correction = v.correction_gain * error + (v.correction_gain * 0.1) * new_integral
         val v_updated = HomeostaticVariable {
-            current_value: sensor_val, set_point: v.set_point, tolerance: v.tolerance,
-            correction_gain: v.correction_gain, integral: new_integral, last_error: error
+            current_value: sensor_val,
+            set_point: v.set_point,
+            tolerance: v.tolerance,
+            correction_gain: v.correction_gain,
+            integral: new_integral,
+            last_error: error,
         }
         list_push(corrections, correction);
         list_push(new_vars, v_updated);
@@ -479,27 +594,38 @@ pub def homeostat_update(h: Homeostat, sensor_values: list<f64>, dt: f64) -> (Ho
     // depend on the units: milliseconds of latency used to swamp a CPU
     // fraction, and a system well inside every band read as unhealthy.
     val avg_deviation = total_deviation / to_f64(if n_vars <= 0 { 1 } else { n_vars })
-    val bounded_health = if 1.0 / (1.0 + avg_deviation) < 0.0 { 0.0 } else { 1.0 / (1.0 + avg_deviation) }
+    val bounded_health = if 1.0 / (1.0 + avg_deviation) < 0.0 {
+        0.0
+    } else {
+        1.0 / (1.0 + avg_deviation)
+    }
     val nh = if bounded_health > 1.0 { 1.0 } else { bounded_health }
     (Homeostat { variables: new_vars, health: nh, allostatic_load: h.allostatic_load }, corrections)
 }
 
 pub def homeostat_is_safe(h: Homeostat) -> bool {
     val n = list_len(h.variables)
-    for i in 0 .. n {
+    for i in 0..n {
         val v = list_get(h.variables, i)
-        if abs(v.current_value - v.set_point) > v.tolerance { return false }
+        if abs(v.current_value - v.set_point) > v.tolerance {
+            return false
+        }
     }
     h.health > 0.3
 }
 
 // Belief update
 // Belief update
-pub def belief_update(beliefs: BeliefState, gm: GenerativeModel, obs_idx: i64, lr: f64) -> BeliefState {
+pub def belief_update(
+    beliefs: BeliefState,
+    gm: GenerativeModel,
+    obs_idx: i64,
+    lr: f64,
+) -> BeliefState {
     val ns = gm.n_states
     val new_probs: list<f64> = list()
     var total_p = 0.0
-    for s in 0 .. ns {
+    for s in 0..ns {
         val qs = list_get(beliefs.probs, s)
         val ll = list_get(gm.likelihood, obs_idx * ns + s)
         val lp = list_get(gm.state_prior, s)
@@ -508,13 +634,17 @@ pub def belief_update(beliefs: BeliefState, gm: GenerativeModel, obs_idx: i64, l
         list_push(new_probs, nq);
         total_p = total_p + nq
     }
-    for i in 0 .. ns { list_set(new_probs, i, list_get(new_probs, i) / total_p) }
+    for i in 0..ns { list_set(new_probs, i, list_get(new_probs, i) / total_p) }
     var ent = 0.0
     var max_p = 0.0
-    for i in 0 .. ns {
+    for i in 0..ns {
         val p = list_get(new_probs, i)
-        if p > 1.0e-15 { ent = ent - p * log(p) }
-        if p > max_p { max_p = p }
+        if p > 1.0e-15 {
+            ent = ent - p * log(p)
+        }
+        if p > max_p {
+            max_p = p
+        }
     }
     BeliefState { probs: new_probs, entropy: ent, confidence: max_p }
 }
@@ -524,16 +654,21 @@ pub def belief_update(beliefs: BeliefState, gm: GenerativeModel, obs_idx: i64, l
 /// preferred ones, given as one log-probability per observation) plus
 /// ambiguity (the expected entropy of the observation given the next state).
 /// Lower is better.
-pub def model_expected_free_energy(gm: GenerativeModel, beliefs: BeliefState, action: i64, log_preferences: list<f64>) -> f64 {
+pub def model_expected_free_energy(
+    gm: GenerativeModel,
+    beliefs: BeliefState,
+    action: i64,
+    log_preferences: list<f64>,
+) -> f64 {
     val ns = gm.n_states
     val no = gm.n_obs
     // Predicted next-state distribution.
     val next: list<f64> = list()
-    for s2 in 0 .. ns { list_push(next, 0.0) }
-    for s in 0 .. ns {
+    for s2 in 0..ns { list_push(next, 0.0) }
+    for s in 0..ns {
         val qs = list_get(beliefs.probs, s)
         if qs > 0.0 {
-            for s2 in 0 .. ns {
+            for s2 in 0..ns {
                 val p = exp(list_get(gm.transitions, (action * ns + s) * ns + s2))
                 list_set(next, s2, list_get(next, s2) + qs * p)
             }
@@ -541,18 +676,20 @@ pub def model_expected_free_energy(gm: GenerativeModel, beliefs: BeliefState, ac
     }
     var ambiguity = 0.0
     var risk = 0.0
-    for o in 0 .. no {
+    for o in 0..no {
         var qo = 0.0
-        for s2 in 0 .. ns {
+        for s2 in 0..ns {
             qo = qo + list_get(next, s2) * exp(list_get(gm.likelihood, o * ns + s2))
         }
-        if qo > 1.0e-15 { risk = risk + qo * (log(qo) - list_get(log_preferences, o)) }
+        if qo > 1.0e-15 {
+            risk = risk + qo * (log(qo) - list_get(log_preferences, o))
+        }
     }
-    for s2 in 0 .. ns {
+    for s2 in 0..ns {
         val qs2 = list_get(next, s2)
         if qs2 > 1.0e-15 {
             var h = 0.0
-            for o in 0 .. no {
+            for o in 0..no {
                 val lp = list_get(gm.likelihood, o * ns + s2)
                 h = h - exp(lp) * lp
             }
@@ -563,10 +700,14 @@ pub def model_expected_free_energy(gm: GenerativeModel, beliefs: BeliefState, ac
 }
 
 /// The action with the lowest expected free energy (the first among equals).
-pub def active_inference_choose(gm: GenerativeModel, beliefs: BeliefState, log_preferences: list<f64>) -> i64 {
+pub def active_inference_choose(
+    gm: GenerativeModel,
+    beliefs: BeliefState,
+    log_preferences: list<f64>,
+) -> i64 {
     var best_a = 0
     var best_efe = 1.0e30
-    for a in 0 .. gm.n_actions {
+    for a in 0..gm.n_actions {
         val efe = model_expected_free_energy(gm, beliefs, a, log_preferences)
         if efe < best_efe {
             best_efe = efe
@@ -579,10 +720,15 @@ pub def active_inference_choose(gm: GenerativeModel, beliefs: BeliefState, log_p
 /// Update beliefs on observation `obs_idx`, then choose an action by expected
 /// free energy with no preference among observations (pure information
 /// seeking). Use active_inference_choose to pass preferences.
-pub def active_inference_step(gm: GenerativeModel, beliefs: BeliefState, obs_idx: i64, lr: f64) -> (BeliefState, i64) {
+pub def active_inference_step(
+    gm: GenerativeModel,
+    beliefs: BeliefState,
+    obs_idx: i64,
+    lr: f64,
+) -> (BeliefState, i64) {
     val nb = belief_update(beliefs, gm, obs_idx, lr)
     val uniform: list<f64> = list()
-    for o in 0 .. gm.n_obs { list_push(uniform, 0.0 - log(to_f64(gm.n_obs))) }
+    for o in 0..gm.n_obs { list_push(uniform, 0.0 - log(to_f64(gm.n_obs))) }
     (nb, active_inference_choose(gm, nb, uniform))
 }
 
@@ -598,9 +744,11 @@ pub def constitution_add(c: Constitution, name: str, severity: i64) -> Constitut
 
 pub def constitution_check(c: Constitution, name: str) -> bool {
     val n = list_len(c.constraints)
-    for i in 0 .. n {
+    for i in 0..n {
         val con = list_get(c.constraints, i)
-        if con.name == name { return con.severity >= c.safety_mode }
+        if con.name == name {
+            return con.severity >= c.safety_mode
+        }
     }
     true
 }
@@ -608,17 +756,21 @@ pub def constitution_check(c: Constitution, name: str) -> bool {
 // Epistemic drive
 pub def novelty_score(observation: list<f64>, memory: list<list<f64>>) -> f64 {
     val n = list_len(memory)
-    if n <= 0 { return 1.0 }
+    if n <= 0 {
+        return 1.0
+    }
     var min_d = 1.0e30
     val nf = list_len(observation)
-    for i in 0 .. n {
+    for i in 0..n {
         val mem_i = list_get(memory, i)
         var d = 0.0
-        for j in 0 .. nf {
+        for j in 0..nf {
             val diff = list_get(observation, j) - list_get(mem_i, j)
             d = d + diff * diff
         }
-        if d < min_d { min_d = d }
+        if d < min_d {
+            min_d = d
+        }
     }
     sqrt(min_d)
 }
@@ -629,8 +781,13 @@ pub def curiosity_reward(prediction_error: f64, scale: f64) -> f64 {
 
 // Multi-agent
 pub def mas_new(n_agents: i64, threshold: f64) -> MASState {
-    MASState { n_agents: n_agents, roles: list(), role_assignments: list(),
-               consensus_threshold: threshold, step: 0 }
+    MASState {
+        n_agents: n_agents,
+        roles: list(),
+        role_assignments: list(),
+        consensus_threshold: threshold,
+        step: 0,
+    }
 }
 
 pub def mas_add_role(mas: MASState, role_name: str) -> MASState {
@@ -640,17 +797,25 @@ pub def mas_add_role(mas: MASState, role_name: str) -> MASState {
 
 pub def mas_assign(mas: MASState, assignments: list<i64>) -> MASState {
     MASState {
-        n_agents: mas.n_agents, roles: mas.roles,
-        role_assignments: assignments, consensus_threshold: mas.consensus_threshold,
-        step: mas.step
+        n_agents: mas.n_agents,
+        roles: mas.roles,
+        role_assignments: assignments,
+        consensus_threshold: mas.consensus_threshold,
+        step: mas.step,
     }
 }
 
 pub def mas_consensus(mas: MASState, votes: list<i64>) -> (bool, f64) {
     val n = list_len(votes)
-    if n <= 0 { return (false, 0.0) }
+    if n <= 0 {
+        return (false, 0.0)
+    }
     var yes = 0
-    for i in 0 .. n { if list_get(votes, i) == 1 { yes = yes + 1 } }
+    for i in 0..n {
+        if list_get(votes, i) == 1 {
+            yes = yes + 1
+        }
+    }
     val frac = to_f64(yes) / to_f64(n)
     (frac >= mas.consensus_threshold, frac)
 }
@@ -668,20 +833,34 @@ pub def meta_record(mc: MetaCognition, performance: f64) -> MetaCognition {
 pub def meta_performance_trend(history: list<f64>, window: i64) -> f64 {
     val n = list_len(history)
     val w = if window > n { n } else { window }
-    if w < 2 { return 0.0 }
-    var sx = 0.0; var sy = 0.0; var sxy = 0.0; var sxx = 0.0
-    for i in (n - w) .. n {
+    if w < 2 {
+        return 0.0
+    }
+    var sx = 0.0;
+    var sy = 0.0;
+    var sxy = 0.0;
+    var sxx = 0.0
+    for i in (n - w)..n {
         val xi = to_f64(i - (n - w))
         val yi = list_get(history, i)
-        sx = sx + xi; sy = sy + yi; sxy = sxy + xi * yi; sxx = sxx + xi * xi
+        sx = sx + xi;
+        sy = sy + yi;
+        sxy = sxy + xi * yi;
+        sxx = sxx + xi * xi
     }
     val denom = to_f64(w) * sxx - sx * sx
-    if abs(denom) < 1.0e-10 { return 0.0 }
+    if abs(denom) < 1.0e-10 {
+        return 0.0
+    }
     (to_f64(w) * sxy - sx * sy) / denom
 }
 
-pub def agent_loop(perceive: () -> list<f64>, decide: (list<f64>) -> i64,
-                    act: (i64) -> bool, max_steps: i64) -> i64 {
+pub def agent_loop(
+    perceive: () -> list<f64>,
+    decide: (list<f64>) -> i64,
+    act: (i64) -> bool,
+    max_steps: i64,
+) -> i64 {
     var step = 0
     var running = true
     while running && step < max_steps {
@@ -691,8 +870,12 @@ pub def agent_loop(perceive: () -> list<f64>, decide: (list<f64>) -> i64,
     step
 }
 
-pub def agent_loop_rewards(perceive: () -> list<f64>, decide: (list<f64>) -> i64,
-                            act: (i64) -> (bool, f64), max_steps: i64) -> (i64, f64) {
+pub def agent_loop_rewards(
+    perceive: () -> list<f64>,
+    decide: (list<f64>) -> i64,
+    act: (i64) -> (bool, f64),
+    max_steps: i64,
+) -> (i64, f64) {
     var step = 0
     var tr = 0.0
     var running = true
@@ -722,7 +905,7 @@ pub def mapek_step(agent: MAPEKAgent) -> (MAPEKAgent, f64) {
             execute_fn: agent.execute_fn,
             max_steps: agent.max_steps,
             step: agent.step + 1,
-            total_reward: agent.total_reward + reward
+            total_reward: agent.total_reward + reward,
         };
         (new_agent, reward)
     }
@@ -747,7 +930,7 @@ pub def mapek_run(agent: MAPEKAgent) -> (MAPEKAgent, i64) {
 pub def meta_update_efficacy(mc: MetaCognition, success_rate: f64) -> MetaCognition {
     MetaCognition {
         performance_history: mc.performance_history,
-        self_efficacy: mc.self_efficacy * 0.9 + success_rate * 0.1
+        self_efficacy: mc.self_efficacy * 0.9 + success_rate * 0.1,
     }
 }
 
@@ -758,7 +941,7 @@ pub record AutonomicRule {
     operator: str,
     threshold: f64,
     action_idx: i64,
-    severity: i64
+    severity: i64,
 }
 
 pub record SoftwareGovernor {
@@ -767,27 +950,37 @@ pub record SoftwareGovernor {
     rules: list<AutonomicRule>,
     metrics_history: list<list<f64>>,
     action_space: list<str>,
-    last_action: i64
+    last_action: i64,
 }
 
-pub def autonomic_rule_new(metric_name: str, operator: str, threshold: f64, action_idx: i64, severity: i64) -> AutonomicRule {
+pub def autonomic_rule_new(
+    metric_name: str,
+    operator: str,
+    threshold: f64,
+    action_idx: i64,
+    severity: i64,
+) -> AutonomicRule {
     AutonomicRule {
         metric_name: metric_name,
         operator: operator,
         threshold: threshold,
         action_idx: action_idx,
-        severity: severity
+        severity: severity,
     }
 }
 
-pub def software_governor_new(homeostat: Homeostat, constitution: Constitution, action_space: list<str>) -> SoftwareGovernor {
+pub def software_governor_new(
+    homeostat: Homeostat,
+    constitution: Constitution,
+    action_space: list<str>,
+) -> SoftwareGovernor {
     SoftwareGovernor {
         homeostat: homeostat,
         constitution: constitution,
         rules: list(),
         metrics_history: list(),
         action_space: action_space,
-        last_action: 0
+        last_action: 0,
     }
 }
 
@@ -811,13 +1004,31 @@ pub def software_governor_add_rule(gov: SoftwareGovernor, rule: AutonomicRule) -
 // dangerous in an autonomic system than one that stops the program while it is
 // being written. See known-issues #29.
 pub def eval_rule(rule: AutonomicRule, metric_val: f64) -> bool {
-    if rule.operator == ">" { return metric_val > rule.threshold };
-    if rule.operator == "<" { return metric_val < rule.threshold };
-    if rule.operator == ">=" { return metric_val >= rule.threshold };
-    if rule.operator == "<=" { return metric_val <= rule.threshold };
-    if rule.operator == "==" { return metric_val == rule.threshold };
-    if rule.operator == "!=" { return metric_val != rule.threshold };
-    panic("eval_rule: unknown operator '" + rule.operator + "' on metric '" + rule.metric_name + "' -- expected one of > < >= <= == !=");
+    if rule.operator == ">" {
+        return metric_val > rule.threshold
+    };
+    if rule.operator == "<" {
+        return metric_val < rule.threshold
+    };
+    if rule.operator == ">=" {
+        return metric_val >= rule.threshold
+    };
+    if rule.operator == "<=" {
+        return metric_val <= rule.threshold
+    };
+    if rule.operator == "==" {
+        return metric_val == rule.threshold
+    };
+    if rule.operator == "!=" {
+        return metric_val != rule.threshold
+    };
+    panic(
+        "eval_rule: unknown operator '"
+            + rule.operator
+            + "' on metric '"
+            + rule.metric_name
+            + "' -- expected one of > < >= <= == !=",
+    );
     false
 }
 
@@ -855,9 +1066,6 @@ pub def model_load(path: str) -> list<f64> effect fs, io {
     weights
 }
 
-
-
-
 // ---------------------------------------------------------------------------
 // Evolution: the generation step
 //
@@ -879,17 +1087,23 @@ pub def population_score(pop: Population, fitnesses: list<f64>) -> Population {
     val scored: list<Genome> = list();
     var total = 0.0;
     var best = -1.0e30;
-    for i in 0 .. n {
+    for i in 0..n {
         val g = list_get(pop.genomes, i);
         val f = if i < list_len(fitnesses) { list_get(fitnesses, i) } else { g.fitness };
         list_push(scored, Genome { genes: g.genes, fitness: f, age: g.age });
         total = total + f;
-        if f > best { best = f };
+        if f > best {
+            best = f
+        };
     };
     val avg = if n > 0 { total / to_f64(n) } else { 0.0 };
     Population {
-        genomes: scored, pop_size: pop.pop_size, mutation_rate: pop.mutation_rate,
-        generation: pop.generation, best_fitness: best, avg_fitness: avg
+        genomes: scored,
+        pop_size: pop.pop_size,
+        mutation_rate: pop.mutation_rate,
+        generation: pop.generation,
+        best_fitness: best,
+        avg_fitness: avg,
     }
 }
 
@@ -897,9 +1111,11 @@ pub def population_score(pop: Population, fitnesses: list<f64>) -> Population {
 pub def population_best_fitness(pop: Population) -> f64 {
     var best = -1.0e30;
     val n = list_len(pop.genomes);
-    for i in 0 .. n {
+    for i in 0..n {
         val g = list_get(pop.genomes, i);
-        if g.fitness > best { best = g.fitness };
+        if g.fitness > best {
+            best = g.fitness
+        };
     };
     best
 }
@@ -913,12 +1129,14 @@ pub def population_best_fitness(pop: Population) -> f64 {
 pub def population_ranked(pop: Population) -> list<Genome> {
     val n = list_len(pop.genomes);
     val taken: list<i64> = list();
-    for i in 0 .. n { list_push(taken, 0); };
+    for i in 0..n {
+        list_push(taken, 0);
+    };
     val out: list<Genome> = list();
-    for round in 0 .. n {
+    for round in 0..n {
         var best_i = 0 - 1;
         var best_f = -1.0e30;
-        for i in 0 .. n {
+        for i in 0..n {
             if list_get(taken, i) == 0 {
                 val g = list_get(pop.genomes, i);
                 if g.fitness > best_f {
@@ -948,12 +1166,16 @@ pub def population_best(pop: Population) -> Genome {
 // objective produces naturally.
 pub def tournament_select(pop: Population, k: i64) -> Genome effect random {
     val n = list_len(pop.genomes);
-    if n == 0 { return genome_random(1, 1.0) };
+    if n == 0 {
+        return genome_random(1, 1.0)
+    };
     val rounds = if k < 1 { 1 } else { k };
     var champion = list_get(pop.genomes, random_range(0, n));
-    for i in 1 .. rounds {
+    for i in 1..rounds {
         val challenger = list_get(pop.genomes, random_range(0, n));
-        if challenger.fitness > champion.fitness { champion = challenger };
+        if challenger.fitness > champion.fitness {
+            champion = challenger
+        };
     };
     champion
 }
@@ -965,13 +1187,17 @@ pub def tournament_select(pop: Population, k: i64) -> Genome effect random {
 // copied rather than regenerated, best fitness cannot fall between generations.
 pub def population_evolve(pop: Population, elite: i64, mut_scale: f64) -> Population effect random {
     val n = list_len(pop.genomes);
-    if n == 0 { return pop };
+    if n == 0 {
+        return pop
+    };
     val ranked = population_ranked(pop);
     val clamped = if elite < 0 { 0 } else { if elite > n { n } else { elite } };
 
     val next: list<Genome> = list();
-    for i in 0 .. clamped { list_push(next, list_get(ranked, i)); };
-    for i in clamped .. n {
+    for i in 0..clamped {
+        list_push(next, list_get(ranked, i));
+    };
+    for i in clamped..n {
         val a = tournament_select(pop, 3);
         val b = tournament_select(pop, 3);
         val child = genome_crossover(a, b);
@@ -979,9 +1205,12 @@ pub def population_evolve(pop: Population, elite: i64, mut_scale: f64) -> Popula
     };
 
     Population {
-        genomes: next, pop_size: pop.pop_size, mutation_rate: pop.mutation_rate,
+        genomes: next,
+        pop_size: pop.pop_size,
+        mutation_rate: pop.mutation_rate,
         generation: pop.generation + 1,
-        best_fitness: pop.best_fitness, avg_fitness: pop.avg_fitness
+        best_fitness: pop.best_fitness,
+        avg_fitness: pop.avg_fitness,
     }
 }
 
@@ -998,7 +1227,7 @@ pub record ViabilityBound {
     critical_low: f64,
     critical_high: f64,
     weight: f64,
-    corrective_action: i64
+    corrective_action: i64,
 }
 
 pub record ViabilityAssessment {
@@ -1008,7 +1237,7 @@ pub record ViabilityAssessment {
     urgency: f64,
     dominant_variable: i64,
     corrective_action: i64,
-    predicted_values: list<f64>
+    predicted_values: list<f64>,
 }
 
 pub record ExpectedFreeEnergy {
@@ -1016,14 +1245,14 @@ pub record ExpectedFreeEnergy {
     pragmatic_risk: f64,
     ambiguity: f64,
     epistemic_value: f64,
-    total: f64
+    total: f64,
 }
 
 pub record ActiveInferenceDecision {
     policy: i64,
     expected_free_energy: f64,
     confidence: f64,
-    evaluations: list<ExpectedFreeEnergy>
+    evaluations: list<ExpectedFreeEnergy>,
 }
 
 pub record AutonomyV2Decision {
@@ -1032,7 +1261,7 @@ pub record AutonomyV2Decision {
     viable: bool,
     viability_risk: f64,
     expected_free_energy: f64,
-    confidence: f64
+    confidence: f64,
 }
 
 pub def viability_bound_new(
@@ -1042,7 +1271,7 @@ pub def viability_bound_new(
     critical_low: f64,
     critical_high: f64,
     weight: f64,
-    corrective_action: i64
+    corrective_action: i64,
 ) -> ViabilityBound {
     ViabilityBound {
         name: name,
@@ -1051,7 +1280,7 @@ pub def viability_bound_new(
         critical_low: critical_low,
         critical_high: critical_high,
         weight: if weight < 0.0 { 0.0 } else { weight },
-        corrective_action: corrective_action
+        corrective_action: corrective_action,
     }
 }
 
@@ -1067,8 +1296,15 @@ pub def viability_predict(values: list<f64>, drift: list<f64>, horizon: f64) -> 
     predicted
 }
 
-pub def viability_assess(bounds: list<ViabilityBound>, predicted: list<f64>) -> ViabilityAssessment {
-    val n = if list_len(bounds) < list_len(predicted) { list_len(bounds) } else { list_len(predicted) }
+pub def viability_assess(
+    bounds: list<ViabilityBound>,
+    predicted: list<f64>,
+) -> ViabilityAssessment {
+    val n = if list_len(bounds) < list_len(predicted) {
+        list_len(bounds)
+    } else {
+        list_len(predicted)
+    }
     var total_risk = 0.0
     var max_risk = 0.0
     var dominant = 0 - 1
@@ -1081,14 +1317,22 @@ pub def viability_assess(bounds: list<ViabilityBound>, predicted: list<f64>) -> 
         val value = list_get(predicted, i)
         val below = if value < bound.preferred_low {
             (bound.preferred_low - value) / (bound.preferred_low - bound.critical_low + 1.0e-12)
-        } else { 0.0 }
+        } else {
+            0.0
+        }
         val above = if value > bound.preferred_high {
             (value - bound.preferred_high) / (bound.critical_high - bound.preferred_high + 1.0e-12)
-        } else { 0.0 }
+        } else {
+            0.0
+        }
         val local = (below + above) * bound.weight
         total_risk = total_risk + local
-        if local > 0.0 { is_safe = false };
-        if value <= bound.critical_low || value >= bound.critical_high { is_critical = true };
+        if local > 0.0 {
+            is_safe = false
+        };
+        if value <= bound.critical_low || value >= bound.critical_high {
+            is_critical = true
+        };
         if local > max_risk {
             max_risk = local
             dominant = i
@@ -1103,7 +1347,7 @@ pub def viability_assess(bounds: list<ViabilityBound>, predicted: list<f64>) -> 
         urgency: clamp(max_risk, 0.0, 1.0),
         dominant_variable: dominant,
         corrective_action: action,
-        predicted_values: predicted
+        predicted_values: predicted,
     }
 }
 
@@ -1111,7 +1355,9 @@ pub def categorical_entropy(probabilities: list<f64>) -> f64 {
     var entropy = 0.0
     for i in 0..list_len(probabilities) {
         val p = list_get(probabilities, i)
-        if p > 1.0e-12 { entropy = entropy - p * log(p) };
+        if p > 1.0e-12 {
+            entropy = entropy - p * log(p)
+        };
     };
     entropy
 }
@@ -1123,11 +1369,13 @@ pub def expected_free_energy(
     predicted_outcomes: list<f64>,
     preferences: list<f64>,
     ambiguity: f64,
-    epistemic_value: f64
+    epistemic_value: f64,
 ) -> ExpectedFreeEnergy {
     val n = if list_len(predicted_outcomes) < list_len(preferences) {
         list_len(predicted_outcomes)
-    } else { list_len(preferences) }
+    } else {
+        list_len(preferences)
+    }
     var risk = 0.0
     for i in 0..n {
         val q = list_get(predicted_outcomes, i)
@@ -1140,7 +1388,7 @@ pub def expected_free_energy(
         pragmatic_risk: risk,
         ambiguity: if ambiguity < 0.0 { 0.0 } else { ambiguity },
         epistemic_value: if epistemic_value < 0.0 { 0.0 } else { epistemic_value },
-        total: risk + ambiguity - epistemic_value
+        total: risk + ambiguity - epistemic_value,
     }
 }
 
@@ -1148,7 +1396,7 @@ pub def active_inference_select(
     policy_outcomes: list<list<f64>>,
     preferences: list<f64>,
     ambiguities: list<f64>,
-    epistemic_values: list<f64>
+    epistemic_values: list<f64>,
 ) -> ActiveInferenceDecision {
     val evaluations: list<ExpectedFreeEnergy> = list()
     var best_policy = 0 - 1
@@ -1156,8 +1404,18 @@ pub def active_inference_select(
     var second_energy = 1.0e30
     for i in 0..list_len(policy_outcomes) {
         val ambiguity = if i < list_len(ambiguities) { list_get(ambiguities, i) } else { 0.0 }
-        val epistemic = if i < list_len(epistemic_values) { list_get(epistemic_values, i) } else { 0.0 }
-        val evaluation = expected_free_energy(i, list_get(policy_outcomes, i), preferences, ambiguity, epistemic)
+        val epistemic = if i < list_len(epistemic_values) {
+            list_get(epistemic_values, i)
+        } else {
+            0.0
+        }
+        val evaluation = expected_free_energy(
+            i,
+            list_get(policy_outcomes, i),
+            preferences,
+            ambiguity,
+            epistemic,
+        )
         list_push(evaluations, evaluation);
         val becomes_best = evaluation.total < best_energy
         if becomes_best {
@@ -1165,14 +1423,16 @@ pub def active_inference_select(
             best_energy = evaluation.total
             best_policy = i
         };
-        if !becomes_best && evaluation.total < second_energy { second_energy = evaluation.total };
+        if !becomes_best && evaluation.total < second_energy {
+            second_energy = evaluation.total
+        };
     };
     val margin = if second_energy >= 1.0e29 { 0.0 } else { second_energy - best_energy }
     ActiveInferenceDecision {
         policy: best_policy,
         expected_free_energy: best_energy,
         confidence: clamp(1.0 - exp(0.0 - margin), 0.0, 1.0),
-        evaluations: evaluations
+        evaluations: evaluations,
     }
 }
 
@@ -1188,20 +1448,29 @@ pub def autonomy_v2_step(
     preferences: list<f64>,
     ambiguities: list<f64>,
     epistemic_values: list<f64>,
-    emergency_action: i64
+    emergency_action: i64,
 ) -> AutonomyV2Decision {
     val predicted = viability_predict(values, drift, horizon)
     val viability = viability_assess(bounds, predicted)
-    val inference = active_inference_select(policy_outcomes, preferences, ambiguities, epistemic_values)
+    val inference = active_inference_select(
+        policy_outcomes,
+        preferences,
+        ambiguities,
+        epistemic_values,
+    )
     val preserve = viability.critical || viability.risk >= 1.0
-    val corrective = if viability.corrective_action >= 0 { viability.corrective_action } else { emergency_action }
+    val corrective = if viability.corrective_action >= 0 {
+        viability.corrective_action
+    } else {
+        emergency_action
+    }
     AutonomyV2Decision {
         action: if preserve { corrective } else { inference.policy },
         emergency: preserve,
         viable: viability.safe,
         viability_risk: viability.risk,
         expected_free_energy: inference.expected_free_energy,
-        confidence: if preserve { viability.urgency } else { inference.confidence }
+        confidence: if preserve { viability.urgency } else { inference.confidence },
     }
 }
 
@@ -1239,7 +1508,12 @@ pub def agent_runtime_new(max_failures: i64) -> AgentRuntime {
     }
 }
 
-pub def agent_record_outcome(runtime: AgentRuntime, observation: f64, reward: f64, succeeded: bool) -> AgentRuntime {
+pub def agent_record_outcome(
+    runtime: AgentRuntime,
+    observation: f64,
+    reward: f64,
+    succeeded: bool,
+) -> AgentRuntime {
     list_push(runtime.observations, observation);
     list_push(runtime.rewards, reward);
     val failures = if succeeded { 0 } else { runtime.consecutive_failures + 1 }
@@ -1264,9 +1538,19 @@ pub def agent_production_step(
     preferences: list<f64>,
     ambiguities: list<f64>,
     epistemic_values: list<f64>,
-    emergency_action: i64
+    emergency_action: i64,
 ) -> AgentStep {
-    val decision = autonomy_v2_step(bounds, values, drift, horizon, policy_outcomes, preferences, ambiguities, epistemic_values, emergency_action)
+    val decision = autonomy_v2_step(
+        bounds,
+        values,
+        drift,
+        horizon,
+        policy_outcomes,
+        preferences,
+        ambiguities,
+        epistemic_values,
+        emergency_action,
+    )
     val degraded = runtime.consecutive_failures >= runtime.max_failures
     val selected = if degraded { emergency_action } else { decision.action }
     val final_decision = AutonomyV2Decision {
@@ -1314,10 +1598,16 @@ pub def agent_production_step(
 pub def probs_normalize(xs: list<f64>) -> list<f64> {
     val n = list_len(xs)
     var total = 0.0
-    for i in 0..n { total = total + list_get(xs, i) }
+    for i in 0..n {
+        total = total + list_get(xs, i)
+    }
     val out: list<f64> = list()
     for i in 0..n {
-        if total > 0.0 { list_push(out, list_get(xs, i) / total) } else { list_push(out, 1.0 / to_f64(n)) }
+        if total > 0.0 {
+            list_push(out, list_get(xs, i) / total)
+        } else {
+            list_push(out, 1.0 / to_f64(n))
+        }
     }
     out
 }
@@ -1326,9 +1616,15 @@ pub def probs_normalize(xs: list<f64>) -> list<f64> {
 pub def probs_softmax(xs: list<f64>) -> list<f64> {
     val n = list_len(xs)
     val out: list<f64> = list()
-    if n == 0 { return out }
+    if n == 0 {
+        return out
+    }
     var mx = list_get(xs, 0)
-    for i in 1..n { if list_get(xs, i) > mx { mx = list_get(xs, i) } }
+    for i in 1..n {
+        if list_get(xs, i) > mx {
+            mx = list_get(xs, i)
+        }
+    }
     var total = 0.0
     for i in 0..n {
         val e = exp(list_get(xs, i) - mx)
@@ -1343,11 +1639,19 @@ pub def probs_softmax(xs: list<f64>) -> list<f64> {
 pub def probs_log_softmax(xs: list<f64>) -> list<f64> {
     val n = list_len(xs)
     val out: list<f64> = list()
-    if n == 0 { return out }
+    if n == 0 {
+        return out
+    }
     var mx = list_get(xs, 0)
-    for i in 1..n { if list_get(xs, i) > mx { mx = list_get(xs, i) } }
+    for i in 1..n {
+        if list_get(xs, i) > mx {
+            mx = list_get(xs, i)
+        }
+    }
     var total = 0.0
-    for i in 0..n { total = total + exp(list_get(xs, i) - mx) }
+    for i in 0..n {
+        total = total + exp(list_get(xs, i) - mx)
+    }
     val lse = mx + log(total)
     for i in 0..n { list_push(out, list_get(xs, i) - lse) }
     out
@@ -1358,7 +1662,9 @@ pub def probs_kl(p: list<f64>, q: list<f64>) -> f64 {
     var kl = 0.0
     for i in 0..list_len(p) {
         val pi = list_get(p, i)
-        if pi > 1.0e-300 { kl = kl + pi * (log(pi) - log(list_get(q, i) + 1.0e-300)) }
+        if pi > 1.0e-300 {
+            kl = kl + pi * (log(pi) - log(list_get(q, i) + 1.0e-300))
+        }
     }
     kl
 }
@@ -1366,7 +1672,11 @@ pub def probs_kl(p: list<f64>, q: list<f64>) -> f64 {
 /// Index of the largest entry; the first among equals.
 pub def probs_argmax(xs: list<f64>) -> i64 {
     var best = 0
-    for i in 1..list_len(xs) { if list_get(xs, i) > list_get(xs, best) { best = i } }
+    for i in 1..list_len(xs) {
+        if list_get(xs, i) > list_get(xs, best) {
+            best = i
+        }
+    }
     best
 }
 
@@ -1377,7 +1687,9 @@ pub def probs_sample(probs: list<f64>) -> i64 effect random {
     val n = list_len(probs)
     for i in 0..n {
         cum = cum + list_get(probs, i)
-        if r < cum { return i }
+        if r < cum {
+            return i
+        }
     }
     n - 1
 }
@@ -1404,7 +1716,7 @@ pub record Pomdp {
     log_c: list<f64>,
     d: list<f64>,
     pa: list<f64>,
-    pb: list<f64>
+    pb: list<f64>,
 }
 
 /// A model knowing nothing: uniform likelihood, transitions, prior and
@@ -1444,7 +1756,13 @@ pub def pomdp_set_likelihood(m: Pomdp, s: i64, probs: list<f64>, confidence: f64
 }
 
 /// Set P(s2 | s, act) for every s2.
-pub def pomdp_set_transition(m: Pomdp, act: i64, s: i64, probs: list<f64>, confidence: f64) -> Pomdp {
+pub def pomdp_set_transition(
+    m: Pomdp,
+    act: i64,
+    s: i64,
+    probs: list<f64>,
+    confidence: f64,
+) -> Pomdp {
     val p = probs_normalize(probs)
     val row = (act * m.n_states + s) * m.n_states
     for s2 in 0..m.n_states {
@@ -1489,7 +1807,9 @@ pub def pomdp_observation_probs(m: Pomdp, q: list<f64>) -> list<f64> {
     val out: list<f64> = list()
     for o in 0..m.n_obs {
         var p = 0.0
-        for s in 0..ns { p = p + list_get(m.a, o * ns + s) * list_get(q, s) }
+        for s in 0..ns {
+            p = p + list_get(m.a, o * ns + s) * list_get(q, s)
+        }
         list_push(out, p)
     }
     out
@@ -1523,7 +1843,9 @@ pub def pomdp_state_ambiguity(m: Pomdp) -> list<f64> {
         var h = 0.0
         for o in 0..m.n_obs {
             val p = list_get(m.a, o * ns + s)
-            if p > 1.0e-300 { h = h - p * log(p) }
+            if p > 1.0e-300 {
+                h = h - p * log(p)
+            }
         }
         list_push(out, h)
     }
@@ -1539,7 +1861,9 @@ pub def pomdp_novelty_weights(m: Pomdp) -> list<f64> {
     for i in 0..(no * ns) { list_push(out, 0.0) }
     for s in 0..ns {
         var col = 0.0
-        for o in 0..no { col = col + list_get(m.pa, o * ns + s) }
+        for o in 0..no {
+            col = col + list_get(m.pa, o * ns + s)
+        }
         for o in 0..no {
             val c = list_get(m.pa, o * ns + s)
             if c > 0.0 { list_set(out, o * ns + s, 1.0 / c - 1.0 / col) }
@@ -1565,14 +1889,36 @@ pub record PolicyValue {
     ambiguity: f64,
     info_gain: f64,
     utility: f64,
-    novelty: f64
+    novelty: f64,
 }
 
-pub def pomdp_policy_value(m: Pomdp, q: list<f64>, policy: list<i64>, w_epistemic: f64, w_novelty: f64) -> PolicyValue {
-    policy_value_with(m, q, policy, pomdp_state_ambiguity(m), pomdp_novelty_weights(m), w_epistemic, w_novelty)
+pub def pomdp_policy_value(
+    m: Pomdp,
+    q: list<f64>,
+    policy: list<i64>,
+    w_epistemic: f64,
+    w_novelty: f64,
+) -> PolicyValue {
+    policy_value_with(
+        m,
+        q,
+        policy,
+        pomdp_state_ambiguity(m),
+        pomdp_novelty_weights(m),
+        w_epistemic,
+        w_novelty,
+    )
 }
 
-def policy_value_with(m: Pomdp, q: list<f64>, policy: list<i64>, h_a: list<f64>, w_a: list<f64>, w_epistemic: f64, w_novelty: f64) -> PolicyValue {
+def policy_value_with(
+    m: Pomdp,
+    q: list<f64>,
+    policy: list<i64>,
+    h_a: list<f64>,
+    w_a: list<f64>,
+    w_epistemic: f64,
+    w_novelty: f64,
+) -> PolicyValue {
     val ns = m.n_states
     var qs = q
     var risk = 0.0
@@ -1587,16 +1933,22 @@ def policy_value_with(m: Pomdp, q: list<f64>, policy: list<i64>, h_a: list<f64>,
         var u = 0.0
         for o in 0..m.n_obs {
             val p = list_get(qo, o)
-            if p > 1.0e-300 { h_o = h_o - p * log(p) }
+            if p > 1.0e-300 {
+                h_o = h_o - p * log(p)
+            }
             u = u + p * list_get(m.log_c, o)
         }
         var amb = 0.0
-        for s in 0..ns { amb = amb + list_get(qs, s) * list_get(h_a, s) }
+        for s in 0..ns {
+            amb = amb + list_get(qs, s) * list_get(h_a, s)
+        }
         var nov = 0.0
         if w_novelty != 0.0 {
             for o in 0..m.n_obs {
                 var ws = 0.0
-                for s in 0..ns { ws = ws + list_get(w_a, o * ns + s) * list_get(qs, s) }
+                for s in 0..ns {
+                    ws = ws + list_get(w_a, o * ns + s) * list_get(qs, s)
+                }
                 nov = nov + list_get(qo, o) * ws
             }
         }
@@ -1613,7 +1965,7 @@ def policy_value_with(m: Pomdp, q: list<f64>, policy: list<i64>, h_a: list<f64>,
         ambiguity: ambiguity,
         info_gain: info_gain,
         utility: utility,
-        novelty: novelty
+        novelty: novelty,
     }
 }
 
@@ -1647,7 +1999,9 @@ pub def pomdp_learn_likelihood(m: Pomdp, obs: i64, posterior: list<f64>, rate: f
         if w > 0.0 {
             list_set(m.pa, obs * ns + s, list_get(m.pa, obs * ns + s) + w)
             var col = 0.0
-            for o in 0..m.n_obs { col = col + list_get(m.pa, o * ns + s) }
+            for o in 0..m.n_obs {
+                col = col + list_get(m.pa, o * ns + s)
+            }
             for o in 0..m.n_obs { list_set(m.a, o * ns + s, list_get(m.pa, o * ns + s) / col) }
         }
     }
@@ -1655,7 +2009,13 @@ pub def pomdp_learn_likelihood(m: Pomdp, obs: i64, posterior: list<f64>, rate: f
 }
 
 /// Add a transition to the counts, weighted by the beliefs before and after.
-pub def pomdp_learn_transition(m: Pomdp, act: i64, before: list<f64>, after: list<f64>, rate: f64) -> Pomdp {
+pub def pomdp_learn_transition(
+    m: Pomdp,
+    act: i64,
+    before: list<f64>,
+    after: list<f64>,
+    rate: f64,
+) -> Pomdp {
     val ns = m.n_states
     for s in 0..ns {
         val ws = list_get(before, s) * rate
@@ -1684,7 +2044,7 @@ pub record AifAgent {
     learning_rate: f64,
     stochastic: bool,
     last_action: i64,
-    t: i64
+    t: i64,
 }
 
 pub record AifDecision {
@@ -1692,7 +2052,7 @@ pub record AifDecision {
     action_probs: list<f64>,
     policy_probs: list<f64>,
     values: list<PolicyValue>,
-    best_policy: i64
+    best_policy: i64,
 }
 
 /// An agent planning `horizon` steps ahead with policy precision `gamma`.
@@ -1712,7 +2072,7 @@ pub def aif_agent_new(m: Pomdp, horizon: i64, gamma: f64) -> AifAgent {
         learning_rate: 0.0,
         stochastic: false,
         last_action: 0 - 1,
-        t: 0
+        t: 0,
     }
 }
 
@@ -1754,7 +2114,11 @@ pub def aif_reset(agent: AifAgent) -> AifAgent {
 /// and learn from it when the agent learns.
 pub def aif_observe(agent: AifAgent, obs: i64) -> AifAgent {
     var ag = agent
-    val prior = if ag.t == 0 || ag.last_action < 0 { ag.belief } else { pomdp_predict(ag.model, ag.belief, ag.last_action) }
+    val prior = if ag.t == 0 || ag.last_action < 0 {
+        ag.belief
+    } else {
+        pomdp_predict(ag.model, ag.belief, ag.last_action)
+    }
     val post = pomdp_posterior(ag.model, prior, obs)
     if ag.learning_rate > 0.0 {
         pomdp_learn_likelihood(ag.model, obs, post, ag.learning_rate)
@@ -1788,11 +2152,21 @@ pub def aif_decide_permitted(agent: AifAgent, permitted: list<bool>) -> (AifAgen
     var any = false
     for i in 0..n {
         val policy = list_get(agent.policies, i)
-        val v = policy_value_with(m, agent.belief, policy, h_a, w_a, agent.w_epistemic, agent.w_novelty)
+        val v = policy_value_with(
+            m,
+            agent.belief,
+            policy,
+            h_a,
+            w_a,
+            agent.w_epistemic,
+            agent.w_novelty,
+        )
         list_push(values, v)
         val first = list_get(policy, 0)
         val allowed = first < list_len(permitted) && list_get(permitted, first)
-        if allowed { any = true }
+        if allowed {
+            any = true
+        }
         list_push(scores, if allowed { 0.0 - agent.gamma * v.efe } else { -1.0e300 })
     }
     val action_probs: list<f64> = list()
@@ -1802,17 +2176,39 @@ pub def aif_decide_permitted(agent: AifAgent, permitted: list<bool>) -> (AifAgen
         for i in 0..n { list_push(none_probs, 0.0) }
         var ag = agent
         ag.last_action = 0 - 1
-        return (ag, AifDecision { action: 0 - 1, action_probs: action_probs, policy_probs: none_probs, values: values, best_policy: 0 - 1 })
+        return (
+            ag,
+            AifDecision {
+                action: 0 - 1,
+                action_probs: action_probs,
+                policy_probs: none_probs,
+                values: values,
+                best_policy: 0 - 1,
+            },
+        )
     }
     val policy_probs = probs_softmax(scores)
     for i in 0..n {
         val first = list_get(list_get(agent.policies, i), 0)
         list_set(action_probs, first, list_get(action_probs, first) + list_get(policy_probs, i))
     }
-    val action = if agent.stochastic { probs_sample(action_probs) } else { probs_argmax(action_probs) }
+    val action = if agent.stochastic {
+        probs_sample(action_probs)
+    } else {
+        probs_argmax(action_probs)
+    }
     var ag = agent
     ag.last_action = action
-    (ag, AifDecision { action: action, action_probs: action_probs, policy_probs: policy_probs, values: values, best_policy: probs_argmax(policy_probs) })
+    (
+        ag,
+        AifDecision {
+            action: action,
+            action_probs: action_probs,
+            policy_probs: policy_probs,
+            values: values,
+            best_policy: probs_argmax(policy_probs),
+        },
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -1832,7 +2228,7 @@ pub record LinearModel {
     forgetting: f64,
     max_variance: f64,
     updates: i64,
-    mse: f64
+    mse: f64,
 }
 
 /// A model with weights 0. `forgetting` in (0, 1]: 1 remembers everything,
@@ -1840,7 +2236,12 @@ pub record LinearModel {
 /// prior variance of the weights: large (1e6) lets the data decide alone,
 /// small pulls the estimates toward 0. It also caps P's diagonal, so a
 /// direction the data never excites cannot wind up under forgetting.
-pub def linear_model_new(n_in: i64, n_out: i64, forgetting: f64, initial_variance: f64) -> LinearModel {
+pub def linear_model_new(
+    n_in: i64,
+    n_out: i64,
+    forgetting: f64,
+    initial_variance: f64,
+) -> LinearModel {
     val w: list<f64> = list()
     for i in 0..(n_in * n_out) { list_push(w, 0.0) }
     val p: list<f64> = list()
@@ -1848,10 +2249,14 @@ pub def linear_model_new(n_in: i64, n_out: i64, forgetting: f64, initial_varianc
         for c in 0..n_in { list_push(p, if r == c { initial_variance } else { 0.0 }) }
     }
     LinearModel {
-        n_in: n_in, n_out: n_out, w: w, p: p,
+        n_in: n_in,
+        n_out: n_out,
+        w: w,
+        p: p,
         forgetting: if forgetting <= 0.0 || forgetting > 1.0 { 1.0 } else { forgetting },
         max_variance: initial_variance,
-        updates: 0, mse: 0.0
+        updates: 0,
+        mse: 0.0,
     }
 }
 
@@ -1859,7 +2264,9 @@ pub def linear_model_predict(m: LinearModel, x: list<f64>) -> list<f64> {
     val out: list<f64> = list()
     for o in 0..m.n_out {
         var s = 0.0
-        for i in 0..m.n_in { s = s + list_get(m.w, o * m.n_in + i) * list_get(x, i) }
+        for i in 0..m.n_in {
+            s = s + list_get(m.w, o * m.n_in + i) * list_get(x, i)
+        }
         list_push(out, s)
     }
     out
@@ -1872,11 +2279,15 @@ pub def linear_model_update(m: LinearModel, x: list<f64>, y: list<f64>) -> Linea
     val px: list<f64> = list()
     for r in 0..n {
         var s = 0.0
-        for c in 0..n { s = s + list_get(m.p, r * n + c) * list_get(x, c) }
+        for c in 0..n {
+            s = s + list_get(m.p, r * n + c) * list_get(x, c)
+        }
         list_push(px, s)
     }
     var denom = m.forgetting
-    for i in 0..n { denom = denom + list_get(x, i) * list_get(px, i) }
+    for i in 0..n {
+        denom = denom + list_get(x, i) * list_get(px, i)
+    }
     val k: list<f64> = list()
     for i in 0..n { list_push(k, list_get(px, i) / denom) }
     val pred = linear_model_predict(m, x)
@@ -1889,9 +2300,15 @@ pub def linear_model_update(m: LinearModel, x: list<f64>, y: list<f64>) -> Linea
     var top = 0.0
     for r in 0..n {
         for c in 0..n {
-            list_set(m.p, r * n + c, (list_get(m.p, r * n + c) - list_get(k, r) * list_get(px, c)) / m.forgetting)
+            list_set(
+                m.p,
+                r * n + c,
+                (list_get(m.p, r * n + c) - list_get(k, r) * list_get(px, c)) / m.forgetting,
+            )
         }
-        if list_get(m.p, r * n + r) > top { top = list_get(m.p, r * n + r) }
+        if list_get(m.p, r * n + r) > top {
+            top = list_get(m.p, r * n + r)
+        }
     }
     if top > m.max_variance {
         val scale = m.max_variance / top
@@ -1911,7 +2328,9 @@ pub def linear_model_variance(m: LinearModel, x: list<f64>) -> f64 {
     var v = 0.0
     for r in 0..n {
         var s = 0.0
-        for c in 0..n { s = s + list_get(m.p, r * n + c) * list_get(x, c) }
+        for c in 0..n {
+            s = s + list_get(m.p, r * n + c) * list_get(x, c)
+        }
         v = v + list_get(x, r) * s
     }
     v
@@ -1931,7 +2350,12 @@ pub def wm_new(n_state: i64, n_action: i64, forgetting: f64) -> LinearModel {
     linear_model_new(n_state + n_action + 1, n_state, forgetting, 1.0e6)
 }
 
-pub def wm_learn(m: LinearModel, state: list<f64>, action: list<f64>, next_state: list<f64>) -> LinearModel {
+pub def wm_learn(
+    m: LinearModel,
+    state: list<f64>,
+    action: list<f64>,
+    next_state: list<f64>,
+) -> LinearModel {
     linear_model_update(m, wm_features(state, action), next_state)
 }
 
@@ -1940,7 +2364,12 @@ pub def wm_predict(m: LinearModel, state: list<f64>, action: list<f64>) -> list<
 }
 
 /// The states the model predicts over `steps` steps holding `action`.
-pub def wm_rollout(m: LinearModel, state: list<f64>, action: list<f64>, steps: i64) -> list<list<f64>> {
+pub def wm_rollout(
+    m: LinearModel,
+    state: list<f64>,
+    action: list<f64>,
+    steps: i64,
+) -> list<list<f64>> {
     val out: list<list<f64>> = list()
     var s = state
     for t in 0..steps {
@@ -1959,7 +2388,7 @@ pub record ViabilityChoice {
     risk: f64,
     critical: bool,
     risks: list<f64>,
-    predicted: list<list<f64>>
+    predicted: list<list<f64>>,
 }
 
 /// The permitted action whose predicted trajectory keeps the state most
@@ -1972,25 +2401,39 @@ pub record ViabilityChoice {
 /// unfitted model predicts for all of them, and why a controller that never
 /// tries an action never learns what it does. Remaining ties go to the lowest
 /// index. An empty `permitted` permits everything.
-pub def viability_choose(bounds: list<ViabilityBound>, m: LinearModel, state: list<f64>, actions: list<list<f64>>, steps: i64, permitted: list<bool>, exploration: f64) -> ViabilityChoice {
+pub def viability_choose(
+    bounds: list<ViabilityBound>,
+    m: LinearModel,
+    state: list<f64>,
+    actions: list<list<f64>>,
+    steps: i64,
+    permitted: list<bool>,
+    exploration: f64,
+) -> ViabilityChoice {
     val risks: list<f64> = list()
     var best = 0 - 1
     var best_risk = 1.0e300
     var best_critical = false
     var best_path: list<list<f64>> = list()
     for a in 0..list_len(actions) {
-        val allowed = list_len(permitted) == 0 || (a < list_len(permitted) && list_get(permitted, a))
+        val allowed = list_len(permitted) == 0
+            || (a < list_len(permitted) && list_get(permitted, a))
         val path = wm_rollout(m, state, list_get(actions, a), if steps < 1 { 1 } else { steps })
         var risk = 0.0
         var critical = false
         for t in 0..list_len(path) {
             val v = viability_assess(bounds, list_get(path, t))
             risk = risk + v.risk
-            if v.critical { critical = true }
+            if v.critical {
+                critical = true
+            }
         }
-        if critical { risk = risk + 1000.0 }
+        if critical {
+            risk = risk + 1000.0
+        }
         list_push(risks, risk)
-        val score = risk - exploration * sqrt(linear_model_variance(m, wm_features(state, list_get(actions, a))))
+        val score = risk
+            - exploration * sqrt(linear_model_variance(m, wm_features(state, list_get(actions, a))))
         if allowed && score < best_risk {
             best = a
             best_risk = score
@@ -1999,7 +2442,13 @@ pub def viability_choose(bounds: list<ViabilityBound>, m: LinearModel, state: li
         }
     }
     val chosen_risk = if best >= 0 { list_get(risks, best) } else { best_risk }
-    ViabilityChoice { action: best, risk: chosen_risk, critical: best_critical, risks: risks, predicted: best_path }
+    ViabilityChoice {
+        action: best,
+        risk: chosen_risk,
+        critical: best_critical,
+        risks: risks,
+        predicted: best_path,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2022,55 +2471,131 @@ pub record SafetyRule {
     action: i64,
     low: f64,
     high: f64,
-    severity: i64
+    severity: i64,
 }
 
 pub record SafetyPolicy {
     rules: list<SafetyRule>,
     audit: list<str>,
-    interventions: i64
+    interventions: i64,
 }
 
 pub record SafetyVerdict {
     action: i64,
     permitted: list<bool>,
     overridden: bool,
-    rule: str
+    rule: str,
 }
 
 pub def safety_policy_new() -> SafetyPolicy {
     SafetyPolicy { rules: list(), audit: list(), interventions: 0 }
 }
 
-pub def safety_forbid_when(p: SafetyPolicy, name: str, variable: i64, op: str, threshold: f64, action: i64, severity: i64) -> SafetyPolicy {
-    list_push(p.rules, SafetyRule { name: name, kind: 0, variable: variable, op: op, threshold: threshold, action: action, low: 0.0, high: 0.0, severity: severity })
+pub def safety_forbid_when(
+    p: SafetyPolicy,
+    name: str,
+    variable: i64,
+    op: str,
+    threshold: f64,
+    action: i64,
+    severity: i64,
+) -> SafetyPolicy {
+    list_push(
+        p.rules,
+        SafetyRule {
+            name: name,
+            kind: 0,
+            variable: variable,
+            op: op,
+            threshold: threshold,
+            action: action,
+            low: 0.0,
+            high: 0.0,
+            severity: severity,
+        },
+    )
     p
 }
 
-pub def safety_require_when(p: SafetyPolicy, name: str, variable: i64, op: str, threshold: f64, action: i64, severity: i64) -> SafetyPolicy {
-    list_push(p.rules, SafetyRule { name: name, kind: 1, variable: variable, op: op, threshold: threshold, action: action, low: 0.0, high: 0.0, severity: severity })
+pub def safety_require_when(
+    p: SafetyPolicy,
+    name: str,
+    variable: i64,
+    op: str,
+    threshold: f64,
+    action: i64,
+    severity: i64,
+) -> SafetyPolicy {
+    list_push(
+        p.rules,
+        SafetyRule {
+            name: name,
+            kind: 1,
+            variable: variable,
+            op: op,
+            threshold: threshold,
+            action: action,
+            low: 0.0,
+            high: 0.0,
+            severity: severity,
+        },
+    )
     p
 }
 
-pub def safety_keep_within(p: SafetyPolicy, name: str, variable: i64, low: f64, high: f64, severity: i64) -> SafetyPolicy {
-    list_push(p.rules, SafetyRule { name: name, kind: 2, variable: variable, op: "in", threshold: 0.0, action: 0 - 1, low: low, high: high, severity: severity })
+pub def safety_keep_within(
+    p: SafetyPolicy,
+    name: str,
+    variable: i64,
+    low: f64,
+    high: f64,
+    severity: i64,
+) -> SafetyPolicy {
+    list_push(
+        p.rules,
+        SafetyRule {
+            name: name,
+            kind: 2,
+            variable: variable,
+            op: "in",
+            threshold: 0.0,
+            action: 0 - 1,
+            low: low,
+            high: high,
+            severity: severity,
+        },
+    )
     p
 }
 
 /// `value op threshold`, for op one of > < >= <= == !=.
 pub def safety_condition(op: str, value: f64, threshold: f64) -> bool {
-    if op == ">" { return value > threshold }
-    if op == "<" { return value < threshold }
-    if op == ">=" { return value >= threshold }
-    if op == "<=" { return value <= threshold }
-    if op == "==" { return value == threshold }
-    if op == "!=" { return value != threshold }
+    if op == ">" {
+        return value > threshold
+    }
+    if op == "<" {
+        return value < threshold
+    }
+    if op == ">=" {
+        return value >= threshold
+    }
+    if op == "<=" {
+        return value <= threshold
+    }
+    if op == "==" {
+        return value == threshold
+    }
+    if op == "!=" {
+        return value != threshold
+    }
     panic("safety rule: unknown operator '" + op + "' -- expected one of > < >= <= == !=")
     false
 }
 
 def rule_fires(r: SafetyRule, state: list<f64>) -> bool {
-    r.variable >= 0 && r.variable < list_len(state) && safety_condition(r.op, list_get(state, r.variable), r.threshold)
+    r.variable >= 0
+        && r.variable < list_len(state)
+        && safety_condition(r.op, list_get(state, r.variable), r.threshold)
 }
 
 /// Which of `n_actions` actions the state-based rules allow now. keep_within
@@ -2080,14 +2605,21 @@ pub def safety_permitted_now(p: SafetyPolicy, state: list<f64>, n_actions: i64) 
     for a in 0..n_actions { list_push(ok, true) }
     for i in 0..list_len(p.rules) {
         val r = list_get(p.rules, i)
-        if r.kind == 0 && r.action >= 0 && r.action < n_actions && rule_fires(r, state) { list_set(ok, r.action, false) }
+        if r.kind == 0 && r.action >= 0 && r.action < n_actions && rule_fires(r, state) {
+            list_set(ok, r.action, false)
+        }
     }
     ok
 }
 
 /// Which actions every rule allows, keep_within judged on the model's
 /// prediction of the next state under each action.
-pub def safety_permitted(p: SafetyPolicy, state: list<f64>, m: LinearModel, actions: list<list<f64>>) -> list<bool> {
+pub def safety_permitted(
+    p: SafetyPolicy,
+    state: list<f64>,
+    m: LinearModel,
+    actions: list<list<f64>>,
+) -> list<bool> {
     val n = list_len(actions)
     val ok = safety_permitted_now(p, state, n)
     for i in 0..list_len(p.rules) {
@@ -2132,30 +2664,75 @@ def required_rule_name(p: SafetyPolicy, state: list<f64>) -> str {
     name
 }
 
+def record_safety_audit(audit: list<str>, idx: i64, msg: str) -> i64 {
+    if list_len(audit) < 128 {
+        val _ = list_push(audit, msg)
+    } else {
+        list_set(audit, idx % 128, msg)
+    }
+    return 0
+}
+
 /// The action to take given the one proposed: a required action first, then
 /// the proposal if permitted, then the first permitted action, then
 /// `fallback`. Every override is counted and written to the audit trail.
-pub def safety_resolve(p: SafetyPolicy, state: list<f64>, permitted: list<bool>, proposed: i64, fallback: i64) -> (SafetyPolicy, SafetyVerdict) {
+pub def safety_resolve(
+    p: SafetyPolicy,
+    state: list<f64>,
+    permitted: list<bool>,
+    proposed: i64,
+    fallback: i64,
+) -> (SafetyPolicy, SafetyVerdict) {
     val required = safety_required(p, state)
     if required >= 0 {
         val name = required_rule_name(p, state)
         if required != proposed {
-            list_push(p.audit, "required " + to_str(required) + " instead of " + to_str(proposed) + " by '" + name + "'")
+            val _a = record_safety_audit(
+                p.audit,
+                p.interventions,
+                "required "
+                    + to_str(required)
+                    + " instead of "
+                    + to_str(proposed)
+                    + " by '"
+                    + name
+                    + "'",
+            )
             var q = p
             q.interventions = p.interventions + 1
-            return (q, SafetyVerdict { action: required, permitted: permitted, overridden: true, rule: name })
+            return (
+                q,
+                SafetyVerdict {
+                    action: required,
+                    permitted: permitted,
+                    overridden: true,
+                    rule: name,
+                },
+            )
         }
-        return (p, SafetyVerdict { action: required, permitted: permitted, overridden: false, rule: name })
+        return (
+            p,
+            SafetyVerdict { action: required, permitted: permitted, overridden: false, rule: name },
+        )
     }
     if proposed >= 0 && proposed < list_len(permitted) && list_get(permitted, proposed) {
-        return (p, SafetyVerdict { action: proposed, permitted: permitted, overridden: false, rule: "" })
+        return (
+            p,
+            SafetyVerdict { action: proposed, permitted: permitted, overridden: false, rule: "" },
+        )
     }
     var first_permitted = 0 - 1
     for a in 0..list_len(permitted) {
-        if first_permitted < 0 && list_get(permitted, a) { first_permitted = a }
+        if first_permitted < 0 && list_get(permitted, a) {
+            first_permitted = a
+        }
     }
     val action = if first_permitted >= 0 { first_permitted } else { fallback }
-    list_push(p.audit, "forbade " + to_str(proposed) + ", took " + to_str(action))
+    val _a = record_safety_audit(
+        p.audit,
+        p.interventions,
+        "forbade " + to_str(proposed) + ", took " + to_str(action),
+    )
     var q = p
     q.interventions = p.interventions + 1
     (q, SafetyVerdict { action: action, permitted: permitted, overridden: true, rule: "forbidden" })
@@ -2175,7 +2752,7 @@ pub record Autopilot {
     prev_state: list<f64>,
     prev_action: i64,
     exploration: f64,
-    learning: bool
+    learning: bool,
 }
 
 pub record AutopilotStep {
@@ -2183,12 +2760,19 @@ pub record AutopilotStep {
     action: i64,
     risk: f64,
     overridden: bool,
-    reason: str
+    reason: str,
 }
 
 /// An autopilot for `n_state` variables choosing among `actions` (each a
 /// control vector), looking `horizon` steps ahead.
-pub def autopilot_new(n_state: i64, actions: list<list<f64>>, bounds: list<ViabilityBound>, safety: SafetyPolicy, horizon: i64, forgetting: f64) -> Autopilot {
+pub def autopilot_new(
+    n_state: i64,
+    actions: list<list<f64>>,
+    bounds: list<ViabilityBound>,
+    safety: SafetyPolicy,
+    horizon: i64,
+    forgetting: f64,
+) -> Autopilot {
     val n_action = if list_len(actions) > 0 { list_len(list_get(actions, 0)) } else { 0 }
     Autopilot {
         model: wm_new(n_state, n_action, forgetting),
@@ -2200,7 +2784,7 @@ pub def autopilot_new(n_state: i64, actions: list<list<f64>>, bounds: list<Viabi
         prev_state: list(),
         prev_action: 0 - 1,
         exploration: 0.001,
-        learning: true
+        learning: true,
     }
 }
 
@@ -2220,7 +2804,15 @@ pub def autopilot_step(pilot: Autopilot, state: list<f64>) -> AutopilotStep {
         ap.model = wm_learn(ap.model, ap.prev_state, list_get(ap.actions, ap.prev_action), state)
     }
     val permitted = safety_permitted(ap.safety, state, ap.model, ap.actions)
-    val pick = viability_choose(ap.bounds, ap.model, state, ap.actions, ap.horizon, permitted, ap.exploration)
+    val pick = viability_choose(
+        ap.bounds,
+        ap.model,
+        state,
+        ap.actions,
+        ap.horizon,
+        permitted,
+        ap.exploration,
+    )
     val resolved = safety_resolve(ap.safety, state, permitted, pick.action, 0)
     ap.safety = resolved.0
     val verdict = resolved.1
@@ -2233,8 +2825,18 @@ pub def autopilot_step(pilot: Autopilot, state: list<f64>) -> AutopilotStep {
     rt.last_action = verdict.action
     rt.state = if verdict.overridden { "protecting" } else { "active" }
     ap.runtime = rt
-    val reason = if verdict.overridden { "safety: " + verdict.rule } else { if pick.critical { "best of critical options" } else { "viable" } }
-    AutopilotStep { pilot: ap, action: verdict.action, risk: pick.risk, overridden: verdict.overridden, reason: reason }
+    val reason = if verdict.overridden {
+        "safety: " + verdict.rule
+    } else {
+        if pick.critical { "best of critical options" } else { "viable" }
+    }
+    AutopilotStep {
+        pilot: ap,
+        action: verdict.action,
+        risk: pick.risk,
+        overridden: verdict.overridden,
+        reason: reason,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2247,7 +2849,7 @@ pub record GovernorStep {
     action_name: str,
     rule: i64,
     health: f64,
-    reason: str
+    reason: str,
 }
 
 /// One autonomic cycle. The metrics are recorded and fed to the homeostat
@@ -2256,10 +2858,17 @@ pub record GovernorStep {
 /// does not clear that action's name (constitution_check false), in which
 /// case the governor takes action 0. A rule naming a metric that was not
 /// measured stops the program: a rule that can never fire is a bug.
-pub def software_governor_step(gov: SoftwareGovernor, metric_names: list<str>, metrics: list<f64>, dt: f64) -> GovernorStep {
-    val snapshot: list<f64> = list()
-    for i in 0..list_len(metrics) { list_push(snapshot, list_get(metrics, i)) }
-    list_push(gov.metrics_history, snapshot)
+pub def software_governor_step(
+    gov: SoftwareGovernor,
+    metric_names: list<str>,
+    metrics: list<f64>,
+    dt: f64,
+) -> GovernorStep {
+    if list_len(gov.metrics_history) < 128 {
+        val snapshot: list<f64> = list()
+        for i in 0..list_len(metrics) { list_push(snapshot, list_get(metrics, i)) }
+        list_push(gov.metrics_history, snapshot)
+    }
     val updated = homeostat_update(gov.homeostat, metrics, dt)
     var g = gov
     g.homeostat = updated.0
@@ -2269,10 +2878,16 @@ pub def software_governor_step(gov: SoftwareGovernor, metric_names: list<str>, m
         val rule = list_get(g.rules, i)
         var idx = 0 - 1
         for j in 0..list_len(metric_names) {
-            if idx < 0 && list_get(metric_names, j) == rule.metric_name { idx = j }
+            if idx < 0 && list_get(metric_names, j) == rule.metric_name {
+                idx = j
+            }
         }
         if idx < 0 || idx >= list_len(metrics) {
-            panic("software_governor_step: rule on metric '" + rule.metric_name + "', which was not measured")
+            panic(
+                "software_governor_step: rule on metric '"
+                    + rule.metric_name
+                    + "', which was not measured",
+            )
         }
         if eval_rule(rule, list_get(metrics, idx)) && rule.severity > best_severity {
             best = i
@@ -2282,21 +2897,50 @@ pub def software_governor_step(gov: SoftwareGovernor, metric_names: list<str>, m
     val health = g.homeostat.health
     if best < 0 {
         g.last_action = 0
-        val why = if homeostat_is_safe(g.homeostat) { "no rule fired" } else { "outside homeostatic bounds, but no rule fired" }
-        return GovernorStep { governor: g, action: 0, action_name: action_name_at(g, 0), rule: 0 - 1, health: health, reason: why }
+        val why = if homeostat_is_safe(g.homeostat) {
+            "no rule fired"
+        } else {
+            "outside homeostatic bounds, but no rule fired"
+        }
+        return GovernorStep {
+            governor: g,
+            action: 0,
+            action_name: action_name_at(g, 0),
+            rule: 0 - 1,
+            health: health,
+            reason: why,
+        }
     }
     val rule = list_get(g.rules, best)
     val name = action_name_at(g, rule.action_idx)
     if !constitution_check(g.constitution, name) {
         g.last_action = 0
-        return GovernorStep { governor: g, action: 0, action_name: action_name_at(g, 0), rule: best, health: health, reason: "'" + name + "' not cleared by the constitution" }
+        return GovernorStep {
+            governor: g,
+            action: 0,
+            action_name: action_name_at(g, 0),
+            rule: best,
+            health: health,
+            reason: "'" + name + "' not cleared by the constitution",
+        }
     }
     g.last_action = rule.action_idx
-    GovernorStep { governor: g, action: rule.action_idx, action_name: name, rule: best, health: health, reason: rule.metric_name + " " + rule.operator + " " + to_str(rule.threshold) }
+    GovernorStep {
+        governor: g,
+        action: rule.action_idx,
+        action_name: name,
+        rule: best,
+        health: health,
+        reason: rule.metric_name + " " + rule.operator + " " + to_str(rule.threshold),
+    }
 }
 
 def action_name_at(g: SoftwareGovernor, idx: i64) -> str {
-    if idx >= 0 && idx < list_len(g.action_space) { list_get(g.action_space, idx) } else { "action " + to_str(idx) }
+    if idx >= 0 && idx < list_len(g.action_space) {
+        list_get(g.action_space, idx)
+    } else {
+        "action " + to_str(idx)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2308,7 +2952,11 @@ def action_name_at(g: SoftwareGovernor, idx: i64) -> str {
 /// sample), is added to the importance of each parameter, and the current
 /// parameters become the anchor. Accumulating the information keeps earlier
 /// tasks protected (online EWC).
-pub def ewc_consolidate(ewc: EWCState, params: list<f64>, grad_samples: list<list<f64>>) -> EWCState {
+pub def ewc_consolidate(
+    ewc: EWCState,
+    params: list<f64>,
+    grad_samples: list<list<f64>>,
+) -> EWCState {
     val n = list_len(params)
     val k = list_len(grad_samples)
     for i in 0..n {
@@ -2336,8 +2984,16 @@ pub def ewc_consolidate(ewc: EWCState, params: list<f64>, grad_samples: list<lis
 pub def ewc_penalty_grad(ewc: EWCState, params: list<f64>) -> list<f64> {
     val out: list<f64> = list()
     for i in 0..list_len(params) {
-        val f = if i < list_len(ewc.importance_weights) { list_get(ewc.importance_weights, i) } else { 0.0 }
-        val anchor = if i < list_len(ewc.old_params) { list_get(ewc.old_params, i) } else { list_get(params, i) }
+        val f = if i < list_len(ewc.importance_weights) {
+            list_get(ewc.importance_weights, i)
+        } else {
+            0.0
+        }
+        val anchor = if i < list_len(ewc.old_params) {
+            list_get(ewc.old_params, i)
+        } else {
+            list_get(params, i)
+        }
         list_push(out, ewc.lambda_ewc * f * (list_get(params, i) - anchor))
     }
     out
@@ -2354,7 +3010,9 @@ def push_numbers(lines: list<str>, xs: list<f64>) -> i64 {
 
 def write_lines(path: str, lines: list<str>) -> bool effect fs, io {
     var content = ""
-    for i in 0..list_len(lines) { content = content + list_get(lines, i) + "\n" }
+    for i in 0..list_len(lines) {
+        content = content + list_get(lines, i) + "\n"
+    }
     val r = file_write_all(path, content)
     when r {
         ok(n) => true,
@@ -2363,14 +3021,18 @@ def write_lines(path: str, lines: list<str>) -> bool effect fs, io {
 }
 
 def number_at(lines: list<str>, i: i64) -> f64 {
-    if i >= list_len(lines) { return 0.0 }
+    if i >= list_len(lines) {
+        return 0.0
+    }
     val parsed = parse_f64(trim(list_get(lines, i)))
     if is_some(parsed) { unwrap(parsed) } else { 0.0 }
 }
 
 /// Save a model with what it has learned: its counts, preferences and prior.
 pub def pomdp_save(m: Pomdp, path: str) -> bool effect fs, io {
-    val lines: list<str> = list("iris-pomdp 1", to_str(m.n_states), to_str(m.n_obs), to_str(m.n_actions))
+    val lines: list<
+        str
+    > = list("iris-pomdp 1", to_str(m.n_states), to_str(m.n_obs), to_str(m.n_actions))
     push_numbers(lines, m.pa)
     push_numbers(lines, m.pb)
     push_numbers(lines, m.log_c)
@@ -2381,11 +3043,15 @@ pub def pomdp_save(m: Pomdp, path: str) -> bool effect fs, io {
 /// A model saved by pomdp_save; none if the file is missing or not one.
 pub def pomdp_load(path: str) -> option<Pomdp> effect fs, io {
     val lines = file_lines(path)
-    if list_len(lines) < 4 || trim(list_get(lines, 0)) != "iris-pomdp 1" { return none() }
+    if list_len(lines) < 4 || trim(list_get(lines, 0)) != "iris-pomdp 1" {
+        return none()
+    }
     val ns = number_at(lines, 1) to i64
     val no = number_at(lines, 2) to i64
     val na = number_at(lines, 3) to i64
-    if list_len(lines) < 4 + no * ns + na * ns * ns + no + ns { return none() }
+    if list_len(lines) < 4 + no * ns + na * ns * ns + no + ns {
+        return none()
+    }
     val m = pomdp_new(ns, no, na)
     var at = 4
     for i in 0..(no * ns) { list_set(m.pa, i, number_at(lines, at + i)) }
@@ -2398,20 +3064,46 @@ pub def pomdp_load(path: str) -> option<Pomdp> effect fs, io {
     // The means of the counts.
     for s in 0..ns {
         var col = 0.0
-        for o in 0..no { col = col + list_get(m.pa, o * ns + s) }
-        for o in 0..no { list_set(m.a, o * ns + s, if col > 0.0 { list_get(m.pa, o * ns + s) / col } else { 1.0 / to_f64(no) }) }
+        for o in 0..no {
+            col = col + list_get(m.pa, o * ns + s)
+        }
+        for o in 0..no {
+            list_set(
+                m.a,
+                o * ns + s,
+                if col > 0.0 { list_get(m.pa, o * ns + s) / col } else { 1.0 / to_f64(no) },
+            )
+        }
     }
     for r in 0..(na * ns) {
         var total = 0.0
-        for s2 in 0..ns { total = total + list_get(m.pb, r * ns + s2) }
-        for s2 in 0..ns { list_set(m.b, r * ns + s2, if total > 0.0 { list_get(m.pb, r * ns + s2) / total } else { 1.0 / to_f64(ns) }) }
+        for s2 in 0..ns {
+            total = total + list_get(m.pb, r * ns + s2)
+        }
+        for s2 in 0..ns {
+            list_set(
+                m.b,
+                r * ns + s2,
+                if total > 0.0 { list_get(m.pb, r * ns + s2) / total } else { 1.0 / to_f64(ns) },
+            )
+        }
     }
     some(m)
 }
 
 /// Save a linear model's weights and covariance, so learning resumes.
 pub def linear_model_save(m: LinearModel, path: str) -> bool effect fs, io {
-    val lines: list<str> = list("iris-linear-model 1", to_str(m.n_in), to_str(m.n_out), to_str(m.forgetting), to_str(m.max_variance), to_str(m.updates), to_str(m.mse))
+    val lines: list<
+        str
+    > = list(
+        "iris-linear-model 1",
+        to_str(m.n_in),
+        to_str(m.n_out),
+        to_str(m.forgetting),
+        to_str(m.max_variance),
+        to_str(m.updates),
+        to_str(m.mse),
+    )
     push_numbers(lines, m.w)
     push_numbers(lines, m.p)
     write_lines(path, lines)
@@ -2419,10 +3111,14 @@ pub def linear_model_save(m: LinearModel, path: str) -> bool effect fs, io {
 
 pub def linear_model_load(path: str) -> option<LinearModel> effect fs, io {
     val lines = file_lines(path)
-    if list_len(lines) < 7 || trim(list_get(lines, 0)) != "iris-linear-model 1" { return none() }
+    if list_len(lines) < 7 || trim(list_get(lines, 0)) != "iris-linear-model 1" {
+        return none()
+    }
     val n_in = number_at(lines, 1) to i64
     val n_out = number_at(lines, 2) to i64
-    if list_len(lines) < 7 + n_in * n_out + n_in * n_in { return none() }
+    if list_len(lines) < 7 + n_in * n_out + n_in * n_in {
+        return none()
+    }
     var m = linear_model_new(n_in, n_out, number_at(lines, 3), number_at(lines, 4))
     m.updates = number_at(lines, 5) to i64
     m.mse = number_at(lines, 6)

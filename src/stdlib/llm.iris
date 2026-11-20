@@ -79,7 +79,7 @@ pub def llm_assistant_turn(response: LlmResponse) -> LlmMessage {
     return LlmMessage { role: "assistant", content: response.content, tool_calls_json: response.tool_calls_json, tool_call_id: "" }
 }
 
-pub def llm_message_json(message: LlmMessage) -> str effect alloc, io {
+pub def llm_message_json(message: LlmMessage) -> str effect alloc {
     val content = if message.content == "" && message.tool_calls_json != "" { "null" } else { json_stringify(message.content) }
     var out = concat(concat(concat("{\"role\":", json_stringify(message.role)), ",\"content\":"), content)
     if message.tool_calls_json != "" {
@@ -116,7 +116,7 @@ pub def llm_tool_calls(response: LlmResponse) -> list<LlmToolCall> effect alloc 
     return calls
 }
 
-pub def llm_messages_json(messages: list<LlmMessage>) -> str effect alloc, io {
+pub def llm_messages_json(messages: list<LlmMessage>) -> str effect alloc {
     val encoded: list<str> = list()
     for i in 0..list_len(messages) {
         list_push(encoded, llm_message_json(list_get(messages, i)));
@@ -124,7 +124,7 @@ pub def llm_messages_json(messages: list<LlmMessage>) -> str effect alloc, io {
     return concat(concat("[", join(encoded, ",")), "]")
 }
 
-pub def llm_tool_json(tool: LlmTool) -> str effect alloc, io {
+pub def llm_tool_json(tool: LlmTool) -> str effect alloc {
     return concat(concat(concat(concat(concat(concat(
         "{\"type\":\"function\",\"function\":{\"name\":",
         json_stringify(tool.name)),
@@ -135,7 +135,7 @@ pub def llm_tool_json(tool: LlmTool) -> str effect alloc, io {
         "}}")
 }
 
-pub def llm_tools_json(tools: list<LlmTool>) -> str effect alloc, io {
+pub def llm_tools_json(tools: list<LlmTool>) -> str effect alloc {
     val encoded: list<str> = list()
     for i in 0..list_len(tools) {
         list_push(encoded, llm_tool_json(list_get(tools, i)));
@@ -143,7 +143,7 @@ pub def llm_tools_json(tools: list<LlmTool>) -> str effect alloc, io {
     return concat(concat("[", join(encoded, ",")), "]")
 }
 
-pub def llm_authorization_headers(client: LlmClient) -> result<str, str> effect env, alloc, io {
+pub def llm_authorization_headers(client: LlmClient) -> result<str, str> effect env, alloc {
     if client.api_key_env == "" {
         return ok("Accept: application/json\r\n")
     }
@@ -154,7 +154,7 @@ pub def llm_authorization_headers(client: LlmClient) -> result<str, str> effect 
     return ok(concat(concat("Authorization: Bearer ", key), "\r\nAccept: application/json\r\n"))
 }
 
-pub def llm_request_json(client: LlmClient, messages: list<LlmMessage>, temperature: f64, max_tokens: i64, tools_json: str) -> str effect alloc, io {
+pub def llm_request_json(client: LlmClient, messages: list<LlmMessage>, temperature: f64, max_tokens: i64, tools_json: str) -> str effect alloc {
     val tools = if tools_json == "" { "" } else { concat(",\"tools\":", tools_json) }
     return concat(concat(concat(concat(concat(concat(concat(concat(concat(
         "{\"model\":", json_stringify(client.model_name)),
@@ -164,7 +164,7 @@ pub def llm_request_json(client: LlmClient, messages: list<LlmMessage>, temperat
         tools), "}")
 }
 
-pub def llm_response_from_json(status: i64, raw_json: str) -> result<LlmResponse, str> effect alloc, io {
+pub def llm_response_from_json(status: i64, raw_json: str) -> result<LlmResponse, str> effect alloc {
     if status < 200 || status >= 300 {
         return err(concat(concat("LLM provider returned HTTP ", to_str(status)), concat(": ", raw_json)))
     }
@@ -180,7 +180,7 @@ pub def llm_response_from_json(status: i64, raw_json: str) -> result<LlmResponse
     return ok(LlmResponse { status: status, content: content, tool_calls_json: tool_calls, raw_json: raw_json })
 }
 
-pub def llm_chat_with_tools(client: LlmClient, messages: list<LlmMessage>, temperature: f64, max_tokens: i64, tools_json: str) -> result<LlmResponse, str> effect net, env, alloc, io, throw {
+pub def llm_chat_with_tools(client: LlmClient, messages: list<LlmMessage>, temperature: f64, max_tokens: i64, tools_json: str) -> result<LlmResponse, str> effect net, env, alloc, throw {
     val headers = llm_authorization_headers(client)
     if is_err(headers) { return err(unwrap_err(headers)) }
     val request = HttpRequest {
@@ -196,11 +196,11 @@ pub def llm_chat_with_tools(client: LlmClient, messages: list<LlmMessage>, tempe
     return llm_response_from_json(value.status, value.body)
 }
 
-pub def llm_chat(client: LlmClient, messages: list<LlmMessage>, temperature: f64, max_tokens: i64) -> result<LlmResponse, str> effect net, env, alloc, io, throw {
+pub def llm_chat(client: LlmClient, messages: list<LlmMessage>, temperature: f64, max_tokens: i64) -> result<LlmResponse, str> effect net, env, alloc, throw {
     return llm_chat_with_tools(client, messages, temperature, max_tokens, "")
 }
 
-pub def llm_embed(client: LlmClient, input: str) -> result<EmbeddingResponse, str> effect net, env, alloc, io, throw {
+pub def llm_embed(client: LlmClient, input: str) -> result<EmbeddingResponse, str> effect net, env, alloc, throw {
     val headers = llm_authorization_headers(client)
     if is_err(headers) { return err(unwrap_err(headers)) }
     val body = concat(concat(concat(concat("{\"model\":", json_stringify(client.model_name)), ",\"input\":"), json_stringify(input)), "}")
@@ -228,7 +228,7 @@ pub def local_onnx_model(path: str) -> result<LocalModel, str> effect ffi, fs, a
     return ok(LocalModel { handle: handle, backend: "onnx" })
 }
 
-pub def local_model_run(local: LocalModel, input: MLTensor) -> result<MLTensor, str> effect ffi, alloc, io {
+pub def local_model_run(local: LocalModel, input: MLTensor) -> result<MLTensor, str> effect ffi, alloc {
     if local.backend == "onnx" {
         return ok(onnx_run(local.handle, input))
     }

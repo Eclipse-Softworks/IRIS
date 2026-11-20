@@ -1,0 +1,606 @@
+// A live IRIS rendering of the mindcorpus.org hero.
+//
+// The screen is deliberately not a dashboard: a black, full-bleed canvas with
+// an animated particle brain, the mindcorpus wordmark, a MENU control and the
+// stacked "Future / Forward / First" type. Everything is interactive: MENU
+// opens the site's contents, each entry opens a page, "Skip intro" clears the
+// headline, and the thin line at the bottom cycles the headline. Transitions
+// are owned by UiState and driven by the frame clock.
+
+bring std.os
+bring std.string
+bring std.ui
+
+record McDot {
+    nx: f64 = 0.0,
+    ny: f64 = 0.0,
+    size: f64 = 1.0,
+    r: i64 = 255,
+    g: i64 = 255,
+    b: i64 = 255,
+    a: i64 = 160,
+    phase: f64 = 0.0,
+    speed: f64 = 1.0,
+}
+
+def mc_rand(seed: i64) -> i64 {
+    val raw = (seed * 1103515245 + 12345) % 2147483647
+    if raw < 0 {
+        return 0 - raw
+    }
+    return raw
+}
+
+def mc_centers() -> list<UiSize> {
+    return list(
+        UiSize { w: -0.30, h: -0.36 },
+        UiSize { w: 0.03, h: -0.41 },
+        UiSize { w: 0.34, h: -0.31 },
+        UiSize { w: -0.40, h: -0.02 },
+        UiSize { w: -0.02, h: -0.05 },
+        UiSize { w: 0.32, h: -0.03 },
+        UiSize { w: -0.26, h: 0.30 },
+        UiSize { w: 0.22, h: 0.35 },
+        UiSize { w: 0.42, h: 0.47 },
+    )
+}
+
+def mc_spreads() -> list<UiSize> {
+    return list(
+        UiSize { w: 0.22, h: 0.17 },
+        UiSize { w: 0.24, h: 0.17 },
+        UiSize { w: 0.22, h: 0.17 },
+        UiSize { w: 0.22, h: 0.18 },
+        UiSize { w: 0.25, h: 0.20 },
+        UiSize { w: 0.22, h: 0.18 },
+        UiSize { w: 0.23, h: 0.18 },
+        UiSize { w: 0.22, h: 0.18 },
+        UiSize { w: 0.11, h: 0.10 },
+    )
+}
+
+def mc_colors() -> list<UiColor> {
+    return list(
+        rgba(255, 168, 36, 255),
+        rgba(240, 190, 50, 255),
+        rgba(232, 214, 70, 255),
+        rgba(238, 72, 180, 255),
+        rgba(58, 220, 168, 255),
+        rgba(112, 230, 96, 255),
+        rgba(34, 188, 242, 255),
+        rgba(156, 96, 255, 255),
+        rgba(176, 106, 255, 255),
+    )
+}
+
+def mc_make_dots(per_cluster: i64) -> list<McDot> effect alloc {
+    val dots: list<McDot> = list()
+    val centers = mc_centers()
+    val spreads = mc_spreads()
+    val colors = mc_colors()
+    var seed = 7907
+    var c = 0
+    while c < list_len(centers) {
+        val ctr = list_get(centers, c)
+        val sp = list_get(spreads, c)
+        val col = list_get(colors, c)
+        var i = 0
+        while i < per_cluster {
+            seed = mc_rand(seed)
+            val u = to_f64(seed) / 2147483647.0
+            seed = mc_rand(seed)
+            val v = to_f64(seed) / 2147483647.0
+            seed = mc_rand(seed)
+            val jitter = to_f64(seed) / 2147483647.0
+            val ang = u * 6.2831853
+            val rad = 0.18 + 0.82 * v
+            var nx = ctr.w + cos(ang) * rad * sp.w
+            var ny = ctr.h + sin(ang) * rad * sp.h
+            if ny > 0.12 {
+                nx = nx * 0.86
+            }
+            val bright = 0.55 + 0.45 * jitter
+            list_push(
+                dots,
+                McDot {
+                    nx: nx,
+                    ny: ny,
+                    size: 0.65 + 0.95 * jitter,
+                    r: (to_f64(col.r) * bright) to i64,
+                    g: (to_f64(col.g) * bright) to i64,
+                    b: (to_f64(col.b) * bright) to i64,
+                    a: (90.0 + 130.0 * jitter) to i64,
+                    phase: u * 6.2831853,
+                    speed: 0.35 + 0.9 * v,
+                },
+            )
+            i = i + 1
+        }
+        c = c + 1
+    }
+    // Sparse white sparks across the whole record.
+    var s = 0
+    while s < 110 {
+        seed = mc_rand(seed)
+        val x = to_f64(seed) / 2147483647.0
+        seed = mc_rand(seed)
+        val y = to_f64(seed) / 2147483647.0
+        seed = mc_rand(seed)
+        val j = to_f64(seed) / 2147483647.0
+        list_push(
+            dots,
+            McDot {
+                nx: (x - 0.5) * 1.5,
+                ny: (y - 0.5) * 1.05,
+                size: 0.5 + 0.7 * j,
+                r: 220,
+                g: 232,
+                b: 255,
+                a: (50.0 + 90.0 * j) to i64,
+                phase: x * 6.2831853,
+                speed: 0.5 + 0.5 * y,
+            },
+        )
+        s = s + 1
+    }
+    return dots
+}
+
+def mc_paint_brain(
+    buf: DrawBuffer,
+    dots: list<McDot>,
+    w: i64,
+    h: i64,
+    clock: UiClock,
+    ptr_x: f64,
+    ptr_y: f64,
+) -> DrawBuffer effect ffi, alloc {
+    var b = buf
+    val fw = to_f64(w)
+    val fh = to_f64(h)
+    val cx = fw * 0.5
+    val cy = fh * 0.44
+    val sx = fw * 0.43
+    val sy = fh * 0.47
+    val dx = (ptr_x - cx) / fw * 18.0
+    val dy = (ptr_y - cy) / fh * 14.0
+    val centers = mc_centers()
+    val colors = mc_colors()
+
+    // Dark fibres under the points.
+    var k = 0
+    while k < 64 {
+        val ci = k % list_len(centers)
+        val ctr = list_get(centers, ci)
+        val col = list_get(colors, ci)
+        val ang = to_f64(mc_rand(1301 + k)) / 2147483647.0 * 6.2831853
+        val reach = 0.08 + 0.22 * (to_f64(mc_rand(2301 + k)) / 2147483647.0)
+        val x1 = cx + ctr.w * sx
+        val y1 = cy + ctr.h * sy
+        val x2 = cx + (ctr.w + cos(ang) * reach) * sx
+        val y2 = cy + (ctr.h + sin(ang) * reach) * sy
+        b = draw_cmd_line(b, UiRect { x: x1, y: y1, w: x2, h: y2 }, with_alpha(col, 22), 0.7, false)
+        k = k + 1
+    }
+
+    // The record itself: every dot drifts on its own clock phase.
+    for d in dots {
+        val ox = sin(clock.now * d.speed + d.phase) * 1.7 + dx
+        val oy = cos(clock.now * d.speed * 0.83 + d.phase) * 1.3 + dy
+        val px = cx + d.nx * sx + ox
+        val py = cy + d.ny * sy + oy
+        b = draw_cmd_circle(
+            b,
+            px,
+            py,
+            d.size,
+            UiStyle { bg: rgba(d.r, d.g, d.b, d.a) },
+        )
+    }
+    return b
+}
+
+def mc_title(i: i64) -> str {
+    return when i {
+        0 => "Reserve",
+        1 => "Licence",
+        2 => "Extraction",
+        3 => "Evidence",
+        4 => "Research",
+        5 => "Download",
+        6 => "Tutorial",
+        7 => "Questions",
+        8 => "Join",
+        9 => "Flipside",
+        _ => "White paper",
+    }
+}
+
+def mc_body(i: i64) -> str {
+    return when i {
+        0 => "Why kept thinking is worth drilling. Every entry is dated and stays yours. Agents tag and sort every entry for you. Your own words stay intact, with the machine's interpretations kept separately.",
+        1 => "Who pays to read a record, and how. With separate consent, laboratories license access for a purpose you allow, then test the directions that emerge. Only checked answers leave custody.",
+        2 => "One record, from licence to royalty. Keep your record. Laboratories read it in custody. Credit comes home when an idea from your record holds.",
+        3 => "The test built to prove mindcorpus wrong. The custody design must be independently reviewed and the record's value tested before licensing begins.",
+        4 => "What records teach about thinking. The ambition is to let useful thinking reach laboratories at scale, wherever it began, so an idea's path to an experiment depends less on its author's institution.",
+        5 => "mindcorpus is an app that builds a second brain from your own record. Connect your AI chats, notes and the folders you choose, then watch the brain build itself from the brainstem and spine outward. The first beta is free and being prepared for Mac.",
+        6 => "Tell your AI what to show or fix. Ask questions in plain words and mindcorpus lays the answer out from your own entries, with the passages it used.",
+        7 => "Where does my record live? In a folder on your own computer that only your account can read. Nothing leaves it unless you choose.",
+        8 => "Keep a record, license one, or help build it. Register interest and follow the beta on Discord. Installing the app does not enrol you in research.",
+        9 => "The other side of mindcorpus.",
+        _ => "Human Directions for Self-Driving Laboratories. The full white paper sets out the custody design, the licence and the research programme.",
+    }
+}
+
+def mc_wrap(text: str, max_chars: i64) -> list<str> effect alloc {
+    val ws = words(text)
+    val out: list<str> = list()
+    var cur = ""
+    for word in ws {
+        if len(cur) == 0 {
+            cur = word
+        } else if len(cur) + 1 + len(word) <= max_chars {
+            cur = cur + " " + word
+        } else {
+            list_push(out, cur)
+            cur = word
+        }
+    }
+    if len(cur) > 0 {
+        list_push(out, cur)
+    }
+    return out
+}
+
+def mc_headline(chapter: i64) -> list<str> {
+    if chapter == 1 {
+        return list("Your second", "brain is the", "beginning.")
+    }
+    if chapter == 2 {
+        return list("Custody for the", "human", "record.")
+    }
+    return list("Future", "Forward", "First")
+}
+
+def mc_paint_menu(
+    buf: DrawBuffer,
+    w: i64,
+    h: i64,
+    state: UiState,
+) -> DrawBuffer effect ffi, alloc {
+    val p = ui_state_animated_value(state, "mc.menu", 0.0)
+    if p < 0.002 {
+        return buf
+    }
+    val fw = to_f64(w)
+    val fh = to_f64(h)
+    val alpha = (220.0 * p) to i64
+    var b = draw_cmd_round_rect(
+        buf,
+        UiRect { x: fw - 280.0, y: 60.0, w: 280.0, h: fh - 100.0 },
+        0.0,
+        UiStyle { bg: rgba(7, 7, 7, alpha) },
+    )
+    b = draw_cmd_line(
+        b,
+        UiRect { x: fw - 280.0, y: 60.0, w: fw - 280.0, h: fh - 40.0 },
+        rgba(70, 70, 70, (190.0 * p) to i64),
+        1.0,
+        false,
+    )
+    var i = 0
+    while i < 11 {
+        val hv = ui_state_hover_progress(state, "item." + to_str(i))
+        val col = mix_color(rgba(118, 118, 118, 255), rgba(255, 255, 255, 255), hv)
+        b = draw_cmd_text(
+            b,
+            UiRect { x: fw - 254.0, y: 74.0 + to_f64(i) * 36.0, w: 220.0, h: 32.0 },
+            mc_title(i),
+            UiStyle { fg: col, font_size: 15.0, bold: hv > 0.5 },
+        )
+        i = i + 1
+    }
+    return b
+}
+
+def mc_paint_section(
+    buf: DrawBuffer,
+    w: i64,
+    h: i64,
+    state: UiState,
+    section: i64,
+) -> DrawBuffer effect ffi, alloc {
+    if section < 0 {
+        return buf
+    }
+    val p = ui_state_animated_value(state, "mc.section", 0.0)
+    if p < 0.002 {
+        return buf
+    }
+    val fw = to_f64(w)
+    val fh = to_f64(h)
+    var b = draw_cmd_round_rect(
+        buf,
+        UiRect { x: 0.0, y: 0.0, w: fw, h: fh },
+        0.0,
+        UiStyle { bg: rgba(0, 0, 0, (242.0 * p) to i64) },
+    )
+    b = draw_cmd_text(
+        b,
+        UiRect { x: 58.0, y: 58.0, w: fw - 140.0, h: 54.0 },
+        mc_title(section),
+        UiStyle { fg: rgba(255, 255, 255, (255.0 * p) to i64), font_size: 34.0, bold: true },
+    )
+    val close_hv = ui_state_hover_progress(state, "close")
+    b = draw_cmd_text(
+        b,
+        UiRect { x: fw - 66.0, y: 14.0, w: 40.0, h: 40.0 },
+        "x",
+        UiStyle {
+            fg: mix_color(rgba(120, 120, 120, 255), rgba(255, 255, 255, 255), close_hv),
+            font_size: 20.0,
+            align: UiAlign.Center,
+        },
+    )
+    val lines = mc_wrap(mc_body(section), 74)
+    var i = 0
+    while i < list_len(lines) {
+        b = draw_cmd_text(
+            b,
+            UiRect { x: 58.0, y: 132.0 + to_f64(i) * 26.0, w: fw - 116.0, h: 24.0 },
+            list_get(lines, i),
+            UiStyle { fg: rgba(178, 178, 178, (255.0 * p) to i64), font_size: 15.0 },
+        )
+        i = i + 1
+    }
+    return b
+}
+
+def mc_paint_chrome(
+    buf: DrawBuffer,
+    w: i64,
+    h: i64,
+    state: UiState,
+    intro: bool,
+    chapter: i64,
+) -> DrawBuffer effect ffi, alloc {
+    val fw = to_f64(w)
+    val fh = to_f64(h)
+    var b = buf
+
+    // Wordmark.
+    b = draw_cmd_text(
+        b,
+        UiRect { x: 27.0, y: 14.0, w: 90.0, h: 40.0 },
+        "mind",
+        UiStyle { fg: rgba(255, 255, 255, 255), font_size: 20.0, bold: true },
+    )
+    b = draw_cmd_text(
+        b,
+        UiRect { x: 79.0, y: 14.0, w: 110.0, h: 40.0 },
+        "corpus",
+        UiStyle { fg: rgba(178, 178, 178, 255), font_size: 20.0 },
+    )
+
+    // MENU and its square control.
+    val menu_hv = ui_state_hover_progress(state, "menu")
+    b = draw_cmd_text(
+        b,
+        UiRect { x: fw - 120.0, y: 16.0, w: 72.0, h: 36.0 },
+        "MENU",
+        UiStyle {
+            fg: mix_color(rgba(180, 180, 180, 255), rgba(255, 255, 255, 255), menu_hv),
+            font_size: 11.0,
+            bold: true,
+        },
+    )
+    val sq = UiRect { x: fw - 44.0, y: 20.0, w: 28.0, h: 28.0 }
+    b = draw_cmd_round_rect(
+        b,
+        sq,
+        2.0,
+        UiStyle { bg: rgba(172, 172, 172, 255), border: rgba(210, 210, 210, 255), border_width: 1.0 },
+    )
+    b = draw_cmd_round_rect(
+        b,
+        UiRect { x: fw - 30.0, y: 20.0, w: 14.0, h: 28.0 },
+        0.0,
+        UiStyle { bg: rgba(18, 18, 18, 255) },
+    )
+
+    // Skip intro.
+    val skip_hv = ui_state_hover_progress(state, "skip")
+    b = draw_cmd_text(
+        b,
+        UiRect { x: fw - 168.0, y: 48.0, w: 140.0, h: 36.0 },
+        "Skip intro",
+        UiStyle {
+            fg: mix_color(rgba(105, 105, 105, 255), rgba(230, 230, 230, 255), skip_hv),
+            font_size: 11.0,
+        },
+    )
+
+    // Stacked headline.
+    if intro {
+        val words_now = mc_headline(chapter)
+        var i = 0
+        while i < list_len(words_now) {
+            b = draw_cmd_text(
+                b,
+                UiRect { x: 26.0, y: fh - 196.0 + to_f64(i) * 50.0, w: 420.0, h: 56.0 },
+                list_get(words_now, i),
+                UiStyle { fg: rgba(30, 30, 30, 255), font_size: 52.0, bold: true },
+            )
+            i = i + 1
+        }
+    }
+
+    // Scroll line.
+    val scroll_hv = ui_state_hover_progress(state, "scroll")
+    b = draw_cmd_line(
+        b,
+        UiRect { x: fw * 0.5, y: fh - 44.0, w: fw * 0.5, h: fh - 8.0 },
+        mix_color(rgba(72, 72, 72, 255), rgba(190, 190, 190, 255), scroll_hv),
+        1.0,
+        false,
+    )
+    return b
+}
+
+def mc_item_rect(w: i64, i: i64) -> UiRect {
+    return UiRect {
+        x: to_f64(w) - 280.0,
+        y: 70.0 + to_f64(i) * 36.0,
+        w: 280.0,
+        h: 34.0,
+    }
+}
+
+def mc_menu_rect(w: i64, h: i64) -> UiRect {
+    return UiRect { x: to_f64(w) - 58.0, y: 8.0, w: 46.0, h: 46.0 }
+}
+
+def mc_skip_rect(w: i64) -> UiRect {
+    return UiRect { x: to_f64(w) - 170.0, y: 42.0, w: 140.0, h: 44.0 }
+}
+
+def mc_close_rect(w: i64) -> UiRect {
+    return UiRect { x: to_f64(w) - 74.0, y: 8.0, w: 52.0, h: 48.0 }
+}
+
+def mc_scroll_rect(w: i64, h: i64) -> UiRect {
+    return UiRect { x: to_f64(w) * 0.5 - 16.0, y: to_f64(h) - 54.0, w: 32.0, h: 50.0 }
+}
+
+pub def main() -> i64 effect ffi, alloc, io {
+    val opened = ui_open_native_host(UiHostMode.Desktop, "mindcorpus", 1200, 680, "")
+    val lib = when opened {
+        ok(h) => h,
+        err(msg) => {
+            println(msg)
+            return 1
+        },
+    }
+    defer { val _c = ui_close_native_host(lib) }
+    val buf = draw_buf_new(1048576)
+    defer { val _f = draw_buf_free(buf) }
+
+    val dots = mc_make_dots(280)
+    var state = ui_state_new()
+    var menu_open = false
+    var section = -1
+    var intro = true
+    var chapter = 0
+    var ptr_x = -1000.0
+    var ptr_y = -1000.0
+    var hover_key = ""
+
+    while true {
+        val m = ui_native_metrics(lib)
+        val mw = m.width to i64
+        val mh = m.height to i64
+        if !m.is_open {
+            return 0
+        }
+        val pool = ui_frame_pool_begin()
+        state = ui_state_tick_next(state)
+        val clock = ui_state_clock(state)
+
+        var tree = ui_new()
+        val root = ui_card(
+            tree,
+            "root",
+            UiStyle { bg: rgba(0, 0, 0, 255), padding: 0.0, gap: 0.0 },
+            list(),
+        )
+        tree = ui_layout(ui_set_root(tree, root), to_f64(mw), to_f64(mh))
+
+        var painted = ui_paint(tree, state, buf)
+        painted = draw_cmd_round_rect(
+            painted,
+            UiRect { x: 0.0, y: 0.0, w: to_f64(mw), h: to_f64(mh) },
+            0.0,
+            UiStyle { bg: rgba(0, 0, 0, 255) },
+        )
+        painted = mc_paint_brain(painted, dots, mw, mh, clock, ptr_x, ptr_y)
+        painted = mc_paint_chrome(painted, mw, mh, state, intro, chapter)
+        painted = mc_paint_menu(painted, mw, mh, state)
+        painted = mc_paint_section(painted, mw, mh, state, section)
+        val _s = ui_native_submit(lib, painted)
+        val ev = ui_native_poll(lib, 0)
+
+        val _p = ui_frame_pool_pause()
+
+        // Pointer tracking and manual hit testing for the custom chrome.
+        for e in ev {
+            if e.kind == UiEventKind.PointerMove || e.kind == UiEventKind.PointerDown {
+                ptr_x = e.x
+                ptr_y = e.y
+            }
+        }
+        var next_hover = ""
+        if section >= 0 {
+            if rect_contains(mc_close_rect(mw), ptr_x, ptr_y) {
+                next_hover = "close"
+            }
+        } else if menu_open {
+            var i = 0
+            while i < 11 {
+                if rect_contains(mc_item_rect(mw, i), ptr_x, ptr_y) {
+                    next_hover = "item." + to_str(i)
+                }
+                i = i + 1
+            }
+        } else if rect_contains(mc_menu_rect(mw, mh), ptr_x, ptr_y) {
+            next_hover = "menu"
+        } else if rect_contains(mc_skip_rect(mw), ptr_x, ptr_y) {
+            next_hover = "skip"
+        } else if rect_contains(mc_scroll_rect(mw, mh), ptr_x, ptr_y) {
+            next_hover = "scroll"
+        }
+        if next_hover != hover_key {
+            if len(hover_key) > 0 {
+                state = ui_state_animate(state, "hover:" + hover_key, 0.0, 0.16, UiEase.OutCubic)
+            }
+            if len(next_hover) > 0 {
+                state = ui_state_animate(state, "hover:" + next_hover, 1.0, 0.16, UiEase.OutCubic)
+            }
+            hover_key = next_hover
+        }
+
+        for e in ev {
+            if e.kind == UiEventKind.PointerDown {
+                if section >= 0 {
+                    if rect_contains(mc_close_rect(mw), e.x, e.y) {
+                        state = ui_state_animate(state, "mc.section", 0.0, 0.22, UiEase.OutCubic)
+                        section = -1
+                    }
+                } else if menu_open {
+                    var i = 0
+                    while i < 11 {
+                        if rect_contains(mc_item_rect(mw, i), e.x, e.y) {
+                            section = i
+                            menu_open = false
+                            state = ui_state_animate(state, "mc.menu", 0.0, 0.20, UiEase.OutCubic)
+                            state = ui_state_animate(state, "mc.section", 1.0, 0.26, UiEase.OutCubic)
+                        }
+                        i = i + 1
+                    }
+                } else if rect_contains(mc_menu_rect(mw, mh), e.x, e.y) {
+                    menu_open = true
+                    state = ui_state_animate(state, "mc.menu", 1.0, 0.22, UiEase.OutCubic)
+                } else if rect_contains(mc_skip_rect(mw), e.x, e.y) {
+                    intro = false
+                } else if rect_contains(mc_scroll_rect(mw, mh), e.x, e.y) {
+                    chapter = (chapter + 1) % 3
+                    intro = true
+                }
+            }
+        }
+
+        state = ui_state_detach(state)
+        val _r = ui_frame_pool_resume(pool)
+        val _d = ui_frame_pool_destroy(pool)
+    }
+    return 0
+}

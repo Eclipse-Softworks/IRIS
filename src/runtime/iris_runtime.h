@@ -215,7 +215,8 @@ typedef struct IrisEnum {
 typedef struct IrisValChunk {
     struct IrisValChunk* next;
     size_t               count;
-    IrisVal              items[1024];
+    size_t               cap;
+    IrisVal              items[];
 } IrisValChunk;
 
 typedef struct {
@@ -313,6 +314,13 @@ typedef enum {
     IRIS_RC_NATIVE_OBJECT = 13,
 } IrisRcKind;
 
+/* Compiler-generated destructor for a nominal record. It releases the record's
+ * owned heap fields but must NOT free the record block itself. */
+typedef void (*IrisNativeDropFn)(void *);
+
+void iris_register_native_drop(void *ptr, IrisNativeDropFn fn);
+void iris_forget_native_drop(void *ptr);
+
 // ---------------------------------------------------------------------------
 // Boxing / unboxing
 // ---------------------------------------------------------------------------
@@ -397,6 +405,8 @@ char*    iris_str_slice(const char* s, int64_t start, int64_t end);
 IrisOption* iris_str_find(const char* s, const char* sub);
 char*    iris_str_replace(const char* s, const char* old_s, const char* new_s);
 char*    iris_const_str(void);
+/* Intern a string literal; `slot` is the per-literal cache emitted by codegen. */
+char*    iris_intern_lit(char** slot, const char* bytes, int64_t len);
 /* Phase 95: split/join */
 IrisList* iris_str_split(const char* s, const char* delim);
 char*     iris_str_join(IrisList* list, const char* delim);
@@ -560,6 +570,8 @@ IrisWeakRef* iris_weak_ref_new(void* target);
 IrisOption*  iris_weak_ref_upgrade(IrisWeakRef* w);
 int32_t      iris_weak_ref_alive(IrisWeakRef* w);
 void         iris_gc_stats(int64_t* out_alloc, int64_t* out_freed, int64_t* out_cycles, int64_t* out_weak_inval);
+/// Set the source-site id recorded for subsequent instrumented allocations.
+void         iris_set_alloc_site(int64_t site);
 
 // ---- New builtins (called via generic BuiltinCall codegen path) ----
 int64_t      iris_list_remove(IrisList* list, int64_t idx);
@@ -572,6 +584,12 @@ int32_t      iris_weak_alive(IrisWeakRef* w);
 IrisVal*     iris_weak_upgrade(IrisWeakRef* w);
 IrisMap*     iris_gc_stats_map(void);
 int32_t      iris_gc_collect_call(void);
+int64_t      iris_ui_pool_begin(void);
+int64_t      iris_ui_pool_pause(void);
+int64_t      iris_ui_pool_resume(int64_t handle);
+int64_t      iris_ui_pool_destroy(int64_t handle);
+int64_t      iris_async_pause_pool(void);
+void         iris_async_resume_pool(int64_t handle);
 
 // ---------------------------------------------------------------------------
 // Effect handlers — thread-local handler stack with real dispatch
@@ -1002,15 +1020,24 @@ void      iris_ffi_call_void(void* handle, const char* func_name, int64_t* args,
  * functions that return through a pointer become callable. See the block
  * comment in iris_runtime.c. */
 int64_t      iris_ffi_out_new(int64_t nbytes);
-void         iris_ffi_out_free(int64_t cell);
+int64_t      iris_ffi_out_free(int64_t cell);
+int64_t      iris_ffi_out_len(int64_t cell);
 int64_t      iris_ffi_out_sizeof_f64(void);
 int64_t      iris_ffi_out_sizeof_i64(void);
 double       iris_ffi_out_get_f64(int64_t cell, int64_t index);
 int64_t      iris_ffi_out_get_i64(int64_t cell, int64_t index);
 int32_t      iris_ffi_out_get_i32(int64_t cell, int64_t index);
+int64_t      iris_ffi_out_get_i32_i64(int64_t cell, int64_t index);
+double       iris_ffi_out_get_f32(int64_t cell, int64_t index);
+int64_t      iris_ffi_out_get_u8(int64_t cell, int64_t byte_offset);
 char*        iris_ffi_out_get_str(int64_t cell);
-void         iris_ffi_out_set_f64(int64_t cell, int64_t index, double v);
-void         iris_ffi_out_set_i64(int64_t cell, int64_t index, int64_t v);
+char*        iris_ffi_out_get_str_range(int64_t cell, int64_t byte_offset, int64_t byte_len);
+int64_t      iris_ffi_out_set_f64(int64_t cell, int64_t index, double v);
+int64_t      iris_ffi_out_set_i64(int64_t cell, int64_t index, int64_t v);
+int64_t      iris_ffi_out_set_i32(int64_t cell, int64_t index, int64_t v);
+int64_t      iris_ffi_out_set_f32(int64_t cell, int64_t index, double v);
+int64_t      iris_ffi_out_set_u8(int64_t cell, int64_t byte_offset, int64_t v);
+int64_t      iris_ffi_out_write_bytes(int64_t cell, int64_t byte_offset, const char* data);
 // Python FFI
 const char* iris_python_eval(const char* code);
 int64_t   iris_python_exec(const char* code_or_path);

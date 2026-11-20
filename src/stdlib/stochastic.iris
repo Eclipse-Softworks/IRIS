@@ -1,7 +1,7 @@
 // src/stdlib/stochastic.iris -- IRIS stochastic calculus helpers
 
 // Box-Muller transform for standard normal samples.
-pub def normal_pair() -> (f64, f64) {
+pub def normal_pair() -> (f64, f64) effect random, time {
     var u1 = random()
     val u2 = random()
     if u1 < 0.000000000001 { u1 = 0.000000000001 }
@@ -13,23 +13,23 @@ pub def normal_pair() -> (f64, f64) {
 }
 
 // Standard normal sample N(0, 1).
-pub def normal() -> f64 {
+pub def normal() -> f64 effect random, time {
     val pair = normal_pair()
     pair.0
 }
 
 // Normal sample with mean and standard deviation.
-pub def normal_mu_sigma(mu: f64, sigma: f64) -> f64 {
+pub def normal_mu_sigma(mu: f64, sigma: f64) -> f64 effect random, time {
     mu + sigma * normal()
 }
 
 // Brownian increment for time step dt.
-pub def brownian_step(dt: f64) -> f64 {
+pub def brownian_step(dt: f64) -> f64 effect random, time {
     if dt <= 0.0 { 0.0 } else { sqrt(dt) * normal() }
 }
 
 // List of Brownian increments of length steps.
-pub def brownian_increments(steps: i64, dt: f64) -> list<f64> {
+pub def brownian_increments(steps: i64, dt: f64) -> list<f64> effect alloc, random, time {
     val n = if steps < 0 { 0 } else { steps }
     val out: list<f64> = list()
     var i = 0
@@ -41,7 +41,7 @@ pub def brownian_increments(steps: i64, dt: f64) -> list<f64> {
 }
 
 // Brownian path with W_0 = 0.0 and length steps + 1.
-pub def brownian_path(steps: i64, dt: f64) -> list<f64> {
+pub def brownian_path(steps: i64, dt: f64) -> list<f64> effect alloc, random, time {
     val n = if steps < 0 { 0 } else { steps }
     val out: list<f64> = list()
     var w = 0.0
@@ -56,7 +56,7 @@ pub def brownian_path(steps: i64, dt: f64) -> list<f64> {
 }
 
 // Brownian motion with drift: X_{t+dt} = X_t + mu * dt + sigma * dW.
-pub def brownian_motion(steps: i64, dt: f64, mu: f64, sigma: f64) -> list<f64> {
+pub def brownian_motion(steps: i64, dt: f64, mu: f64, sigma: f64) -> list<f64> effect alloc, random, time {
     val n = if steps < 0 { 0 } else { steps }
     val out: list<f64> = list()
     var x = 0.0
@@ -71,7 +71,7 @@ pub def brownian_motion(steps: i64, dt: f64, mu: f64, sigma: f64) -> list<f64> {
 }
 
 // Geometric Brownian motion via Euler-Maruyama.
-pub def gbm_path(steps: i64, dt: f64, s0: f64, mu: f64, sigma: f64) -> list<f64> {
+pub def gbm_path(steps: i64, dt: f64, s0: f64, mu: f64, sigma: f64) -> list<f64> effect alloc, random, time {
     val n = if steps < 0 { 0 } else { steps }
     val out: list<f64> = list()
     var s = s0

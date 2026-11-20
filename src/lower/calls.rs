@@ -104,6 +104,7 @@ impl<'m> Lowerer<'m> {
                     })?;
                     out.push(crate::thir::ThirExpr {
                         kind: crate::thir::ThirExprKind::Block(crate::thir::ThirBlock {
+                            scope_id: 0,
                             stmts: vec![],
                             tail: None,
                             span: default_expr.span(),
@@ -576,11 +577,31 @@ impl<'m> Lowerer<'m> {
                 } else {
                     let slot = arg_vals.len();
                     let expected_param = callee_param_tys.as_ref().and_then(|ts| ts.get(slot));
-                    let (v, vty) = self.lower_thir_expr_for_expected_ty(arg, expected_param)?;
+                    let (mut v, mut vty) =
+                        self.lower_thir_expr_for_expected_ty(arg, expected_param)?;
                     if let Some(param_ty) = expected_param {
                         if hints::incompatible(&vty, param_ty) {
                             return Err(self
                                 .argument_type_error_span(callee, slot, arg.span, &vty, param_ty));
+                        }
+                        // A record passed by value transfers ownership to the
+                        // callee. Emit a move marker so the borrow checker
+                        // rejects any later use of the caller's binding.
+                        if super::strict_record_ownership()
+                            && matches!(param_ty, IrType::Struct { .. })
+                            && matches!(
+                                arg.kind,
+                                crate::thir::ThirExprKind::Value { .. }
+                                    | crate::thir::ThirExprKind::Field { .. }
+                                    | crate::thir::ThirExprKind::TupleIndex { .. }
+                            )
+                        {
+                            if let Some(Ok((_, _, Some(place)))) = self.resolve_thir_place(arg) {
+                                let (moved, moved_ty) =
+                                    self.emit_move_marker(v, vty, Some(place), arg.span);
+                                v = moved;
+                                vty = moved_ty;
+                            }
                         }
                     }
                     let expected = expected_param

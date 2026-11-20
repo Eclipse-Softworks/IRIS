@@ -737,6 +737,36 @@ fn emit_llvm_ir_impl(
         writeln!(out)?;
     }
 
+    // Compiler-generated destructors for native records. The runtime calls
+    // these when a NATIVE_OBJECT refcount reaches zero. They release only the
+    // fields that the GC annotation pass retains on the record's behalf; the
+    // runtime frees the record block itself afterwards.
+    for name in &struct_names {
+        let fields = &module.struct_defs[*name];
+        let drop_name = native_drop_fn_name(name);
+        writeln!(out, "define internal void @{drop_name}(ptr %p) {{")?;
+        writeln!(out, "entry:")?;
+        for (i, (_, fty)) in fields.iter().enumerate() {
+            let Some(kind) = native_drop_kind(fty) else {
+                continue;
+            };
+            if llvm_type_complete(fty)? != "ptr" {
+                continue;
+            }
+            writeln!(
+                out,
+                "  %df{i} = getelementptr inbounds %{name}, ptr %p, i32 0, i32 {i}"
+            )?;
+            writeln!(out, "  %dv{i} = load ptr, ptr %df{i}, align 8")?;
+            writeln!(
+                out,
+                "  call void @iris_release_kind(ptr %dv{i}, i32 {kind})"
+            )?;
+        }
+        writeln!(out, "  ret void")?;
+        writeln!(out, "}}\n")?;
+    }
+
     // Continuation struct for effect handler resume support.
     writeln!(out, "%Continuation = type {{ i32, i64 }}")?;
     writeln!(out)?;
@@ -854,6 +884,11 @@ fn emit_llvm_ir_impl(
             "@.str.{} = private unnamed_addr constant [{} x i8] c\"{}\\00\", align 1",
             idx, len, escaped
         )?;
+        // One cache slot per literal: the first `ConstStr` execution interns a
+        // process-wide immortal copy (see iris_intern_lit in iris_runtime.c).
+        // Emitting the literal itself as the value handed static memory to the
+        // RC release path, which could free it through a record field.
+        writeln!(out, "@.str.cache.{} = private global ptr null", idx)?;
     }
     if !str_vec.is_empty() {
         writeln!(out)?;
@@ -2560,7 +2595,10 @@ fn runtime_unbox_helper_for_type(ty: &IrType) -> Option<&'static str> {
 
 fn runtime_rc_kind_for_type(ty: &IrType) -> Option<i32> {
     match ty {
-        IrType::Struct { .. } | IrType::Tuple(_) | IrType::Fn { .. } => Some(0),
+        // A record value is a native LLVM allocation, not an IrisVal box.
+        // 13 is IRIS_RC_NATIVE_OBJECT in the runtime.
+        IrType::Struct { .. } => Some(13),
+        IrType::Tuple(_) | IrType::Fn { .. } => Some(0),
         IrType::Str => Some(1),
         IrType::List(_) => Some(2),
         IrType::Map(_, _) => Some(3),
@@ -2574,6 +2612,28 @@ fn runtime_rc_kind_for_type(ty: &IrType) -> Option<i32> {
         IrType::TaskGroup => Some(11),
         _ => None,
     }
+}
+
+/// Types the GC pass treats as owned fields of a record. Tuples and closures
+/// are boxed IrisVals but are NOT tracked by `is_heap_ty`, so releasing them
+/// from a record destructor would free a value the record does not own.
+fn native_drop_kind(ty: &IrType) -> Option<i32> {
+    match ty {
+        IrType::Tuple(_) | IrType::Fn { .. } => None,
+        _ => runtime_rc_kind_for_type(ty),
+    }
+}
+
+/// Deterministic LLVM name for a record type's native destructor. A stable
+/// FNV-1a suffix avoids both reserved characters in record names and
+/// collisions between names that differ only in punctuation.
+fn native_drop_fn_name(name: &str) -> String {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for byte in name.bytes() {
+        hash ^= byte as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("__iris_native_drop_{hash:016x}")
 }
 
 fn runtime_box_helper_for_value(
@@ -3300,7 +3360,15 @@ fn emit_instr_ir(
                     | BinOp::CmpGt
                     | BinOp::CmpGe
             );
-            let semantic_operand_ty = func.value_type(*lhs).or_else(|| func.value_type(*rhs));
+            let lhs_inferred_ty = inferred_value_type(func, *lhs, func.value_type(*lhs));
+            let rhs_inferred_ty = inferred_value_type(func, *rhs, func.value_type(*rhs));
+            let semantic_operand_ty_owned = lhs_inferred_ty
+                .as_ref()
+                .filter(|t| !matches!(t, IrType::Infer))
+                .cloned()
+                .or_else(|| rhs_inferred_ty.clone())
+                .or(lhs_inferred_ty);
+            let semantic_operand_ty = semantic_operand_ty_owned.as_ref();
             // String comparison: use iris_str_eq / iris_str_cmp (pointer comparison is wrong).
             let lhs_ety = emitted_types.get(lhs).map(|s| s.as_str());
             let rhs_ety = emitted_types.get(rhs).map(|s| s.as_str());
@@ -3311,23 +3379,14 @@ fn emit_instr_ir(
             // one-byte string "" (the first field, then its zero padding)
             // and compared **equal**. A silent wrong answer, and the opposite
             // of the truth. See known-issues #26.
-            let is_aggregate = matches!(
-                semantic_operand_ty,
-                Some(IrType::Struct { .. })
-                    | Some(IrType::Tuple(_))
-                    | Some(IrType::Array { .. })
-                    | Some(IrType::List(_))
-                    | Some(IrType::Map(_, _))
-                    | Some(IrType::Option(_))
-                    | Some(IrType::ResultType(_, _))
-            );
+            let unknown_semantic_ty = matches!(semantic_operand_ty, None | Some(IrType::Infer));
             let is_str_cmp = semantic_operand_ty == Some(&IrType::Str)
-                || (!is_aggregate
+                || (unknown_semantic_ty
                     && lhs_ety == Some("ptr")
                     && rhs_ety == Some("ptr")
                     && matches!(op, BinOp::CmpEq | BinOp::CmpNe));
 
-            // Structural equality for records, field by field, and collections.
+            // Structural equality for records, enums, and collections.
             if matches!(op, BinOp::CmpEq | BinOp::CmpNe) {
                 if let Some(sty @ IrType::Struct { .. }) = semantic_operand_ty {
                     let lv =
@@ -3343,29 +3402,24 @@ fn emit_instr_ir(
                     // Result type is recorded by the shared comparison path,
                     // same as every other `i1`-producing compare.
                     return Ok(());
-                } else if let Some(IrType::List(_)) = semantic_operand_ty {
+                } else if matches!(semantic_operand_ty, Some(IrType::Enum { .. }))
+                    && lhs_ety == Some("i64")
+                    && rhs_ety == Some("i64")
+                {
                     let lv =
-                        coerce_to_type(*lhs, "ptr", consts, func, emitted_types, gep_counter, out)?;
+                        coerce_to_type(*lhs, "i64", consts, func, emitted_types, gep_counter, out)?;
                     let rv =
-                        coerce_to_type(*rhs, "ptr", consts, func, emitted_types, gep_counter, out)?;
-                    if *op == BinOp::CmpEq {
-                        writeln!(
-                            out,
-                            "  %v{} = call i1 @iris_list_eq(ptr {}, ptr {})",
-                            result.0, lv, rv
-                        )?;
-                    } else {
-                        let tmp = format!("%list_eq_tmp{}", gep_counter);
-                        *gep_counter += 1;
-                        writeln!(
-                            out,
-                            "  {} = call i1 @iris_list_eq(ptr {}, ptr {})",
-                            tmp, lv, rv
-                        )?;
-                        writeln!(out, "  %v{} = xor i1 {}, true", result.0, tmp)?;
-                    }
+                        coerce_to_type(*rhs, "i64", consts, func, emitted_types, gep_counter, out)?;
+                    let pred = if *op == BinOp::CmpEq { "eq" } else { "ne" };
+                    writeln!(out, "  %v{} = icmp {} i64 {}, {}", result.0, pred, lv, rv)?;
                     return Ok(());
-                } else if let Some(IrType::Map(_, _)) = semantic_operand_ty {
+                } else if let Some((eq_fn, prefix)) = match semantic_operand_ty {
+                    Some(IrType::List(_)) => Some(("iris_list_eq", "list")),
+                    Some(IrType::Map(_, _)) => Some(("iris_map_eq", "map")),
+                    Some(IrType::Option(_)) => Some(("iris_option_eq", "opt")),
+                    Some(IrType::Enum { .. }) => Some(("iris_enum_eq", "enum")),
+                    _ => None,
+                } {
                     let lv =
                         coerce_to_type(*lhs, "ptr", consts, func, emitted_types, gep_counter, out)?;
                     let rv =
@@ -3373,38 +3427,16 @@ fn emit_instr_ir(
                     if *op == BinOp::CmpEq {
                         writeln!(
                             out,
-                            "  %v{} = call i1 @iris_map_eq(ptr {}, ptr {})",
-                            result.0, lv, rv
+                            "  %v{} = call i1 @{}(ptr {}, ptr {})",
+                            result.0, eq_fn, lv, rv
                         )?;
                     } else {
-                        let tmp = format!("%map_eq_tmp{}", gep_counter);
+                        let tmp = format!("%{prefix}_eq_tmp{}", gep_counter);
                         *gep_counter += 1;
                         writeln!(
                             out,
-                            "  {} = call i1 @iris_map_eq(ptr {}, ptr {})",
-                            tmp, lv, rv
-                        )?;
-                        writeln!(out, "  %v{} = xor i1 {}, true", result.0, tmp)?;
-                    }
-                    return Ok(());
-                } else if let Some(IrType::Option(_)) = semantic_operand_ty {
-                    let lv =
-                        coerce_to_type(*lhs, "ptr", consts, func, emitted_types, gep_counter, out)?;
-                    let rv =
-                        coerce_to_type(*rhs, "ptr", consts, func, emitted_types, gep_counter, out)?;
-                    if *op == BinOp::CmpEq {
-                        writeln!(
-                            out,
-                            "  %v{} = call i1 @iris_option_eq(ptr {}, ptr {})",
-                            result.0, lv, rv
-                        )?;
-                    } else {
-                        let tmp = format!("%opt_eq_tmp{}", gep_counter);
-                        *gep_counter += 1;
-                        writeln!(
-                            out,
-                            "  {} = call i1 @iris_option_eq(ptr {}, ptr {})",
-                            tmp, lv, rv
+                            "  {} = call i1 @{}(ptr {}, ptr {})",
+                            tmp, eq_fn, lv, rv
                         )?;
                         writeln!(out, "  %v{} = xor i1 {}, true", result.0, tmp)?;
                     }
@@ -4472,10 +4504,19 @@ fn emit_instr_ir(
                     "  %struct_bytes{r} = ptrtoint ptr %struct_sz{r} to i64",
                     r = result.0
                 )?;
+                writeln!(out, "  call void @iris_set_alloc_site(i64 {instr_loc})")?;
                 writeln!(
                     out,
                     "  %struct_alloc{r} = call ptr @iris_alloc_bytes(i64 %struct_bytes{r})",
                     r = result.0
+                )?;
+                // Give the runtime a type-aware destructor so this record's
+                // owned fields are released when its last reference is gone.
+                writeln!(
+                    out,
+                    "  call void @iris_register_native_drop(ptr %struct_alloc{r}, ptr @{drop})",
+                    r = result.0,
+                    drop = native_drop_fn_name(name)
                 )?;
                 for (i, (fv, (_, fty))) in fields.iter().zip(field_tys.iter()).enumerate() {
                     let fty_s = llvm_type_complete(fty)?;
@@ -4921,9 +4962,14 @@ fn emit_instr_ir(
             }
         }
 
-        IrInstr::EnterScope { .. } | IrInstr::ExitScope { .. } | IrInstr::Drop { .. } => {
-            // Explicit scope markers are metadata-only; `DropElaborationPass`
-            // lowers `IrInstr::Drop` into `IrInstr::Call` before codegen.
+        IrInstr::EnterBlock { .. }
+        | IrInstr::ExitBlock { .. }
+        | IrInstr::EnterScope { .. }
+        | IrInstr::ExitScope { .. }
+        | IrInstr::Drop { .. } => {
+            // Structured block and drop-scope markers are metadata-only;
+            // `DropElaborationPass` lowers `IrInstr::Drop` into `IrInstr::Call`
+            // before codegen.
         }
 
         IrInstr::Borrow { result, place, .. } | IrInstr::Move { result, place } => {
@@ -5491,9 +5537,12 @@ fn emit_instr_ir(
                     tramp_name
                 )?;
             } else {
+                let pool_save = format!("%spawn_pool{}", gep_counter);
                 let arg_buf = format!("%spawn_args{}", gep_counter);
                 *gep_counter += 1;
                 let alloc_size = (args.len() as i64) * 8;
+                writeln!(out, "  {} = call i64 @iris_async_pause_pool()", pool_save)?;
+                writeln!(out, "  call void @iris_set_alloc_site(i64 {instr_loc})")?;
                 writeln!(
                     out,
                     "  {} = call ptr @iris_alloc_bytes(i64 {})",
@@ -5522,6 +5571,11 @@ fn emit_instr_ir(
                     out,
                     "  call void @iris_spawn_fn(ptr @{}, ptr {})",
                     tramp_name, arg_buf
+                )?;
+                writeln!(
+                    out,
+                    "  call void @iris_async_resume_pool(i64 {})",
+                    pool_save
                 )?;
             }
         }
@@ -5783,8 +5837,8 @@ fn emit_instr_ir(
                 let len = value.len() + 1;
                 writeln!(
                     out,
-                    "  %v{} = getelementptr inbounds [{} x i8], ptr @.str.{}, i32 0, i32 0",
-                    result.0, len, idx
+                    "  %v{} = call ptr @iris_intern_lit(ptr @.str.cache.{}, ptr @.str.{}, i64 {})",
+                    result.0, idx, idx, len
                 )?;
             } else {
                 writeln!(out, "  %v{} = call ptr @iris_const_str()", result.0)?;
@@ -7748,6 +7802,7 @@ fn emit_instr_ir(
             ..
         } => {
             let data = val(*value);
+            writeln!(out, "  call void @iris_set_alloc_site(i64 {instr_loc})")?;
             writeln!(out, "  %v{} = call ptr @iris_alloc_bytes(i64 16)", result.0)?;
             writeln!(out, "  store ptr {}, ptr %v{}, align 8", data, result.0)?;
             writeln!(
@@ -7853,11 +7908,15 @@ fn emit_instr_ir(
             args,
         } => {
             let tramp_name = format!("{}_trampoline", body_fn);
+            let pool_save = format!("%task_group_pool{}", gep_counter);
+            *gep_counter += 1;
+            writeln!(out, "  {} = call i64 @iris_async_pause_pool()", pool_save)?;
             let arg_ptr = if args.is_empty() {
                 "null".to_owned()
             } else {
                 let buffer = format!("%task_group_args{}", gep_counter);
                 *gep_counter += 1;
+                writeln!(out, "  call void @iris_set_alloc_site(i64 {instr_loc})")?;
                 writeln!(
                     out,
                     "  {} = call ptr @iris_alloc_bytes(i64 {})",
@@ -7891,6 +7950,11 @@ fn emit_instr_ir(
                 val(*group),
                 tramp_name,
                 arg_ptr
+            )?;
+            writeln!(
+                out,
+                "  call void @iris_async_resume_pool(i64 {})",
+                pool_save
             )?;
         }
         IrInstr::TaskGroupJoin { group } => {
@@ -8421,6 +8485,13 @@ fn emit_struct_eq(
                 writeln!(
                     out,
                     "  {} = call i1 @iris_option_eq(ptr {}, ptr {})",
+                    cmp, lval, rval
+                )?;
+            }
+            IrType::Enum { .. } => {
+                writeln!(
+                    out,
+                    "  {} = call i1 @iris_enum_eq(ptr {}, ptr {})",
                     cmp, lval, rval
                 )?;
             }
@@ -9650,6 +9721,7 @@ fn emit_runtime_declares(out: &mut String) -> Result<(), CodegenError> {
         "declare i1 @iris_list_eq(ptr, ptr)",
         "declare i1 @iris_map_eq(ptr, ptr)",
         "declare i1 @iris_option_eq(ptr, ptr)",
+        "declare i1 @iris_enum_eq(ptr, ptr)",
         "declare i64 @iris_str_cmp(ptr, ptr)",
         "declare i1 @iris_str_contains(ptr, ptr)",
         "declare i1 @iris_str_starts_with(ptr, ptr)",
@@ -9666,6 +9738,7 @@ fn emit_runtime_declares(out: &mut String) -> Result<(), CodegenError> {
         "declare ptr @iris_str_find(ptr, ptr)",
         "declare ptr @iris_str_replace(ptr, ptr, ptr)",
         "declare ptr @iris_const_str()",
+        "declare ptr @iris_intern_lit(ptr, ptr, i64)",
         // Option / Result
         "declare ptr @iris_make_some(ptr)",
         "declare ptr @iris_make_none()",
@@ -9722,7 +9795,9 @@ fn emit_runtime_declares(out: &mut String) -> Result<(), CodegenError> {
         // Process / environment (Phase 59)
         "declare void @exit(i32)",
         "declare ptr @iris_alloc_bytes(i64)",
+        "declare void @iris_set_alloc_site(i64)",
         "declare void @iris_free_bytes(ptr)",
+        "declare void @iris_register_native_drop(ptr, ptr)",
         "declare void @iris_set_argv(i32, ptr)",
         "declare void @iris_sandbox_set_policy(i32, i32, i32)",
         "declare void @iris_sandbox_set_profile(i32, i32, i32, i32, i32, i32)",
@@ -9800,6 +9875,8 @@ fn emit_runtime_declares(out: &mut String) -> Result<(), CodegenError> {
         "declare void @iris_chan_send(ptr, ptr)",
         "declare ptr @iris_chan_recv(ptr)",
         "declare void @iris_spawn_fn(ptr, ptr)",
+        "declare i64 @iris_async_pause_pool()",
+        "declare void @iris_async_resume_pool(i64)",
         "declare ptr @iris_task_group_new()",
         "declare void @iris_task_group_spawn(ptr, ptr, ptr)",
         "declare void @iris_task_group_join(ptr)",
@@ -10075,12 +10152,21 @@ fn emit_runtime_declares(out: &mut String) -> Result<(), CodegenError> {
         // Expanded C FFI
         "declare i64 @iris_ffi_call_i64(ptr, ptr, ptr, i32)",
         "declare i64 @iris_ffi_out_new(i64)",
-        "declare void @iris_ffi_out_free(i64)",
+        "declare i64 @iris_ffi_out_free(i64)",
+        "declare i64 @iris_ffi_out_len(i64)",
         "declare double @iris_ffi_out_get_f64(i64, i64)",
         "declare i64 @iris_ffi_out_get_i64(i64, i64)",
+        "declare i64 @iris_ffi_out_get_i32_i64(i64, i64)",
+        "declare double @iris_ffi_out_get_f32(i64, i64)",
+        "declare i64 @iris_ffi_out_get_u8(i64, i64)",
         "declare ptr @iris_ffi_out_get_str(i64)",
-        "declare void @iris_ffi_out_set_f64(i64, i64, double)",
-        "declare void @iris_ffi_out_set_i64(i64, i64, i64)",
+        "declare ptr @iris_ffi_out_get_str_range(i64, i64, i64)",
+        "declare i64 @iris_ffi_out_set_f64(i64, i64, double)",
+        "declare i64 @iris_ffi_out_set_i64(i64, i64, i64)",
+        "declare i64 @iris_ffi_out_set_i32(i64, i64, i64)",
+        "declare i64 @iris_ffi_out_set_f32(i64, i64, double)",
+        "declare i64 @iris_ffi_out_set_u8(i64, i64, i64)",
+        "declare i64 @iris_ffi_out_write_bytes(i64, i64, ptr)",
         "declare double @iris_ffi_call_f64(ptr, ptr, ptr, i32)",
         "declare ptr @iris_ffi_call_str(ptr, ptr, ptr, i32)",
         "declare void @iris_ffi_call_void(ptr, ptr, ptr, i32)",

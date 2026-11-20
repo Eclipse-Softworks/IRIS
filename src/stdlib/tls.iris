@@ -42,7 +42,7 @@ pub def tls_is_grease(value: i64) -> bool {
 }
 
 // `count` big-endian u16 values starting at `offset`, without GREASE.
-def tls_u16_list(payload: ByteBuffer, offset: i64, count: i64) -> list<i64> {
+def tls_u16_list(payload: ByteBuffer, offset: i64, count: i64) -> list<i64> effect alloc {
     val values: list<i64> = list();
     for i in 0 .. count {
         val value = byte_buffer_read_u16_be(payload, offset + i * 2);
@@ -68,7 +68,7 @@ pub record Ja4Result {
 }
 
 /// Parse TLS Record Header (5 bytes: Content-Type, Version, Length)
-pub def tls_parse_record(buf: ByteBuffer) -> result<TlsRecord, str> {
+pub def tls_parse_record(buf: ByteBuffer) -> result<TlsRecord, str> effect alloc {
     if buf.len < 5 {
         return err("tls record too short (< 5 bytes)")
     }
@@ -88,7 +88,7 @@ pub def tls_parse_record(buf: ByteBuffer) -> result<TlsRecord, str> {
 }
 
 /// Parse TLS ClientHello Handshake message
-pub def tls_parse_client_hello(payload: ByteBuffer) -> result<TlsClientHello, str> {
+pub def tls_parse_client_hello(payload: ByteBuffer) -> result<TlsClientHello, str> effect alloc {
     if payload.len < 38 {
         return err("client hello too short (< 38 bytes)")
     }
@@ -212,7 +212,7 @@ pub def tls_parse_client_hello(payload: ByteBuffer) -> result<TlsClientHello, st
 }
 
 // Decimal values joined with '-'.
-def tls_join_decimal(values: list<i64>) -> str {
+def tls_join_decimal(values: list<i64>) -> str effect alloc {
     var out = "";
     for i in 0 .. list_len(values) {
         val item = to_str(list_get(values, i));
@@ -223,7 +223,7 @@ def tls_join_decimal(values: list<i64>) -> str {
 
 /// JA3 (Salesforce): "version,ciphers,extensions,groups,point_formats" in
 /// decimal, GREASE removed, and its MD5.
-pub def tls_calculate_ja3(hello: TlsClientHello) -> Ja3Result {
+pub def tls_calculate_ja3(hello: TlsClientHello) -> Ja3Result effect alloc {
     val head = to_str(hello.client_version) + "," + tls_join_decimal(hello.ciphers) + ",";
     val tail = tls_join_decimal(hello.extensions) + "," + tls_join_decimal(hello.supported_groups) + ",";
     val ja3 = head + tail + tls_join_decimal(hello.ec_point_formats);
@@ -248,7 +248,7 @@ pub def tls_calculate_ja3(hello: TlsClientHello) -> Ja3Result {
     }
 }
 
-def sort_i64_list(items: list<i64>) -> list<i64> {
+def sort_i64_list(items: list<i64>) -> list<i64> effect alloc {
     val res: list<i64> = list();
     val n = list_len(items);
     for i in 0 .. n {
@@ -266,7 +266,7 @@ def sort_i64_list(items: list<i64>) -> list<i64> {
     res
 }
 
-def to_hex4(val_u16: i64) -> str {
+def to_hex4(val_u16: i64) -> str effect alloc {
     val hex_chars = "0123456789abcdef";
     val b0 = band(shr(val_u16, 12), 0x0f);
     val b1 = band(shr(val_u16, 8), 0x0f);
@@ -295,7 +295,7 @@ def tls_alphanumeric(byte: i64) -> bool {
 
 // JA4's ALPN pair: the first and last characters of the first protocol, or of
 // its hex form when either byte is not alphanumeric; "00" without ALPN.
-def tls_ja4_alpn(alpn: list<i64>) -> str {
+def tls_ja4_alpn(alpn: list<i64>) -> str effect alloc {
     val n = list_len(alpn);
     if n == 0 {
         return "00"
@@ -318,7 +318,7 @@ def tls_ja4_alpn(alpn: list<i64>) -> str {
 /// highest supported version, SNI, cipher and extension counts, ALPN; part b:
 /// SHA-256 of the sorted ciphers; part c: SHA-256 of the sorted extensions
 /// without SNI and ALPN, then the signature algorithms in order.
-pub def tls_calculate_ja4(hello: TlsClientHello, is_quic: bool) -> Ja4Result {
+pub def tls_calculate_ja4(hello: TlsClientHello, is_quic: bool) -> Ja4Result effect alloc {
     // 1. Part A (10 characters): [proto][ver][sni][ciphers][extensions][alpn]
     val proto = if is_quic { "q" } else { "t" };
     var version = hello.client_version;

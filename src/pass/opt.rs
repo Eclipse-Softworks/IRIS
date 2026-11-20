@@ -75,15 +75,19 @@ fn is_side_effecting(instr: &IrInstr) -> bool {
             | IrInstr::Panic { .. }
             | IrInstr::ArrayStore { .. }
             | IrInstr::ChanSend { .. }
+            | IrInstr::ChanRecv { .. }
             | IrInstr::Spawn { .. }
             | IrInstr::TaskGroupSpawn { .. }
             | IrInstr::TaskGroupJoin { .. }
             | IrInstr::TaskGroupCancel { .. }
             | IrInstr::ParFor { .. }
+            | IrInstr::AtomicLoad { .. }
             | IrInstr::AtomicStore { .. }
             | IrInstr::CellNew { .. }
+            | IrInstr::CellLoad { .. }
             | IrInstr::CellStore { .. }
             | IrInstr::AtomicAdd { .. }
+            | IrInstr::MutexLock { .. }
             | IrInstr::MutexUnlock { .. }
             | IrInstr::Barrier
             | IrInstr::ReadLine { .. }
@@ -96,7 +100,11 @@ fn is_side_effecting(instr: &IrInstr) -> bool {
             | IrInstr::MapSet { .. }
             | IrInstr::MapRemove { .. }
             | IrInstr::CallClosure { .. }
+            | IrInstr::FileReadAll { .. }
             | IrInstr::FileWriteAll { .. }
+            | IrInstr::FileExists { .. }
+            | IrInstr::FileLines { .. }
+            | IrInstr::EnvVar { .. }
             | IrInstr::DbOpen { .. }
             | IrInstr::DbExec { .. }
             | IrInstr::DbExecParams { .. }
@@ -116,6 +124,9 @@ fn is_side_effecting(instr: &IrInstr) -> bool {
             | IrInstr::SleepMs { .. }
             | IrInstr::BuiltinCall { .. }
             | IrInstr::Backward { .. }
+            | IrInstr::PushHandler { .. }
+            | IrInstr::PopHandler
+            | IrInstr::ResumeCont { .. }
     )
 }
 
@@ -435,7 +446,10 @@ pub(crate) fn apply_replacements(instr: &mut IrInstr, reps: &HashMap<ValueId, Va
         IrInstr::Borrow { place, .. } | IrInstr::Move { place, .. } => {
             replace(place);
         }
-        IrInstr::EnterScope { .. } | IrInstr::ExitScope { .. } => {}
+        IrInstr::EnterBlock { .. }
+        | IrInstr::ExitBlock { .. }
+        | IrInstr::EnterScope { .. }
+        | IrInstr::ExitScope { .. } => {}
         IrInstr::Drop { value, .. } => {
             replace(value);
         }
@@ -925,5 +939,61 @@ fn elementwise_unary(callee: &str) -> Option<&'static str> {
         "Tanh" => Some("tanh"),
         "GELU" => Some("gelu"),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dce_preserves_discarded_side_effecting_reads_and_sync() {
+        let src = r#"
+            def main() -> i64 {
+                val _a = file_read_all("blocked.txt")
+                val _b = file_exists("blocked.txt")
+                val _c = file_lines("blocked.txt")
+                val ch: chan<i64> = channel()
+                send(ch, 1)
+                val _d = recv(ch)
+                0
+            }
+        "#;
+        let module = crate::compile_to_module(src, "dce_side_effects")
+            .expect("module with discarded side-effecting reads should compile");
+        let main_fn = module
+            .functions
+            .iter()
+            .find(|f| f.name == "main")
+            .expect("main function present");
+        let all_instrs: Vec<&IrInstr> = main_fn.blocks.iter().flat_map(|b| &b.instrs).collect();
+
+        assert!(all_instrs
+            .iter()
+            .any(|i| matches!(i, IrInstr::FileReadAll { .. })));
+        assert!(all_instrs
+            .iter()
+            .any(|i| matches!(i, IrInstr::FileExists { .. })));
+        assert!(all_instrs
+            .iter()
+            .any(|i| matches!(i, IrInstr::FileLines { .. })));
+        assert!(all_instrs
+            .iter()
+            .any(|i| matches!(i, IrInstr::ChanRecv { .. })));
+
+        assert!(is_side_effecting(&IrInstr::EnvVar {
+            result: ValueId(0),
+            name: ValueId(1),
+        }));
+        assert!(is_side_effecting(&IrInstr::AtomicLoad {
+            result: ValueId(0),
+            atomic: ValueId(1),
+            result_ty: crate::ir::types::IrType::Infer,
+        }));
+        assert!(is_side_effecting(&IrInstr::MutexLock {
+            result: ValueId(0),
+            mutex: ValueId(1),
+            result_ty: crate::ir::types::IrType::Infer,
+        }));
     }
 }

@@ -1,0 +1,546 @@
+bring std.math
+
+/// Mean volumetric Earth radius in kilometers (IUGG WGS-84 ellipsoid).
+pub const def earth_radius_km() -> f64 {
+    return 6371.0088
+}
+
+/// Gutenberg-Richter seismic energy scaling factor (`log10(E_J) = 1.5 * M + 4.8`).
+pub const def gutenberg_energy_slope() -> f64 {
+    return 1.5
+}
+
+/// Gutenberg-Richter seismic energy intercept in log10-Joules.
+pub const def gutenberg_energy_offset() -> f64 {
+    return 4.8
+}
+
+/// Default HTTP request timeout in milliseconds for live telemetry feeds.
+pub const def default_http_timeout_ms() -> i64 {
+    return 12000
+}
+
+/// Depth boundary (km) separating shallow crustal earthquakes from intermediate events.
+pub const def shallow_depth_limit_km() -> f64 {
+    return 70.0
+}
+
+/// Depth boundary (km) separating intermediate earthquakes from deep subduction events.
+pub const def intermediate_depth_limit_km() -> f64 {
+    return 300.0
+}
+
+/// Upstream live telemetry data source identifier.
+pub choice TelemetrySource {
+    UsgsEarthquakes,
+    NoaaSpaceWeather,
+    IssOrbitalTrack,
+    OpenMeteoSurface,
+}
+
+/// Focal depth classification for seismic hazard interpretation.
+pub choice DepthRegime {
+    Shallow,
+    Intermediate,
+    Deep,
+}
+
+/// Operational severity tier computed across geophysical and geomagnetic observations.
+pub choice AlertSeverity {
+    Quiet,
+    Elevated,
+    Watch,
+    Critical,
+}
+
+/// Explicit typed error hierarchy for live telemetry acquisition, parsing, and persistence.
+pub choice TelemetryError {
+    Transport(str),
+    HttpCode(i64, str),
+    MalformedPayload(str),
+    Storage(str),
+}
+
+/// Validated WGS-84 geographic coordinate with optional focal depth or altitude offset.
+pub record GeoCoord {
+    lat_deg: f64,
+    lon_deg: f64,
+    depth_km: f64 = 0.0,
+}
+
+/// Real-time seismic event ingested from USGS earthquake feeds.
+pub record SeismicEvent {
+    event_id: str,
+    time_utc: str,
+    coord: GeoCoord,
+    magnitude: f64,
+    mag_type: str,
+    place: str,
+    station_count: i64 = 0,
+    gap_deg: f64 = 180.0,
+    rms_sec: f64 = 0.0,
+}
+
+/// Three-hour planetary geomagnetic storm measurement from NOAA SWPC.
+pub record GeomagneticSample {
+    time_tag: str,
+    kp_index: f64,
+    a_running: f64,
+    station_count: i64,
+}
+
+/// Instantaneous orbital state vector for the International Space Station.
+pub record OrbitalState {
+    name: str,
+    latitude: f64,
+    longitude: f64,
+    altitude_km: f64,
+    velocity_kmh: f64,
+    footprint_km: f64,
+    visibility: str,
+    timestamp_s: i64,
+    solar_lat: f64,
+    solar_lon: f64,
+}
+
+/// Live near-surface meteorological observation fetched from Open-Meteo.
+pub record SurfaceWeather {
+    label: str,
+    lat: f64,
+    lon: f64,
+    temp_c: f64,
+    pressure_hpa: f64,
+    wind_kmh: f64,
+    humidity_pct: f64 = 0.0,
+    precipitation_mm: f64 = 0.0,
+}
+
+/// Gutenberg-Richter empirical frequency-magnitude fit parameters trained by reverse-mode AD.
+pub record GutenbergRichterFit {
+    a_value: f64,
+    b_value: f64,
+    r2_score: f64,
+    bin_count: i64,
+    expected_daily_m5: f64,
+    expected_daily_m6: f64,
+}
+
+/// Unified observatory analytics computed over all live planetary feeds.
+pub record RunAnalytics {
+    total_quakes: i64,
+    shallow_count: i64,
+    intermediate_count: i64,
+    deep_count: i64,
+    max_magnitude: f64,
+    strongest_idx: i64,
+    secondary_idx: i64,
+    total_energy_log10_j: f64,
+    closest_iss_km: f64,
+    closest_iss_idx: i64,
+    watch_plus_count: i64,
+    mag_mean: f64,
+    mag_ci_low: f64,
+    mag_ci_high: f64,
+    kp_latest: f64,
+    kp_peak: f64,
+    kp_ci_low: f64,
+    kp_ci_high: f64,
+    gr_fit: GutenbergRichterFit,
+    overall_alert: AlertSeverity,
+}
+
+/// Complete live ingestion cycle bundle shared across storage, rendering, and reporting.
+pub record ObservatorySnapshot {
+    events: list<SeismicEvent>,
+    kps: list<GeomagneticSample>,
+    iss: OrbitalState,
+    weather: list<SurfaceWeather>,
+    analytics: RunAnalytics,
+}
+
+/// Unified formatting and severity interface shared across all live planetary telemetry records.
+pub trait TelemetryPrintable {
+    def feed_code(self: Self) -> str
+    def headline(self: Self) -> str effect io, alloc
+    def severity_score(self: Self) -> f64
+}
+
+impl TelemetryPrintable for SeismicEvent {
+    def feed_code(self: SeismicEvent) -> str {
+        return "USGS-EQ"
+    }
+
+    def headline(self: SeismicEvent) -> str effect io, alloc {
+        val m_str = format_fixed_2(self.magnitude)
+        val d_str = format_fixed_1(self.coord.depth_km)
+        return concat(
+            "M",
+            concat(m_str, concat(" (", concat(d_str, concat(" km depth) @ ", self.place)))),
+        )
+    }
+
+    def severity_score(self: SeismicEvent) -> f64 {
+        val shallow_boost = if self.coord.depth_km < shallow_depth_limit_km() { 1.15 } else { 0.85 }
+        return clamp_f64((self.magnitude / 7.5) * 100.0 * shallow_boost, 0.0, 100.0)
+    }
+}
+
+impl TelemetryPrintable for GeomagneticSample {
+    def feed_code(self: GeomagneticSample) -> str {
+        return "NOAA-KP"
+    }
+
+    def headline(self: GeomagneticSample) -> str effect io, alloc {
+        val kp_str = format_fixed_2(self.kp_index)
+        val a_str = format_fixed_0(self.a_running)
+        return concat(
+            "Kp ",
+            concat(
+                kp_str,
+                concat(
+                    " (A_run=",
+                    concat(
+                        a_str,
+                        concat(
+                            ", stn=",
+                            concat(to_str(self.station_count), concat(") at ", self.time_tag)),
+                        ),
+                    ),
+                ),
+            ),
+        )
+    }
+
+    def severity_score(self: GeomagneticSample) -> f64 {
+        return clamp_f64((self.kp_index / 9.0) * 100.0, 0.0, 100.0)
+    }
+}
+
+impl TelemetryPrintable for OrbitalState {
+    def feed_code(self: OrbitalState) -> str {
+        return "ISS-ORBIT"
+    }
+
+    def headline(self: OrbitalState) -> str effect io, alloc {
+        val lat_s = format_fixed_2(self.latitude)
+        val lon_s = format_fixed_2(self.longitude)
+        val alt_s = format_fixed_1(self.altitude_km)
+        val vel_s = format_fixed_0(self.velocity_kmh)
+        return concat(
+            "ISS (",
+            concat(
+                lat_s,
+                concat(
+                    ", ",
+                    concat(
+                        lon_s,
+                        concat(
+                            ") alt=",
+                            concat(
+                                alt_s,
+                                concat(
+                                    " km, v=",
+                                    concat(vel_s, concat(" km/h [", concat(self.visibility, "]"))),
+                                ),
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+        )
+    }
+
+    def severity_score(self: OrbitalState) -> f64 {
+        val baseline = 410.0
+        val deviation = abs_f64(self.altitude_km - baseline)
+        return clamp_f64(deviation * 1.5, 0.0, 100.0)
+    }
+}
+
+impl TelemetryPrintable for SurfaceWeather {
+    def feed_code(self: SurfaceWeather) -> str {
+        return "OPEN-METEO"
+    }
+
+    def headline(self: SurfaceWeather) -> str effect io, alloc {
+        val t_s = format_fixed_1(self.temp_c)
+        val w_s = format_fixed_1(self.wind_kmh)
+        val p_s = format_fixed_1(self.pressure_hpa)
+        return concat(
+            self.label,
+            concat(
+                ": ",
+                concat(
+                    t_s,
+                    concat(" C, wind=", concat(w_s, concat(" km/h, P=", concat(p_s, " hPa")))),
+                ),
+            ),
+        )
+    }
+
+    def severity_score(self: SurfaceWeather) -> f64 {
+        val wind_norm = clamp_f64((self.wind_kmh / 120.0) * 70.0, 0.0, 70.0)
+        val rain_norm = clamp_f64(self.precipitation_mm * 3.0, 0.0, 30.0)
+        return clamp_f64(wind_norm + rain_norm, 0.0, 100.0)
+    }
+}
+
+/// Shared banner builder from resolved code, severity index, and headline text.
+def assemble_banner(code: str, score_f: f64, desc: str) -> str effect io, alloc {
+    val score = format_fixed_1(score_f)
+    return concat("[", concat(code, concat(" | idx=", concat(score, concat("] ", desc)))))
+}
+
+/// Format any `TelemetryPrintable` value through bounded generic dispatch.
+pub def format_feed_banner[T where T: TelemetryPrintable](item: T) -> str effect io, alloc {
+    return assemble_banner(item.feed_code(), item.severity_score(), item.headline())
+}
+
+/// Format a dynamic `dyn TelemetryPrintable` trait-object dispatch record.
+pub def format_dyn_banner(item: dyn TelemetryPrintable) -> str effect io, alloc {
+    return assemble_banner(item.feed_code(), item.severity_score(), item.headline())
+}
+
+/// Collect and format heterogeneous telemetry records through dynamic `dyn TelemetryPrintable`
+/// trait-object dispatch in a unified priority banner feed.
+pub def format_priority_dispatches(snap: ObservatorySnapshot) -> list<str> effect io, alloc {
+    val items: list<dyn TelemetryPrintable> = list()
+    val events = snap.events
+    val kps = snap.kps
+    if list_len(events) > 0 {
+        val _ = list_push(items, list_get(events, snap.analytics.strongest_idx))
+        if snap.analytics.secondary_idx != snap.analytics.strongest_idx {
+            val _ = list_push(items, list_get(events, snap.analytics.secondary_idx))
+        }
+    }
+    if list_len(kps) > 0 {
+        val _ = list_push(items, list_get(kps, list_len(kps) - 1))
+    }
+    val _ = list_push(items, snap.iss)
+    for i in 0..list_len(snap.weather) {
+        val _ = list_push(items, list_get(snap.weather, i))
+    }
+    val lines: list<str> = list()
+    for i in 0..list_len(items) {
+        val _ = list_push(lines, format_dyn_banner(list_get(items, i)))
+    }
+    return lines
+}
+
+/// Convert degrees to radians.
+pub def deg_to_rad(deg: f64) -> f64 {
+    return deg * (PI / 180.0)
+}
+
+/// Validating constructor enforcing physical WGS-84 bounds on coordinates and focal depth.
+pub def validate_coord(
+    lat_deg: f64,
+    lon_deg: f64,
+    depth_km: f64,
+) -> result<GeoCoord, TelemetryError> effect alloc {
+    if lat_deg < -90.0 || lat_deg > 90.0 {
+        return err(TelemetryError.MalformedPayload("latitude out of [-90, 90] bounds"))
+    }
+    if lon_deg < -180.0 || lon_deg > 180.0 {
+        return err(TelemetryError.MalformedPayload("longitude out of [-180, 180] bounds"))
+    }
+    if depth_km < -10.0 || depth_km > 800.0 {
+        return err(TelemetryError.MalformedPayload("depth_km out of [-10, 800] bounds"))
+    }
+    return ok(
+        GeoCoord {
+            lat_deg: lat_deg,
+            lon_deg: lon_deg,
+            depth_km: depth_km,
+        },
+    )
+}
+
+/// Great-circle spherical Haversine distance in kilometers between two coordinates.
+pub def haversine_km(a_lat: f64, a_lon: f64, b_lat: f64, b_lon: f64) -> f64 {
+    val phi1 = deg_to_rad(a_lat)
+    val phi2 = deg_to_rad(b_lat)
+    val d_phi = deg_to_rad(b_lat - a_lat)
+    val d_lambda = deg_to_rad(b_lon - a_lon)
+    val s_phi = sin(d_phi * 0.5)
+    val s_lam = sin(d_lambda * 0.5)
+    val h = clamp_f64((s_phi * s_phi) + (cos(phi1) * cos(phi2) * s_lam * s_lam), 0.0, 1.0)
+    val central = 2.0 * atan2(sqrt(h), sqrt(max_f64(0.0, 1.0 - h)))
+    return earth_radius_km() * central
+}
+
+/// Classify earthquake focal depth into shallow, intermediate, or deep regimes.
+pub def depth_regime(depth_km: f64) -> DepthRegime {
+    if depth_km < shallow_depth_limit_km() {
+        return DepthRegime.Shallow
+    }
+    if depth_km < intermediate_depth_limit_km() {
+        return DepthRegime.Intermediate
+    }
+    return DepthRegime.Deep
+}
+
+/// Human-readable label for a `DepthRegime`.
+pub def depth_regime_label(regime: DepthRegime) -> str {
+    return when regime {
+        DepthRegime.Shallow => "Shallow",
+        DepthRegime.Intermediate => "Intermediate",
+        DepthRegime.Deep => "Deep",
+    }
+}
+
+/// Radiated seismic energy exponent `log10(E_J) = 1.5 * M + 4.8`.
+pub def seismic_log10_energy_j(magnitude: f64) -> f64 {
+    return (gutenberg_energy_slope() * magnitude) + gutenberg_energy_offset()
+}
+
+/// Radiated seismic energy in terajoules (TJ = 10^12 J).
+pub def seismic_energy_tj(magnitude: f64) -> f64 {
+    val log_tj = seismic_log10_energy_j(magnitude) - 12.0
+    return exp(log_tj * LN10)
+}
+
+/// Classify normalized severity index `[0..100]` into discrete `AlertSeverity`.
+pub def classify_alert_tier(score: f64) -> AlertSeverity {
+    if score >= 75.0 {
+        return AlertSeverity.Critical
+    }
+    if score >= 55.0 {
+        return AlertSeverity.Watch
+    }
+    if score >= 35.0 {
+        return AlertSeverity.Elevated
+    }
+    return AlertSeverity.Quiet
+}
+
+/// Canonical uppercase label for an `AlertSeverity`.
+pub def alert_severity_label(sev: AlertSeverity) -> str {
+    return when sev {
+        AlertSeverity.Quiet => "QUIET",
+        AlertSeverity.Elevated => "ELEVATED",
+        AlertSeverity.Watch => "WATCH",
+        AlertSeverity.Critical => "CRITICAL",
+    }
+}
+
+/// Canonical feed slug for a `TelemetrySource`.
+pub def source_name(src: TelemetrySource) -> str {
+    return when src {
+        TelemetrySource.UsgsEarthquakes => "USGS-Earthquakes",
+        TelemetrySource.NoaaSpaceWeather => "NOAA-SWPC-Kp",
+        TelemetrySource.IssOrbitalTrack => "WhereTheISS-25544",
+        TelemetrySource.OpenMeteoSurface => "Open-Meteo-Current",
+    }
+}
+
+/// Format any `TelemetryError` into a diagnostic string.
+pub def format_telemetry_error(e: TelemetryError) -> str effect io, alloc {
+    return when e {
+        TelemetryError.Transport(msg) => concat("transport error: ", msg),
+        TelemetryError.HttpCode(
+            code,
+            msg
+        ) => concat("HTTP ", concat(to_str(code), concat(": ", msg))),
+        TelemetryError.MalformedPayload(msg) => concat("malformed payload: ", msg),
+        TelemetryError.Storage(msg) => concat("sqlite storage error: ", msg),
+    }
+}
+
+/// Deterministic floating-point formatter with fixed 0 decimal places.
+pub def format_fixed_0(x: f64) -> str effect io, alloc {
+    val rounded = round(x) to i64
+    return to_str(rounded)
+}
+
+/// Deterministic floating-point formatter with fixed 1 decimal place.
+pub def format_fixed_1(x: f64) -> str effect io, alloc {
+    val neg = x < 0.0
+    val abs_x = if neg { 0.0 - x } else { x }
+    val scaled = round(abs_x * 10.0) to i64
+    val whole = scaled / 10
+    val frac = scaled % 10
+    val prefix = if neg && scaled > 0 { "-" } else { "" }
+    return concat(prefix, concat(to_str(whole), concat(".", to_str(frac))))
+}
+
+/// Deterministic floating-point formatter with fixed 2 decimal places.
+pub def format_fixed_2(x: f64) -> str effect io, alloc {
+    val neg = x < 0.0
+    val abs_x = if neg { 0.0 - x } else { x }
+    val scaled = round(abs_x * 100.0) to i64
+    val whole = scaled / 100
+    val frac = scaled % 100
+    val frac_s = if frac < 10 { concat("0", to_str(frac)) } else { to_str(frac) }
+    val prefix = if neg && scaled > 0 { "-" } else { "" }
+    return concat(prefix, concat(to_str(whole), concat(".", frac_s)))
+}
+
+/// Safe `max` between two `f64` values.
+pub def max_f64(a: f64, b: f64) -> f64 {
+    return if a >= b { a } else { b }
+}
+
+/// Safe `min` between two `f64` values.
+pub def min_f64(a: f64, b: f64) -> f64 {
+    return if a <= b { a } else { b }
+}
+
+def test_domain_validation_and_geodesic() -> i64 effect alloc, throw {
+    assert(is_ok(validate_coord(35.6762, 139.6503, 12.5)))
+    assert(is_err(validate_coord(95.0, 0.0, 10.0)))
+    assert(is_err(validate_coord(0.0, 185.0, 10.0)))
+    assert(is_err(validate_coord(0.0, 0.0, 900.0)))
+
+    // Equator 1 deg longitude distance ~ 111.195 km
+    val d_eq = haversine_km(0.0, 0.0, 0.0, 1.0)
+    assert(d_eq > 111.0 && d_eq < 111.4)
+
+    // Gutenberg-Richter: M4 -> 10^(1.5*4+4.8)=10^10.8 -> log10 = 10.8
+    assert(abs_f64(seismic_log10_energy_j(4.0) - 10.8) < 0.0001)
+    // M4.8 -> 10^12 J = 1.0 TJ
+    assert(abs_f64(seismic_energy_tj(4.8) - 1.0) < 0.01)
+
+    assert(depth_regime_label(depth_regime(12.0)) == "Shallow")
+    assert(depth_regime_label(depth_regime(120.0)) == "Intermediate")
+    assert(depth_regime_label(depth_regime(450.0)) == "Deep")
+    assert(alert_severity_label(classify_alert_tier(80.0)) == "CRITICAL")
+    assert(alert_severity_label(classify_alert_tier(20.0)) == "QUIET")
+    assert(source_name(TelemetrySource.UsgsEarthquakes) == "USGS-Earthquakes")
+    return 0
+}
+
+def test_domain_traits_and_generics() -> i64 effect io, alloc, throw {
+    val coord = unwrap(validate_coord(35.68, 139.69, 25.0))
+    val eq = SeismicEvent {
+        event_id: "us7000test",
+        time_utc: "2026-11-14T20:00:00Z",
+        coord: coord,
+        magnitude: 5.5,
+        mag_type: "mww",
+        place: "Near Tokyo, Japan",
+        station_count: 42,
+        gap_deg: 28.0,
+        rms_sec: 0.41,
+    }
+    val banner = format_feed_banner(eq)
+    assert(contains(banner, "USGS-EQ"))
+    assert(contains(banner, "M5.50"))
+    assert(contains(banner, "Near Tokyo, Japan"))
+
+    val items: list<dyn TelemetryPrintable> = list()
+    val _ = list_push(items, eq)
+    val kp = GeomagneticSample {
+        time_tag: "2026-11-14T18:00:00",
+        kp_index: 4.33,
+        a_running: 28.0,
+        station_count: 8,
+    }
+    val _ = list_push(items, kp)
+    assert(list_len(items) == 2)
+    val h0 = list_get(items, 0).feed_code()
+    val h1 = list_get(items, 1).feed_code()
+    assert(h0 == "USGS-EQ")
+    assert(h1 == "NOAA-KP")
+    return 0
+}

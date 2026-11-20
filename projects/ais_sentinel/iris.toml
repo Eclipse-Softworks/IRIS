@@ -1,0 +1,6 @@
+[package]
+name = "ais_sentinel"
+version = "0.1.0"
+entry = "main.iris"
+
+[dependencies]

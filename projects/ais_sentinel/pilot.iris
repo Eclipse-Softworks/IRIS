@@ -1,0 +1,718 @@
+bring std.ais
+bring std.fs
+bring std.os
+bring domain
+
+/// Result of one `evaluate_contact` cycle carrying updated engine and decision.
+pub record EvalStep {
+    engine: PilotEngine,
+    decision: SentinelDecision,
+}
+
+record RegimeConf {
+    regime: SeaRegime,
+    confidence: f64,
+}
+
+record ResolvedHelm {
+    action_idx: i64,
+    overridden: bool,
+    rule_name: str,
+}
+
+record VerdictInputs {
+    pred: list<f64>,
+    weather: MarineWeather,
+    encounter: EncounterMetrics,
+    ewc_pen: f64,
+    obs: i64,
+}
+
+/// Stateful `std.ais` Active Inference, World-Model Autopilot, Governor & EWC engine.
+pub record PilotEngine {
+    aif: AifAgent,
+    autopilot: Autopilot,
+    governor: SoftwareGovernor,
+    ewc: EWCState,
+    anchor_weights: list<f64>,
+    state_path: str,
+    loaded_from_disk: bool,
+    eval_count: i64,
+}
+
+def list_f4(a: f64, b: f64, c: f64, d: f64) -> list<f64> effect alloc {
+    val xs: list<f64> = list()
+    list_push(xs, a)
+    list_push(xs, b)
+    list_push(xs, c)
+    list_push(xs, d)
+    return xs
+}
+
+def set_marine_likelihoods(m: Pomdp) -> Pomdp effect alloc {
+    var cur = pomdp_set_likelihood(m, 0, list_f4(0.78, 0.16, 0.05, 0.01), 6.0)
+    cur = pomdp_set_likelihood(cur, 1, list_f4(0.16, 0.62, 0.18, 0.04), 6.0)
+    cur = pomdp_set_likelihood(cur, 2, list_f4(0.04, 0.22, 0.56, 0.18), 6.0)
+    cur = pomdp_set_likelihood(cur, 3, list_f4(0.01, 0.06, 0.24, 0.69), 6.0)
+    return cur
+}
+
+def set_action0_transitions(m: Pomdp) -> Pomdp effect alloc {
+    var cur = pomdp_set_transition(m, 0, 0, list_f4(0.80, 0.15, 0.04, 0.01), 5.0)
+    cur = pomdp_set_transition(cur, 0, 1, list_f4(0.15, 0.62, 0.18, 0.05), 5.0)
+    cur = pomdp_set_transition(cur, 0, 2, list_f4(0.04, 0.16, 0.56, 0.24), 5.0)
+    cur = pomdp_set_transition(cur, 0, 3, list_f4(0.01, 0.05, 0.22, 0.72), 5.0)
+    return cur
+}
+
+def set_action1_transitions(m: Pomdp) -> Pomdp effect alloc {
+    var cur = pomdp_set_transition(m, 1, 0, list_f4(0.88, 0.10, 0.02, 0.00), 5.0)
+    cur = pomdp_set_transition(cur, 1, 1, list_f4(0.36, 0.52, 0.10, 0.02), 5.0)
+    cur = pomdp_set_transition(cur, 1, 2, list_f4(0.10, 0.42, 0.38, 0.10), 5.0)
+    cur = pomdp_set_transition(cur, 1, 3, list_f4(0.04, 0.16, 0.44, 0.36), 5.0)
+    return cur
+}
+
+def set_action2_transitions(m: Pomdp) -> Pomdp effect alloc {
+    var cur = pomdp_set_transition(m, 2, 0, list_f4(0.92, 0.07, 0.01, 0.00), 5.0)
+    cur = pomdp_set_transition(cur, 2, 1, list_f4(0.58, 0.34, 0.07, 0.01), 5.0)
+    cur = pomdp_set_transition(cur, 2, 2, list_f4(0.28, 0.46, 0.22, 0.04), 5.0)
+    cur = pomdp_set_transition(cur, 2, 3, list_f4(0.12, 0.32, 0.38, 0.18), 5.0)
+    return cur
+}
+
+/// Construct the 4-state x 4-obs x 3-action maritime Active Inference `Pomdp`.
+pub def build_marine_pomdp() -> Pomdp effect alloc {
+    var m = pomdp_new(4, 4, 3)
+    m = pomdp_set_prior(m, list_f4(0.46, 0.30, 0.16, 0.08))
+    m = set_marine_likelihoods(m)
+    m = set_action0_transitions(m)
+    m = set_action1_transitions(m)
+    m = set_action2_transitions(m)
+    m = pomdp_set_preferences(m, list_f4(2.6, 1.0, 0.0 - 2.6, 0.0 - 5.5))
+    return m
+}
+
+/// Build hard COLREGs and WMO storm `SafetyPolicy` shield over 4-element state.
+pub def build_colregs_safety() -> SafetyPolicy effect alloc {
+    var p = safety_policy_new()
+    p = safety_forbid_when(p, "colregs_no_hold_on_cpa", 2, "<", 1.2, 0, 10)
+    p = safety_forbid_when(p, "gale_gust_no_maintain", 1, ">", 28.0, 0, 8)
+    p = safety_require_when(p, "critical_cpa_shelter", 2, "<", 0.5, 2, 12)
+    p = safety_require_when(p, "storm_wave_evasive", 0, ">=", 4.0, 2, 11)
+    p = safety_keep_within(p, "hull_gust_viability", 1, 0.0, 44.0, 6)
+    return p
+}
+
+def build_viability_bounds() -> list<ViabilityBound> effect alloc {
+    val bounds: list<ViabilityBound> = list()
+    list_push(bounds, viability_bound_new("wave_m", 0.0, 2.0, 0.0, 4.0, 1.5, 2))
+    list_push(bounds, viability_bound_new("gust_kn", 0.0, 22.0, 0.0, 35.0, 1.2, 1))
+    list_push(bounds, viability_bound_new("cpa_nm", 1.5, 25.0, 0.6, 80.0, 2.0, 2))
+    list_push(bounds, viability_bound_new("baro_drop", 0.0, 12.0, 0.0, 25.0, 0.8, 1))
+    return bounds
+}
+
+def list_f2(a: f64, b: f64) -> list<f64> effect alloc {
+    val xs: list<f64> = list()
+    list_push(xs, a)
+    list_push(xs, b)
+    return xs
+}
+
+def list_f3(a: f64, b: f64, c: f64) -> list<f64> effect alloc {
+    val xs: list<f64> = list()
+    list_push(xs, a)
+    list_push(xs, b)
+    list_push(xs, c)
+    return xs
+}
+
+def list_s3(a: str, b: str, c: str) -> list<str> effect alloc {
+    val xs: list<str> = list()
+    list_push(xs, a)
+    list_push(xs, b)
+    list_push(xs, c)
+    return xs
+}
+
+def build_action_vectors() -> list<list<f64>> effect alloc {
+    val actions: list<list<f64>> = list()
+    list_push(actions, list_f2(0.0, 0.0))
+    list_push(actions, list_f2(0.0 - 1.0, 0.0))
+    list_push(actions, list_f2(0.0 - 1.5, 1.0))
+    return actions
+}
+
+def build_seeded_autopilot() -> Autopilot effect alloc {
+    var ap = autopilot_new(
+        4,
+        build_action_vectors(),
+        build_viability_bounds(),
+        build_colregs_safety(),
+        2,
+        0.94,
+    )
+    var m = wm_learn(
+        ap.model,
+        list_f4(1.0, 14.0, 3.0, 4.0),
+        list_f2(0.0, 0.0),
+        list_f4(1.0, 14.0, 2.9, 4.0),
+    )
+    m = wm_learn(
+        m,
+        list_f4(2.2, 24.0, 1.8, 8.0),
+        list_f2(0.0 - 1.0, 0.0),
+        list_f4(2.0, 22.5, 2.2, 7.8),
+    )
+    m = wm_learn(
+        m,
+        list_f4(3.0, 31.0, 0.8, 12.0),
+        list_f2(0.0 - 1.5, 1.0),
+        list_f4(2.6, 27.0, 1.9, 11.0),
+    )
+    ap.model = m
+    return ap
+}
+
+def build_marine_governor() -> SoftwareGovernor effect alloc {
+    var h = homeostat_new()
+    h = homeostat_add_var(h, homeovar_new(1.2, 1.2, 0.25))
+    h = homeostat_add_var(h, homeovar_new(14.0, 10.0, 0.20))
+    h = homeostat_add_var(h, homeovar_new(3.0, 2.0, 0.30))
+    var c = constitution_new(3)
+    c = constitution_add(c, "maintain", 4)
+    c = constitution_add(c, "weathervane", 6)
+    c = constitution_add(c, "seek_shelter", 9)
+    var gov = software_governor_new(h, c, list_s3("maintain", "weathervane", "seek_shelter"))
+    gov = software_governor_add_rule(gov, autonomic_rule_new("cpa_nm", "<", 1.0, 2, 10))
+    gov = software_governor_add_rule(gov, autonomic_rule_new("gust_kn", ">", 26.0, 1, 7))
+    gov = software_governor_add_rule(gov, autonomic_rule_new("wave_m", ">=", 3.5, 2, 11))
+    return gov
+}
+
+def build_initial_ewc() -> EWCState effect alloc {
+    val ewc = ewc_new(4, 0.8)
+    val anchor = list_f4(0.25, 0.25, 0.30, 0.20)
+    val grads: list<list<f64>> = list()
+    list_push(grads, list_f4(0.40, 0.35, 0.55, 0.25))
+    list_push(grads, list_f4(0.45, 0.30, 0.50, 0.20))
+    return ewc_consolidate(ewc, anchor, grads)
+}
+
+/// Initialize a `PilotEngine`, loading persisted POMDP weights from `state_dir` if present.
+pub def init_pilot_engine(state_dir: str) -> PilotEngine effect fs, io, alloc {
+    val model_path = if len(state_dir) > 0 { f"{state_dir}/ais_pomdp.model" } else { "" }
+    var loaded = false
+    var pomdp = build_marine_pomdp()
+    if len(model_path) > 0 && path_exists(model_path) {
+        val maybe = pomdp_load(model_path)
+        if is_some(maybe) {
+            pomdp = unwrap(maybe)
+            loaded = true
+        }
+    }
+    var aif = aif_agent_new(pomdp, 2, 1.5)
+    aif = aif_with_drives(aif, 0.35, 0.25)
+    aif = aif_with_learning(aif, 0.18)
+    return PilotEngine {
+        aif: aif,
+        autopilot: build_seeded_autopilot(),
+        governor: build_marine_governor(),
+        ewc: build_initial_ewc(),
+        anchor_weights: list_f4(0.25, 0.25, 0.30, 0.20),
+        state_path: model_path,
+        loaded_from_disk: loaded,
+        eval_count: 0,
+    }
+}
+
+/// Persist learned Active Inference `Pomdp` weights to `dir_path` (`ais_pomdp.model`).
+pub def save_pilot_engine(
+    engine: PilotEngine,
+    dir_path: str,
+) -> result<str, AisError> effect fs, io, alloc {
+    if len(dir_path) == 0 {
+        return ok("ephemeral-memory")
+    }
+    val _mk = make_dir(dir_path)
+    val out_path = f"{dir_path}/ais_pomdp.model"
+    val saved = pomdp_save(engine.aif.model, out_path)
+    if !saved {
+        return err(AisError.IoFailed(f"failed to save POMDP weights to {out_path}"))
+    }
+    return ok(out_path)
+}
+
+/// Bin live weather, CPA encounter, and nav status into a discrete observation index `0..3`.
+pub def classify_observation(w: MarineWeather, enc: EncounterMetrics, nav: NavStatus) -> i64 {
+    val nav_pen = when nav {
+        NavStatus.NotUnderCommand => 2,
+        NavStatus.Aground => 2,
+        NavStatus.RestrictedManeuver => 1,
+        NavStatus.ConstrainedDraught => 1,
+        _ => 0,
+    }
+    if w.wave_height_m >= 3.5 || w.gust_knots >= 34.0 || enc.cpa_nm < 0.6 {
+        return 3
+    }
+    if w.wave_height_m >= 2.0 || w.gust_knots >= 24.0 || enc.cpa_nm < 1.3 || nav_pen >= 2 {
+        return 2
+    }
+    if w.wave_height_m >= 0.9 || w.gust_knots >= 15.0 || enc.cpa_nm < 3.0 || nav_pen >= 1 {
+        return 1
+    }
+    return 0
+}
+
+def build_state_vector(w: MarineWeather, enc: EncounterMetrics) -> list<f64> effect alloc {
+    val baro_drop = if w.pressure_hpa < 1013.25 { 1013.25 - w.pressure_hpa } else { 0.0 }
+    return list_f4(w.wave_height_m, w.gust_knots, enc.cpa_nm, baro_drop)
+}
+
+def regime_from_belief(belief: list<f64>) -> RegimeConf {
+    var best_idx = 0
+    var best_prob = 0.0
+    for i in 0..list_len(belief) {
+        val p = list_get(belief, i)
+        if i == 0 || p > best_prob {
+            best_idx = i
+            best_prob = p
+        }
+    }
+    val reg = if best_idx <= 0 {
+        SeaRegime.CalmPassage
+    } else if best_idx == 1 {
+        SeaRegime.SwellBuild
+    } else if best_idx == 2 {
+        SeaRegime.SquallTraffic
+    } else {
+        SeaRegime.StormHazard
+    }
+    return RegimeConf { regime: reg, confidence: best_prob }
+}
+
+def clamp_i64(v: i64, lo: i64, hi: i64) -> i64 {
+    if v < lo {
+        return lo
+    }
+    if v > hi {
+        return hi
+    }
+    return v
+}
+
+def compute_risk_score(
+    w: MarineWeather,
+    enc: EncounterMetrics,
+    regime: SeaRegime,
+    overridden: bool,
+) -> i64 {
+    val wave_pts = (w.wave_height_m * 14.0) to i64
+    val gust_pts = (w.gust_knots * 0.9) to i64
+    val cpa_pts = if enc.cpa_nm < 0.5 {
+        36
+    } else if enc.cpa_nm < 1.2 {
+        24
+    } else if enc.cpa_nm < 2.5 {
+        12
+    } else {
+        2
+    }
+    val reg_pts = when regime {
+        SeaRegime.CalmPassage => 0,
+        SeaRegime.SwellBuild => 8,
+        SeaRegime.SquallTraffic => 18,
+        SeaRegime.StormHazard => 28,
+    }
+    val ov_pts = if overridden { 8 } else { 0 }
+    return clamp_i64(wave_pts + gust_pts + cpa_pts + reg_pts + ov_pts, 0, 100)
+}
+
+def norm_feature_weights(w: MarineWeather, enc: EncounterMetrics) -> list<f64> effect alloc {
+    val baro_drop = if w.pressure_hpa < 1013.25 { 1013.25 - w.pressure_hpa } else { 0.0 }
+    val inv_cpa = 1.0 / (enc.cpa_nm + 0.5)
+    return list_f4(
+        0.25 + w.wave_height_m * 0.04,
+        0.25 + w.gust_knots * 0.005,
+        0.30 + inv_cpa * 0.08,
+        0.20 + baro_drop * 0.004,
+    )
+}
+
+def resolve_approved_action(
+    aif_action: i64,
+    ap_step: AutopilotStep,
+    gov_step: GovernorStep,
+) -> ResolvedHelm {
+    if ap_step.overridden {
+        return ResolvedHelm {
+            action_idx: ap_step.action,
+            overridden: true,
+            rule_name: ap_step.reason,
+        }
+    }
+    if gov_step.action > aif_action {
+        return ResolvedHelm {
+            action_idx: gov_step.action,
+            overridden: true,
+            rule_name: f"governor: {gov_step.reason}",
+        }
+    }
+    return ResolvedHelm { action_idx: aif_action, overridden: false, rule_name: ap_step.reason }
+}
+
+def assemble_verdict(
+    reg: RegimeConf,
+    aif_dec: AifDecision,
+    ap_step: AutopilotStep,
+    gov_step: GovernorStep,
+    inputs: VerdictInputs,
+) -> AisPilotVerdict effect alloc {
+    val pred = inputs.pred
+    val wx = inputs.weather
+    val enc = inputs.encounter
+    val resolved = resolve_approved_action(aif_dec.action, ap_step, gov_step)
+    val act_p = if aif_dec.action >= 0 && aif_dec.action < list_len(aif_dec.action_probs) {
+        list_get(aif_dec.action_probs, aif_dec.action)
+    } else {
+        0.0
+    }
+    return AisPilotVerdict {
+        regime: reg.regime,
+        proposed_action: helm_action_from_index(aif_dec.action),
+        approved_action: helm_action_from_index(resolved.action_idx),
+        overridden: resolved.overridden,
+        safety_rule: resolved.rule_name,
+        active_inf_conf: reg.confidence,
+        wm_predicted_wave_m: if list_len(pred) > 0 { list_get(pred, 0) } else { wx.wave_height_m },
+        wm_predicted_cpa_nm: if list_len(pred) > 2 { list_get(pred, 2) } else { enc.cpa_nm },
+        homeostat_health: gov_step.health,
+        governor_action: gov_step.action_name,
+        ewc_penalty_val: inputs.ewc_pen,
+        audit_notes: f"obs={inputs.obs} act_p={to_str(act_p)} ap_risk={to_str(ap_step.risk)}",
+    }
+}
+
+def step_ewc_weights(ewc: EWCState, obs: i64, feat_w: list<f64>) -> EWCState effect alloc {
+    val grad_box: list<list<f64>> = list()
+    list_push(grad_box, list_f4(0.35, 0.40, 0.45, 0.25))
+    return if obs >= 2 { ewc_consolidate(ewc, feat_w, grad_box) } else { ewc }
+}
+
+def next_pilot_state(
+    engine: PilotEngine,
+    aif_next: AifAgent,
+    ap_next: Autopilot,
+    gov_next: SoftwareGovernor,
+    ewc_pack: (EWCState, list<f64>),
+) -> PilotEngine {
+    return PilotEngine {
+        aif: aif_next,
+        autopilot: ap_next,
+        governor: gov_next,
+        ewc: ewc_pack.0,
+        anchor_weights: ewc_pack.1,
+        state_path: engine.state_path,
+        loaded_from_disk: engine.loaded_from_disk,
+        eval_count: engine.eval_count + 1,
+    }
+}
+
+def step_governor_metrics(
+    gov: SoftwareGovernor,
+    weather: MarineWeather,
+    enc: EncounterMetrics,
+) -> GovernorStep effect alloc {
+    val names = list_s3("wave_m", "gust_kn", "cpa_nm")
+    val vals = list_f3(weather.wave_height_m, weather.gust_knots, enc.cpa_nm)
+    return software_governor_step(gov, names, vals, 1.0)
+}
+
+/// Evaluate one maritime contact + live weather through all `std.ais` controllers.
+pub def evaluate_contact(
+    engine: PilotEngine,
+    contact: VesselContact,
+    enc: EncounterMetrics,
+    weather: MarineWeather,
+) -> EvalStep effect alloc {
+    val obs = classify_observation(weather, enc, contact.nav_status)
+    val state = build_state_vector(weather, enc)
+    val ap = engine.autopilot
+    val permitted = safety_permitted(ap.safety, state, ap.model, ap.actions)
+    val aif_pair = aif_decide_permitted(aif_observe(engine.aif, obs), permitted)
+    val ap_step = autopilot_step(ap, state)
+    val pred = wm_predict(
+        ap_step.pilot.model,
+        state,
+        list_get(ap_step.pilot.actions, ap_step.action),
+    )
+    val gov_step = step_governor_metrics(engine.governor, weather, enc)
+    val reg = regime_from_belief(aif_pair.0.belief)
+    val resolved = resolve_approved_action(aif_pair.1.action, ap_step, gov_step)
+    val feat_w = norm_feature_weights(weather, enc)
+    val ewc_pen = ewc_penalty(engine.ewc, feat_w)
+    val next_ewc = step_ewc_weights(engine.ewc, obs, feat_w)
+    val next_eng = next_pilot_state(
+        engine,
+        aif_pair.0,
+        ap_step.pilot,
+        gov_step.governor,
+        (next_ewc, feat_w),
+    )
+    val v_in = VerdictInputs {
+        pred: pred,
+        weather: weather,
+        encounter: enc,
+        ewc_pen: ewc_pen,
+        obs: obs,
+    }
+    val verdict = assemble_verdict(reg, aif_pair.1, ap_step, gov_step, v_in)
+    val risk = compute_risk_score(weather, enc, reg.regime, resolved.overridden)
+    return EvalStep {
+        engine: next_eng,
+        decision: SentinelDecision {
+            contact: contact,
+            encounter: enc,
+            weather: weather,
+            verdict: verdict,
+            risk_score: risk,
+        },
+    }
+}
+
+def put_f64_slice(buf: list<f64>, off: i64, src: list<f64>) -> i64 {
+    val n = list_len(src)
+    for i in 0..n {
+        list_set(buf, off + i, list_get(src, i))
+    }
+    return off + n
+}
+
+def read_f64_slice(buf: list<f64>, off: i64, dst: list<f64>, n: i64) -> i64 {
+    val lim = if n < list_len(dst) { n } else { list_len(dst) }
+    for i in 0..lim {
+        list_set(dst, i, list_get(buf, off + i))
+    }
+    return off + n
+}
+
+def save_aif_and_wm_weights(eng: PilotEngine, buf: list<f64>) -> i64 {
+    var off = put_f64_slice(buf, 0, eng.aif.model.a)
+    off = put_f64_slice(buf, off, eng.aif.model.pa)
+    off = put_f64_slice(buf, off, eng.aif.model.b)
+    off = put_f64_slice(buf, off, eng.aif.model.pb)
+    off = put_f64_slice(buf, off, eng.aif.belief)
+    list_set(buf, off, to_f64(eng.aif.last_action))
+    list_set(buf, off + 1, to_f64(eng.aif.t))
+    off = off + 2
+    off = put_f64_slice(buf, off, eng.autopilot.model.w)
+    off = put_f64_slice(buf, off, eng.autopilot.model.p)
+    list_set(buf, off, to_f64(eng.autopilot.model.updates))
+    list_set(buf, off + 1, eng.autopilot.model.mse)
+    return off + 2
+}
+
+def save_gov_ewc_scalars(eng: PilotEngine, buf: list<f64>, off_in: i64) -> i64 {
+    var off = off_in
+    val prev_n = list_len(eng.autopilot.prev_state)
+    list_set(buf, off, to_f64(prev_n))
+    off = off + 1
+    for i in 0..4 {
+        val v = if i < prev_n { list_get(eng.autopilot.prev_state, i) } else { 0.0 }
+        list_set(buf, off + i, v)
+    }
+    off = off + 4
+    list_set(buf, off, to_f64(eng.autopilot.prev_action))
+    list_set(buf, off + 1, to_f64(eng.autopilot.safety.interventions))
+    list_set(buf, off + 2, to_f64(eng.autopilot.runtime.cycle))
+    list_set(buf, off + 3, to_f64(eng.autopilot.runtime.last_action))
+    list_set(buf, off + 4, if eng.autopilot.runtime.state == "protecting" { 1.0 } else { 0.0 })
+    off = off + 5
+    for i in 0..3 {
+        val hv = list_get(eng.governor.homeostat.variables, i)
+        list_set(buf, off, hv.current_value)
+        list_set(buf, off + 1, hv.integral)
+        list_set(buf, off + 2, hv.last_error)
+        off = off + 3
+    }
+    list_set(buf, off, eng.governor.homeostat.health)
+    list_set(buf, off + 1, eng.governor.homeostat.allostatic_load)
+    list_set(buf, off + 2, to_f64(eng.governor.last_action))
+    off = off + 3
+    off = put_f64_slice(buf, off, eng.ewc.importance_weights)
+    off = put_f64_slice(buf, off, eng.ewc.old_params)
+    off = put_f64_slice(buf, off, eng.anchor_weights)
+    list_set(buf, off, to_f64(eng.ewc.n_tasks))
+    list_set(buf, off + 1, to_f64(eng.eval_count))
+    list_set(buf, off + 2, if eng.loaded_from_disk { 1.0 } else { 0.0 })
+    return off + 3
+}
+
+/// Snapshot learned weights and counters from `eng` in-place into preallocated `buf`.
+pub def pilot_weights_save(eng: PilotEngine, buf: list<f64>) -> i64 {
+    val mid = save_aif_and_wm_weights(eng, buf)
+    return save_gov_ewc_scalars(eng, buf, mid)
+}
+
+/// Allocate a flat reusable checkpoint vector initialized from `eng`.
+pub def pilot_weights_new(eng: PilotEngine) -> list<f64> effect alloc {
+    val buf: list<f64> = list()
+    for _i in 0..256 {
+        list_push(buf, 0.0)
+    }
+    val _n = pilot_weights_save(eng, buf)
+    return buf
+}
+
+def restore_aif_state(aif_in: AifAgent, buf: list<f64>) -> (AifAgent, i64) {
+    var ag = aif_in
+    var off = read_f64_slice(buf, 0, ag.model.a, list_len(ag.model.a))
+    off = read_f64_slice(buf, off, ag.model.pa, list_len(ag.model.pa))
+    off = read_f64_slice(buf, off, ag.model.b, list_len(ag.model.b))
+    off = read_f64_slice(buf, off, ag.model.pb, list_len(ag.model.pb))
+    off = read_f64_slice(buf, off, ag.belief, list_len(ag.belief))
+    ag.last_action = list_get(buf, off) to i64
+    ag.t = list_get(buf, off + 1) to i64
+    return (ag, off + 2)
+}
+
+def restore_autopilot_state(
+    ap_in: Autopilot,
+    buf: list<f64>,
+    off_in: i64,
+) -> (Autopilot, i64) effect alloc {
+    var ap = ap_in
+    var lm = ap.model
+    var off = read_f64_slice(buf, off_in, lm.w, list_len(lm.w))
+    off = read_f64_slice(buf, off, lm.p, list_len(lm.p))
+    lm.updates = list_get(buf, off) to i64
+    lm.mse = list_get(buf, off + 1)
+    ap.model = lm
+    off = off + 2
+    val prev_n = list_get(buf, off) to i64
+    off = off + 1
+    val prev_st: list<f64> = list()
+    for i in 0..prev_n {
+        list_push(prev_st, list_get(buf, off + i))
+    }
+    ap.prev_state = prev_st
+    off = off + 4
+    ap.prev_action = list_get(buf, off) to i64
+    var sf = ap.safety
+    sf.interventions = list_get(buf, off + 1) to i64
+    ap.safety = sf
+    var rt = ap.runtime
+    rt.cycle = list_get(buf, off + 2) to i64
+    rt.last_action = list_get(buf, off + 3) to i64
+    rt.state = if list_get(buf, off + 4) > 0.5 { "protecting" } else { "active" }
+    ap.runtime = rt
+    return (ap, off + 5)
+}
+
+def restore_gov_ewc_state(
+    eng: PilotEngine,
+    buf: list<f64>,
+    off_in: i64,
+) -> (SoftwareGovernor, EWCState, i64) {
+    var off = off_in
+    var gov = eng.governor
+    var hom = gov.homeostat
+    for i in 0..3 {
+        var hv = list_get(hom.variables, i)
+        hv.current_value = list_get(buf, off)
+        hv.integral = list_get(buf, off + 1)
+        hv.last_error = list_get(buf, off + 2)
+        list_set(hom.variables, i, hv)
+        off = off + 3
+    }
+    hom.health = list_get(buf, off)
+    hom.allostatic_load = list_get(buf, off + 1)
+    gov.homeostat = hom
+    gov.last_action = list_get(buf, off + 2) to i64
+    off = off + 3
+    var ewc = eng.ewc
+    off = read_f64_slice(buf, off, ewc.importance_weights, list_len(ewc.importance_weights))
+    off = read_f64_slice(buf, off, ewc.old_params, list_len(ewc.old_params))
+    off = read_f64_slice(buf, off, eng.anchor_weights, list_len(eng.anchor_weights))
+    ewc.n_tasks = list_get(buf, off) to i64
+    return (gov, ewc, off + 1)
+}
+
+/// Construct a fresh `PilotEngine` seeded from weight checkpoint `buf` without disk I/O.
+pub def pilot_engine_from_weights(
+    state_dir: str,
+    buf: list<f64>,
+) -> PilotEngine effect fs, io, alloc {
+    val base = init_pilot_engine("")
+    val aif_pair = restore_aif_state(base.aif, buf)
+    val ap_pair = restore_autopilot_state(base.autopilot, buf, aif_pair.1)
+    val ge_tri = restore_gov_ewc_state(base, buf, ap_pair.1)
+    val evals = list_get(buf, ge_tri.2) to i64
+    val loaded = list_get(buf, ge_tri.2 + 1) > 0.5
+    val path = if len(state_dir) > 0 { f"{state_dir}/ais_pomdp.model" } else { "" }
+    return PilotEngine {
+        aif: aif_pair.0,
+        autopilot: ap_pair.0,
+        governor: ge_tri.0,
+        ewc: ge_tri.1,
+        anchor_weights: base.anchor_weights,
+        state_path: path,
+        loaded_from_disk: loaded,
+        eval_count: evals,
+    }
+}
+
+def test_safety_override_and_active_inference() -> i64 effect fs, io, alloc, throw {
+    val eng0 = init_pilot_engine("")
+    val c_close = VesselContact {
+        label: "CROSSING_VESSEL",
+        mmsi: unwrap(parse_mmsi(230992750)),
+        msg_type: 1,
+        lat: unwrap(parse_geo_lat(60.01)),
+        lon: unwrap(parse_geo_lon(24.84)),
+        sog: unwrap(parse_knots(16.0)),
+        cog_deg: 65.0,
+        heading_deg: 65,
+        nav_status: NavStatus.UnderWayEngine,
+    }
+    val enc_danger = EncounterMetrics {
+        own_lat: 60.02,
+        own_lon: 24.85,
+        target_label: "CROSSING_VESSEL",
+        target_mmsi: 230992750,
+        range_nm: 0.7,
+        bearing_deg: 210.0,
+        cpa_nm: 0.32,
+        tcpa_min: 3.0,
+    }
+    val storm_wx = MarineWeather {
+        lat: 60.01,
+        lon: 24.84,
+        wave_height_m: 4.3,
+        wave_dir_deg: 250.0,
+        wave_period_s: 7.5,
+        wind_knots: 29.0,
+        gust_knots: 37.0,
+        wind_dir_deg: 248.0,
+        pressure_hpa: 988.0,
+        live_ok: true,
+        note: "test-storm",
+    }
+    val res = evaluate_contact(eng0, c_close, enc_danger, storm_wx)
+    val dec = res.decision
+    assert(helm_action_label(dec.verdict.approved_action) == "ALTER_COURSE_SHELTER")
+    assert(dec.risk_score >= 60)
+    assert(res.engine.eval_count == 1)
+    return 0
+}
+
+def test_pomdp_persistence_roundtrip() -> i64 effect fs, io, alloc, throw {
+    val tmp_dir = "projects/ais_sentinel/.iris/test_state"
+    val eng0 = init_pilot_engine("")
+    val saved = save_pilot_engine(eng0, tmp_dir)
+    assert(is_ok(saved))
+    val eng1 = init_pilot_engine(tmp_dir)
+    assert(eng1.loaded_from_disk)
+    return 0
+}

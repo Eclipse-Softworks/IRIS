@@ -1,0 +1,241 @@
+// std.ui_theme -- Design tokens, geometry, color math, and IRIS Obsidian & Signal palettes.
+
+/// RGBA color channel container (`0..255` per channel).
+pub record UiColor {
+    r: i64 = 30,
+    g: i64 = 30,
+    b: i64 = 30,
+    a: i64 = 255,
+}
+
+/// Semantic intent role mapped to active theme tokens.
+pub choice UiTone {
+    Primary,
+    Secondary,
+    Accent,
+    Success,
+    Warning,
+    Danger,
+    Neutral,
+    Muted,
+}
+
+/// Cross-axis or text alignment rule.
+pub choice UiAlign {
+    Start,
+    Center,
+    End,
+    Stretch,
+}
+
+/// Declarative box and text styling properties with defaults.
+pub record UiStyle {
+    bg: UiColor = UiColor { r: 0, g: 0, b: 0, a: 0 },
+    fg: UiColor = UiColor { r: 212, g: 212, b: 212, a: 255 },
+    border: UiColor = UiColor { r: 0, g: 0, b: 0, a: 0 },
+    border_width: f64 = 0.0,
+    radius: f64 = 8.0,
+    padding: f64 = 0.0,
+    gap: f64 = 8.0,
+    font_size: f64 = 14.0,
+    line_height: f64 = 0.0,
+    bold: bool = false,
+    monospace: bool = false,
+    italic: bool = false,
+    align: UiAlign = UiAlign.Start,
+    flex: f64 = 0.0,
+    min_w: f64 = 0.0,
+    min_h: f64 = 0.0,
+    max_w: f64 = 0.0,
+    max_h: f64 = 0.0,
+    // When true, the column scrolls its children by `UiTree.scroll_y`.
+    scrollable: bool = false,
+}
+
+/// Two-dimensional extent in logical pixels.
+pub record UiSize {
+    w: f64 = 0.0,
+    h: f64 = 0.0,
+}
+
+/// Axis-aligned rectangle in logical pixels.
+pub record UiRect {
+    x: f64 = 0.0,
+    y: f64 = 0.0,
+    w: f64 = 0.0,
+    h: f64 = 0.0,
+}
+
+/// Single-pass Flutter-style min/max layout bounds.
+pub record BoxConstraints {
+    min_w: f64 = 0.0,
+    max_w: f64 = 100000.0,
+    min_h: f64 = 0.0,
+    max_h: f64 = 100000.0,
+}
+
+/// Complete theme token set anchored in IRIS Obsidian & Signal aesthetics.
+pub record UiTheme {
+    bg: UiColor,
+    surface: UiColor,
+    panel: UiColor,
+    panel_alt: UiColor,
+    fg: UiColor,
+    fg_muted: UiColor,
+    border: UiColor,
+    primary: UiColor,
+    azure: UiColor,
+    teal: UiColor,
+    cyan: UiColor,
+    amber: UiColor,
+    coral: UiColor,
+    emerald: UiColor,
+    font_ui_size: f64 = 14.0,
+    font_mono_size: f64 = 13.0,
+    radius: f64 = 8.0,
+}
+
+def clamp_channel(v: i64) -> i64 {
+    if v < 0 {
+        return 0
+    }
+    if v > 255 {
+        return 255
+    }
+    return v
+}
+
+def clamp_unit(t: f64) -> f64 {
+    if t < 0.0 {
+        return 0.0
+    }
+    if t > 1.0 {
+        return 1.0
+    }
+    return t
+}
+
+def clamp_f(v: f64, lo: f64, hi: f64) -> f64 {
+    val safe_hi = if hi < lo { lo } else { hi }
+    if v < lo {
+        return lo
+    }
+    if v > safe_hi {
+        return safe_hi
+    }
+    return v
+}
+
+/// Construct an RGBA color with channels clamped to `0..255`.
+pub def rgba(r: i64, g: i64, b: i64, a: i64) -> UiColor {
+    return UiColor {
+        r: clamp_channel(r),
+        g: clamp_channel(g),
+        b: clamp_channel(b),
+        a: clamp_channel(a),
+    }
+}
+
+/// Construct an opaque RGB color (`alpha = 255`).
+pub def rgb(r: i64, g: i64, b: i64) -> UiColor {
+    return rgba(r, g, b, 255)
+}
+
+/// Clone a color with a new `alpha` channel (`0..255`).
+pub def with_alpha(c: UiColor, a: i64) -> UiColor {
+    return UiColor { r: c.r, g: c.g, b: c.b, a: clamp_channel(a) }
+}
+
+/// Pack RGBA channels into little-endian 32-bit word expected by `iris_ui_host`.
+pub def pack_rgba(c: UiColor) -> i64 {
+    val r = clamp_channel(c.r)
+    val g = clamp_channel(c.g)
+    val b = clamp_channel(c.b)
+    val a = clamp_channel(c.a)
+    return a * 16777216 + b * 65536 + g * 256 + r
+}
+
+/// Linearly interpolate two colors by `t` in `[0.0, 1.0]`.
+pub def mix_color(a: UiColor, b: UiColor, t: f64) -> UiColor {
+    val u = clamp_unit(t)
+    val inv = 1.0 - u
+    return UiColor {
+        r: clamp_channel((to_f64(a.r) * inv + to_f64(b.r) * u) to i64),
+        g: clamp_channel((to_f64(a.g) * inv + to_f64(b.g) * u) to i64),
+        b: clamp_channel((to_f64(a.b) * inv + to_f64(b.b) * u) to i64),
+        a: clamp_channel((to_f64(a.a) * inv + to_f64(b.a) * u) to i64),
+    }
+}
+
+/// Format an RGBA color as a CSS `rgba(...)` string for SVG/HTML mirrors.
+pub def color_css(c: UiColor) -> str effect alloc {
+    val alpha = to_f64(clamp_channel(c.a)) / 255.0
+    return f"rgba({c.r},{c.g},{c.b},{alpha})"
+}
+
+/// Check whether logical point `(px, py)` lies inside rectangle `r`.
+pub def rect_contains(r: UiRect, px: f64, py: f64) -> bool {
+    return px >= r.x && px <= r.x + r.w && py >= r.y && py <= r.y + r.h
+}
+
+/// Clamp dimensions `(w, h)` inside single-pass `BoxConstraints`.
+pub def constrain_size(c: BoxConstraints, w: f64, h: f64) -> UiSize {
+    return UiSize {
+        w: clamp_f(w, c.min_w, c.max_w),
+        h: clamp_f(h, c.min_h, c.max_h),
+    }
+}
+
+/// Create the canonical dark IRIS Obsidian & Signal theme derived from `docs/iris-theme.theme`.
+pub def obsidian_theme() -> UiTheme {
+    return UiTheme {
+        bg: rgb(30, 30, 30),
+        surface: rgb(37, 37, 42),
+        panel: rgb(43, 43, 51),
+        panel_alt: rgb(53, 53, 64),
+        fg: rgb(212, 212, 212),
+        fg_muted: rgb(146, 152, 166),
+        border: rgb(68, 71, 84),
+        primary: rgb(197, 134, 192),
+        azure: rgb(86, 156, 214),
+        teal: rgb(78, 201, 176),
+        cyan: rgb(79, 193, 255),
+        amber: rgb(220, 220, 170),
+        coral: rgb(206, 145, 120),
+        emerald: rgb(106, 153, 85),
+    }
+}
+
+/// Create a crisp high-contrast daylight theme preserving IRIS semantic hues.
+pub def daylight_theme() -> UiTheme {
+    return UiTheme {
+        bg: rgb(243, 244, 248),
+        surface: rgb(252, 252, 255),
+        panel: rgb(235, 237, 243),
+        panel_alt: rgb(222, 226, 236),
+        fg: rgb(28, 30, 38),
+        fg_muted: rgb(95, 102, 120),
+        border: rgb(198, 204, 218),
+        primary: rgb(142, 72, 146),
+        azure: rgb(32, 104, 180),
+        teal: rgb(18, 138, 118),
+        cyan: rgb(14, 122, 178),
+        amber: rgb(168, 118, 14),
+        coral: rgb(184, 72, 48),
+        emerald: rgb(46, 125, 50),
+    }
+}
+
+/// Resolve a semantic `UiTone` into the theme's accent color.
+pub def tone_color(theme: UiTheme, tone: UiTone) -> UiColor {
+    return when tone {
+        UiTone.Primary => theme.primary,
+        UiTone.Secondary => theme.azure,
+        UiTone.Accent => theme.cyan,
+        UiTone.Success => theme.teal,
+        UiTone.Warning => theme.amber,
+        UiTone.Danger => theme.coral,
+        UiTone.Neutral => theme.fg,
+        UiTone.Muted => theme.fg_muted,
+    }
+}

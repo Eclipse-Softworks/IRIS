@@ -1,4 +1,4 @@
-﻿# build_installer.ps1 - Build the IRIS Windows EXE installer (Inno Setup)
+# build_installer.ps1 - Build the IRIS Windows EXE installer (Inno Setup)
 # Run from the project root:
 #   powershell -ExecutionPolicy Bypass -File installer\build_installer.ps1
 #

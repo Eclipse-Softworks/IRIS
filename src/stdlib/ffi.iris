@@ -35,7 +35,7 @@ pub def call_f64(handle: i64, func_name: str, a1: i64) -> f64 effect ffi {
 }
 
 /// Call a function returning a string.
-pub def call_str(handle: i64, func_name: str) -> str effect ffi {
+pub def call_str(handle: i64, func_name: str) -> str effect ffi, alloc {
     ffi_call_str(handle, func_name)
 }
 
@@ -86,7 +86,7 @@ pub def out_i64(cell: i64, index: i64) -> i64 effect ffi {
 }
 
 /// Read the cell as a NUL-terminated string.
-pub def out_str(cell: i64) -> str effect ffi {
+pub def out_str(cell: i64) -> str effect ffi, alloc {
     ffi_out_get_str(cell)
 }
 
@@ -105,26 +105,71 @@ pub def out_free(cell: i64) -> i64 effect ffi {
     ffi_out_free(cell)
 }
 
+/// Return the byte capacity of a cell, or 0 if null/freed.
+pub def out_len(cell: i64) -> i64 effect ffi {
+    ffi_out_len(cell)
+}
+
+/// Read an unsigned byte (`0..255`) at `byte_offset`.
+pub def out_u8(cell: i64, byte_offset: i64) -> i64 effect ffi {
+    ffi_out_get_u8(cell, byte_offset)
+}
+
+/// Write an unsigned byte (`v & 255`) at `byte_offset`.
+pub def out_set_u8(cell: i64, byte_offset: i64, v: i64) -> i64 effect ffi {
+    ffi_out_set_u8(cell, byte_offset, v)
+}
+
+/// Read the signed 32-bit integer at element `index` (`index * 4` bytes).
+pub def out_i32(cell: i64, index: i64) -> i64 effect ffi {
+    ffi_out_get_i32(cell, index)
+}
+
+/// Write a signed 32-bit integer at element `index` (`index * 4` bytes).
+pub def out_set_i32(cell: i64, index: i64, v: i64) -> i64 effect ffi {
+    ffi_out_set_i32(cell, index, v)
+}
+
+/// Read the 32-bit float at element `index` (`index * 4` bytes) widened to `f64`.
+pub def out_f32(cell: i64, index: i64) -> f64 effect ffi {
+    ffi_out_get_f32(cell, index)
+}
+
+/// Write `v` truncated to 32-bit float at element `index` (`index * 4` bytes).
+pub def out_set_f32(cell: i64, index: i64, v: f64) -> i64 effect ffi {
+    ffi_out_set_f32(cell, index, v)
+}
+
+/// Copy raw UTF-8 bytes of `data` into `cell` at `byte_offset`. Returns bytes copied.
+pub def out_write_bytes(cell: i64, byte_offset: i64, data: str) -> i64 effect ffi {
+    ffi_out_write_bytes(cell, byte_offset, data)
+}
+
+/// Read up to `byte_len` UTF-8 bytes from `cell + byte_offset`, stopping at NUL.
+pub def out_str_range(cell: i64, byte_offset: i64, byte_len: i64) -> str effect ffi, alloc {
+    ffi_out_get_str_range(cell, byte_offset, byte_len)
+}
+
 // ── Python FFI ──
 
 /// Evaluate a Python expression and return the result as a string.
-pub def py_eval(code: str) -> str effect ffi {
+pub def py_eval(code: str) -> str effect ffi, alloc {
     python_eval(code)
 }
 
 /// Execute a Python script file or inline code.
 /// Returns exit code (0 on success).
-pub def py_exec(code_or_path: str) -> i64 effect ffi {
+pub def py_exec(code_or_path: str) -> i64 effect ffi, alloc {
     python_exec(code_or_path)
 }
 
 /// Call a Python function: `py_call("math", "sqrt", "16")` => "4.0".
-pub def py_call(module: str, func: str, args: str) -> str effect ffi {
+pub def py_call(module: str, func: str, args: str) -> str effect ffi, alloc {
     python_call(module, func, args)
 }
 
 /// Get the Python version string.
-pub def py_version() -> str effect ffi {
+pub def py_version() -> str effect ffi, alloc {
     python_version()
 }
 
@@ -161,16 +206,31 @@ pub def call_i64_3(handle: i64, func_name: str, a1: i64, a2: i64, a3: i64) -> i6
 
 /// Call a C function with seven i64 arguments, returning i64.
 pub def call_i64_7(
-    handle: i64, func_name: str,
-    a1: i64, a2: i64, a3: i64, a4: i64, a5: i64, a6: i64, a7: i64
+    handle: i64,
+    func_name: str,
+    a1: i64,
+    a2: i64,
+    a3: i64,
+    a4: i64,
+    a5: i64,
+    a6: i64,
+    a7: i64,
 ) -> i64 effect ffi {
     ffi_call_i64(handle, func_name, a1, a2, a3, a4, a5, a6, a7)
 }
 
 /// Call a C function with eight i64 arguments, returning i64.
 pub def call_i64_8(
-    handle: i64, func_name: str,
-    a1: i64, a2: i64, a3: i64, a4: i64, a5: i64, a6: i64, a7: i64, a8: i64
+    handle: i64,
+    func_name: str,
+    a1: i64,
+    a2: i64,
+    a3: i64,
+    a4: i64,
+    a5: i64,
+    a6: i64,
+    a7: i64,
+    a8: i64,
 ) -> i64 effect ffi {
     ffi_call_i64(handle, func_name, a1, a2, a3, a4, a5, a6, a7, a8)
 }
@@ -181,11 +241,11 @@ pub def call_f64_2(handle: i64, func_name: str, a1: i64, a2: i64) -> f64 effect 
 }
 
 /// Execute a shell command, returning its stdout as a string.
-pub def shell(cmd: str) -> str effect sys {
+pub def shell(cmd: str) -> str effect sys, alloc {
     exec_cmd(cmd)
 }
 
 /// Convenience: call a Python module function with a single string argument.
-pub def py_call1(module: str, func: str, arg: str) -> str effect ffi {
+pub def py_call1(module: str, func: str, arg: str) -> str effect ffi, alloc {
     python_call(module, func, arg)
 }

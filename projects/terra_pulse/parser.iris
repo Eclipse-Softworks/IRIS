@@ -1,0 +1,371 @@
+bring std.json
+bring std.math
+bring "domain.iris"
+
+/// Trim trailing carriage return (`\r`) from CRLF lines.
+pub def strip_cr(line: str) -> str effect alloc {
+    val n = len(line)
+    if n > 0 && str_index(line, n - 1) == 13 {
+        return slice(line, 0, n - 1)
+    }
+    return line
+}
+
+/// Parse a single RFC-4180 CSV line, supporting quoted fields with embedded commas
+/// and doubled quote escapes (`""`).
+def append_csv_span(
+    clean: str,
+    buf: str,
+    span_start: i64,
+    end_idx: i64,
+) -> str effect alloc {
+    if end_idx <= span_start {
+        return buf
+    }
+    val chunk = slice(clean, span_start, end_idx)
+    return if len(buf) == 0 { chunk } else { concat(buf, chunk) }
+}
+
+/// RFC 4180 CSV line splitter handling quoted commas and escaped `""` quotes.
+pub def parse_csv_row(line: str) -> list<str> effect alloc {
+    val clean = strip_cr(line)
+    val n = len(clean)
+    val fields: list<str> = list()
+    var buf = ""
+    var span_start = 0
+    var in_quotes = false
+    var i = 0
+    while i < n {
+        val b = str_index(clean, i)
+        if b == 34 {
+            buf = append_csv_span(clean, buf, span_start, i)
+            if in_quotes && (i + 1) < n && str_index(clean, i + 1) == 34 {
+                buf = concat(buf, "\"")
+                i = i + 2
+                span_start = i
+                continue
+            }
+            in_quotes = !in_quotes
+            i = i + 1
+            span_start = i
+            continue
+        }
+        if b == 44 && !in_quotes {
+            buf = append_csv_span(clean, buf, span_start, i)
+            val _ = list_push(fields, buf)
+            buf = ""
+            i = i + 1
+            span_start = i
+            continue
+        }
+        i = i + 1
+    }
+    buf = append_csv_span(clean, buf, span_start, n)
+    val _ = list_push(fields, buf)
+    return fields
+}
+
+/// Parse an ASCII decimal float into a typed `result<f64, TelemetryError>`.
+pub def parse_required_f64(
+    raw: str,
+    field_name: str,
+) -> result<f64, TelemetryError> effect alloc {
+    val s = trim(raw)
+    return when parse_f64(s) {
+        some(v) => ok(v),
+        none => err(
+            TelemetryError.MalformedPayload(
+                concat("invalid float for ", concat(field_name, concat(": ", s))),
+            ),
+        ),
+    }
+}
+
+/// Parse an ASCII decimal integer into a typed `result<i64, TelemetryError>`.
+pub def parse_required_i64(
+    raw: str,
+    field_name: str,
+) -> result<i64, TelemetryError> effect alloc {
+    val s = trim(raw)
+    return when parse_i64(s) {
+        some(v) => ok(v),
+        none => err(
+            TelemetryError.MalformedPayload(
+                concat("invalid integer for ", concat(field_name, concat(": ", s))),
+            ),
+        ),
+    }
+}
+
+/// Resolve a named CSV header column index, returning `-1` when absent.
+def find_col(headers: list<str>, name: str) -> i64 effect alloc {
+    val n = list_len(headers)
+    for i in 0..n {
+        if trim(list_get(headers, i)) == name {
+            return i
+        }
+    }
+    return -1
+}
+
+/// Extract column value by resolved index, returning `""` when out of bounds.
+def safe_col(cols: list<str>, idx: i64) -> str effect alloc {
+    if idx >= 0 && idx < list_len(cols) {
+        return list_get(cols, idx)
+    }
+    return ""
+}
+
+/// Resolved header column positions inside a USGS CSV earthquake feed.
+record UsgsColumns {
+    idx_time: i64,
+    idx_lat: i64,
+    idx_lon: i64,
+    idx_depth: i64,
+    idx_mag: i64,
+    idx_mag_type: i64,
+    idx_nst: i64,
+    idx_gap: i64,
+    idx_rms: i64,
+    idx_id: i64,
+    idx_place: i64,
+}
+
+/// Resolve and validate mandatory column positions from USGS CSV header line.
+def resolve_usgs_columns(header_line: str) -> result<UsgsColumns, TelemetryError> effect alloc {
+    val headers = parse_csv_row(header_line)
+    val cols = UsgsColumns {
+        idx_time: find_col(headers, "time"),
+        idx_lat: find_col(headers, "latitude"),
+        idx_lon: find_col(headers, "longitude"),
+        idx_depth: find_col(headers, "depth"),
+        idx_mag: find_col(headers, "mag"),
+        idx_mag_type: find_col(headers, "magType"),
+        idx_nst: find_col(headers, "nst"),
+        idx_gap: find_col(headers, "gap"),
+        idx_rms: find_col(headers, "rms"),
+        idx_id: find_col(headers, "id"),
+        idx_place: find_col(headers, "place"),
+    }
+    if cols.idx_lat < 0 || cols.idx_lon < 0 || cols.idx_mag < 0 || cols.idx_id < 0 {
+        return err(
+            TelemetryError.MalformedPayload("USGS CSV header missing required geo/mag columns"),
+        )
+    }
+    return ok(cols)
+}
+
+/// Parse one non-empty USGS CSV data row into `some(SeismicEvent)` or `none` if blank.
+def parse_usgs_row(
+    raw_line: str,
+    schema: UsgsColumns,
+) -> result<option<SeismicEvent>, TelemetryError> effect alloc {
+    val cols = parse_csv_row(raw_line)
+    val id_val = trim(safe_col(cols, schema.idx_id))
+    if len(id_val) == 0 {
+        return ok(none)
+    }
+    val lat = parse_required_f64(safe_col(cols, schema.idx_lat), "latitude")?
+    val lon = parse_required_f64(safe_col(cols, schema.idx_lon), "longitude")?
+    val depth = parse_f64(trim(safe_col(cols, schema.idx_depth))) ?? 0.0
+    val mag = parse_required_f64(safe_col(cols, schema.idx_mag), "mag")?
+    val coord = validate_coord(lat, lon, depth)?
+
+    val mt_raw = trim(safe_col(cols, schema.idx_mag_type))
+    val place_raw = trim(safe_col(cols, schema.idx_place))
+    val ev = SeismicEvent {
+        event_id: id_val,
+        time_utc: trim(safe_col(cols, schema.idx_time)),
+        coord: coord,
+        magnitude: mag,
+        mag_type: if len(mt_raw) > 0 { mt_raw } else { "unk" },
+        place: if len(place_raw) > 0 { place_raw } else { "Unassigned Region" },
+        station_count: parse_i64(trim(safe_col(cols, schema.idx_nst))) ?? 0,
+        gap_deg: parse_f64(trim(safe_col(cols, schema.idx_gap))) ?? 180.0,
+        rms_sec: parse_f64(trim(safe_col(cols, schema.idx_rms))) ?? 0.0,
+    }
+    return ok(some(ev))
+}
+
+/// Parse USGS CSV earthquake feed into validated `SeismicEvent` records.
+pub def parse_usgs_csv(
+    raw_csv: str,
+) -> result<list<SeismicEvent>, TelemetryError> effect alloc {
+    val lines = split(raw_csv, "\n")
+    val n_lines = list_len(lines)
+    if n_lines < 2 {
+        return err(TelemetryError.MalformedPayload("USGS CSV feed has no data rows"))
+    }
+    val schema = resolve_usgs_columns(list_get(lines, 0))?
+    val events: list<SeismicEvent> = list()
+    for r in 1..n_lines {
+        val raw_line = strip_cr(list_get(lines, r))
+        if len(trim(raw_line)) == 0 {
+            continue
+        }
+        when parse_usgs_row(raw_line, schema)? {
+            some(ev) => {
+                val _ = list_push(events, ev)
+            }
+            none => {}
+        }
+    }
+    if list_len(events) == 0 {
+        return err(TelemetryError.MalformedPayload("USGS CSV feed yielded zero seismic events"))
+    }
+    return ok(events)
+}
+
+/// Parse NOAA SWPC planetary K-index JSON array into `GeomagneticSample` entries.
+pub def parse_noaa_kp_json(
+    raw_json: str,
+) -> result<list<GeomagneticSample>, TelemetryError> effect alloc {
+    val samples: list<GeomagneticSample> = list()
+    var i = 0
+    while i < 256 {
+        val prefix = concat(to_str(i), ".")
+        val time_tag = json_query(raw_json, concat(prefix, "time_tag"))
+        if len(time_tag) == 0 {
+            break
+        }
+        val kp_raw = json_query(raw_json, concat(prefix, "Kp"))
+        val a_raw = json_query(raw_json, concat(prefix, "a_running"))
+        val stn_raw = json_query(raw_json, concat(prefix, "station_count"))
+        val kp_val = parse_required_f64(kp_raw, "Kp")?
+        val a_val = parse_f64(trim(a_raw)) ?? 0.0
+        val stn_val = parse_i64(trim(stn_raw)) ?? 0
+        val _ = list_push(
+            samples,
+            GeomagneticSample {
+                time_tag: time_tag,
+                kp_index: kp_val,
+                a_running: a_val,
+                station_count: stn_val,
+            },
+        )
+        i = i + 1
+    }
+
+    if list_len(samples) == 0 {
+        return err(
+            TelemetryError.MalformedPayload("NOAA Kp JSON produced zero geomagnetic samples"),
+        )
+    }
+    return ok(samples)
+}
+
+/// Parse WhereTheISS JSON state vector into a validated `OrbitalState`.
+pub def parse_iss_json(
+    raw_json: str,
+) -> result<OrbitalState, TelemetryError> effect alloc {
+    val name_raw = json_query(raw_json, "name")
+    if len(name_raw) == 0 {
+        return err(TelemetryError.MalformedPayload("ISS JSON missing satellite name"))
+    }
+    val lat = parse_required_f64(json_query(raw_json, "latitude"), "iss.latitude")?
+    val lon = parse_required_f64(json_query(raw_json, "longitude"), "iss.longitude")?
+    val _ = validate_coord(lat, lon, 0.0)?
+    val alt = parse_required_f64(json_query(raw_json, "altitude"), "iss.altitude")?
+    val vel = parse_required_f64(json_query(raw_json, "velocity"), "iss.velocity")?
+    val foot = parse_required_f64(json_query(raw_json, "footprint"), "iss.footprint")?
+    val ts = parse_i64(trim(json_query(raw_json, "timestamp"))) ?? 0
+    val sol_lat = parse_f64(trim(json_query(raw_json, "solar_lat"))) ?? 0.0
+    val sol_lon = parse_f64(trim(json_query(raw_json, "solar_lon"))) ?? 0.0
+    val vis_raw = json_query(raw_json, "visibility")
+    val visibility = if len(vis_raw) > 0 { vis_raw } else { "unknown" }
+
+    return ok(
+        OrbitalState {
+            name: name_raw,
+            latitude: lat,
+            longitude: lon,
+            altitude_km: alt,
+            velocity_kmh: vel,
+            footprint_km: foot,
+            visibility: visibility,
+            timestamp_s: ts,
+            solar_lat: sol_lat,
+            solar_lon: sol_lon,
+        },
+    )
+}
+
+/// Parse Open-Meteo current atmospheric telemetry for a tagged coordinate.
+pub def parse_open_meteo_json(
+    label: str,
+    lat: f64,
+    lon: f64,
+    raw_json: str,
+) -> result<SurfaceWeather, TelemetryError> effect alloc {
+    val temp_raw = json_query(raw_json, "current.temperature_2m")
+    val press_raw = json_query(raw_json, "current.surface_pressure")
+    val wind_raw = json_query(raw_json, "current.wind_speed_10m")
+    val temp_c = parse_required_f64(temp_raw, "current.temperature_2m")?
+    val pressure_hpa = parse_required_f64(press_raw, "current.surface_pressure")?
+    val wind_kmh = parse_required_f64(wind_raw, "current.wind_speed_10m")?
+    val humidity_pct = parse_f64(trim(json_query(raw_json, "current.relative_humidity_2m"))) ?? 0.0
+    val precip_mm = parse_f64(trim(json_query(raw_json, "current.precipitation"))) ?? 0.0
+
+    return ok(
+        SurfaceWeather {
+            label: label,
+            lat: lat,
+            lon: lon,
+            temp_c: temp_c,
+            pressure_hpa: pressure_hpa,
+            wind_kmh: wind_kmh,
+            humidity_pct: humidity_pct,
+            precipitation_mm: precip_mm,
+        },
+    )
+}
+
+def test_parser_rfc4180_usgs_csv() -> i64 effect alloc, throw {
+    val sample = concat(
+        "time,latitude,longitude,depth,mag,magType,nst,gap,dmin,rms,net,id,updated,place,type\n",
+        "2026-11-14T19:51:04.046Z,41.5538,-119.3295,12.4,4.7,ml,18,120,0.4,0.36,nn,nn00926979,2026-11-14T19:54:21Z,\"70 km E of Cedarville, California\",earthquake\n",
+    )
+    val parsed = parse_usgs_csv(sample)
+    assert(is_ok(parsed))
+    val items = unwrap(parsed)
+    assert(list_len(items) == 1)
+    val ev = list_get(items, 0)
+    assert(ev.event_id == "nn00926979")
+    assert(ev.place == "70 km E of Cedarville, California")
+    assert(abs_f64(ev.magnitude - 4.7) < 0.001)
+    assert(ev.station_count == 18)
+
+    val bad = "time,latitude,longitude,depth,mag,id\n2026-01-01,199.0,0.0,10.0,4.0,bad1\n"
+    assert(is_err(parse_usgs_csv(bad)))
+
+    val quoted = parse_csv_row("a,\"hello \"\"world\"\", ok\",")
+    assert(list_len(quoted) == 3)
+    assert(list_get(quoted, 0) == "a")
+    assert(list_get(quoted, 1) == "hello \"world\", ok")
+    assert(list_get(quoted, 2) == "")
+    return 0
+}
+
+def test_parser_json_wire_feeds() -> i64 effect alloc, throw {
+    val kp_wire = "[{\"time_tag\":\"2026-11-14T00:00:00\",\"Kp\":3.67,\"a_running\":22,\"station_count\":8},{\"time_tag\":\"2026-11-14T03:00:00\",\"Kp\":4.33,\"a_running\":32,\"station_count\":8}]"
+    val kp_res = parse_noaa_kp_json(kp_wire)
+    assert(is_ok(kp_res))
+    val kps = unwrap(kp_res)
+    assert(list_len(kps) == 2)
+    assert(abs_f64(list_get(kps, 1).kp_index - 4.33) < 0.001)
+
+    val iss_wire = "{\"name\":\"iss\",\"id\":25544,\"latitude\":-5.41,\"longitude\":-101.56,\"altitude\":415.94,\"velocity\":27593.27,\"visibility\":\"daylight\",\"footprint\":4486.75,\"timestamp\":1794690639,\"solar_lat\":-18.39,\"solar_lon\":218.45}"
+    val iss_res = parse_iss_json(iss_wire)
+    assert(is_ok(iss_res))
+    val iss = unwrap(iss_res)
+    assert(iss.visibility == "daylight")
+    assert(abs_f64(iss.altitude_km - 415.94) < 0.01)
+
+    val wx_wire = "{\"current\":{\"temperature_2m\":10.9,\"surface_pressure\":1010.0,\"wind_speed_10m\":2.9,\"relative_humidity_2m\":68.0,\"precipitation\":0.0}}"
+    val wx_res = parse_open_meteo_json("Epicenter-A", 35.7, 139.6, wx_wire)
+    assert(is_ok(wx_res))
+    val wx = unwrap(wx_res)
+    assert(abs_f64(wx.temp_c - 10.9) < 0.01)
+    assert(abs_f64(wx.pressure_hpa - 1010.0) < 0.01)
+    return 0
+}

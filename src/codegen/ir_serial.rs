@@ -164,6 +164,8 @@ const OP_DROP: u8 = 0x83;
 const OP_CELL_NEW: u8 = 0x84;
 const OP_CELL_LOAD: u8 = 0x85;
 const OP_CELL_STORE: u8 = 0x86;
+const OP_ENTER_BLOCK: u8 = 0x87;
+const OP_EXIT_BLOCK: u8 = 0x88;
 
 const MAGIC: &[u8; 4] = b"IRIS";
 const VERSION: u8 = 1;
@@ -796,6 +798,14 @@ impl Writer {
                 self.u8(OP_MOVE);
                 self.vid(*result);
                 self.vid(*place);
+            }
+            IrInstr::EnterBlock { scope } => {
+                self.u8(OP_ENTER_BLOCK);
+                self.u32(scope.0);
+            }
+            IrInstr::ExitBlock { scope } => {
+                self.u8(OP_EXIT_BLOCK);
+                self.u32(scope.0);
             }
             IrInstr::EnterScope { scope } => {
                 self.u8(OP_ENTER_SCOPE);
@@ -2230,6 +2240,14 @@ impl<'a> Reader<'a> {
                 let result = self.vid()?;
                 let place = self.vid()?;
                 IrInstr::Move { result, place }
+            }
+            OP_ENTER_BLOCK => {
+                let scope = crate::ir::function::ScopeId(self.u32()?);
+                IrInstr::EnterBlock { scope }
+            }
+            OP_EXIT_BLOCK => {
+                let scope = crate::ir::function::ScopeId(self.u32()?);
+                IrInstr::ExitBlock { scope }
             }
             OP_ENTER_SCOPE => {
                 let scope = crate::ir::function::ScopeId(self.u32()?);

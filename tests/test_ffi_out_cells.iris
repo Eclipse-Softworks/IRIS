@@ -1,0 +1,115 @@
+// std.ffi binary out-cell primitives: u8, i32, f32, length, byte slices.
+// Exercises both `std.ffi` typed wrappers and underlying `ffi_out_*` builtins
+// across the native and interpreter backends without external fixture DLLs.
+
+bring std.ffi
+
+def check_cell_lifecycle_and_len() -> i64 effect ffi, alloc {
+    val c = out_new(64)
+    assert(c != 0);
+    assert(out_len(c) == 64);
+    assert(ffi_out_len(c) == 64);
+    assert(out_len(0) == 0);
+
+    assert(out_free(c) == 0);
+    // Double free and length after free must be safe no-ops.
+    assert(out_free(c) == 0);
+    assert(out_len(c) == 0);
+    assert(out_u8(c, 0) == 0);
+    0
+}
+
+def check_u8_and_i32_and_f32() -> i64 effect ffi, alloc {
+    val c = out_new(32)
+    assert(c != 0);
+
+    // Byte read/write (endian-agnostic byte checks).
+    assert(out_set_u8(c, 0, 255) == 0);
+    assert(out_set_u8(c, 1, 65) == 0);
+    assert(out_set_u8(c, 31, 171) == 0);
+    // Out-of-bounds byte writes/reads are safely ignored / return 0.
+    assert(out_set_u8(c, -1, 99) == 0);
+    assert(out_set_u8(c, 32, 99) == 0);
+    assert(out_u8(c, 0) == 255);
+    assert(out_u8(c, 1) == 65);
+    assert(out_u8(c, 31) == 171);
+    assert(out_u8(c, -1) == 0);
+    assert(out_u8(c, 32) == 0);
+
+    // 32-bit signed integers at index * 4.
+    assert(out_set_i32(c, 2, -123456) == 0);
+    assert(out_set_i32(c, 3, 2147483000) == 0);
+    assert(out_set_i32(c, 8, 999) == 0);
+    assert(out_i32(c, 2) == -123456);
+    assert(out_i32(c, 3) == 2147483000);
+    assert(out_i32(c, 8) == 0);
+
+    // 32-bit floats at index * 4.
+    assert(out_set_f32(c, 4, 2.5) == 0);
+    assert(out_set_f32(c, 5, -0.25) == 0);
+    assert(out_set_f32(c, 6, 12.75) == 0);
+    assert(out_set_f32(c, 8, 1.0) == 0);
+    assert(out_f32(c, 4) == 2.5);
+    assert(out_f32(c, 5) == -0.25);
+    assert(out_f32(c, 6) == 12.75);
+    assert(out_f32(c, 8) == 0.0);
+
+    // Direct builtin path.
+    assert(ffi_out_set_u8(c, 2, 42) == 0);
+    assert(ffi_out_get_u8(c, 2) == 42);
+    assert(ffi_out_set_i32(c, 7, -77) == 0);
+    assert(ffi_out_get_i32(c, 7) == -77);
+    assert(ffi_out_set_f32(c, 1, 3.5) == 0);
+    assert(ffi_out_get_f32(c, 1) == 3.5);
+
+    val _f = out_free(c)
+    0
+}
+
+def check_bytes_and_str_range() -> i64 effect ffi, alloc {
+    val c = out_new(24)
+    val n1 = out_write_bytes(c, 4, "hello-iris")
+    assert(n1 == 10);
+    assert(out_str_range(c, 4, 10) == "hello-iris");
+    assert(out_str_range(c, 4, 5) == "hello");
+    assert(out_str_range(c, 10, 4) == "iris");
+    assert(out_str_range(c, 10, 64) == "iris");
+
+    // Truncates cleanly at end of cell.
+    val n2 = ffi_out_write_bytes(c, 20, "abcdef")
+    assert(n2 == 4);
+    assert(ffi_out_get_str_range(c, 20, 4) == "abcd");
+    assert(out_write_bytes(c, -5, "x") == 0);
+    assert(out_write_bytes(c, 24, "x") == 0);
+    assert(out_str_range(c, -1, 5) == "");
+    assert(out_str_range(c, 4, 0) == "");
+    assert(out_str_range(c, 24, 5) == "");
+
+    val _f = out_free(c)
+    0
+}
+
+def check_reuse_loop() -> i64 effect ffi, alloc {
+    var reusable = out_new(64)
+    var i = 0
+    while i < 500 {
+        assert(out_len(reusable) >= 64);
+        val _a = out_set_i32(reusable, 0, i)
+        val _b = out_set_f32(reusable, 1, 1.5)
+        assert(out_i32(reusable, 0) == i);
+        assert(out_f32(reusable, 1) == 1.5);
+        i = i + 1
+    }
+    val _f = out_free(reusable)
+    0
+}
+
+def main() -> i64 effect io, ffi, alloc {
+    val a = check_cell_lifecycle_and_len()
+    val b = check_u8_and_i32_and_f32()
+    val c = check_bytes_and_str_range()
+    val d = check_reuse_loop()
+    assert(a + b + c + d == 0);
+    println("ffi out cells ok")
+    0
+}

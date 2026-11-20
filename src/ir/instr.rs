@@ -424,6 +424,23 @@ pub enum IrInstr {
         place: ValueId,
     },
 
+    // ---- Structured Lexical Blocks ----
+    /// Marks entry into a structured `{ ... }` block (a "true block").
+    ///
+    /// Unlike [`IrInstr::EnterScope`] (a drop-scope marker that is stripped by
+    /// `DropElaborationPass`), these markers are preserved through the whole
+    /// pipeline so that serialization and the interpreter see a real block
+    /// scope. The interpreter pushes a lexical frame here and pops it at the
+    /// matching [`IrInstr::ExitBlock`].
+    EnterBlock {
+        scope: ScopeId,
+    },
+    /// Marks exit from a structured `{ ... }` block. Pops the frame pushed by
+    /// the matching [`IrInstr::EnterBlock`], running any deferred drops.
+    ExitBlock {
+        scope: ScopeId,
+    },
+
     // ---- Explicit Drop Scopes ----
     /// Marks entry into a lexical drop scope.
     EnterScope {
@@ -1173,7 +1190,11 @@ impl IrInstr {
             IrInstr::Move { result, .. } => Some(*result),
             IrInstr::CellNew { result, .. } | IrInstr::CellLoad { result, .. } => Some(*result),
             IrInstr::CellStore { .. } => None,
-            IrInstr::EnterScope { .. } | IrInstr::ExitScope { .. } | IrInstr::Drop { .. } => None,
+            IrInstr::EnterBlock { .. }
+            | IrInstr::ExitBlock { .. }
+            | IrInstr::EnterScope { .. }
+            | IrInstr::ExitScope { .. }
+            | IrInstr::Drop { .. } => None,
             IrInstr::MakeSome { result, .. } => Some(*result),
             IrInstr::MakeNone { result, .. } => Some(*result),
             IrInstr::IsSome { result, .. } => Some(*result),
@@ -1382,7 +1403,10 @@ impl IrInstr {
             IrInstr::CellNew { init, .. } => vec![*init],
             IrInstr::CellLoad { cell, .. } => vec![*cell],
             IrInstr::CellStore { cell, value } => vec![*cell, *value],
-            IrInstr::EnterScope { .. } | IrInstr::ExitScope { .. } => vec![],
+            IrInstr::EnterBlock { .. }
+            | IrInstr::ExitBlock { .. }
+            | IrInstr::EnterScope { .. }
+            | IrInstr::ExitScope { .. } => vec![],
             IrInstr::Drop { value, .. } => vec![*value],
             IrInstr::MakeSome { value, .. } => vec![*value],
             IrInstr::MakeNone { .. } => vec![],

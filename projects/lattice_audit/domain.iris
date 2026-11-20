@@ -1,0 +1,364 @@
+/// Provenance source of a locked crate recorded in `Cargo.lock`.
+pub choice PackageOrigin {
+    CratesIo,
+    WorkspaceLocal,
+    OtherSource(str),
+}
+
+/// Risk severity classification assigned during attestation.
+pub choice Severity {
+    Clean,
+    Info,
+    Medium,
+    High,
+    Critical,
+}
+
+/// Cryptographic SHA-256 verification verdict comparing lockfile vs upstream.
+pub choice DigestVerdict {
+    VerifiedMatch,
+    HashMismatch,
+    WorkspaceUnpinned,
+    UnverifiedOffline,
+}
+
+/// OSV vulnerability advisory screening verdict for a crate version.
+pub choice AdvisoryVerdict {
+    NoKnownCves,
+    AdvisoriesFound(i64),
+    SkippedOffline,
+}
+
+/// Domain error hierarchy for parsing, validation, telemetry, and sealing.
+pub choice AuditError {
+    LockfileReadFailed(str),
+    ValidationFailed(str),
+    NetworkFailed(str),
+    ParseFailed(str),
+    IoFailed(str),
+}
+
+/// Validated crate identifier (non-empty ASCII `[A-Za-z0-9_-]`, <= 64 chars).
+pub record PackageName {
+    value: str,
+}
+
+/// Strict semantic version triple (`major.minor.patch`) plus optional prerelease tag.
+pub record SemVer {
+    major: i64,
+    minor: i64,
+    patch: i64,
+    pre: str,
+    raw: str,
+}
+
+/// Validated 64-character lowercase SHA-256 hexadecimal digest.
+pub record Sha256Digest {
+    hex: str,
+}
+
+/// One locked dependency entry parsed from `Cargo.lock`.
+pub record LockedPackage {
+    name: PackageName,
+    version: SemVer,
+    origin: PackageOrigin,
+    checksum: option<Sha256Digest>,
+    dep_count: i64,
+    deps: list<str>,
+}
+
+/// Parsed lockfile snapshot with duplicate-version and structural metrics.
+pub record LockfileReport {
+    path: str,
+    sha256: Sha256Digest,
+    packages: list<LockedPackage>,
+    duplicate_names: list<str>,
+    workspace_count: i64,
+    missing_checksum_count: i64,
+}
+
+/// Security advisory record returned by OSV.dev for a crate version.
+pub record AdvisoryHit {
+    id: str,
+    alias: str,
+    summary: str,
+}
+
+/// Upstream registry and vulnerability telemetry gathered for one locked crate.
+pub record RegistryTelemetry {
+    pkg_name: str,
+    locked_ver: str,
+    yanked: bool,
+    upstream_checksum: option<Sha256Digest>,
+    max_stable: option<SemVer>,
+    license: str,
+    crate_size_bytes: i64,
+    downloads: i64,
+    advisories: list<AdvisoryHit>,
+    lookup_ok: bool,
+    error_note: str,
+}
+
+/// Fully evaluated risk and cryptographic audit outcome for a crate.
+pub record AuditedPackage {
+    pkg: LockedPackage,
+    telemetry: RegistryTelemetry,
+    digest_verdict: DigestVerdict,
+    advisory_verdict: AdvisoryVerdict,
+    risk_score: i64,
+    severity: Severity,
+    notes: str,
+}
+
+/// Cryptographically sealed attestation certificate summary across audited crates.
+pub record AttestationSummary {
+    lockfile_path: str,
+    lockfile_sha256: Sha256Digest,
+    audited_count: i64,
+    yanked_count: i64,
+    mismatch_count: i64,
+    vuln_pkg_count: i64,
+    drift_count: i64,
+    duplicate_count: i64,
+    audited_at_iso: str,
+    merkle_root: Sha256Digest,
+    hmac_tag: str,
+}
+
+def is_valid_crate_char(code: i64) -> bool {
+    val is_lower = code >= 97 && code <= 122
+    val is_upper = code >= 65 && code <= 90
+    val is_digit = code >= 48 && code <= 57
+    val is_punct = code == 95 || code == 45
+    return is_lower || is_upper || is_digit || is_punct
+}
+
+def hex_char_lower(code: i64) -> option<str> {
+    if code >= 48 && code <= 57 {
+        val d = code - 48
+        return some(slice("0123456789", d, d + 1))
+    }
+    if code >= 97 && code <= 102 {
+        val d = code - 97
+        return some(slice("abcdef", d, d + 1))
+    }
+    if code >= 65 && code <= 70 {
+        val d = code - 65
+        return some(slice("abcdef", d, d + 1))
+    }
+    return none()
+}
+
+/// Parse and validate a decimal non-negative integer string strictly.
+pub def parse_uint_digits(raw: str) -> result<i64, AuditError> {
+    val s = trim(raw)
+    val n = len(s)
+    if n == 0 || n > 16 {
+        return err(AuditError.ValidationFailed(concat("invalid integer: ", raw)))
+    }
+    var acc = 0
+    for i in 0..n {
+        val code = str_index(s, i)
+        if code < 48 || code > 57 {
+            return err(AuditError.ValidationFailed(concat("non-digit in int: ", s)))
+        }
+        acc = (acc * 10) + (code - 48)
+    }
+    return ok(acc)
+}
+
+/// Smart constructor enforcing non-empty valid Rust crate identifiers.
+pub def parse_package_name(raw: str) -> result<PackageName, AuditError> {
+    val s = trim(raw)
+    val n = len(s)
+    if n == 0 || n > 64 {
+        return err(AuditError.ValidationFailed(concat("invalid crate name: ", raw)))
+    }
+    for i in 0..n {
+        if !is_valid_crate_char(str_index(s, i)) {
+            return err(AuditError.ValidationFailed(concat("illegal char in crate name: ", s)))
+        }
+    }
+    return ok(PackageName { value: s })
+}
+
+/// Smart constructor validating exact 64-character SHA-256 hex digests.
+pub def parse_sha256(raw: str) -> result<Sha256Digest, AuditError> effect alloc {
+    val s = trim(raw)
+    if len(s) != 64 {
+        return err(AuditError.ValidationFailed(concat("SHA-256 must be 64 hex chars: ", s)))
+    }
+    val parts: list<str> = list()
+    for i in 0..64 {
+        val mapped = hex_char_lower(str_index(s, i))
+        when mapped {
+            some(ch) => {
+                val _ = list_push(parts, ch)
+            },
+            none => {
+                return err(AuditError.ValidationFailed(concat("non-hex char in SHA-256: ", s)))
+            },
+        }
+    }
+    return ok(Sha256Digest { hex: join(parts, "") })
+}
+
+def split_pre_tag(raw: str) -> (str, str) {
+    val no_build = split_first_char(raw, "+")
+    val n = len(no_build)
+    var cut = n
+    for i in 0..n {
+        val found = cut == n && str_index(no_build, i) == 45
+        cut = if found { i } else { cut }
+    }
+    val core = slice(no_build, 0, cut)
+    val pre = if cut < n { slice(no_build, cut + 1, n) } else { "" }
+    return (core, pre)
+}
+
+def split_first_char(raw: str, sep: str) -> str {
+    val target = str_index(sep, 0)
+    val n = len(raw)
+    var cut = n
+    for i in 0..n {
+        val found = cut == n && str_index(raw, i) == target
+        cut = if found { i } else { cut }
+    }
+    return slice(raw, 0, cut)
+}
+
+/// Parse strict `major.minor.patch[-prerelease]` into a validated `SemVer`.
+pub def parse_semver(raw: str) -> result<SemVer, AuditError> effect alloc {
+    val s = trim(raw)
+    val split_pair = split_pre_tag(s)
+    val parts = split(split_pair.0, ".")
+    if list_len(parts) != 3 {
+        return err(AuditError.ParseFailed(concat("expected X.Y.Z SemVer, got: ", s)))
+    }
+    val maj = parse_uint_digits(list_get(parts, 0))?
+    val min = parse_uint_digits(list_get(parts, 1))?
+    val pat = parse_uint_digits(list_get(parts, 2))?
+    return ok(SemVer { major: maj, minor: min, patch: pat, pre: split_pair.1, raw: s })
+}
+
+/// Total ordering comparator between two `SemVer` values (`-1`, `0`, `+1`).
+pub def semver_cmp(a: SemVer, b: SemVer) -> i64 {
+    if a.major != b.major {
+        return if a.major < b.major { -1 } else { 1 }
+    }
+    if a.minor != b.minor {
+        return if a.minor < b.minor { -1 } else { 1 }
+    }
+    if a.patch != b.patch {
+        return if a.patch < b.patch { -1 } else { 1 }
+    }
+    if a.pre == b.pre {
+        return 0
+    }
+    if len(a.pre) > 0 && len(b.pre) == 0 {
+        return -1
+    }
+    if len(a.pre) == 0 && len(b.pre) > 0 {
+        return 1
+    }
+    return 0
+}
+
+/// Classify version drift of `locked` relative to upstream `latest`.
+pub def semver_drift_kind(locked: SemVer, latest: SemVer) -> str {
+    if semver_cmp(locked, latest) >= 0 {
+        return "current"
+    }
+    if locked.major < latest.major {
+        return "major"
+    }
+    if locked.minor < latest.minor {
+        return "minor"
+    }
+    return "patch"
+}
+
+/// Numeric ordering weight for `Severity` sorting and threshold checks.
+pub def severity_rank(sev: Severity) -> i64 {
+    return when sev {
+        Severity.Clean => 0,
+        Severity.Info => 1,
+        Severity.Medium => 2,
+        Severity.High => 3,
+        Severity.Critical => 4,
+    }
+}
+
+/// Human-readable label for `Severity`.
+pub def severity_label(sev: Severity) -> str {
+    return when sev {
+        Severity.Clean => "CLEAN",
+        Severity.Info => "INFO",
+        Severity.Medium => "MEDIUM",
+        Severity.High => "HIGH",
+        Severity.Critical => "CRITICAL",
+    }
+}
+
+/// Human-readable label for `DigestVerdict`.
+pub def digest_label(v: DigestVerdict) -> str {
+    return when v {
+        DigestVerdict.VerifiedMatch => "SHA256_MATCH",
+        DigestVerdict.HashMismatch => "SHA256_MISMATCH",
+        DigestVerdict.WorkspaceUnpinned => "WORKSPACE_LOCAL",
+        DigestVerdict.UnverifiedOffline => "UNVERIFIED",
+    }
+}
+
+/// Human-readable label for `AdvisoryVerdict`.
+pub def advisory_label(v: AdvisoryVerdict) -> str effect alloc {
+    return when v {
+        AdvisoryVerdict.NoKnownCves => "0_CVES",
+        AdvisoryVerdict.AdvisoriesFound(n) => f"{n}_CVES",
+        AdvisoryVerdict.SkippedOffline => "OFFLINE_SKIPPED",
+    }
+}
+
+/// Human-readable message extracted exhaustively from `AuditError`.
+pub def audit_error_message(e: AuditError) -> str {
+    return when e {
+        AuditError.LockfileReadFailed(msg) => concat("lockfile read error: ", msg),
+        AuditError.ValidationFailed(msg) => concat("validation error: ", msg),
+        AuditError.NetworkFailed(msg) => concat("network error: ", msg),
+        AuditError.ParseFailed(msg) => concat("parse error: ", msg),
+        AuditError.IoFailed(msg) => concat("io error: ", msg),
+    }
+}
+
+def test_domain_validators() -> i64 effect alloc, throw {
+    val pkg = parse_package_name("serde_json")
+    assert(is_ok(pkg))
+    assert(is_err(parse_package_name("")))
+    assert(is_err(parse_package_name("bad crate!")))
+    val sha = parse_sha256("9A8E94EA7F378BD32CBBD37198A4A91436180C5BB472411E48B5EC2E2124AE9E")
+    when sha {
+        ok(
+            d
+        ) => assert(d.hex == "9a8e94ea7f378bd32cbbd37198a4a91436180c5bb472411e48b5ec2e2124ae9e"),
+        err(_) => assert(false),
+    }
+    assert(is_err(parse_sha256("short")))
+    assert(is_err(parse_sha256("zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz")))
+    return 0
+}
+
+def test_semver_ordering() -> i64 effect alloc, throw {
+    val a = parse_semver("1.0.228")
+    val b = parse_semver("1.0.229")
+    val c = parse_semver("2.0.0-rc1")
+    assert(is_ok(a) && is_ok(b) && is_ok(c))
+    val va = unwrap(a)
+    val vb = unwrap(b)
+    val vc = unwrap(c)
+    assert(semver_cmp(va, vb) == -1)
+    assert(semver_cmp(vb, vc) == -1)
+    assert(semver_drift_kind(va, vb) == "patch")
+    assert(semver_drift_kind(va, vc) == "major")
+    assert(severity_rank(Severity.Critical) > severity_rank(Severity.High))
+    return 0
+}

@@ -763,8 +763,8 @@ fn run_debug_passes(ir: &mut IrModule) -> Result<(), Error> {
     use crate::pass::type_infer::TypeInferPass;
     use crate::pass::validate::ValidatePass;
     use crate::pass::{
-        ConstFoldPass, CopyPropPass, ExhaustivePass, GcAnnotatePass, LicmPass, OpExpandPass,
-        PassManager, ShapeCheckPass, StrengthReducePass,
+        ConstFoldPass, CopyPropPass, ExhaustivePass, FramePoolScopePass, GcAnnotatePass, LicmPass,
+        OpExpandPass, PassManager, ShapeCheckPass, StrengthReducePass,
     };
     let mut pm = PassManager::new();
     pm.add_pass(ValidatePass);
@@ -782,6 +782,7 @@ fn run_debug_passes(ir: &mut IrModule) -> Result<(), Error> {
     pm.add_pass(ExhaustivePass);
     pm.add_pass(ShapeCheckPass);
     pm.add_pass(GcAnnotatePass);
+    pm.add_pass(FramePoolScopePass);
     pm.add_pass(crate::pass::async_lower::AsyncLowerPass);
     // The passes above move (LICM), rewrite (constant folding, copy
     // propagation) and insert (GC annotation) instructions, which leaves

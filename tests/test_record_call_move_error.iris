@@ -1,0 +1,17 @@
+bring std.os
+
+record Packet {
+    value: i64 = 0,
+}
+
+def consume(p: Packet) -> i64 {
+    return p.value
+}
+
+pub def main() -> i64 {
+    val packet = Packet { value: 17 }
+    val seen = consume(move packet)
+    val again = packet.value
+    assert(seen == again)
+    return 0
+}

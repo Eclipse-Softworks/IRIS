@@ -1,0 +1,306 @@
+// Dual-backend end-to-end host verification against real `iris_ui_host` CPU rasterizer,
+// `cosmic-text` text measurement, event injection/polling, pixel sampling, AccessKit nodes, and PNG output.
+
+bring std.fs
+bring std.ui
+
+def check_raw_draw_protocol() -> i64 {
+    val opened = ui_open_native_host(UiHostMode.Headless, "IRIS Protocol Check", 320, 240, "")
+    val lib = when opened {
+        ok(l) => l,
+        err(msg) => {
+            println(f"host open error: {msg}")
+            return 1
+        },
+    }
+
+    val m = ui_native_metrics(lib)
+    assert(m.width == 320.0 && m.height == 240.0 && m.is_open)
+
+    val tm = ui_native_measure_text(lib, "AIS Sentinel Telemetry", 16.0, 280.0, 1)
+    assert(tm.width > 30.0 && tm.height > 10.0 && tm.lines >= 1)
+
+    var buf = draw_buf_new(2048)
+    buf = draw_buf_begin(buf, rgb(30, 30, 30))
+    buf = draw_cmd_round_rect(
+        buf,
+        UiRect { x: 20.0, y: 20.0, w: 120.0, h: 60.0 },
+        8.0,
+        UiStyle { bg: rgb(78, 201, 176), border: rgb(255, 255, 255), border_width: 1.0 },
+    )
+    buf = draw_cmd_line(
+        buf,
+        UiRect { x: 10.0, y: 100.0, w: 300.0, h: 100.0 },
+        rgb(220, 220, 170),
+        2.0,
+        true,
+    )
+    buf = draw_cmd_circle(
+        buf,
+        220.0,
+        160.0,
+        32.0,
+        UiStyle { bg: rgb(197, 134, 192), border: rgb(86, 156, 214), border_width: 2.0 },
+    )
+    buf = draw_cmd_push_clip(buf, UiRect { x: 10.0, y: 120.0, w: 150.0, h: 100.0 })
+    buf = draw_cmd_polyline(
+        buf,
+        list(20.0, 60.0, 110.0, 150.0),
+        list(200.0, 150.0, 180.0, 140.0),
+        rgb(79, 193, 255),
+        rgba(79, 193, 255, 64),
+    )
+    buf = draw_cmd_pop_clip(buf)
+    buf = draw_cmd_text(
+        buf,
+        UiRect { x: 28.0, y: 36.0, w: 104.0, h: 24.0 },
+        "RADAR",
+        UiStyle { fg: rgb(30, 30, 30), font_size: 14.0, bold: true },
+    )
+    buf = draw_cmd_image_rgba(
+        buf,
+        UiRect { x: 200.0, y: 30.0, w: 40.0, h: 40.0 },
+        2,
+        2,
+        list(
+            pack_rgba(rgb(255, 0, 0)),
+            pack_rgba(rgb(0, 255, 0)),
+            pack_rgba(rgb(0, 0, 255)),
+            pack_rgba(rgb(255, 255, 0)),
+        ),
+    )
+    buf = draw_cmd_a11y(buf, 1, 3, UiRect { x: 20.0, y: 20.0, w: 120.0, h: 60.0 }, "RADAR")
+    buf = draw_buf_finish(buf)
+
+    val sub = ui_native_submit(lib, buf)
+    assert(sub == 0)
+
+    val bg_px = ui_native_sample_pixel(lib, 5, 5)
+    assert(bg_px.r == 30 && bg_px.g == 30 && bg_px.b == 30)
+    val teal_px = ui_native_sample_pixel(lib, 30, 25)
+    assert(teal_px.g > 180 && teal_px.b > 150)
+
+    val png_out = "target/test_std_ui_protocol.png"
+    assert(ui_native_save_png(lib, png_out) == 0)
+    assert(path_exists(png_out))
+
+    assert(
+        ui_native_inject_event(lib, HostEvent { kind: UiEventKind.PointerMove, x: 50.0, y: 40.0 })
+            == 0,
+    )
+    assert(ui_native_inject_event(lib, HostEvent { kind: UiEventKind.TextInput, text: "AIS" }) == 0)
+    val evs = ui_native_poll(lib, 0)
+    assert(list_len(evs) == 2)
+    assert(list_get(evs, 1).text == "AIS")
+
+    val _fb = draw_buf_free(buf)
+    val _cl = ui_close_native_host(lib)
+    0
+}
+
+def build_host_dashboard(state: UiState, tree: UiTree) -> i64 {
+    val ttl = ui_heading(tree, "h1", "Maritime Sentinel", UiTone.Accent)
+    val bdg = ui_badge(tree, "b1", "HEADLESS", UiTone.Success)
+    val btn = ui_button(tree, "step_btn", "Step", "step_sim")
+    val row = ui_row(tree, "top", UiStyle { gap: 10.0 }, list(ttl, bdg, btn))
+    val rad = ui_radar_scope(
+        tree,
+        "rad",
+        RadarSpec {
+            title: "GOF SECTOR",
+            range_nm: 12.0,
+            own_heading_deg: 90.0,
+            ring_count: 3,
+            blips: list(
+                RadarBlip {
+                    label: "TANKER-1",
+                    bearing_deg: 60.0,
+                    range_nm: 4.5,
+                    course_deg: 240.0,
+                    speed_kn: 13.0,
+                    tone: UiTone.Danger,
+                },
+            ),
+        },
+        UiStyle { flex: 1.0 },
+    )
+    val lch = ui_line_chart(
+        tree,
+        "cpa",
+        ChartSeries {
+            label: "CPA (nm)",
+            xs: list(0.0, 1.0, 2.0),
+            ys: list(3.0, 1.9, 2.4),
+            tone: UiTone.Primary,
+            fill: true,
+        },
+        UiStyle { flex: 1.0 },
+    )
+    val grid = ui_tensor_from_grid(
+        tree,
+        "grid",
+        TensorSpec {
+            width: 2,
+            height: 2,
+            cells: list(0.2, 0.5, 0.8, 1.0),
+            vmin: 0.0,
+            vmax: 1.0,
+            title: "Field",
+        },
+        UiStyle { min_h: 90.0 },
+    )
+    val body = ui_row(tree, "mid", UiStyle { gap: 10.0, flex: 1.0 }, list(rad, lch))
+    return ui_col(tree, "root", UiStyle { padding: 12.0, gap: 10.0 }, list(row, body, grid))
+}
+
+def check_pump_and_run_loop() -> i64 {
+    val opened = ui_open_native_host(UiHostMode.Headless, "IRIS Loop Check", 640, 480, "")
+    val lib = when opened {
+        ok(l) => l,
+        err(_) => {
+            return 1
+        },
+    }
+
+    var tree = ui_new()
+    val root = build_host_dashboard(ui_state_new(), tree)
+    tree = ui_layout(ui_set_root(tree, root), 640.0, 480.0)
+    val btn_idx = when ui_find_node_key(tree, "step_btn") {
+        some(i) => i,
+        none => -1
+    }
+    assert(btn_idx >= 0)
+    val r = list_get(tree.nodes, btn_idx).layout
+    val cx = r.x + r.w * 0.5
+    val cy = r.y + r.h * 0.5
+
+    assert(
+        ui_native_inject_event(lib, HostEvent { kind: UiEventKind.PointerMove, x: cx, y: cy }) == 0,
+    )
+    assert(
+        ui_native_inject_event(lib, HostEvent { kind: UiEventKind.PointerDown, x: cx, y: cy }) == 0,
+    )
+    assert(
+        ui_native_inject_event(lib, HostEvent { kind: UiEventKind.PointerUp, x: cx, y: cy }) == 0,
+    )
+
+    val buf = draw_buf_new(8192)
+    val step = ui_native_pump_once(lib, tree, ui_state_new(), buf)
+    assert(step.state.dispatched_action == "step_btn" || step.state.dispatched_action == "step_sim")
+    val _fb = draw_buf_free(step.buf)
+
+    val final_state = ui_run_loop(
+        lib,
+        2,
+        ui_state_new(),
+        |s: UiState, tr: UiTree| build_host_dashboard(s, tr),
+    )
+    assert(!final_state.close_requested)
+    val _cl = ui_close_native_host(lib)
+
+    val snap_tree = ui_new()
+    val snap_root = build_host_dashboard(ui_state_new(), snap_tree)
+    val snap = ui_render_headless(
+        ui_set_root(snap_tree, snap_root),
+        ui_state_new(),
+        UiSize { w: 640.0, h: 480.0 },
+        "target/test_std_ui_headless.png",
+    )
+    assert(when snap {
+        ok(_) => true,
+        err(_) => false
+    })
+    assert(path_exists("target/test_std_ui_headless.png"))
+    0
+}
+
+def check_extended_draw_opcodes() -> i64 {
+    val opened = ui_open_native_host(UiHostMode.Headless, "IRIS Extended Opcodes", 320, 240, "")
+    val lib = when opened {
+        ok(l) => l,
+        err(msg) => { println(f"host open error: {msg}"); return 1 },
+    }
+    var buf = draw_buf_new(16384)
+    val r = UiRect { x: 10.0, y: 10.0, w: 100.0, h: 60.0 }
+    val radii = UiRadii { tl: 20.0, tr: 0.0, br: 0.0, bl: 0.0 }
+    val stops = list(
+        UiGradientStop { offset: 0.0, color: rgb(255, 0, 0) },
+        UiGradientStop { offset: 1.0, color: rgb(0, 0, 255) },
+    )
+    var b = draw_buf_begin(buf, rgb(20, 20, 20))
+    b = draw_cmd_round_rect_corners(b, r, radii, UiStyle { bg: rgb(255, 0, 255) })
+    b = draw_cmd_linear_gradient(
+        b,
+        UiRect { x: 10.0, y: 80.0, w: 100.0, h: 40.0 },
+        UiRadii {},
+        10.0, 80.0, 110.0, 80.0, 0,
+        stops,
+    )
+    b = draw_cmd_radial_gradient(
+        b,
+        UiRect { x: 120.0, y: 10.0, w: 80.0, h: 80.0 },
+        UiRadii {},
+        160.0, 50.0, 40.0, 0,
+        list(
+            UiGradientStop { offset: 0.0, color: rgb(255, 255, 255) },
+            UiGradientStop { offset: 1.0, color: rgb(0, 0, 0) },
+        ),
+    )
+    b = draw_cmd_box_shadow(
+        b,
+        UiRect { x: 10.0, y: 140.0, w: 100.0, h: 40.0 },
+        UiRadii { tl: 4.0, tr: 4.0, br: 4.0, bl: 4.0 },
+        4.0, 4.0, 4.0, 0.0,
+        rgba(0, 0, 0, 200),
+    )
+    b = draw_cmd_round_rect(
+        b,
+        UiRect { x: 10.0, y: 140.0, w: 100.0, h: 40.0 },
+        4.0,
+        UiStyle { bg: rgb(255, 255, 255) },
+    )
+    b = draw_cmd_push_transform(b, UiTransform { e: 50.0 })
+    b = draw_cmd_svg_path(
+        b,
+        UiRect { x: 200.0, y: 10.0, w: 40.0, h: 40.0 },
+        UiSize { w: 10.0, h: 10.0 },
+        UiTransform {},
+        "M0 0 L10 0 L10 10 Z",
+        rgb(0, 255, 0),
+        rgba(0, 0, 0, 0),
+        0.0,
+    )
+    b = draw_cmd_pop_transform(b)
+    val done = draw_buf_finish(b)
+    assert(done.cmd_count == 8)
+    assert(ui_native_submit(lib, done) == 0)
+
+    val corner = ui_native_sample_pixel(lib, 60, 40)
+    assert(corner.r > 240 && corner.b > 240)
+    val cut = ui_native_sample_pixel(lib, 11, 11)
+    assert(cut.r < 40 && cut.g < 40)
+    val grad_left = ui_native_sample_pixel(lib, 30, 100)
+    val grad_right = ui_native_sample_pixel(lib, 90, 100)
+    assert(grad_left.r > grad_left.b + 40)
+    assert(grad_right.b > grad_right.r + 40)
+    val radial_center = ui_native_sample_pixel(lib, 160, 50)
+    val radial_rim = ui_native_sample_pixel(lib, 122, 14)
+    assert(radial_center.r > radial_rim.r + 40)
+    val shadow = ui_native_sample_pixel(lib, 112, 182)
+    val clear = ui_native_sample_pixel(lib, 112, 130)
+    assert(shadow.r < clear.r - 8)
+    val svg = ui_native_sample_pixel(lib, 280, 20)
+    assert(svg.g > 240)
+
+    val _f = draw_buf_free(done)
+    val _c = ui_close_native_host(lib)
+    return 0
+}
+
+def main() -> i64 {
+    assert(check_raw_draw_protocol() == 0)
+    assert(check_extended_draw_opcodes() == 0)
+    assert(check_pump_and_run_loop() == 0)
+    println("std ui host ok")
+    return 0
+}

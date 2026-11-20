@@ -1,0 +1,456 @@
+bring std.async
+bring std.http
+bring std.math
+bring std.time
+bring "domain.iris"
+bring "parser.iris"
+bring "analytics.iris"
+bring "telemetry.iris"
+bring "store.iris"
+bring "render.iris"
+bring "gui_state.iris"
+bring "gui.iris"
+
+/// Runtime CLI configuration parsed cleanly from command-line arguments.
+pub record CliConfig {
+    feed_slug: str = "2.5_day",
+    db_path: str = "terra_pulse.db",
+    svg_path: str = "terra_pulse_map.svg",
+    json_path: str = "terra_pulse_summary.json",
+    serve_port: i64 = 0,
+    enable_db: bool = true,
+    show_help: bool = false,
+    run_gui: bool = false,
+}
+
+/// Cooperative async preflight verification checking runtime TLS capability.
+pub async def async_preflight_tls() -> bool effect alloc, thread {
+    await async_yield()
+    return http_tls_available()
+}
+
+record RunTimings {
+    stage1_ms: i64,
+    stage2_ms: i64,
+    svg_bytes: i64,
+    json_bytes: i64,
+}
+
+def require_flag_arg(
+    argv: list<str>,
+    i: i64,
+    n: i64,
+    flag: str,
+) -> result<str, TelemetryError> effect io, alloc {
+    if (i + 1) >= n {
+        return err(TelemetryError.MalformedPayload(concat(flag, " requires an argument")))
+    }
+    return ok(list_get(argv, i + 1))
+}
+
+def with_cli_string_flag(cfg: CliConfig, flag: str, v: str) -> CliConfig {
+    val feed = if flag == "--feed" { v } else { cfg.feed_slug }
+    val db_path = if flag == "--db" { v } else { cfg.db_path }
+    val svg_path = if flag == "--svg" { v } else { cfg.svg_path }
+    val json_path = if flag == "--json" { v } else { cfg.json_path }
+    return CliConfig {
+        feed_slug: feed,
+        db_path: db_path,
+        svg_path: svg_path,
+        json_path: json_path,
+        serve_port: cfg.serve_port,
+        enable_db: cfg.enable_db,
+        show_help: cfg.show_help,
+        run_gui: cfg.run_gui,
+    }
+}
+
+def with_cli_flags(
+    cfg: CliConfig,
+    port: i64,
+    enable_db: bool,
+    show_help: bool,
+    run_gui: bool,
+) -> CliConfig {
+    return CliConfig {
+        feed_slug: cfg.feed_slug,
+        db_path: cfg.db_path,
+        svg_path: cfg.svg_path,
+        json_path: cfg.json_path,
+        serve_port: port,
+        enable_db: enable_db,
+        show_help: show_help,
+        run_gui: run_gui,
+    }
+}
+
+def parse_serve_port(
+    argv: list<str>,
+    i: i64,
+    n: i64,
+) -> result<(i64, i64), TelemetryError> effect io, alloc {
+    if (i + 1) >= n {
+        return ok((i + 1, 8787))
+    }
+    return when parse_i64(list_get(argv, i + 1)) {
+        some(p) => if p <= 0 || p > 65535 {
+            err(TelemetryError.MalformedPayload("port must be in 1..65535"))
+        } else {
+            ok((i + 2, p))
+        },
+        none => ok((i + 1, 8787)),
+    }
+}
+
+def parse_cli_step(
+    argv: list<str>,
+    i: i64,
+    n: i64,
+    cfg: CliConfig,
+) -> result<(i64, CliConfig), TelemetryError> effect io, alloc {
+    val flag = list_get(argv, i)
+    if flag == "--help" || flag == "-h" {
+        return ok((i + 1, with_cli_flags(cfg, cfg.serve_port, cfg.enable_db, true, cfg.run_gui)))
+    }
+    if flag == "--no-db" {
+        return ok((i + 1, with_cli_flags(cfg, cfg.serve_port, false, cfg.show_help, cfg.run_gui)))
+    }
+    if flag == "--gui" {
+        return ok((i + 1, with_cli_flags(cfg, cfg.serve_port, cfg.enable_db, cfg.show_help, true)))
+    }
+    if flag == "--serve" {
+        val (next_i, port) = parse_serve_port(argv, i, n)?
+        return ok((next_i, with_cli_flags(cfg, port, cfg.enable_db, cfg.show_help, cfg.run_gui)))
+    }
+    if flag == "--feed" || flag == "--db" || flag == "--svg" || flag == "--json" {
+        val v = require_flag_arg(argv, i, n, flag)?
+        return ok((i + 2, with_cli_string_flag(cfg, flag, v)))
+    }
+    return err(TelemetryError.MalformedPayload(concat("unknown CLI option: ", flag)))
+}
+
+/// Parse CLI flags into a validated `CliConfig` or explicit `TelemetryError`.
+pub def parse_cli_args(argv: list<str>) -> result<CliConfig, TelemetryError> effect io, alloc {
+    var cfg = CliConfig {
+        feed_slug: "2.5_day",
+        db_path: "terra_pulse.db",
+        svg_path: "terra_pulse_map.svg",
+        json_path: "terra_pulse_summary.json",
+        serve_port: 0,
+        enable_db: true,
+        show_help: false,
+    }
+    val n = list_len(argv)
+    var i = 1
+    while i < n {
+        val step = parse_cli_step(argv, i, n, cfg)?
+        i = step.0
+        cfg = step.1
+    }
+    val _ = resolve_usgs_feed_url(cfg.feed_slug)?
+    return ok(cfg)
+}
+
+/// Print CLI usage and options summary.
+def print_usage() -> i64 effect io {
+    println("TerraPulse â€” Live Planetary Seismic, Orbital, Geomagnetic & Atmospheric Observatory")
+    println("Usage: terra_pulse [OPTIONS]")
+    println("  --feed <slug>    USGS feed: all_day | 2.5_day (default) | 2.5_week | 4.5_week")
+    println("  --db <path>      SQLite database path (default: terra_pulse.db)")
+    println("  --no-db          Run live ingestion without SQLite persistence")
+    println("  --svg <path>     Output global visualization SVG (default: terra_pulse_map.svg)")
+    println("  --json <path>    Output telemetry JSON report (default: terra_pulse_summary.json)")
+    println("  --gui            Launch interactive native Enterprise Desktop Observatory UI")
+    println("  --serve [port]   Serve live HTTP dashboard on 127.0.0.1:<port> (default 8787)")
+    println("  --help           Show this message")
+    return 0
+}
+
+/// Print signed delta string (`+0.12` / `-0.05`) comparing current and previous readings.
+def format_signed_delta(cur: f64, prev: f64) -> str effect io, alloc {
+    val diff = cur - prev
+    val prefix = if diff >= 0.0 { "+" } else { "" }
+    return concat(prefix, format_fixed_2(diff))
+}
+
+def print_seismic_and_orbital_section(
+    cfg: CliConfig,
+    snap: ObservatorySnapshot,
+    timings: RunTimings,
+) -> i64 effect io, alloc {
+    val a = snap.analytics
+    val top_place = if list_len(snap.events) > 0 {
+        list_get(snap.events, a.strongest_idx).place
+    } else {
+        "none"
+    }
+    val near_place = if list_len(snap.events) > 0 {
+        list_get(snap.events, a.closest_iss_idx).place
+    } else {
+        "none"
+    }
+    println("================================================================================")
+    println("         TERRA PULSE â€” LIVE PLANETARY TELEMETRY OBSERVATORY (IRIS NATIVE)       ")
+    println("================================================================================")
+    println(
+        f"[STATUS]  Alert Tier: {alert_severity_label(a.overall_alert)} | Feed: {cfg.feed_slug}",
+    )
+    println(
+        f"[TIMING]  Stage 1 Parallel Fetch (USGS+NOAA+ISS): {timings.stage1_ms} ms | Stage 2 Open-Meteo: {timings.stage2_ms} ms",
+    )
+    println(
+        f"[SEISMIC] Events={a.total_quakes} (Shallow={a.shallow_count}, Mid={a.intermediate_count}, Deep={a.deep_count}, M>=4={a.watch_plus_count})",
+    )
+    println(
+        f"[ENERGY]  Peak M={format_fixed_2(a.max_magnitude)} @ {top_place} | Cumulative Radiated log10(E_J)={format_fixed_2(a.total_energy_log10_j)}",
+    )
+    println(
+        f"[ORBITAL] ISS @ ({format_fixed_2(snap.iss.latitude)}, {format_fixed_2(snap.iss.longitude)}) alt={format_fixed_1(snap.iss.altitude_km)} km ({snap.iss.visibility}) | Closest Quake={format_fixed_1(a.closest_iss_km)} km ({near_place})",
+    )
+    return 0
+}
+
+def print_ad_and_bayes_section(a: RunAnalytics) -> i64 effect io, alloc {
+    val gr = a.gr_fit
+    println(
+        f"[AD FIT]  Gutenberg-Richter log10(N>=M) = {format_fixed_2(gr.a_value)} - {format_fixed_2(gr.b_value)}*M (R^2={format_fixed_2(gr.r2_score)}, bins={gr.bin_count})",
+    )
+    println(
+        f"[RATES]   Calibrated Expected Rates: E[N>=M5]={format_fixed_2(gr.expected_daily_m5)}/day, E[N>=M6]={format_fixed_2(gr.expected_daily_m6)}/day",
+    )
+    val m_s = f"{format_fixed_2(a.mag_mean)} (95% CI [{format_fixed_2(a.mag_ci_low)}, {format_fixed_2(a.mag_ci_high)}])"
+    val k_s = f"{format_fixed_2(a.kp_latest)}, Peak={format_fixed_2(a.kp_peak)} (95% CI [{format_fixed_2(a.kp_ci_low)}, {format_fixed_2(a.kp_ci_high)}])"
+    println(f"[BAYES]   Magnitude Mean={m_s} | NOAA Kp Latest={k_s}")
+    return 0
+}
+
+def print_dispatch_and_sqlite_section(
+    cfg: CliConfig,
+    snap: ObservatorySnapshot,
+    delta: HistoryDelta,
+    dispatches: list<str>,
+    timings: RunTimings,
+) -> i64 effect io, alloc {
+    println("--------------------------------------------------------------------------------")
+    println("  UNIFIED TELEMETRY DISPATCHES (dyn TelemetryPrintable):")
+    for i in 0..list_len(dispatches) {
+        val line = list_get(dispatches, i)
+        println(f"   * {line}")
+    }
+    if list_len(snap.weather) == 0 {
+        println("  [Weather correlation returned 0 stations]")
+    }
+    if cfg.enable_db {
+        println("--------------------------------------------------------------------------------")
+        if delta.has_previous {
+            val d_kp = format_signed_delta(snap.analytics.kp_latest, delta.prev_kp)
+            val d_b = format_signed_delta(snap.analytics.gr_fit.b_value, delta.prev_gr_b)
+            val d_m = format_signed_delta(snap.analytics.max_magnitude, delta.prev_max_mag)
+            println(
+                f"[SQLITE]  Prior runs={delta.prior_runs} | Stored quakes={delta.stored_events_total} (new this run={delta.new_events_count})",
+            )
+            println(f"[DELTAS]  Kp {d_kp} | GR b-value {d_b} | Peak Mag {d_m} | DB: {cfg.db_path}")
+        } else {
+            println(
+                f"[SQLITE]  Initialized history DB '{cfg.db_path}': stored={delta.stored_events_total} quakes (new={delta.new_events_count})",
+            )
+        }
+    }
+    println("--------------------------------------------------------------------------------")
+    println(f"[OUTPUT]  SVG Map: {cfg.svg_path} ({timings.svg_bytes} bytes)")
+    println(f"[OUTPUT]  JSON:    {cfg.json_path} ({timings.json_bytes} bytes)")
+    println("================================================================================")
+    return 0
+}
+
+/// Render structured live observatory report to stdout.
+def print_observatory_report(
+    cfg: CliConfig,
+    snap: ObservatorySnapshot,
+    delta: HistoryDelta,
+    dispatches: list<str>,
+    timings: RunTimings,
+) -> i64 effect io, alloc {
+    val _ = print_seismic_and_orbital_section(cfg, snap, timings)
+    val _ = print_ad_and_bayes_section(snap.analytics)
+    return print_dispatch_and_sqlite_section(cfg, snap, delta, dispatches, timings)
+}
+
+def compute_run_history_delta(
+    cfg: CliConfig,
+    snap: ObservatorySnapshot,
+) -> result<HistoryDelta, TelemetryError> effect ffi, io, alloc, time {
+    if cfg.enable_db {
+        return persist_observatory_run(cfg.db_path, snap)
+    }
+    val a = snap.analytics
+    return ok(
+        HistoryDelta {
+            prior_runs: 0,
+            stored_events_total: list_len(snap.events),
+            new_events_count: list_len(snap.events),
+            has_previous: false,
+            prev_kp: a.kp_latest,
+            prev_gr_b: a.gr_fit.b_value,
+            prev_max_mag: a.max_magnitude,
+        },
+    )
+}
+
+/// Run the live observatory pipeline end-to-end.
+pub def run_live_pipeline(
+    cfg: CliConfig,
+) -> result<i64, TelemetryError> effect net, ffi, fs, io, alloc, thread, time, throw {
+    val tls_task = async_preflight_tls()
+    val tls_ready = (await timeout_after(tls_task, 2000)) ?? http_tls_available()
+    if !tls_ready {
+        return err(TelemetryError.Transport("HTTPS TLS support unavailable in host runtime"))
+    }
+    val usgs_url = resolve_usgs_feed_url(cfg.feed_slug)?
+    val (events, kps, iss, ms_stage1) = fetch_stage1_feeds(usgs_url)?
+    val analytics = analyze_observatory_feeds(events, kps, iss)
+    val (weather, ms_stage2) = fetch_stage2_weather(events, iss, analytics)
+    val snap = ObservatorySnapshot {
+        events: events,
+        kps: kps,
+        iss: iss,
+        weather: weather,
+        analytics: analytics,
+    }
+    val dispatches = format_priority_dispatches(snap)
+    val delta = compute_run_history_delta(cfg, snap)?
+    val svg_xml = build_observatory_svg(snap)
+    val svg_bytes = write_text_checked(cfg.svg_path, svg_xml)?
+    val summary_json = build_summary_json(snap, delta)
+    val json_bytes = write_text_checked(cfg.json_path, summary_json)?
+    val timings = RunTimings {
+        stage1_ms: ms_stage1,
+        stage2_ms: ms_stage2,
+        svg_bytes: svg_bytes,
+        json_bytes: json_bytes,
+    }
+    val _ = print_observatory_report(cfg, snap, delta, dispatches, timings)
+    if cfg.serve_port > 0 {
+        val recent = if cfg.enable_db { fetch_recent_runs(cfg.db_path, 12)? } else { list() }
+        val html = build_dashboard_html(snap, delta, recent, summary_json)
+        return ok(serve_observatory_http(cfg.serve_port, svg_xml, summary_json, html))
+    }
+    return ok(0)
+}
+
+/// Entrypoint for the TerraPulse live planetary observatory CLI.
+pub def main() -> i64 effect net, ffi, fs, env, io, alloc, thread, time, throw {
+    val cfg = when parse_cli_args(args()) {
+        ok(c) => c,
+        err(e) => {
+            println(concat("Argument error: ", format_telemetry_error(e)))
+            val _ = print_usage()
+            return 2
+        },
+    }
+    if cfg.show_help {
+        return print_usage()
+    }
+    if cfg.run_gui {
+        val gui_opts = GuiLaunchOpts {
+            feed_slug: cfg.feed_slug,
+            db_path: cfg.db_path,
+            svg_path: cfg.svg_path,
+            json_path: cfg.json_path,
+            enable_db: cfg.enable_db,
+        }
+        return when launch_terra_pulse_gui(gui_opts) {
+            ok(code) => code,
+            err(e) => {
+                println(concat("TerraPulse GUI error: ", format_telemetry_error(e)))
+                1
+            },
+        }
+    }
+    return when run_live_pipeline(cfg) {
+        ok(code) => code,
+        err(e) => {
+            println(concat("TerraPulse error: ", format_telemetry_error(e)))
+            1
+        },
+    }
+}
+
+def sample_usgs_wire() -> str effect io, alloc {
+    return concat(
+        "time,latitude,longitude,depth,mag,magType,nst,gap,rms,id,place\n",
+        concat(
+            "2026-11-14T19:51:04Z,41.55,-119.32,8.1,2.93,ml,12,180,0.36,nn00926979,\"70 km E of Cedarville, California\"\n",
+            "2026-11-14T18:10:00Z,36.21,141.05,42.0,5.2,mww,64,35,0.42,us7000live,\"Near East Coast of Honshu, Japan\"\n",
+        ),
+    )
+}
+
+def build_test_captured_snapshot() -> ObservatorySnapshot effect net, io, alloc, thread, throw {
+    val handled_csv = handle {
+        probe_via_effects("usgs://captured")
+    } with {
+        eff_record_trace(m) -> resume(k) => k(m),
+        eff_fetch_resource(_u) -> resume(k) => k(sample_usgs_wire()),
+    }
+    val events = unwrap(parse_usgs_csv(handled_csv))
+    val kps = unwrap(
+        parse_noaa_kp_json(
+            "[{\"time_tag\":\"2026-11-14T18:00:00\",\"Kp\":3.00,\"a_running\":15,\"station_count\":8},{\"time_tag\":\"2026-11-14T21:00:00\",\"Kp\":3.67,\"a_running\":22,\"station_count\":8}]",
+        ),
+    )
+    val iss = unwrap(
+        parse_iss_json(
+            "{\"name\":\"iss\",\"latitude\":-5.41,\"longitude\":-101.56,\"altitude\":415.94,\"velocity\":27593.27,\"visibility\":\"daylight\",\"footprint\":4486.75,\"timestamp\":1794690639,\"solar_lat\":-18.39,\"solar_lon\":218.45}",
+        ),
+    )
+    val wx = unwrap(
+        parse_open_meteo_json(
+            "Epicenter #1",
+            36.21,
+            141.05,
+            "{\"current\":{\"temperature_2m\":10.9,\"surface_pressure\":1010.0,\"wind_speed_10m\":2.9,\"relative_humidity_2m\":70.0,\"precipitation\":0.0}}",
+        ),
+    )
+    val weather: list<SurfaceWeather> = list(wx)
+    val analytics = analyze_observatory_feeds(events, kps, iss)
+    return ObservatorySnapshot {
+        events: events,
+        kps: kps,
+        iss: iss,
+        weather: weather,
+        analytics: analytics,
+    }
+}
+
+def test_main_cli_and_pipeline_integration() -> i64 effect net, ffi, io, alloc, thread, throw {
+    val parsed = parse_cli_args(
+        list("terra_pulse", "--feed", "all_day", "--no-db", "--serve", "9090"),
+    )
+    assert(is_ok(parsed))
+    val cfg = unwrap(parsed)
+    assert(cfg.feed_slug == "all_day" && !cfg.enable_db && cfg.serve_port == 9090 && !cfg.run_gui)
+    val parsed_gui = parse_cli_args(list("terra_pulse", "--gui", "--feed", "2.5_week"))
+    assert(
+        is_ok(parsed_gui)
+            && unwrap(parsed_gui).run_gui
+            && unwrap(parsed_gui).feed_slug == "2.5_week",
+    )
+    assert(is_err(parse_cli_args(list("terra_pulse", "--feed"))))
+    assert(is_err(parse_cli_args(list("terra_pulse", "--feed", "invalid"))))
+    assert(is_err(parse_cli_args(list("terra_pulse", "--unknown"))))
+
+    val snap = build_test_captured_snapshot()
+    val db = db_open(":memory:")
+    assert(db != 0)
+    defer {
+        val _ = db_close(db)
+    }
+    val delta = unwrap(persist_on_handle(db, 1794690639000, snap))
+    assert(delta.new_events_count == 2)
+    assert(contains(build_observatory_svg(snap), "Honshu, Japan"))
+    val js = build_summary_json(snap, delta)
+    assert(contains(js, "gr_b"))
+    assert(contains(build_dashboard_html(snap, delta, list(), js), "/map.svg"))
+    return 0
+}

@@ -1,0 +1,1306 @@
+bring std.json
+bring std.fs
+bring std.string
+bring std.ui
+bring domain
+
+def j_quote(s: str) -> str effect alloc {
+    val esc = json_escape(s)
+    return f"\"{esc}\""
+}
+
+def j_kv_str(k: str, v: str) -> str effect alloc {
+    return concat(concat(j_quote(k), ":"), j_quote(v))
+}
+
+def j_kv_num(k: str, v: f64) -> str effect alloc {
+    return concat(concat(j_quote(k), ":"), to_str(v))
+}
+
+def j_kv_int(k: str, v: i64) -> str effect alloc {
+    return concat(concat(j_quote(k), ":"), to_str(v))
+}
+
+def j_kv_bool(k: str, v: bool) -> str effect alloc {
+    val b = if v { "true" } else { "false" }
+    return concat(concat(j_quote(k), ":"), b)
+}
+
+def join_json_fields(fields: list<str>) -> str effect alloc {
+    var out = "{"
+    val n = list_len(fields)
+    for i in 0..n {
+        if i > 0 {
+            out = concat(out, ",")
+        }
+        out = concat(out, list_get(fields, i))
+    }
+    return concat(out, "}")
+}
+
+def render_contact_json(c: VesselContact) -> str effect alloc {
+    val f: list<str> = list()
+    list_push(f, j_kv_str("label", c.label))
+    list_push(f, j_kv_int("mmsi", c.mmsi.raw))
+    list_push(f, j_kv_str("flag_country", c.mmsi.flag_country))
+    list_push(f, j_kv_num("lat", c.lat.deg))
+    list_push(f, j_kv_num("lon", c.lon.deg))
+    list_push(f, j_kv_num("sog_kn", c.sog.value))
+    list_push(f, j_kv_num("cog_deg", c.cog_deg))
+    list_push(f, j_kv_str("nav_status", nav_status_label(c.nav_status)))
+    return join_json_fields(f)
+}
+
+def render_weather_json(w: MarineWeather) -> str effect alloc {
+    val f: list<str> = list()
+    list_push(f, j_kv_num("wave_height_m", w.wave_height_m))
+    list_push(f, j_kv_num("wave_dir_deg", w.wave_dir_deg))
+    list_push(f, j_kv_num("wave_period_s", w.wave_period_s))
+    list_push(f, j_kv_num("wind_knots", w.wind_knots))
+    list_push(f, j_kv_num("gust_knots", w.gust_knots))
+    list_push(f, j_kv_num("pressure_hpa", w.pressure_hpa))
+    list_push(f, j_kv_num("current_knots", w.current_knots))
+    list_push(f, j_kv_num("sea_temp_c", w.sea_temp_c))
+    list_push(f, j_kv_bool("live_ok", w.live_ok))
+    list_push(f, j_kv_str("source", w.note))
+    return join_json_fields(f)
+}
+
+def render_verdict_json(v: AisPilotVerdict) -> str effect alloc {
+    val f: list<str> = list()
+    list_push(f, j_kv_str("regime", sea_regime_label(v.regime)))
+    list_push(f, j_kv_str("proposed_action", helm_action_label(v.proposed_action)))
+    list_push(f, j_kv_str("approved_action", helm_action_label(v.approved_action)))
+    list_push(f, j_kv_bool("overridden", v.overridden))
+    list_push(f, j_kv_str("safety_rule", v.safety_rule))
+    list_push(f, j_kv_num("active_inf_conf", v.active_inf_conf))
+    list_push(f, j_kv_num("wm_predicted_wave_m", v.wm_predicted_wave_m))
+    list_push(f, j_kv_num("wm_predicted_cpa_nm", v.wm_predicted_cpa_nm))
+    list_push(f, j_kv_num("homeostat_health", v.homeostat_health))
+    list_push(f, j_kv_str("governor_action", v.governor_action))
+    list_push(f, j_kv_num("ewc_penalty", v.ewc_penalty_val))
+    list_push(f, j_kv_str("audit_notes", v.audit_notes))
+    return join_json_fields(f)
+}
+
+/// Render a single `SentinelDecision` as an RFC-8259 JSON object string.
+pub def render_decision_json(d: SentinelDecision) -> str effect alloc {
+    val f: list<str> = list()
+    list_push(f, concat("\"vessel\":", render_contact_json(d.contact)))
+    list_push(f, j_kv_num("range_nm", d.encounter.range_nm))
+    list_push(f, j_kv_num("bearing_deg", d.encounter.bearing_deg))
+    list_push(f, j_kv_num("cpa_nm", d.encounter.cpa_nm))
+    list_push(f, j_kv_num("tcpa_min", d.encounter.tcpa_min))
+    list_push(f, j_kv_int("risk_score", d.risk_score))
+    list_push(f, concat("\"weather\":", render_weather_json(d.weather)))
+    list_push(f, concat("\"ais_verdict\":", render_verdict_json(d.verdict)))
+    return join_json_fields(f)
+}
+
+def render_summary_json(s: FleetSummary) -> str effect alloc {
+    val f: list<str> = list()
+    list_push(f, j_kv_str("corridor", s.corridor))
+    list_push(f, j_kv_int("waypoint_count", s.waypoint_count))
+    list_push(f, j_kv_int("override_count", s.override_count))
+    list_push(f, j_kv_num("min_cpa_nm", s.min_cpa_nm))
+    list_push(f, j_kv_num("max_wave_m", s.max_wave_m))
+    list_push(f, j_kv_num("max_gust_kn", s.max_gust_kn))
+    list_push(f, j_kv_num("avg_health", s.avg_health))
+    list_push(f, j_kv_str("pomdp_state", s.pomdp_saved_path))
+    list_push(f, j_kv_str("observed_at_iso", s.observed_at_iso))
+    list_push(f, j_kv_str("feed_source", s.feed_source))
+    list_push(f, j_kv_bool("feed_ok", s.feed_ok))
+    return join_json_fields(f)
+}
+
+/// Render a full sentinel report (`summary` + `decisions` array) as JSON.
+pub def render_sentinel_json(
+    summary: FleetSummary,
+    decisions: list<SentinelDecision>,
+) -> str effect alloc {
+    var arr = "["
+    val n = list_len(decisions)
+    for i in 0..n {
+        if i > 0 {
+            arr = concat(arr, ",")
+        }
+        arr = concat(arr, render_decision_json(list_get(decisions, i)))
+    }
+    arr = concat(arr, "]")
+    val sum_json = render_summary_json(summary)
+    val f: list<str> = list()
+    list_push(f, concat("\"summary\":", sum_json))
+    list_push(f, concat("\"decisions\":", arr))
+    return join_json_fields(f)
+}
+
+/// Write formatted JSON report atomically via `std.fs` to `out_path`.
+pub def write_sentinel_json(
+    summary: FleetSummary,
+    decisions: list<SentinelDecision>,
+    out_path: str,
+) -> result<str, AisError> effect fs, io, alloc {
+    val payload = render_sentinel_json(summary, decisions)
+    return when file_write_all(out_path, payload) {
+        ok(_n) => ok(out_path),
+        err(msg) => err(AisError.IoFailed(f"failed writing JSON to {out_path}: {msg}")),
+    }
+}
+
+/// Format high-level fleet summary header for stdout reporting.
+pub def format_fleet_banner(s: FleetSummary) -> str effect alloc {
+    val head = f"=== AIS SENTINEL REPORT [{s.corridor}] obs={s.observed_at_iso} ==="
+    val stats = f"contacts={s.waypoint_count} overrides={s.override_count} min_cpa={to_str(s.min_cpa_nm)}nm max_wave={to_str(s.max_wave_m)}m max_gust={to_str(s.max_gust_kn)}kn avg_health={to_str(s.avg_health)}"
+    val state_line = f"pomdp_model={s.pomdp_saved_path}"
+    return f"{head}\n{stats}\n{state_line}"
+}
+
+/// Format compact single-line telemetry and `std.ais` verdict row for stdout.
+pub def format_decision_row(d: SentinelDecision) -> str effect alloc {
+    val act = helm_action_label(d.verdict.approved_action)
+    val reg = sea_regime_label(d.verdict.regime)
+    val ov_tag = if d.verdict.overridden { "OVERRIDE" } else { "DIRECT" }
+    val cpa_s = to_str(d.encounter.cpa_nm)
+    val wave_s = to_str(d.weather.wave_height_m)
+    val gst_s = to_str(d.weather.gust_knots)
+    return f"[{ov_tag}] {d.contact.label} (MMSI {d.contact.mmsi.raw} {d.contact.mmsi.flag_country}) | cpa={cpa_s}nm wave={wave_s}m gust={gst_s}kn | regime={reg} -> {act} (risk={d.risk_score})"
+}
+
+/// Format detailed `std.ais` safety shield, world-model, and governor diagnostics.
+pub def format_decision_detail(d: SentinelDecision) -> str effect alloc {
+    val row = format_decision_row(d)
+    val sub = f"  ais: conf={to_str(d.verdict.active_inf_conf)} wm_wave={to_str(d.verdict.wm_predicted_wave_m)}m wm_cpa={to_str(d.verdict.wm_predicted_cpa_nm)}nm health={to_str(d.verdict.homeostat_health)} gov={d.verdict.governor_action} ewc={to_str(d.verdict.ewc_penalty_val)} rule='{d.verdict.safety_rule}'"
+    return f"{row}\n{sub}"
+}
+
+def sample_test_contact() -> VesselContact effect alloc, throw {
+    return VesselContact {
+        label: "TEST_MV",
+        mmsi: unwrap(parse_mmsi(230992750)),
+        msg_type: 1,
+        lat: unwrap(parse_geo_lat(60.01)),
+        lon: unwrap(parse_geo_lon(24.84)),
+        sog: unwrap(parse_knots(15.0)),
+        cog_deg: 65.0,
+        heading_deg: 65,
+        nav_status: NavStatus.UnderWayEngine,
+    }
+}
+
+def sample_test_verdict() -> AisPilotVerdict {
+    return AisPilotVerdict {
+        regime: SeaRegime.SwellBuild,
+        proposed_action: HelmAction.MaintainCourse,
+        approved_action: HelmAction.MaintainCourse,
+        overridden: false,
+        safety_rule: "viable",
+        active_inf_conf: 0.72,
+        wm_predicted_wave_m: 1.1,
+        wm_predicted_cpa_nm: 1.4,
+        homeostat_health: 0.96,
+        governor_action: "maintain",
+        ewc_penalty_val: 0.02,
+        audit_notes: "obs=1",
+    }
+}
+
+def test_render_sentinel_json() -> i64 effect alloc, throw {
+    val c = sample_test_contact()
+    val enc = EncounterMetrics {
+        own_lat: 60.05,
+        own_lon: 24.95,
+        target_label: "TEST_MV",
+        target_mmsi: 230992750,
+        range_nm: 4.1,
+        bearing_deg: 235.0,
+        cpa_nm: 1.4,
+        tcpa_min: 7.5,
+    }
+    val wx = MarineWeather {
+        lat: 60.01,
+        lon: 24.84,
+        wave_height_m: 1.1,
+        wave_dir_deg: 240.0,
+        wave_period_s: 4.5,
+        wind_knots: 14.0,
+        gust_knots: 20.0,
+        wind_dir_deg: 238.0,
+        pressure_hpa: 1007.2,
+        live_ok: true,
+        note: "open-meteo-live",
+    }
+    val dec = SentinelDecision {
+        contact: c,
+        encounter: enc,
+        weather: wx,
+        verdict: sample_test_verdict(),
+        risk_score: 28,
+    }
+    val summary = FleetSummary {
+        corridor: "gulf_of_finland",
+        corridor_kind: CorridorKind.GulfOfFinland,
+        waypoint_count: 1,
+        override_count: 0,
+        min_cpa_nm: 1.4,
+        max_wave_m: 1.1,
+        max_gust_kn: 20.0,
+        avg_health: 0.96,
+        pomdp_saved_path: "ephemeral",
+        observed_at_iso: "2026-11-15T00:00",
+    }
+    val decs: list<SentinelDecision> = list()
+    list_push(decs, dec)
+    val doc = render_sentinel_json(summary, decs)
+    assert(json_query(doc, "summary.corridor") == "gulf_of_finland")
+    assert(json_query(doc, "summary.waypoint_count") == "1")
+    return 0
+}
+
+/// Interactive GUI state driving radar scope, telemetry plots, and contact filtering.
+pub record ConsoleState {
+    corridor: CorridorKind = CorridorKind.GulfOfFinland,
+    offline: bool = true,
+    tick: i64 = 0,
+    alert_range_nm: f64 = 6.0,
+    filter_text: str = "",
+    selected_mmsi: i64 = 0,
+    alerts_only: bool = false,
+    paused: bool = false,
+    loading: bool = false,
+    feed_status: str = "",
+    summary: FleetSummary,
+    own_ship: VesselContact,
+    decisions: list<SentinelDecision>,
+    conf_history: list<f64>,
+    cpa_history: list<f64>,
+}
+
+/// Background telemetry message published from worker tasks over `chan<TelemetryTick>`.
+pub record TelemetryTick {
+    tick: i64,
+    corridor: CorridorKind,
+    offline: bool,
+    summary: FleetSummary,
+    own_ship: VesselContact,
+    decisions: list<SentinelDecision>,
+    feed_status: str = "",
+}
+
+/// Human-readable display title for a `CorridorKind`.
+pub def corridor_display_name(kind: CorridorKind) -> str {
+    return when kind {
+        CorridorKind.GulfOfFinland => "Gulf of Finland TSS",
+        CorridorKind.AlandSea => "Aland Sea TSS",
+        CorridorKind.DoverStrait => "Dover Strait TSS",
+        CorridorKind.Skagerrak => "Skagerrak Approach",
+        CorridorKind.CustomCoord => "Custom Sector",
+    }
+}
+
+/// Cycle to the next monitored TSS corridor in deterministic order.
+pub def next_corridor_kind(kind: CorridorKind) -> CorridorKind {
+    return when kind {
+        CorridorKind.GulfOfFinland => CorridorKind.AlandSea,
+        CorridorKind.AlandSea => CorridorKind.Skagerrak,
+        CorridorKind.Skagerrak => CorridorKind.DoverStrait,
+        CorridorKind.DoverStrait => CorridorKind.GulfOfFinland,
+        CorridorKind.CustomCoord => CorridorKind.GulfOfFinland,
+    }
+}
+
+def fmt_f1(v: f64) -> str effect alloc {
+    val nonneg = if v < 0.0 { 0.0 } else { v }
+    val scaled = (nonneg * 10.0 + 0.5) to i64
+    val whole = scaled / 10
+    val frac = scaled % 10
+    return f"{whole}.{frac}"
+}
+
+def push_capped_f64(xs: list<f64>, next_val: f64, cap: i64) -> list<f64> effect alloc {
+    val out: list<f64> = list()
+    val n = list_len(xs)
+    val start = if n >= cap { n - cap + 1 } else { 0 }
+    for i in start..n {
+        list_push(out, list_get(xs, i))
+    }
+    list_push(out, next_val)
+    return out
+}
+
+def mean_confidence(decs: list<SentinelDecision>) -> f64 effect alloc {
+    val n = list_len(decs)
+    if n <= 0 {
+        return 0.0
+    }
+    var sum = 0.0
+    for i in 0..n {
+        sum = sum + list_get(decs, i).verdict.active_inf_conf
+    }
+    return sum / to_f64(n)
+}
+
+/// Create an initial `ConsoleState` seeded with the first telemetry snapshot.
+pub def init_console_state(
+    summary: FleetSummary,
+    own: VesselContact,
+    decs: list<SentinelDecision>,
+    offline: bool,
+) -> ConsoleState effect alloc {
+    val conf_h: list<f64> = list()
+    val cpa_h: list<f64> = list()
+    for i in 0..list_len(decs) {
+        val d = list_get(decs, i)
+        list_push(conf_h, d.verdict.active_inf_conf)
+        list_push(cpa_h, if d.encounter.cpa_nm > 12.0 { 12.0 } else { d.encounter.cpa_nm })
+    }
+    if list_len(conf_h) == 0 {
+        list_push(conf_h, mean_confidence(decs))
+        list_push(cpa_h, summary.min_cpa_nm)
+    }
+    if list_len(conf_h) == 1 {
+        list_push(conf_h, list_get(conf_h, 0))
+        list_push(cpa_h, list_get(cpa_h, 0))
+    }
+    val init_mmsi = if list_len(decs) > 0 { list_get(decs, 0).contact.mmsi.raw } else { 0 }
+    return ConsoleState {
+        corridor: summary.corridor_kind,
+        offline: offline,
+        tick: 0,
+        alert_range_nm: 6.0,
+        filter_text: "",
+        selected_mmsi: init_mmsi,
+        alerts_only: false,
+        paused: false,
+        loading: false,
+        feed_status: summary.feed_source,
+        summary: summary,
+        own_ship: own,
+        decisions: decs,
+        conf_history: conf_h,
+        cpa_history: cpa_h,
+    }
+}
+
+def has_mmsi_in_decisions(decs: list<SentinelDecision>, mmsi: i64) -> bool effect alloc {
+    if mmsi <= 0 {
+        return false
+    }
+    for i in 0..list_len(decs) {
+        if list_get(decs, i).contact.mmsi.raw == mmsi {
+            return true
+        }
+    }
+    return false
+}
+
+/// Return an updated `ConsoleState` incorporating a new telemetry snapshot.
+pub def console_with_telemetry(
+    st: ConsoleState,
+    tick_num: i64,
+    summary: FleetSummary,
+    own: VesselContact,
+    decs: list<SentinelDecision>,
+) -> ConsoleState effect alloc {
+    val conf_h = push_capped_f64(st.conf_history, mean_confidence(decs), 24)
+    val cpa_h = push_capped_f64(st.cpa_history, summary.min_cpa_nm, 24)
+    val keep_sel = if has_mmsi_in_decisions(decs, st.selected_mmsi) {
+        st.selected_mmsi
+    } else if list_len(decs) > 0 {
+        list_get(decs, 0).contact.mmsi.raw
+    } else {
+        0
+    }
+    return ConsoleState {
+        corridor: summary.corridor_kind,
+        offline: st.offline,
+        tick: tick_num,
+        alert_range_nm: st.alert_range_nm,
+        filter_text: st.filter_text,
+        selected_mmsi: keep_sel,
+        alerts_only: st.alerts_only,
+        paused: st.paused,
+        loading: false,
+        feed_status: summary.feed_source,
+        summary: summary,
+        own_ship: own,
+        decisions: decs,
+        conf_history: conf_h,
+        cpa_history: cpa_h,
+    }
+}
+
+/// Incorporate a background `TelemetryTick` (including optional `feed_status`).
+pub def console_with_tick(st: ConsoleState, msg: TelemetryTick) -> ConsoleState effect alloc {
+    val next = console_with_telemetry(st, msg.tick, msg.summary, msg.own_ship, msg.decisions)
+    val status_txt = if len(msg.feed_status) > 0 { msg.feed_status } else { next.feed_status }
+    return ConsoleState {
+        corridor: next.corridor,
+        offline: msg.offline,
+        tick: next.tick,
+        alert_range_nm: next.alert_range_nm,
+        filter_text: next.filter_text,
+        selected_mmsi: next.selected_mmsi,
+        alerts_only: next.alerts_only,
+        paused: next.paused,
+        loading: false,
+        feed_status: status_txt,
+        summary: next.summary,
+        own_ship: next.own_ship,
+        decisions: next.decisions,
+        conf_history: next.conf_history,
+        cpa_history: next.cpa_history,
+    }
+}
+
+def corridor_eq(a: CorridorKind, b: CorridorKind) -> bool {
+    return when a {
+        CorridorKind.GulfOfFinland => when b {
+            CorridorKind.GulfOfFinland => true,
+            _ => false
+        },
+        CorridorKind.AlandSea => when b {
+            CorridorKind.AlandSea => true,
+            _ => false
+        },
+        CorridorKind.Skagerrak => when b {
+            CorridorKind.Skagerrak => true,
+            _ => false
+        },
+        CorridorKind.DoverStrait => when b {
+            CorridorKind.DoverStrait => true,
+            _ => false
+        },
+        CorridorKind.CustomCoord => when b {
+            CorridorKind.CustomCoord => true,
+            _ => false
+        },
+    }
+}
+
+def resolve_corridor_action(act: str, cur: CorridorKind) -> CorridorKind {
+    if act == "cor_gof" {
+        return CorridorKind.GulfOfFinland
+    }
+    if act == "cor_aland" {
+        return CorridorKind.AlandSea
+    }
+    if act == "cor_skag" {
+        return CorridorKind.Skagerrak
+    }
+    if act == "cor_dover" {
+        return CorridorKind.DoverStrait
+    }
+    if act == "switch_corridor" {
+        return next_corridor_kind(cur)
+    }
+    return cur
+}
+
+def parse_sel_mmsi(act: str, fallback: i64) -> i64 {
+    if !starts_with(act, "sel_mmsi_") {
+        return fallback
+    }
+    var mmsi = 0
+    val n = len(act)
+    for i in 9..n {
+        val ch = str_index(act, i)
+        if ch < 48 || ch > 57 {
+            return fallback
+        }
+        mmsi = mmsi * 10 + (ch - 48)
+    }
+    return if mmsi > 0 { mmsi } else { fallback }
+}
+
+def toggle_or(ui_st: UiState, key: str, fallback: bool) -> bool {
+    if ui_st.has_toggle_change && ui_st.last_toggle_key == key {
+        return ui_st.last_toggle_val
+    }
+    return fallback
+}
+
+/// Apply widget interactions recorded in `ui_st` onto `st`.
+pub def apply_console_ui_events(st: ConsoleState, ui_st: UiState) -> ConsoleState {
+    val act = ui_st.dispatched_action
+    val offline_val = toggle_or(ui_st, "tog_offline", st.offline)
+    val paused_val = if act == "reset_sim" {
+        false
+    } else {
+        toggle_or(ui_st, "tog_pause", st.paused)
+    }
+    val alerts_val = if act == "reset_sim" {
+        false
+    } else {
+        toggle_or(ui_st, "tog_alerts", st.alerts_only)
+    }
+    val range_val = if ui_st.has_slider_change && ui_st.last_slider_key == "sld_alert_range" {
+        ui_st.last_slider_val
+    } else {
+        st.alert_range_nm
+    }
+    val flt = if act == "clear_filter" {
+        ""
+    } else if ui_st.last_text_key == "inp_filter" {
+        ui_st.last_text_val
+    } else {
+        st.filter_text
+    }
+    val next_cor = resolve_corridor_action(act, st.corridor)
+    val cor_swapped = !corridor_eq(next_cor, st.corridor)
+    val mode_swapped = offline_val != st.offline
+    val next_tick = if act == "reset_sim" || cor_swapped || mode_swapped {
+        0
+    } else if act == "step_sim" || act == "refresh_live" {
+        st.tick + 1
+    } else {
+        st.tick
+    }
+    val next_sel = if act == "reset_sim" || cor_swapped {
+        0
+    } else {
+        parse_sel_mmsi(act, st.selected_mmsi)
+    }
+    val need_sync = !offline_val
+        && (cor_swapped || mode_swapped || act == "refresh_live" || act == "reset_sim")
+    return ConsoleState {
+        corridor: next_cor,
+        offline: offline_val,
+        tick: next_tick,
+        alert_range_nm: range_val,
+        filter_text: flt,
+        selected_mmsi: next_sel,
+        alerts_only: alerts_val,
+        paused: paused_val,
+        loading: if need_sync { true } else { st.loading },
+        feed_status: st.feed_status,
+        summary: st.summary,
+        own_ship: st.own_ship,
+        decisions: st.decisions,
+        conf_history: st.conf_history,
+        cpa_history: st.cpa_history,
+    }
+}
+
+/// Return the picked vessel MMSI when the radar scope was clicked, or `0` otherwise.
+pub def pick_radar_mmsi(st: ConsoleState, ui_st: UiState, tree: UiTree) -> i64 effect alloc {
+    if ui_st.dispatched_action != "radar_scope" {
+        return 0
+    }
+    val picked = ui_radar_pick_blip(tree, "radar_scope", ui_st.pointer_x, ui_st.pointer_y)
+    if is_none(picked) || list_len(tree.radars) == 0 {
+        return 0
+    }
+    val spec = list_get(tree.radars, 0)
+    val bidx = unwrap(picked)
+    if bidx < 0 || bidx >= list_len(spec.blips) {
+        return 0
+    }
+    val lbl = list_get(spec.blips, bidx).label
+    for i in 0..list_len(st.decisions) {
+        val d = list_get(st.decisions, i)
+        if d.contact.label == lbl {
+            return d.contact.mmsi.raw
+        }
+    }
+    return 0
+}
+
+/// Apply widget interactions plus an already-picked radar MMSI onto `st`.
+pub def apply_console_ui_with_pick(
+    st: ConsoleState,
+    ui_st: UiState,
+    picked_mmsi: i64,
+) -> ConsoleState {
+    val base = apply_console_ui_events(st, ui_st)
+    if picked_mmsi == 0 || picked_mmsi == base.selected_mmsi {
+        return base
+    }
+    return ConsoleState {
+        corridor: base.corridor,
+        offline: base.offline,
+        tick: base.tick,
+        alert_range_nm: base.alert_range_nm,
+        filter_text: base.filter_text,
+        selected_mmsi: picked_mmsi,
+        alerts_only: base.alerts_only,
+        paused: base.paused,
+        loading: base.loading,
+        feed_status: base.feed_status,
+        summary: base.summary,
+        own_ship: base.own_ship,
+        decisions: base.decisions,
+        conf_history: base.conf_history,
+        cpa_history: base.cpa_history,
+    }
+}
+
+/// Apply widget interactions plus pixel radar blip selection using `tree` layout geometry.
+pub def apply_console_ui_interactions(
+    st: ConsoleState,
+    ui_st: UiState,
+    tree: UiTree,
+) -> ConsoleState effect alloc {
+    val picked_mmsi = pick_radar_mmsi(st, ui_st, tree)
+    return apply_console_ui_with_pick(st, ui_st, picked_mmsi)
+}
+
+def radar_vessel_tone(d: SentinelDecision, idx: i64) -> UiTone {
+    if d.verdict.overridden {
+        return UiTone.Danger
+    }
+    val slot = idx % 6
+    if slot == 0 {
+        return UiTone.Accent
+    }
+    if slot == 1 {
+        return UiTone.Success
+    }
+    if slot == 2 {
+        return UiTone.Warning
+    }
+    if slot == 3 {
+        return UiTone.Primary
+    }
+    if slot == 4 {
+        return UiTone.Danger
+    }
+    return UiTone.Secondary
+}
+
+def matches_filter(d: SentinelDecision, needle: str) -> bool effect alloc {
+    val trimmed = trim(needle)
+    if len(trimmed) == 0 {
+        return true
+    }
+    val q = to_lower(trimmed)
+    val lbl = to_lower(d.contact.label)
+    val flag = to_lower(d.contact.mmsi.flag_country)
+    val act = to_lower(helm_action_label(d.verdict.approved_action))
+    val mmsi_str = to_str(d.contact.mmsi.raw)
+    return contains(lbl, q) || contains(mmsi_str, q) || contains(flag, q) || contains(act, q)
+}
+
+def filtered_decisions(st: ConsoleState) -> list<SentinelDecision> effect alloc {
+    val out: list<SentinelDecision> = list()
+    for i in 0..list_len(st.decisions) {
+        val d = list_get(st.decisions, i)
+        val is_alert = d.verdict.overridden
+            || d.risk_score >= 70
+            || d.encounter.cpa_nm <= st.alert_range_nm
+        if (!st.alerts_only || is_alert) && matches_filter(d, st.filter_text) {
+            list_push(out, d)
+        }
+    }
+    return out
+}
+
+def resolve_selected_decision(
+    st: ConsoleState,
+    visible: list<SentinelDecision>,
+) -> option<SentinelDecision> effect alloc {
+    for i in 0..list_len(visible) {
+        val d = list_get(visible, i)
+        if d.contact.mmsi.raw == st.selected_mmsi {
+            return some(d)
+        }
+    }
+    for i in 0..list_len(st.decisions) {
+        val d = list_get(st.decisions, i)
+        if d.contact.mmsi.raw == st.selected_mmsi {
+            return some(d)
+        }
+    }
+    if list_len(visible) > 0 {
+        return some(list_get(visible, 0))
+    }
+    return none()
+}
+
+def build_console_header(tree: UiTree, st: ConsoleState) -> i64 effect alloc {
+    val c_name = corridor_display_name(st.corridor)
+    val obs_iso = st.summary.observed_at_iso
+    val ovr = st.summary.override_count
+    val min_cpa_s = fmt_f1(st.summary.min_cpa_nm)
+    val mode_lbl = if st.loading {
+        "SYNCING..."
+    } else if st.offline {
+        "OFFLINE SIM"
+    } else if st.summary.feed_ok {
+        "LIVE REAL-TIME"
+    } else {
+        "LIVE DEGRADED"
+    }
+    val mode_tone = if !st.offline && st.summary.feed_ok {
+        UiTone.Secondary
+    } else {
+        UiTone.Neutral
+    }
+    val risk_tone = if ovr > 0 || st.summary.min_cpa_nm < st.alert_range_nm {
+        UiTone.Secondary
+    } else {
+        UiTone.Neutral
+    }
+    val tick_lbl = if st.offline { f"SIM #{st.tick}" } else { f"POLL #{st.tick}" }
+    val step_btn = if st.offline {
+        ui_button_tone(tree, "btn_step", "Step Sim", "step_sim", UiTone.Secondary)
+    } else {
+        ui_button_tone(tree, "btn_refresh", "Refresh Live", "refresh_live", UiTone.Secondary)
+    }
+    val kids = list(
+        ui_heading(tree, "hdr_title", "AIS SENTINEL", UiTone.Secondary),
+        ui_badge(tree, "hdr_mode", mode_lbl, mode_tone),
+        ui_badge(tree, "hdr_corridor", c_name, UiTone.Secondary),
+        ui_badge(tree, "hdr_tick", f"{tick_lbl} | {obs_iso}", UiTone.Neutral),
+        ui_badge(tree, "hdr_risk", f"OVR {ovr} | MIN {min_cpa_s}nm", risk_tone),
+        ui_spacer(tree, 1.0, 8.0, 4.0),
+        step_btn,
+        ui_button_tone(tree, "btn_corridor", "Next Sector", "switch_corridor", UiTone.Secondary),
+        ui_button_tone(tree, "btn_reset", "Reset", "reset_sim", UiTone.Secondary),
+    )
+    val row = ui_row(tree, "hdr_row", UiStyle { gap: 8.0, align: UiAlign.Center }, kids)
+    return ui_card(tree, "hdr_card", UiStyle { min_h: 58.0 }, list(row))
+}
+
+def sector_pill(tree: UiTree, key: str, title: str, active: bool) -> i64 effect alloc {
+    val tone = if active { UiTone.Secondary } else { UiTone.Neutral }
+    return ui_button_tone(tree, key, title, key, tone)
+}
+
+def build_corridor_bar(tree: UiTree, st: ConsoleState) -> i64 effect alloc {
+    val pills = list(
+        sector_pill(tree, "cor_gof", "GoF", corridor_eq(st.corridor, CorridorKind.GulfOfFinland)),
+        sector_pill(tree, "cor_aland", "Aland", corridor_eq(st.corridor, CorridorKind.AlandSea)),
+        sector_pill(tree, "cor_skag", "Skag", corridor_eq(st.corridor, CorridorKind.Skagerrak)),
+        sector_pill(tree, "cor_dover", "Dover", corridor_eq(st.corridor, CorridorKind.DoverStrait)),
+    )
+    return ui_row(tree, "ctrl_cor_row", UiStyle { gap: 6.0, align: UiAlign.Center }, pills)
+}
+
+def build_toggles_row(tree: UiTree, st: ConsoleState) -> i64 effect alloc {
+    val off_tone = if st.offline { UiTone.Secondary } else { UiTone.Neutral }
+    val pause_tone = if st.paused { UiTone.Secondary } else { UiTone.Neutral }
+    val alert_tone = if st.alerts_only { UiTone.Secondary } else { UiTone.Neutral }
+    return ui_row(
+        tree,
+        "ctrl_mode_row",
+        UiStyle { gap: 10.0, align: UiAlign.Center },
+        list(
+            ui_toggle(tree, "tog_offline", "Offline", st.offline, off_tone),
+            ui_toggle(tree, "tog_pause", "Pause", st.paused, pause_tone),
+            ui_toggle(tree, "tog_alerts", "Alerts", st.alerts_only, alert_tone),
+        ),
+    )
+}
+
+def build_filter_row(tree: UiTree, st: ConsoleState) -> i64 effect alloc {
+    return ui_row(
+        tree,
+        "ctrl_flt_row",
+        UiStyle { gap: 6.0, align: UiAlign.Center },
+        list(
+            ui_text_input(
+                tree,
+                "inp_filter",
+                st.filter_text,
+                "Filter name, MMSI, flag, or action...",
+                UiStyle { flex: 1.0, min_h: 32.0 },
+            ),
+            ui_button_tone(tree, "btn_clear_flt", "Clear", "clear_filter", UiTone.Secondary),
+        ),
+    )
+}
+
+def build_controls_card(tree: UiTree, st: ConsoleState) -> i64 effect alloc {
+    val rng_txt = fmt_f1(st.alert_range_nm)
+    val feed_txt = if len(st.feed_status) > 0 {
+        st.feed_status
+    } else if st.offline {
+        "Offline TSS Simulation (synthetic waypoints)"
+    } else {
+        st.summary.feed_source
+    }
+    val col = ui_col(
+        tree,
+        "ctrl_col",
+        UiStyle { gap: 6.0 },
+        list(
+            ui_label(
+                tree,
+                "lbl_ctrl",
+                f"Bridge Controls (Alert CPA <= {rng_txt} nm)",
+                UiStyle { fg: tree.theme.fg, font_size: 13.0, bold: true },
+            ),
+            build_corridor_bar(tree, st),
+            build_toggles_row(tree, st),
+            ui_label(
+                tree,
+                "lbl_mode",
+                feed_txt,
+                UiStyle { fg: tree.theme.fg_muted, font_size: 11.0 },
+            ),
+            ui_slider_range(
+                tree,
+                "sld_alert_range",
+                "Alert CPA (nm)",
+                st.alert_range_nm,
+                UiSize { w: 0.5, h: 12.0 },
+            ),
+            build_filter_row(tree, st),
+        ),
+    )
+    return ui_card(tree, "ctrl_card", UiStyle { min_h: 212.0 }, list(col))
+}
+
+def radar_span_nm(st: ConsoleState, visible: list<SentinelDecision>) -> f64 effect alloc {
+    var max_r = if st.alert_range_nm * 2.0 > 12.0 { st.alert_range_nm * 2.0 } else { 12.0 }
+    for i in 0..list_len(visible) {
+        val r = list_get(visible, i).encounter.range_nm * 1.12
+        if r > max_r && r <= 48.0 {
+            max_r = r
+        }
+    }
+    return max_r
+}
+
+def build_radar_card(
+    tree: UiTree,
+    st: ConsoleState,
+    visible: list<SentinelDecision>,
+) -> i64 effect alloc {
+    val blips: list<RadarBlip> = list()
+    for i in 0..list_len(visible) {
+        val d = list_get(visible, i)
+        list_push(
+            blips,
+            RadarBlip {
+                label: d.contact.label,
+                bearing_deg: d.encounter.bearing_deg,
+                range_nm: d.encounter.range_nm,
+                course_deg: d.contact.cog_deg,
+                speed_kn: d.contact.sog.value,
+                tone: radar_vessel_tone(d, i),
+            },
+        )
+    }
+    val span = radar_span_nm(st, visible)
+    val span_txt = fmt_f1(span)
+    val sel = resolve_selected_decision(st, visible)
+    val sel_label = when sel {
+        some(d) => d.contact.label,
+        none => "",
+    }
+    val spec = RadarSpec {
+        title: f"AIS RADAR ({span_txt} nm)",
+        range_nm: span,
+        own_heading_deg: to_f64(st.own_ship.heading_deg),
+        ring_count: 4,
+        blips: blips,
+    }
+    val scope = ui_radar_scope_interactive(
+        tree,
+        "radar_scope",
+        spec,
+        sel_label,
+        UiStyle { flex: 1.0, min_h: 410.0 },
+    )
+    return ui_card(tree, "radar_card", UiStyle { flex: 1.0, min_h: 432.0 }, list(scope))
+}
+
+def build_series_xs(n: i64) -> list<f64> effect alloc {
+    val xs: list<f64> = list()
+    for i in 0..n {
+        list_push(xs, to_f64(i))
+    }
+    return xs
+}
+
+def build_charts_card(tree: UiTree, st: ConsoleState) -> i64 effect alloc {
+    val conf_xs = build_series_xs(list_len(st.conf_history))
+    val cpa_xs = build_series_xs(list_len(st.cpa_history))
+    val conf_series = ChartSeries {
+        label: "POMDP Belief Confidence",
+        xs: conf_xs,
+        ys: st.conf_history,
+        tone: UiTone.Secondary,
+        fill: true,
+    }
+    val cpa_series = ChartSeries {
+        label: "Min CPA Trend (nm)",
+        xs: cpa_xs,
+        ys: st.cpa_history,
+        tone: UiTone.Secondary,
+        fill: true,
+    }
+    val col = ui_col(
+        tree,
+        "charts_col",
+        UiStyle { gap: 6.0, flex: 1.0 },
+        list(
+            ui_label(
+                tree,
+                "lbl_spark",
+                "POMDP Belief Confidence",
+                UiStyle { fg: tree.theme.fg_muted, font_size: 12.0, bold: true },
+            ),
+            ui_sparkline(tree, "spark_conf", conf_series, UiStyle { min_h: 50.0 }),
+            ui_line_chart(tree, "chart_cpa", cpa_series, UiStyle { flex: 1.0, min_h: 118.0 }),
+        ),
+    )
+    return ui_card(tree, "charts_card", UiStyle { flex: 1.15, min_h: 214.0 }, list(col))
+}
+
+def build_risk_tensor_card(tree: UiTree, visible: list<SentinelDecision>) -> i64 effect alloc {
+    val n = list_len(visible)
+    val rows = if n > 0 { n } else { 1 }
+    val cells: list<f64> = list()
+    if n == 0 {
+        list_push(cells, 0.0)
+        list_push(cells, 0.0)
+        list_push(cells, 0.0)
+        list_push(cells, 0.0)
+    } else {
+        for i in 0..n {
+            val d = list_get(visible, i)
+            val w_norm = if d.weather.wave_height_m / 5.0 > 1.0 {
+                1.0
+            } else {
+                d.weather.wave_height_m / 5.0
+            }
+            val cpa_raw = 1.0 - d.encounter.cpa_nm / 6.0
+            val cpa_norm = if cpa_raw < 0.0 {
+                0.0
+            } else if cpa_raw > 1.0 {
+                1.0
+            } else {
+                cpa_raw
+            }
+            val ovr_norm = if d.verdict.overridden { 1.0 } else { 0.15 }
+            val r_norm = to_f64(d.risk_score) / 100.0
+            list_push(cells, w_norm)
+            list_push(cells, cpa_norm)
+            list_push(cells, ovr_norm)
+            list_push(cells, r_norm)
+        }
+    }
+    val view = ui_tensor_from_grid(
+        tree,
+        "tensor_risk",
+        TensorSpec {
+            width: 4,
+            height: rows,
+            cells: cells,
+            vmin: 0.0,
+            vmax: 4.0,
+            title: "Sea/CPA/Shield/Risk",
+        },
+        UiStyle { flex: 1.0, min_h: 192.0 },
+    )
+    return ui_card(tree, "tensor_card", UiStyle { flex: 0.85, min_h: 214.0 }, list(view))
+}
+
+def fmt_f2(v: f64) -> str effect alloc {
+    val sign = if v < 0.0 { "-" } else { "" }
+    val mag = if v < 0.0 { -v } else { v }
+    val scaled = (mag * 100.0 + 0.5) to i64
+    val whole = scaled / 100
+    val frac = scaled % 100
+    val frac_s = if frac < 10 { f"0{frac}" } else { to_str(frac) }
+    return f"{sign}{whole}.{frac_s}"
+}
+
+def build_inspector_top(tree: UiTree, d: SentinelDecision) -> i64 effect alloc {
+    val c = d.contact
+    val sh_txt = if d.verdict.overridden { "SHIELD OVR" } else { "SHIELD OK" }
+    val sh_tone = if d.verdict.overridden { UiTone.Secondary } else { UiTone.Neutral }
+    val flag_short = truncate(c.mmsi.flag_country, 11)
+    return ui_row(
+        tree,
+        "insp_top",
+        UiStyle { gap: 6.0, align: UiAlign.Stretch },
+        list(
+            ui_label(
+                tree,
+                "insp_name",
+                truncate(c.label, 18),
+                UiStyle { fg: tree.theme.azure, font_size: 13.0, bold: true, min_w: 155.0 },
+            ),
+            ui_spacer(tree, 1.0, 6.0, 4.0),
+            ui_badge(tree, "insp_mmsi", f"{c.mmsi.raw} ({flag_short})", UiTone.Neutral),
+            ui_badge(
+                tree,
+                "insp_act",
+                helm_action_label(d.verdict.approved_action),
+                UiTone.Secondary,
+            ),
+            ui_badge(tree, "insp_sh", sh_txt, sh_tone),
+        ),
+    )
+}
+
+def build_inspector_card(
+    tree: UiTree,
+    st: ConsoleState,
+    visible: list<SentinelDecision>,
+) -> i64 effect alloc {
+    val sel = resolve_selected_decision(st, visible)
+    if is_none(sel) {
+        val empty_lbl = ui_label(
+            tree,
+            "insp_empty",
+            "Selected Vessel Inspector: No target visible (adjust filter or sector).",
+            UiStyle { fg: tree.theme.fg_muted, font_size: 12.0 },
+        )
+        return ui_card(tree, "insp_card", UiStyle { min_h: 102.0 }, list(empty_lbl))
+    }
+    val d = unwrap(sel)
+    val c = d.contact
+    val kin = f"Pos {fmt_f2(c.lat.deg)},{fmt_f2(c.lon.deg)} | SOG {fmt_f1(c.sog.value)}kn COG {to_str((c.cog_deg + 0.5) to i64)}d HDG {c.heading_deg}d | {nav_status_label(c.nav_status)} | CPA {fmt_f1(d.encounter.cpa_nm)}nm TCPA {fmt_f1(d.encounter.tcpa_min)}m"
+    val env = f"Wave {fmt_f1(d.weather.wave_height_m)}m/{fmt_f1(d.weather.wave_period_s)}s | Wind {fmt_f1(d.weather.wind_knots)}kn G{fmt_f1(d.weather.gust_knots)}kn | Cur {fmt_f1(d.weather.current_knots)}kn SST {fmt_f1(d.weather.sea_temp_c)}C | Rule:{d.verdict.safety_rule} Conf:{to_str((d.verdict.active_inf_conf * 100.0 + 0.5) to i64)}%"
+    val col = ui_col(
+        tree,
+        "insp_col",
+        UiStyle { gap: 4.0 },
+        list(
+            build_inspector_top(tree, d),
+            ui_label(
+                tree,
+                "insp_kin",
+                kin,
+                UiStyle { fg: tree.theme.fg, font_size: 11.0, monospace: true },
+            ),
+            ui_label(
+                tree,
+                "insp_env",
+                env,
+                UiStyle { fg: tree.theme.fg_muted, font_size: 11.0, monospace: true },
+            ),
+        ),
+    )
+    return ui_card(tree, "insp_card", UiStyle { min_h: 102.0 }, list(col))
+}
+
+def format_console_table_row(d: SentinelDecision) -> str effect alloc {
+    val name_col = pad_right(truncate(d.contact.label, 14), 14, " ")
+    val mmsi_col = pad_right(to_str(d.contact.mmsi.raw), 9, " ")
+    val brg_rng = f"{to_str((d.encounter.bearing_deg + 0.5) to i64)}d/{fmt_f1(d.encounter.range_nm)}nm"
+    val pos_col = pad_right(brg_rng, 10, " ")
+    val cpa_col = pad_right(fmt_f1(d.encounter.cpa_nm), 5, " ")
+    val act_col = pad_right(truncate(helm_action_label(d.verdict.approved_action), 20), 20, " ")
+    val risk_s = to_str(d.risk_score)
+    return f"{name_col} | {mmsi_col} | {pos_col} | {cpa_col} | {act_col} | {risk_s}"
+}
+
+def append_visible_table_rows(
+    tree: UiTree,
+    st: ConsoleState,
+    visible: list<SentinelDecision>,
+    children: list<i64>,
+    limit: i64,
+) -> i64 effect alloc {
+    val sel = resolve_selected_decision(st, visible)
+    val active_mmsi = when sel {
+        some(d) => d.contact.mmsi.raw,
+        none => 0,
+    }
+    for i in 0..limit {
+        val d = list_get(visible, i)
+        val row_txt = format_console_table_row(d)
+        val mmsi = d.contact.mmsi.raw
+        val is_sel = mmsi == active_mmsi
+        val row_tone = if is_sel { UiTone.Secondary } else { UiTone.Neutral }
+        list_push(
+            children,
+            ui_table_row_selectable(tree, f"sel_mmsi_{mmsi}", row_txt, is_sel, row_tone),
+        )
+    }
+    if limit == 0 {
+        list_push(
+            children,
+            ui_label(
+                tree,
+                "tbl_empty",
+                "No AIS targets match current filter.",
+                UiStyle { fg: tree.theme.fg_muted, font_size: 12.0 },
+            ),
+        )
+    }
+    return 0
+}
+
+def build_table_card(
+    tree: UiTree,
+    st: ConsoleState,
+    visible: list<SentinelDecision>,
+) -> i64 effect alloc {
+    val children: list<i64> = list()
+    val wave = fmt_f1(st.summary.max_wave_m)
+    val gust = fmt_f1(st.summary.max_gust_kn)
+    val hlth = to_str((st.summary.avg_health * 100.0 + 0.5) to i64)
+    val limit = if list_len(visible) < 7 { list_len(visible) } else { 7 }
+    val banner = f"Showing {limit}/{list_len(visible)} visible ({st.summary.waypoint_count} total) | Wave {wave}m | Gust {gust}kn | Health {hlth}%"
+    list_push(
+        children,
+        ui_label(
+            tree,
+            "tbl_banner",
+            banner,
+            UiStyle {
+                fg: tree.theme.fg_muted,
+                font_size: 12.0,
+                monospace: true,
+                align: UiAlign.Stretch,
+                min_h: 20.0,
+            },
+        ),
+    )
+    list_push(
+        children,
+        ui_table_header(
+            tree,
+            "tbl_hdr",
+            "VESSEL         | MMSI      | BRG/RNG    | CPA   | HELM ACTION          | RISK",
+            UiStyle { min_h: 28.0 },
+        ),
+    )
+    val _rows = append_visible_table_rows(tree, st, visible, children, limit)
+    val col = ui_col(tree, "tbl_col", UiStyle { gap: 4.0, flex: 1.0 }, children)
+    return ui_card(tree, "tbl_card", UiStyle { flex: 1.0, min_h: 274.0 }, list(col))
+}
+
+/// Build the complete declarative AIS Sentinel console `UiTree` from `st` and return root node ID.
+pub def build_ais_console_tree(st: ConsoleState, tree: UiTree) -> i64 effect alloc {
+    val visible = filtered_decisions(st)
+    val header = build_console_header(tree, st)
+    val left = ui_col(
+        tree,
+        "left_pane",
+        UiStyle { flex: 1.05, gap: 10.0, min_w: 420.0 },
+        list(build_controls_card(tree, st), build_radar_card(tree, st, visible)),
+    )
+    val analytics = ui_row(
+        tree,
+        "right_analytics",
+        UiStyle { min_h: 216.0, gap: 10.0 },
+        list(build_charts_card(tree, st), build_risk_tensor_card(tree, visible)),
+    )
+    val right = ui_col(
+        tree,
+        "right_pane",
+        UiStyle { flex: 1.35, gap: 10.0 },
+        list(
+            analytics,
+            build_inspector_card(tree, st, visible),
+            build_table_card(tree, st, visible),
+        ),
+    )
+    val body = ui_row(tree, "body_split", UiStyle { flex: 1.0, gap: 10.0 }, list(left, right))
+    return ui_col(
+        tree,
+        "ais_root",
+        UiStyle { padding: 12.0, gap: 10.0, bg: tree.theme.bg },
+        list(header, body),
+    )
+}
+
+def sample_test_decision() -> SentinelDecision effect alloc, throw {
+    val enc = EncounterMetrics {
+        own_lat: 60.05,
+        own_lon: 24.95,
+        target_label: "TEST_MV",
+        target_mmsi: 230992750,
+        range_nm: 4.1,
+        bearing_deg: 235.0,
+        cpa_nm: 1.4,
+        tcpa_min: 7.5,
+    }
+    val wx = MarineWeather {
+        lat: 60.01,
+        lon: 24.84,
+        wave_height_m: 1.1,
+        wave_dir_deg: 240.0,
+        wave_period_s: 4.5,
+        wind_knots: 14.0,
+        gust_knots: 20.0,
+        wind_dir_deg: 238.0,
+        pressure_hpa: 1007.2,
+        live_ok: true,
+        note: "open-meteo-live",
+    }
+    return SentinelDecision {
+        contact: sample_test_contact(),
+        encounter: enc,
+        weather: wx,
+        verdict: sample_test_verdict(),
+        risk_score: 74,
+    }
+}
+
+def click_widget_events(tree: UiTree, ui_st: UiState, key: str) -> UiState effect alloc, throw {
+    val idx = unwrap(ui_find_node_key(tree, key))
+    val r = list_get(tree.nodes, idx).layout
+    val cx = r.x + r.w * 0.5
+    val cy = r.y + r.h * 0.5
+    return ui_process_events(
+        tree,
+        ui_st,
+        list(
+            HostEvent { kind: UiEventKind.PointerDown, x: cx, y: cy },
+            HostEvent { kind: UiEventKind.PointerUp, x: cx, y: cy },
+        ),
+    )
+}
+
+def test_ais_sentinel_gui_console() -> i64 effect ffi, alloc, throw {
+    val dec = sample_test_decision()
+    val contact = dec.contact
+    val summary = FleetSummary {
+        corridor: "gulf_of_finland",
+        corridor_kind: CorridorKind.GulfOfFinland,
+        waypoint_count: 1,
+        override_count: 1,
+        min_cpa_nm: 1.4,
+        max_wave_m: 1.1,
+        max_gust_kn: 20.0,
+        avg_health: 0.96,
+        pomdp_saved_path: "ephemeral",
+        observed_at_iso: "2026-11-15T00:00",
+    }
+    val st0 = init_console_state(summary, contact, list(dec), true)
+    var tree = ui_new()
+    val root = build_ais_console_tree(st0, tree)
+    tree = ui_layout(ui_set_root(tree, root), 1280.0, 800.0)
+    assert(list_len(tree.radars) == 1)
+    assert(list_len(list_get(tree.radars, 0).blips) == 1)
+    assert(list_len(tree.charts) == 2)
+    assert(list_len(tree.tensors) == 1)
+
+    val rad_idx = unwrap(ui_find_node_key(tree, "radar_scope"))
+    val rad_box = list_get(tree.nodes, rad_idx).layout
+    assert(rad_box.w > 200.0 && rad_box.h > 200.0)
+
+    val ui_step = click_widget_events(tree, ui_state_new(), "btn_step")
+    assert(ui_step.dispatched_action == "step_sim")
+    val st1 = apply_console_ui_interactions(st0, ui_step, tree)
+    assert(st1.tick == 1)
+
+    val ui_aland = click_widget_events(tree, ui_state_new(), "cor_aland")
+    val st2 = apply_console_ui_events(st1, ui_aland)
+    assert(corridor_display_name(st2.corridor) == "Aland Sea TSS")
+
+    val ui_row = click_widget_events(tree, ui_state_new(), "sel_mmsi_230992750")
+    val st3 = apply_console_ui_events(st1, ui_row)
+    assert(st3.selected_mmsi == 230992750)
+
+    val ui_live = click_widget_events(tree, ui_state_new(), "tog_offline")
+    val st4 = apply_console_ui_events(st1, ui_live)
+    assert(!st4.offline && st4.loading)
+
+    val svg = ui_render_svg(tree)
+    assert(contains(svg, "AIS SENTINEL"))
+    val http_resp = ui_http_mirror_response(tree, "AIS Sentinel")
+    assert(contains(http_resp, "HTTP/1.1 200 OK"))
+
+    val px = ui_render_headless(tree, ui_state_new(), UiSize { w: 1280.0, h: 800.0 }, "")
+    assert(is_ok(px))
+    return 0
+}

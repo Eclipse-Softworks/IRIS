@@ -1,0 +1,2083 @@
+bring std.os
+bring std.fs
+bring std.math
+bring std.time
+bring std.http
+bring std.http_server
+bring std.ui
+bring domain
+bring nmea
+bring marine_net
+bring ais_live
+bring pilot
+bring render
+
+/// CLI configuration parsed for `ais_sentinel`.
+pub record CliConfig {
+    corridor: CorridorKind = CorridorKind.GulfOfFinland,
+    nmea_raw: str = "",
+    nmea_file: str = "",
+    custom_lat: f64 = 0.0,
+    custom_lon: f64 = 0.0,
+    has_custom_coord: bool = false,
+    custom_label: str = "CUSTOM-VESSEL",
+    state_dir: str = "",
+    json_path: str = "",
+    offline: bool = false,
+    show_help: bool = false,
+    gui_mode: bool = false,
+    gui_headless: bool = false,
+    gui_snapshot_path: str = "",
+    web_mirror_port: i64 = 0,
+}
+
+/// Higher-kinded singleton container `SingleBox[T]`.
+pub record SingleBox[T] {
+    value: T,
+}
+
+/// Higher-kinded optional container `OptionBox[T]`.
+pub record OptionBox[T] {
+    maybe: option<T>,
+}
+
+/// Higher-kinded sequence container `ListBox[T]`.
+pub record ListBox[T] {
+    items: list<T>,
+}
+
+/// Stack-allocated hazard priority window bounded by const generic `N`.
+pub record HazardWindow[T, const N: usize] {
+    slots: [T; N],
+    len: i64,
+}
+
+/// Type-state witness certifying verified NMEA or TSS corridor contact acquisition.
+pub record DecodedNmeaWitness {
+    corridor: str,
+    own_ship: VesselContact,
+    source_kind: str,
+}
+
+/// Type-state witness certifying live sea-state & encounter sensing.
+pub record SeaStateWitness {
+    live_queries: i64,
+    offline_used: bool,
+    observed_iso: str,
+}
+
+/// Type-state witness certifying `std.ais` safety + governor evaluation & sealing.
+pub record AisGovernedWitness {
+    summary: FleetSummary,
+}
+
+/// Type-state envelope parameterized by stage witness `S`, HKT constructor `F[_]`, and element `T`.
+pub record StageEnvelope[S, F[_], T] {
+    witness: S,
+    container: F<T>,
+}
+
+/// Stage-sealed payload bundle pairing a verified transition witness `S` with `P`.
+pub record StageBox[S, P] {
+    witness: S,
+    payload: P,
+}
+
+/// Higher-kinded telemetry container trait inspecting container kind and cardinality across `F[_]`.
+pub trait TelemetryKind[F[_]] {
+    def container_kind(self: Self) -> str
+    def cardinality(self: Self) -> i64 effect alloc
+    def is_populated(self: Self) -> bool effect alloc
+}
+
+impl TelemetryKind[list] for ListBox<VesselContact> {
+    def container_kind(self: Self) -> str {
+        return "ListBox<VesselContact>"
+    }
+
+    def cardinality(self: Self) -> i64 effect alloc {
+        return list_len(self.items)
+    }
+
+    def is_populated(self: Self) -> bool effect alloc {
+        return list_len(self.items) > 0
+    }
+}
+
+impl TelemetryKind[list] for ListBox<SentinelDecision> {
+    def container_kind(self: Self) -> str {
+        return "ListBox<SentinelDecision>"
+    }
+
+    def cardinality(self: Self) -> i64 effect alloc {
+        return list_len(self.items)
+    }
+
+    def is_populated(self: Self) -> bool effect alloc {
+        return list_len(self.items) > 0
+    }
+}
+
+impl TelemetryKind[option] for OptionBox<VesselContact> {
+    def container_kind(self: Self) -> str {
+        return "OptionBox<VesselContact>"
+    }
+
+    def cardinality(self: Self) -> i64 effect alloc {
+        return if is_some(self.maybe) { 1 } else { 0 }
+    }
+
+    def is_populated(self: Self) -> bool effect alloc {
+        return is_some(self.maybe)
+    }
+}
+
+impl TelemetryKind[SingleBox] for SingleBox<SentinelDecision> {
+    def container_kind(self: Self) -> str {
+        return "SingleBox<SentinelDecision>"
+    }
+
+    def cardinality(self: Self) -> i64 effect alloc {
+        return 1
+    }
+
+    def is_populated(self: Self) -> bool effect alloc {
+        return true
+    }
+}
+
+impl TelemetryKind[SingleBox] for SingleBox<FleetSummary> {
+    def container_kind(self: Self) -> str {
+        return "SingleBox<FleetSummary>"
+    }
+
+    def cardinality(self: Self) -> i64 effect alloc {
+        return 1
+    }
+
+    def is_populated(self: Self) -> bool effect alloc {
+        return true
+    }
+}
+
+/// Polymorphic summary trait rendered across homogeneous and singleton wrappers.
+pub trait AisSummarizable {
+    def summarize(self: Self) -> str effect alloc, io
+}
+
+impl[T] AisSummarizable for list<T> {
+    def summarize(self: Self) -> str effect alloc, io {
+        return f"batch(contacts={list_len(self)})"
+    }
+}
+
+impl[T] AisSummarizable for option<T> {
+    def summarize(self: Self) -> str effect alloc, io {
+        return if is_some(self) { "singleton(present)" } else { "singleton(empty)" }
+    }
+}
+
+impl AisSummarizable for SingleBox<SentinelDecision> {
+    def summarize(self: Self) -> str effect alloc, io {
+        return format_decision_detail(self.value)
+    }
+}
+
+impl AisSummarizable for SingleBox<FleetSummary> {
+    def summarize(self: Self) -> str effect alloc, io {
+        return format_fleet_banner(self.value)
+    }
+}
+
+/// Render any value implementing `AisSummarizable` using bounded parametric polymorphism.
+pub def render_bounded[T where T: AisSummarizable](item: T) -> str effect alloc, io {
+    return item.summarize()
+}
+
+/// Parametric HKT identity preserving container `F<T>` without inspecting elements.
+pub def passthrough_hkt[F[_], T](container: F<T>) -> F<T> {
+    return container
+}
+
+/// Seal a verified payload `P` behind its stage witness `S`.
+pub def seal_stage[S, P](witness: S, payload: P) -> StageBox<S, P> {
+    return StageBox { witness: witness, payload: payload }
+}
+
+/// Generic functor map over arbitrary element types in `list<A>`.
+pub def map_list_gen[A, B](xs: list<A>, f: |A| -> B) -> list<B> effect alloc {
+    val out: list<B> = list()
+    for i in 0..list_len(xs) {
+        list_push(out, f(list_get(xs, i)))
+    }
+    return out
+}
+
+/// Generic predicate filter over `list<T>`.
+pub def filter_list_gen[T](xs: list<T>, pred: |T| -> bool) -> list<T> effect alloc {
+    val out: list<T> = list()
+    for i in 0..list_len(xs) {
+        val item = list_get(xs, i)
+        if pred(item) {
+            list_push(out, item)
+        }
+    }
+    return out
+}
+
+/// Generic left fold over `list<A>` into accumulator `B`.
+pub def fold_list_gen[A, B](xs: list<A>, init: B, step: |B, A| -> B) -> B effect alloc {
+    var acc = init
+    for i in 0..list_len(xs) {
+        acc = step(acc, list_get(xs, i))
+    }
+    return acc
+}
+
+/// Generic functor map over `option<A>`.
+pub def map_option_gen[A, B](opt: option<A>, f: |A| -> B) -> option<B> {
+    return when opt {
+        some(v) => some(f(v)),
+        none => none(),
+    }
+}
+
+/// Generic functor map over `SingleBox<A>`.
+pub def map_single_gen[A, B](box_val: SingleBox<A>, f: |A| -> B) -> SingleBox<B> {
+    return SingleBox { value: f(box_val.value) }
+}
+
+def insert_hazard4(
+    w: HazardWindow<SentinelDecision, 4>,
+    item: SentinelDecision,
+) -> HazardWindow<SentinelDecision, 4> {
+    var slots = w.slots
+    var len = w.len
+    if len < 4 {
+        slots[len] = item
+        len = len + 1
+    } else if item.risk_score > slots[3].risk_score {
+        slots[3] = item
+    }
+    for _pass in 0..3 {
+        for j in 0..3 {
+            if j + 1 < len && slots[j].risk_score < slots[j + 1].risk_score {
+                val tmp = slots[j]
+                slots[j] = slots[j + 1]
+                slots[j + 1] = tmp
+            }
+        }
+    }
+    return HazardWindow { slots: slots, len: len }
+}
+
+def make_initial_hazard4(seed: SentinelDecision) -> HazardWindow<SentinelDecision, 4> {
+    return HazardWindow { slots: [seed, seed, seed, seed], len: 0 }
+}
+
+def resolve_corridor_kind(name: str) -> result<CorridorKind, AisError> effect alloc {
+    val norm = to_lower(trim(name))
+    if norm == "gulf_of_finland" || norm == "finland" || norm == "helsinki" {
+        return ok(CorridorKind.GulfOfFinland)
+    }
+    if norm == "aland_sea" || norm == "aland" || norm == "mariehamn" {
+        return ok(CorridorKind.AlandSea)
+    }
+    if norm == "dover_strait" || norm == "dover" || norm == "channel" {
+        return ok(CorridorKind.DoverStrait)
+    }
+    if norm == "skagerrak" || norm == "norway" || norm == "oslo" {
+        return ok(CorridorKind.Skagerrak)
+    }
+    return err(
+        AisError.ValidationFailed(
+            f"unknown corridor '{name}'; expected gulf_of_finland, aland_sea, skagerrak, or dover_strait",
+        ),
+    )
+}
+
+def apply_flag_pair(
+    cfg: CliConfig,
+    flag: str,
+    next_val: str,
+) -> result<CliConfig, AisError> effect alloc {
+    var c = cfg
+    if flag == "--corridor" {
+        c.corridor = resolve_corridor_kind(next_val)?
+        return ok(c)
+    }
+    if flag == "--nmea" {
+        c.nmea_raw = next_val
+        return ok(c)
+    }
+    if flag == "--nmea-file" {
+        c.nmea_file = next_val
+        return ok(c)
+    }
+    if flag == "--state-dir" {
+        c.state_dir = next_val
+        return ok(c)
+    }
+    if flag == "--json" {
+        c.json_path = next_val
+        return ok(c)
+    }
+    if flag == "--label" {
+        c.custom_label = next_val
+        return ok(c)
+    }
+    if flag == "--gui-snapshot" {
+        c.gui_snapshot_path = next_val
+        return ok(c)
+    }
+    if flag == "--web-mirror" {
+        val port = parse_i64(trim(next_val)) ?? -1
+        if port <= 0 || port > 65535 {
+            return err(AisError.ValidationFailed(f"invalid --web-mirror port '{next_val}'"))
+        }
+        c.web_mirror_port = port
+        return ok(c)
+    }
+    return err(AisError.ValidationFailed(f"unknown flag '{flag}'"))
+}
+
+def apply_coord_flag(
+    cfg: CliConfig,
+    flag: str,
+    next_val: str,
+) -> result<CliConfig, AisError> effect alloc {
+    var c = cfg
+    val parsed = safe_parse_float(next_val)
+    if is_none(parsed) {
+        return err(
+            AisError.ValidationFailed(f"{flag} expects decimal coordinate, got '{next_val}'"),
+        )
+    }
+    if flag == "--lat" {
+        val _valid = parse_geo_lat(unwrap(parsed))?
+        c.custom_lat = unwrap(parsed)
+        c.has_custom_coord = true
+        return ok(c)
+    }
+    val _valid = parse_geo_lon(unwrap(parsed))?
+    c.custom_lon = unwrap(parsed)
+    c.has_custom_coord = true
+    return ok(c)
+}
+
+/// Parse command-line arguments into validated `CliConfig`.
+pub def parse_cli_args(argv: list<str>) -> result<CliConfig, AisError> effect alloc {
+    var cfg = CliConfig {}
+    var i = 1
+    while i < list_len(argv) {
+        val arg = list_get(argv, i)
+        if arg == "--help" || arg == "-h" {
+            cfg.show_help = true
+            i = i + 1
+        } else if arg == "--offline" {
+            cfg.offline = true
+            i = i + 1
+        } else if arg == "--gui" {
+            cfg.gui_mode = true
+            i = i + 1
+        } else if arg == "--gui-headless" {
+            cfg.gui_headless = true
+            i = i + 1
+        } else {
+            if i + 1 >= list_len(argv) {
+                return err(AisError.ValidationFailed(f"flag '{arg}' requires a value"))
+            }
+            val nxt = list_get(argv, i + 1)
+            cfg = if arg == "--lat" || arg == "--lon" {
+                apply_coord_flag(cfg, arg, nxt)?
+            } else {
+                apply_flag_pair(cfg, arg, nxt)?
+            }
+            i = i + 2
+        }
+    }
+    return ok(cfg)
+}
+
+def print_usage() -> i64 effect io {
+    println("AIS Sentinel - Live Marine, NMEA-0183 & std.ais Active-Inference Safety Monitor")
+    println("Usage:")
+    println("  ais_sentinel [--corridor gulf_of_finland|aland_sea|skagerrak|dover_strait]")
+    println("               [--nmea \"!AIVDM,...\"] [--nmea-file <path>]")
+    println("               [--lat <deg> --lon <deg> --label <name>]")
+    println("               [--state-dir <dir>] [--json <out.json>] [--offline]")
+    println("               [--gui] [--gui-headless] [--gui-snapshot <out.png>]")
+    println("               [--web-mirror <port>] [--help]")
+    return 0
+}
+
+def load_nmea_file_contacts(path: str) -> result<CorridorScenario, AisError> effect alloc, fs, io {
+    val lines = when read_lines(path) {
+        ok(ls) => ls,
+        err(msg) => {
+            return err(AisError.IoFailed(f"cannot read NMEA file '{path}': {msg}"))
+        },
+    }
+    val targets: list<VesselContact> = list()
+    for i in 0..list_len(lines) {
+        val line = trim(list_get(lines, i))
+        if len(line) > 0 && !starts_with(line, "#") {
+            val pair = decode_nmea_aivdm(line, f"NMEA-{i + 1}")?
+            list_push(targets, pair.1)
+        }
+    }
+    if list_len(targets) == 0 {
+        return err(AisError.ParseFailed(f"no valid !AIVDM sentences found in '{path}'"))
+    }
+    val first = list_get(targets, 0)
+    val own = custom_own_ship(first.lat, first.lon)?
+    return ok(
+        CorridorScenario { corridor_name: f"nmea-file:{path}", own_ship: own, targets: targets },
+    )
+}
+
+record WeatherGridCache {
+    keys: list<str>,
+    weathers: list<MarineWeather>,
+    isos: list<str>,
+    live_flags: list<i64>,
+    fetched_ms: list<i64>,
+}
+
+record LiveCaches {
+    vessels: VesselMetaCache,
+    weather: WeatherGridCache,
+}
+
+record AcquireBatchResult {
+    env: StageEnvelope<DecodedNmeaWitness, ListBox, VesselContact>,
+    feed_source: str,
+    feed_ok: bool,
+    status_note: str,
+    observed_iso: str,
+    cache: VesselMetaCache,
+}
+
+def weather_grid_new() -> WeatherGridCache effect alloc {
+    val ks: list<str> = list()
+    val wxs: list<MarineWeather> = list()
+    val isos: list<str> = list()
+    val lfs: list<i64> = list()
+    val fms: list<i64> = list()
+    return WeatherGridCache {
+        keys: ks,
+        weathers: wxs,
+        isos: isos,
+        live_flags: lfs,
+        fetched_ms: fms,
+    }
+}
+
+def round_grid_cell(deg: f64) -> i64 {
+    return if deg >= 0.0 { (deg + 0.5) to i64 } else { (deg - 0.5) to i64 }
+}
+
+def wx_cell_key(lat: f64, lon: f64) -> str effect alloc {
+    return f"{round_grid_cell(lat)},{round_grid_cell(lon)}"
+}
+
+def wx_cache_find_fresh(
+    cache: WeatherGridCache,
+    key: str,
+    now: i64,
+) -> option<(MarineWeather, str, i64)> effect alloc {
+    for i in 0..list_len(cache.keys) {
+        if list_get(cache.keys, i) == key && now - list_get(cache.fetched_ms, i) <= 120000 {
+            return some(
+                (
+                    list_get(cache.weathers, i),
+                    list_get(cache.isos, i),
+                    list_get(cache.live_flags, i),
+                ),
+            )
+        }
+    }
+    return none()
+}
+
+def wx_cache_store(
+    cache: WeatherGridCache,
+    key: str,
+    fetched: (MarineWeather, str, i64),
+    now: i64,
+) -> i64 effect alloc {
+    for i in 0..list_len(cache.keys) {
+        if list_get(cache.keys, i) == key {
+            list_set(cache.weathers, i, fetched.0)
+            list_set(cache.isos, i, fetched.1)
+            list_set(cache.live_flags, i, fetched.2)
+            list_set(cache.fetched_ms, i, now)
+            return 0
+        }
+    }
+    list_push(cache.keys, key)
+    list_push(cache.weathers, fetched.0)
+    list_push(cache.isos, fetched.1)
+    list_push(cache.live_flags, fetched.2)
+    list_push(cache.fetched_ms, now)
+    return 0
+}
+
+def fetch_weather_step_cached(
+    cache: WeatherGridCache,
+    lat: f64,
+    lon: f64,
+    offline: bool,
+) -> (MarineWeather, str, i64) effect net, alloc, io, thread, time {
+    if offline {
+        return (offline_baseline_weather(lat, lon), "offline-baseline", 0)
+    }
+    val key = wx_cell_key(lat, lon)
+    val now = now_ms()
+    return when wx_cache_find_fresh(cache, key, now) {
+        some(hit) => hit,
+        none => {
+            val fetched = fetch_weather_step(lat, lon, false)
+            val _s = wx_cache_store(cache, key, fetched, now_ms())
+            fetched
+        },
+    }
+}
+
+def collect_missing_wx_cells(
+    cache: WeatherGridCache,
+    targets: list<VesselContact>,
+    now: i64,
+) -> list<(str, f64, f64)> effect alloc {
+    val missing: list<(str, f64, f64)> = list()
+    for i in 0..list_len(targets) {
+        val tgt = list_get(targets, i)
+        val key = wx_cell_key(tgt.lat.deg, tgt.lon.deg)
+        if is_none(wx_cache_find_fresh(cache, key, now)) {
+            var seen = false
+            for j in 0..list_len(missing) {
+                if list_get(missing, j).0 == key {
+                    seen = true
+                }
+            }
+            if !seen && list_len(missing) < 4 {
+                list_push(missing, (key, tgt.lat.deg, tgt.lon.deg))
+            }
+        }
+    }
+    return missing
+}
+
+def prewarm_target_weather_cells(
+    cache: WeatherGridCache,
+    targets: list<VesselContact>,
+    offline: bool,
+) -> i64 effect net, alloc, io, thread, time {
+    if offline || list_len(targets) == 0 {
+        return 0
+    }
+    val missing = collect_missing_wx_cells(cache, targets, now_ms())
+    val pending = list_len(missing)
+    if pending <= 1 {
+        return 0
+    }
+    val wx_ch: chan<(f64, f64, MarineWeather, str, i64)> = channel(8)
+    for i in 0..pending {
+        val cell = list_get(missing, i)
+        val clat = cell.1
+        val clon = cell.2
+        spawn {
+            val res = fetch_weather_step(clat, clon, false)
+            send(wx_ch, (clat, clon, res.0, res.1, res.2))
+        }
+    }
+    for _k in 0..pending {
+        val item = recv(wx_ch)
+        val key = wx_cell_key(item.0, item.1)
+        val _s = wx_cache_store(cache, key, (item.2, item.3, item.4), now_ms())
+    }
+    return pending
+}
+
+def wrap_batch_env(
+    corridor: str,
+    own: VesselContact,
+    src_kind: str,
+    targets: list<VesselContact>,
+) -> StageEnvelope<DecodedNmeaWitness, ListBox, VesselContact> effect alloc {
+    val w = DecodedNmeaWitness {
+        corridor: corridor,
+        own_ship: own,
+        source_kind: src_kind,
+    }
+    return StageEnvelope { witness: w, container: ListBox { items: passthrough_hkt(targets) } }
+}
+
+def acquire_corridor_with_meta(
+    cfg: CliConfig,
+    cache_in: VesselMetaCache,
+) -> result<AcquireBatchResult, AisError> effect net, fs, io, alloc, thread {
+    if len(cfg.nmea_file) > 0 {
+        val scen = load_nmea_file_contacts(cfg.nmea_file)?
+        val env = wrap_batch_env(scen.corridor_name, scen.own_ship, "nmea-file", scen.targets)
+        return ok(
+            AcquireBatchResult {
+                env: env,
+                feed_source: "nmea-file",
+                feed_ok: true,
+                status_note: f"NMEA-0183 file: {cfg.nmea_file}",
+                observed_iso: "nmea-file",
+                cache: cache_in,
+            },
+        )
+    }
+    if cfg.offline {
+        val scen = corridor_scenario(cfg.corridor)?
+        val env = wrap_batch_env(scen.corridor_name, scen.own_ship, "offline-tss-sim", scen.targets)
+        return ok(
+            AcquireBatchResult {
+                env: env,
+                feed_source: "offline-tss-sim",
+                feed_ok: true,
+                status_note: "Offline TSS Simulation (synthetic waypoints)",
+                observed_iso: "offline-sim",
+                cache: cache_in,
+            },
+        )
+    }
+    val live = fetch_live_ais_corridor(
+        cfg.corridor,
+        cfg.custom_lat,
+        cfg.custom_lon,
+        cfg.custom_label,
+        cache_in,
+    )
+    val env = wrap_batch_env(live.corridor_name, live.own_ship, live.feed_source, live.targets)
+    return ok(
+        AcquireBatchResult {
+            env: env,
+            feed_source: live.feed_source,
+            feed_ok: live.feed_ok,
+            status_note: live.status_note,
+            observed_iso: live.observed_iso,
+            cache: live.cache,
+        },
+    )
+}
+
+def stage_acquire_batch(
+    cfg: CliConfig,
+) -> result<
+    StageEnvelope<DecodedNmeaWitness, ListBox, VesselContact>,
+    AisError
+> effect net, fs, io, alloc, thread {
+    val res = acquire_corridor_with_meta(cfg, vessel_cache_new())?
+    return ok(res.env)
+}
+
+def fetch_weather_step(
+    lat: f64,
+    lon: f64,
+    offline: bool,
+) -> (MarineWeather, str, i64) effect net, alloc, io, thread {
+    if offline {
+        return (offline_baseline_weather(lat, lon), "offline-baseline", 0)
+    }
+    return when fetch_live_weather_pair(lat, lon) {
+        ok(pair) => (pair.0, pair.1, 1),
+        err(e) => {
+            val msg = ais_error_message(e)
+            println(f"warn: live Open-Meteo fallback for ({to_str(lat)}, {to_str(lon)}): {msg}")
+            (offline_baseline_weather(lat, lon), "fallback-offline", 0)
+        },
+    }
+}
+
+def stage_sense_and_pilot_cached(
+    env: StageEnvelope<DecodedNmeaWitness, ListBox, VesselContact>,
+    engine_in: PilotEngine,
+    wx_cache: WeatherGridCache,
+    offline: bool,
+) -> (
+    StageEnvelope<SeaStateWitness, ListBox, SentinelDecision>,
+    PilotEngine,
+) effect net, alloc, io, thread, time {
+    var eng = engine_in
+    val decisions: list<SentinelDecision> = list()
+    var live_cnt = 0
+    var last_iso = "offline"
+    val targets = env.container.items
+    val _warmed = prewarm_target_weather_cells(wx_cache, targets, offline)
+    for i in 0..list_len(targets) {
+        val tgt = list_get(targets, i)
+        val enc = compute_encounter_cpa(env.witness.own_ship, tgt)
+        val wx_t = fetch_weather_step_cached(wx_cache, tgt.lat.deg, tgt.lon.deg, offline)
+        live_cnt = live_cnt + wx_t.2
+        last_iso = wx_t.1
+        val step = evaluate_contact(eng, tgt, enc, wx_t.0)
+        eng = step.engine
+        list_push(decisions, step.decision)
+    }
+    val w = SeaStateWitness {
+        live_queries: live_cnt,
+        offline_used: offline,
+        observed_iso: last_iso,
+    }
+    val out = StageEnvelope { witness: w, container: ListBox { items: passthrough_hkt(decisions) } }
+    return (out, eng)
+}
+
+def stage_sense_and_pilot_batch(
+    env: StageEnvelope<DecodedNmeaWitness, ListBox, VesselContact>,
+    engine_in: PilotEngine,
+    offline: bool,
+) -> (
+    StageEnvelope<SeaStateWitness, ListBox, SentinelDecision>,
+    PilotEngine,
+) effect net, alloc, io, thread, time {
+    return stage_sense_and_pilot_cached(env, engine_in, weather_grid_new(), offline)
+}
+
+def build_fleet_summary(
+    corridor_name: str,
+    corridor_kind: CorridorKind,
+    env: StageEnvelope<SeaStateWitness, ListBox, SentinelDecision>,
+    pomdp_path: str,
+) -> FleetSummary effect alloc {
+    val decs = env.container.items
+    val n = list_len(decs)
+    val overrides = filter_list_gen(decs, |d: SentinelDecision| d.verdict.overridden)
+    val min_cpa = fold_list_gen(
+        decs,
+        999.0,
+        |m: f64, d: SentinelDecision| if d.encounter.cpa_nm < m { d.encounter.cpa_nm } else { m },
+    )
+    val max_wave = fold_list_gen(
+        decs,
+        0.0,
+        |
+            m: f64,
+            d: SentinelDecision
+        | if d.weather.wave_height_m > m { d.weather.wave_height_m } else { m },
+    )
+    val max_gust = fold_list_gen(
+        decs,
+        0.0,
+        |
+            m: f64,
+            d: SentinelDecision
+        | if d.weather.gust_knots > m { d.weather.gust_knots } else { m },
+    )
+    val sum_health = fold_list_gen(
+        decs,
+        0.0,
+        |acc: f64, d: SentinelDecision| acc + d.verdict.homeostat_health,
+    )
+    val avg_h = if n > 0 { sum_health / to_f64(n) } else { 1.0 }
+    return FleetSummary {
+        corridor: corridor_name,
+        corridor_kind: corridor_kind,
+        waypoint_count: n,
+        override_count: list_len(overrides),
+        min_cpa_nm: if n > 0 { min_cpa } else { 0.0 },
+        max_wave_m: max_wave,
+        max_gust_kn: max_gust,
+        avg_health: avg_h,
+        pomdp_saved_path: pomdp_path,
+        observed_at_iso: env.witness.observed_iso,
+    }
+}
+
+def emit_batch_report(
+    cfg: CliConfig,
+    src_env: StageEnvelope<DecodedNmeaWitness, ListBox, VesselContact>,
+    cert: StageBox<AisGovernedWitness, ListBox<SentinelDecision>>,
+) -> result<i64, AisError> effect fs, io, alloc {
+    val decs = cert.payload.items
+    println(render_bounded(SingleBox { value: cert.witness.summary }))
+    println(
+        f"HKT Container : {src_env.container.container_kind()} -> {cert.payload.container_kind()} | {render_bounded(decs)} (populated={cert.payload.is_populated()})",
+    )
+    if list_len(decs) > 0 {
+        var top_haz = make_initial_hazard4(list_get(decs, 0))
+        for i in 0..list_len(decs) {
+            val d = list_get(decs, i)
+            top_haz = insert_hazard4(top_haz, d)
+            println(render_bounded(SingleBox { value: d }))
+        }
+        val names = map_list_gen(decs, |d: SentinelDecision| d.contact.label)
+        println(
+            f"Top Hazard (#{top_haz.slots[0].risk_score}/100): {top_haz.slots[0].contact.label} across {list_len(names)} contacts",
+        )
+    }
+    if len(cfg.json_path) > 0 {
+        val written = write_sentinel_json(cert.witness.summary, decs, cfg.json_path)?
+        println(f"Wrote JSON report: {written}")
+    }
+    return ok(0)
+}
+
+def run_batch_pipeline(
+    cfg: CliConfig,
+) -> result<i64, AisError> effect net, fs, io, alloc, thread, time {
+    val acq = stage_acquire_batch(cfg)?
+    val eng0 = init_pilot_engine(cfg.state_dir)
+    if eng0.loaded_from_disk {
+        println(f"Loaded persisted POMDP priors: {eng0.state_path}")
+    }
+    val sensed = stage_sense_and_pilot_batch(acq, eng0, cfg.offline)
+    val saved_path = save_pilot_engine(sensed.1, cfg.state_dir)?
+    val summary = build_fleet_summary(acq.witness.corridor, cfg.corridor, sensed.0, saved_path)
+    val witness = AisGovernedWitness { summary: summary }
+    val cert = seal_stage(witness, sensed.0.container)
+    return emit_batch_report(cfg, acq, cert)
+}
+
+def acquire_singleton_contact(
+    cfg: CliConfig,
+) -> result<(DecodedNmeaWitness, OptionBox<VesselContact>), AisError> effect alloc {
+    if len(cfg.nmea_raw) > 0 {
+        val pair = decode_nmea_aivdm(cfg.nmea_raw, cfg.custom_label)?
+        val target = pair.1
+        val own = custom_own_ship(target.lat, target.lon)?
+        val w = DecodedNmeaWitness {
+            corridor: "nmea-aivdm",
+            own_ship: own,
+            source_kind: "aivdm-frame",
+        }
+        return ok((w, OptionBox { maybe: passthrough_hkt(some(target)) }))
+    }
+    val lat = parse_geo_lat(cfg.custom_lat)?
+    val lon = parse_geo_lon(cfg.custom_lon)?
+    val target = materialize_contact(
+        ContactSpec {
+            label: cfg.custom_label,
+            mmsi_raw: 230990001,
+            lat_deg: lat.deg,
+            lon_deg: lon.deg,
+            sog_kn: 12.5,
+            cog_deg: 180.0,
+            heading_deg: 180,
+            nav_status: NavStatus.UnderWayEngine,
+        },
+    )?
+    val own = custom_own_ship(target.lat, target.lon)?
+    val w = DecodedNmeaWitness {
+        corridor: "custom-coord",
+        own_ship: own,
+        source_kind: "custom-lat-lon",
+    }
+    return ok((w, OptionBox { maybe: passthrough_hkt(some(target)) }))
+}
+
+def run_singleton_pipeline(
+    cfg: CliConfig,
+) -> result<i64, AisError> effect net, fs, io, alloc, thread {
+    val pair = acquire_singleton_contact(cfg)?
+    val env_raw: StageEnvelope<
+        DecodedNmeaWitness,
+        OptionBox,
+        VesselContact
+    > = StageEnvelope { witness: pair.0, container: pair.1 }
+    val target_opt = map_option_gen(env_raw.container.maybe, |c: VesselContact| c)
+    val opt_label = render_bounded(target_opt)
+    val tgt = when target_opt {
+        some(v) => v,
+        none => {
+            return err(AisError.ValidationFailed("missing singleton vessel target"))
+        },
+    }
+    val eng0 = init_pilot_engine(cfg.state_dir)
+    val enc = compute_encounter_cpa(env_raw.witness.own_ship, tgt)
+    val wx_t = fetch_weather_step(tgt.lat.deg, tgt.lon.deg, cfg.offline)
+    val step = evaluate_contact(eng0, tgt, enc, wx_t.0)
+    val saved_path = save_pilot_engine(step.engine, cfg.state_dir)?
+    val dec_box = map_single_gen(SingleBox { value: step.decision }, |d: SentinelDecision| d)
+    val d_list: list<SentinelDecision> = list()
+    list_push(d_list, dec_box.value)
+    val summary = FleetSummary {
+        corridor: env_raw.witness.corridor,
+        corridor_kind: CorridorKind.CustomCoord,
+        waypoint_count: 1,
+        override_count: if dec_box.value.verdict.overridden { 1 } else { 0 },
+        min_cpa_nm: enc.cpa_nm,
+        max_wave_m: wx_t.0.wave_height_m,
+        max_gust_kn: wx_t.0.gust_knots,
+        avg_health: dec_box.value.verdict.homeostat_health,
+        pomdp_saved_path: saved_path,
+        observed_at_iso: wx_t.1,
+    }
+    val cert = seal_stage(AisGovernedWitness { summary: summary }, dec_box)
+    println(render_bounded(SingleBox { value: cert.witness.summary }))
+    println(
+        f"HKT Container : {env_raw.container.container_kind()} -> {cert.payload.container_kind()} | {opt_label} (n={cert.payload.cardinality()})",
+    )
+    println(render_bounded(cert.payload))
+    if len(cfg.json_path) > 0 {
+        val written = write_sentinel_json(summary, d_list, cfg.json_path)?
+        println(f"Wrote JSON report: {written}")
+    }
+    return ok(0)
+}
+
+def advance_contact_kinematics(c: VesselContact, tick_num: i64) -> VesselContact {
+    val steps = tick_num % 20
+    if steps <= 0 {
+        return c
+    }
+    val rad = deg_to_rad(c.cog_deg)
+    val dist_nm = c.sog.value * 0.015 * to_f64(steps)
+    val next_lat_deg = c.lat.deg + (dist_nm * cos(rad)) / 60.0
+    val cos_lat = cos(deg_to_rad(c.lat.deg))
+    val lon_scale = if abs_f64(cos_lat) > 0.15 { abs_f64(cos_lat) } else { 0.15 }
+    val next_lon_deg = c.lon.deg + (dist_nm * sin(rad)) / (60.0 * lon_scale)
+    val lat_v = when parse_geo_lat(next_lat_deg) {
+        ok(v) => v,
+        err(_e) => c.lat,
+    }
+    val lon_v = when parse_geo_lon(next_lon_deg) {
+        ok(v) => v,
+        err(_e) => c.lon,
+    }
+    return VesselContact {
+        label: c.label,
+        mmsi: c.mmsi,
+        msg_type: c.msg_type,
+        lat: lat_v,
+        lon: lon_v,
+        sog: c.sog,
+        cog_deg: c.cog_deg,
+        heading_deg: c.heading_deg,
+        nav_status: c.nav_status,
+    }
+}
+
+def advance_corridor_env(
+    src_env: StageEnvelope<DecodedNmeaWitness, ListBox, VesselContact>,
+    tick_num: i64,
+) -> StageEnvelope<DecodedNmeaWitness, ListBox, VesselContact> effect alloc {
+    val moved_own = advance_contact_kinematics(src_env.witness.own_ship, tick_num)
+    val moved_targets = map_list_gen(
+        src_env.container.items,
+        |c: VesselContact| advance_contact_kinematics(c, tick_num),
+    )
+    val w = DecodedNmeaWitness {
+        corridor: src_env.witness.corridor,
+        own_ship: moved_own,
+        source_kind: src_env.witness.source_kind,
+    }
+    return StageEnvelope { witness: w, container: ListBox { items: moved_targets } }
+}
+
+record ConsoleEvalResult {
+    summary: FleetSummary,
+    own_ship: VesselContact,
+    decisions: list<SentinelDecision>,
+    engine: PilotEngine,
+    status_note: str,
+}
+
+record WorkerCmd {
+    corridor: CorridorKind,
+    offline: bool,
+    paused: bool,
+    force_refresh: bool,
+    reset_tick: bool,
+}
+
+record WorkerState {
+    cfg: CliConfig,
+    paused: bool,
+    tick: i64,
+    force_now: bool,
+    stop: bool,
+}
+
+def corridor_eq_cfg(a: CorridorKind, b: CorridorKind) -> bool {
+    return corridor_display_name(a) == corridor_display_name(b)
+}
+
+def fmt_obs_line(acq: AcquireBatchResult, wx_obs: str) -> str effect alloc {
+    if len(acq.observed_iso) > 0 && acq.observed_iso != "live-utc" {
+        return acq.observed_iso
+    }
+    return wx_obs
+}
+
+def evaluate_empty_live_weather(
+    acq: AcquireBatchResult,
+    cfg: CliConfig,
+    engine_in: PilotEngine,
+    wx_cache: WeatherGridCache,
+) -> ConsoleEvalResult effect net, alloc, io, thread, time {
+    val own = acq.env.witness.own_ship
+    val empty_decs: list<SentinelDecision> = list()
+    val wx_t = fetch_weather_step_cached(wx_cache, own.lat.deg, own.lon.deg, cfg.offline)
+    val wx = wx_t.0
+    val obs = fmt_obs_line(acq, wx_t.1)
+    val summary = FleetSummary {
+        corridor: acq.env.witness.corridor,
+        corridor_kind: cfg.corridor,
+        waypoint_count: 0,
+        override_count: 0,
+        min_cpa_nm: 0.0,
+        max_wave_m: wx.wave_height_m,
+        max_gust_kn: wx.gust_knots,
+        avg_health: 1.0,
+        pomdp_saved_path: if len(cfg.state_dir) > 0 { cfg.state_dir } else { "ephemeral" },
+        observed_at_iso: obs,
+        feed_source: acq.feed_source,
+        feed_ok: acq.feed_ok,
+    }
+    val w_str = to_str((wx.wave_height_m * 10.0 + 0.5) to i64)
+    val g_str = to_str((wx.gust_knots * 10.0 + 0.5) to i64)
+    val note = f"{acq.status_note} | Sea {to_i64_tenths_str(w_str)}m, Gust {to_i64_tenths_str(g_str)}kn"
+    return ConsoleEvalResult {
+        summary: summary,
+        own_ship: own,
+        decisions: empty_decs,
+        engine: engine_in,
+        status_note: note,
+    }
+}
+
+def to_i64_tenths_str(scaled: str) -> str effect alloc {
+    val n = len(scaled)
+    if n <= 1 {
+        return f"0.{scaled}"
+    }
+    val head = slice(scaled, 0, n - 1)
+    val tail = slice(scaled, n - 1, n)
+    return f"{head}.{tail}"
+}
+
+def assemble_fleet_summary(
+    cfg: CliConfig,
+    corridor: str,
+    acq: AcquireBatchResult,
+    sea_env: StageEnvelope<SeaStateWitness, ListBox, SentinelDecision>,
+) -> FleetSummary effect alloc {
+    val pomdp_path = if len(cfg.state_dir) > 0 { cfg.state_dir } else { "ephemeral" }
+    val base_sum = build_fleet_summary(corridor, cfg.corridor, sea_env, pomdp_path)
+    return FleetSummary {
+        corridor: base_sum.corridor,
+        corridor_kind: base_sum.corridor_kind,
+        waypoint_count: base_sum.waypoint_count,
+        override_count: base_sum.override_count,
+        min_cpa_nm: base_sum.min_cpa_nm,
+        max_wave_m: base_sum.max_wave_m,
+        max_gust_kn: base_sum.max_gust_kn,
+        avg_health: base_sum.avg_health,
+        pomdp_saved_path: base_sum.pomdp_saved_path,
+        observed_at_iso: fmt_obs_line(acq, base_sum.observed_at_iso),
+        feed_source: acq.feed_source,
+        feed_ok: acq.feed_ok,
+    }
+}
+
+def acquire_with_anchor_prewarm(
+    cfg: CliConfig,
+    caches: LiveCaches,
+) -> result<AcquireBatchResult, AisError> effect net, fs, io, alloc, thread, time {
+    if cfg.offline || len(cfg.nmea_file) > 0 {
+        return acquire_corridor_with_meta(cfg, caches.vessels)
+    }
+    val anchor = sector_station_contact(
+        cfg.corridor,
+        cfg.custom_lat,
+        cfg.custom_lon,
+        cfg.custom_label,
+    )
+    val key = wx_cell_key(anchor.lat.deg, anchor.lon.deg)
+    val has_fresh = is_some(wx_cache_find_fresh(caches.weather, key, now_ms()))
+    if has_fresh {
+        return acquire_corridor_with_meta(cfg, caches.vessels)
+    }
+    val warm_ch: chan<(MarineWeather, str, i64)> = channel(1)
+    val alat = anchor.lat.deg
+    val alon = anchor.lon.deg
+    spawn {
+        send(warm_ch, fetch_weather_step(alat, alon, false))
+    }
+    val acq_res = acquire_corridor_with_meta(cfg, caches.vessels)
+    val warm_wx = recv(warm_ch)
+    if warm_wx.2 > 0 {
+        val _s = wx_cache_store(caches.weather, key, warm_wx, now_ms())
+    }
+    return acq_res
+}
+
+def evaluate_console_cached(
+    cfg: CliConfig,
+    engine_in: PilotEngine,
+    tick_num: i64,
+    caches: LiveCaches,
+) -> (result<ConsoleEvalResult, AisError>, LiveCaches) effect net, fs, io, alloc, thread, time {
+    val acq = when acquire_with_anchor_prewarm(cfg, caches) {
+        ok(r) => r,
+        err(e) => {
+            return (err(e), caches)
+        },
+    }
+    val next_caches = LiveCaches { vessels: acq.cache, weather: caches.weather }
+    if !cfg.offline && list_len(acq.env.container.items) == 0 {
+        return (ok(evaluate_empty_live_weather(acq, cfg, engine_in, caches.weather)), next_caches)
+    }
+    val env_step = if cfg.offline { advance_corridor_env(acq.env, tick_num) } else { acq.env }
+    val sea_pair = stage_sense_and_pilot_cached(env_step, engine_in, caches.weather, cfg.offline)
+    val summary = assemble_fleet_summary(cfg, env_step.witness.corridor, acq, sea_pair.0)
+    return (
+        ok(
+            ConsoleEvalResult {
+                summary: summary,
+                own_ship: env_step.witness.own_ship,
+                decisions: sea_pair.0.container.items,
+                engine: sea_pair.1,
+                status_note: acq.status_note,
+            },
+        ),
+        next_caches,
+    )
+}
+
+def evaluate_console_full(
+    cfg: CliConfig,
+    engine_in: PilotEngine,
+    tick_num: i64,
+    cache_in: VesselMetaCache,
+) -> (
+    result<ConsoleEvalResult, AisError>,
+    VesselMetaCache,
+) effect net, fs, io, alloc, thread, time {
+    val res = evaluate_console_cached(
+        cfg,
+        engine_in,
+        tick_num,
+        LiveCaches { vessels: cache_in, weather: weather_grid_new() },
+    )
+    return (res.0, res.1.vessels)
+}
+
+def run_gui_headless(
+    cfg: CliConfig,
+) -> result<i64, AisError> effect net, fs, io, ffi, alloc, random, thread, time {
+    val eng = init_pilot_engine(cfg.state_dir)
+    val snap = evaluate_console_full(cfg, eng, 0, vessel_cache_new()).0?
+    val base_st = init_console_state(snap.summary, snap.own_ship, snap.decisions, cfg.offline)
+    val st = ConsoleState {
+        corridor: base_st.corridor,
+        offline: base_st.offline,
+        tick: base_st.tick,
+        alert_range_nm: base_st.alert_range_nm,
+        filter_text: base_st.filter_text,
+        selected_mmsi: base_st.selected_mmsi,
+        alerts_only: base_st.alerts_only,
+        paused: base_st.paused,
+        loading: false,
+        feed_status: snap.status_note,
+        summary: base_st.summary,
+        own_ship: base_st.own_ship,
+        decisions: base_st.decisions,
+        conf_history: base_st.conf_history,
+        cpa_history: base_st.cpa_history,
+    }
+    var tree = ui_new()
+    val root = build_ais_console_tree(st, tree)
+    tree = ui_layout(ui_set_root(tree, root), 1280.0, 800.0)
+    val out_path = if len(cfg.gui_snapshot_path) > 0 {
+        cfg.gui_snapshot_path
+    } else {
+        "ais_sentinel_snapshot.png"
+    }
+    val px = when ui_render_headless(
+        tree,
+        ui_state_new(),
+        UiSize { w: 1280.0, h: 800.0 },
+        out_path,
+    ) {
+        ok(c) => c,
+        err(msg) => {
+            return err(AisError.IoFailed(f"headless GUI render failed: {msg}"))
+        },
+    }
+    println(
+        f"AIS Sentinel headless PNG snapshot saved to {out_path} (center rgba=({px.r},{px.g},{px.b},{px.a})) | feed={snap.status_note}",
+    )
+    return ok(0)
+}
+
+def run_web_mirror(
+    cfg: CliConfig,
+) -> result<i64, AisError> effect net, fs, io, alloc, random, thread, time {
+    val eng = init_pilot_engine(cfg.state_dir)
+    val snap = evaluate_console_full(cfg, eng, 0, vessel_cache_new()).0?
+    val base_st = init_console_state(snap.summary, snap.own_ship, snap.decisions, cfg.offline)
+    val st = ConsoleState {
+        corridor: base_st.corridor,
+        offline: base_st.offline,
+        tick: base_st.tick,
+        alert_range_nm: base_st.alert_range_nm,
+        filter_text: base_st.filter_text,
+        selected_mmsi: base_st.selected_mmsi,
+        alerts_only: base_st.alerts_only,
+        paused: base_st.paused,
+        loading: false,
+        feed_status: snap.status_note,
+        summary: base_st.summary,
+        own_ship: base_st.own_ship,
+        decisions: base_st.decisions,
+        conf_history: base_st.conf_history,
+        cpa_history: base_st.cpa_history,
+    }
+    var tree = ui_new()
+    val root = build_ais_console_tree(st, tree)
+    tree = ui_layout(ui_set_root(tree, root), 1280.0, 800.0)
+    val html_resp = ui_http_mirror_response(tree, "AIS Sentinel - Maritime Radar Console")
+    val json_resp = http_response(200, "OK", render_sentinel_json(snap.summary, snap.decisions))
+    println(
+        f"AIS Sentinel web mirror listening on http://127.0.0.1:{cfg.web_mirror_port} (/ or /json)",
+    )
+    val _srv = http_serve(
+        cfg.web_mirror_port,
+        |req: str| if contains(req, "GET /json") { json_resp } else { html_resp },
+    )
+    return ok(0)
+}
+
+def apply_worker_cmd(ws_in: WorkerState, cmd: WorkerCmd) -> WorkerState effect alloc {
+    val cor_diff = !corridor_eq_cfg(ws_in.cfg.corridor, cmd.corridor)
+    val mode_diff = ws_in.cfg.offline != cmd.offline
+    val next_cfg = CliConfig {
+        corridor: cmd.corridor,
+        nmea_raw: ws_in.cfg.nmea_raw,
+        nmea_file: ws_in.cfg.nmea_file,
+        custom_lat: ws_in.cfg.custom_lat,
+        custom_lon: ws_in.cfg.custom_lon,
+        has_custom_coord: ws_in.cfg.has_custom_coord,
+        custom_label: ws_in.cfg.custom_label,
+        state_dir: ws_in.cfg.state_dir,
+        json_path: ws_in.cfg.json_path,
+        offline: cmd.offline,
+        show_help: false,
+    }
+    val reset_tk = cmd.reset_tick || cor_diff || mode_diff
+    val next_tk = if reset_tk { 0 } else { ws_in.tick }
+    val need_now = ws_in.force_now || cor_diff || mode_diff || cmd.force_refresh || cmd.reset_tick
+    return WorkerState {
+        cfg: next_cfg,
+        paused: cmd.paused,
+        tick: next_tk,
+        force_now: need_now,
+        stop: ws_in.stop,
+    }
+}
+
+def drain_worker_cmds(cmd_ch: chan<WorkerCmd>, ws_in: WorkerState) -> WorkerState effect alloc {
+    var ws = ws_in
+    var keep_draining = true
+    while keep_draining {
+        when chan_try_recv(cmd_ch) {
+            some(cmd) => {
+                ws = apply_worker_cmd(ws, cmd)
+            },
+            none => {
+                keep_draining = false
+            },
+        }
+    }
+    return ws
+}
+
+def wait_worker_interval(
+    cmd_ch: chan<WorkerCmd>,
+    stop_ch: chan<i64>,
+    ws_in: WorkerState,
+    total_ms: i64,
+) -> WorkerState effect alloc, time {
+    var ws = ws_in
+    var elapsed = 0
+    while elapsed < total_ms && !ws.stop && !ws.force_now {
+        val _s = timeout(50)
+        elapsed = elapsed + 50
+        if is_some(chan_try_recv(stop_ch)) {
+            ws.stop = true
+        } else {
+            ws = drain_worker_cmds(cmd_ch, ws)
+        }
+    }
+    return ws
+}
+
+def clone_str_detached(s: str) -> str effect alloc {
+    if len(s) == 0 {
+        return ""
+    }
+    return "" + s
+}
+
+def clone_corridor_detached(k: CorridorKind) -> CorridorKind {
+    return when k {
+        CorridorKind.GulfOfFinland => CorridorKind.GulfOfFinland,
+        CorridorKind.AlandSea => CorridorKind.AlandSea,
+        CorridorKind.DoverStrait => CorridorKind.DoverStrait,
+        CorridorKind.Skagerrak => CorridorKind.Skagerrak,
+        CorridorKind.CustomCoord => CorridorKind.CustomCoord,
+    }
+}
+
+def clone_nav_status_detached(ns: NavStatus) -> NavStatus {
+    return when ns {
+        NavStatus.UnderWayEngine => NavStatus.UnderWayEngine,
+        NavStatus.AtAnchor => NavStatus.AtAnchor,
+        NavStatus.NotUnderCommand => NavStatus.NotUnderCommand,
+        NavStatus.RestrictedManeuver => NavStatus.RestrictedManeuver,
+        NavStatus.ConstrainedDraught => NavStatus.ConstrainedDraught,
+        NavStatus.Moored => NavStatus.Moored,
+        NavStatus.Aground => NavStatus.Aground,
+        NavStatus.Fishing => NavStatus.Fishing,
+        NavStatus.UnderWaySailing => NavStatus.UnderWaySailing,
+        NavStatus.Reserved(n) => NavStatus.Reserved(n),
+    }
+}
+
+def clone_sea_regime_detached(r: SeaRegime) -> SeaRegime {
+    return when r {
+        SeaRegime.CalmPassage => SeaRegime.CalmPassage,
+        SeaRegime.SwellBuild => SeaRegime.SwellBuild,
+        SeaRegime.SquallTraffic => SeaRegime.SquallTraffic,
+        SeaRegime.StormHazard => SeaRegime.StormHazard,
+    }
+}
+
+def clone_helm_detached(h: HelmAction) -> HelmAction {
+    return when h {
+        HelmAction.MaintainCourse => HelmAction.MaintainCourse,
+        HelmAction.ReduceSpeedWeathervane => HelmAction.ReduceSpeedWeathervane,
+        HelmAction.AlterCourseSeekShelter => HelmAction.AlterCourseSeekShelter,
+    }
+}
+
+def clone_contact_detached(c: VesselContact) -> VesselContact effect alloc {
+    return VesselContact {
+        label: clone_str_detached(c.label),
+        mmsi: Mmsi {
+            raw: c.mmsi.raw,
+            mid_code: c.mmsi.mid_code,
+            flag_country: clone_str_detached(c.mmsi.flag_country),
+        },
+        msg_type: c.msg_type,
+        lat: GeoLat { deg: c.lat.deg },
+        lon: GeoLon { deg: c.lon.deg },
+        sog: Knots { value: c.sog.value },
+        cog_deg: c.cog_deg,
+        heading_deg: c.heading_deg,
+        nav_status: clone_nav_status_detached(c.nav_status),
+    }
+}
+
+def clone_weather_detached(w: MarineWeather) -> MarineWeather effect alloc {
+    return MarineWeather {
+        lat: w.lat,
+        lon: w.lon,
+        wave_height_m: w.wave_height_m,
+        wave_dir_deg: w.wave_dir_deg,
+        wave_period_s: w.wave_period_s,
+        wind_knots: w.wind_knots,
+        gust_knots: w.gust_knots,
+        wind_dir_deg: w.wind_dir_deg,
+        pressure_hpa: w.pressure_hpa,
+        current_knots: w.current_knots,
+        sea_temp_c: w.sea_temp_c,
+        observed_iso: clone_str_detached(w.observed_iso),
+        live_ok: w.live_ok,
+        note: clone_str_detached(w.note),
+    }
+}
+
+def clone_verdict_detached(v: AisPilotVerdict) -> AisPilotVerdict effect alloc {
+    return AisPilotVerdict {
+        regime: clone_sea_regime_detached(v.regime),
+        proposed_action: clone_helm_detached(v.proposed_action),
+        approved_action: clone_helm_detached(v.approved_action),
+        overridden: v.overridden,
+        safety_rule: clone_str_detached(v.safety_rule),
+        active_inf_conf: v.active_inf_conf,
+        wm_predicted_wave_m: v.wm_predicted_wave_m,
+        wm_predicted_cpa_nm: v.wm_predicted_cpa_nm,
+        homeostat_health: v.homeostat_health,
+        governor_action: clone_str_detached(v.governor_action),
+        ewc_penalty_val: v.ewc_penalty_val,
+        audit_notes: clone_str_detached(v.audit_notes),
+    }
+}
+
+def clone_decision_detached(d: SentinelDecision) -> SentinelDecision effect alloc {
+    return SentinelDecision {
+        contact: clone_contact_detached(d.contact),
+        encounter: EncounterMetrics {
+            own_lat: d.encounter.own_lat,
+            own_lon: d.encounter.own_lon,
+            target_label: clone_str_detached(d.encounter.target_label),
+            target_mmsi: d.encounter.target_mmsi,
+            range_nm: d.encounter.range_nm,
+            bearing_deg: d.encounter.bearing_deg,
+            cpa_nm: d.encounter.cpa_nm,
+            tcpa_min: d.encounter.tcpa_min,
+        },
+        weather: clone_weather_detached(d.weather),
+        verdict: clone_verdict_detached(d.verdict),
+        risk_score: d.risk_score,
+    }
+}
+
+def clone_summary_detached(s: FleetSummary) -> FleetSummary effect alloc {
+    return FleetSummary {
+        corridor: clone_str_detached(s.corridor),
+        corridor_kind: clone_corridor_detached(s.corridor_kind),
+        waypoint_count: s.waypoint_count,
+        override_count: s.override_count,
+        min_cpa_nm: s.min_cpa_nm,
+        max_wave_m: s.max_wave_m,
+        max_gust_kn: s.max_gust_kn,
+        avg_health: s.avg_health,
+        pomdp_saved_path: clone_str_detached(s.pomdp_saved_path),
+        observed_at_iso: clone_str_detached(s.observed_at_iso),
+        feed_source: clone_str_detached(s.feed_source),
+        feed_ok: s.feed_ok,
+    }
+}
+
+def clone_tick_detached(
+    tick_num: i64,
+    cfg: CliConfig,
+    res: ConsoleEvalResult,
+) -> TelemetryTick effect alloc {
+    val decs: list<SentinelDecision> = list()
+    for i in 0..list_len(res.decisions) {
+        list_push(decs, clone_decision_detached(list_get(res.decisions, i)))
+    }
+    return TelemetryTick {
+        tick: tick_num,
+        corridor: clone_corridor_detached(cfg.corridor),
+        offline: cfg.offline,
+        summary: clone_summary_detached(res.summary),
+        own_ship: clone_contact_detached(res.own_ship),
+        decisions: decs,
+        feed_status: clone_str_detached(res.status_note),
+    }
+}
+
+def clone_caches_shallow(src: LiveCaches) -> LiveCaches effect alloc {
+    val ms: list<i64> = list()
+    val ns: list<str> = list()
+    for i in 0..list_len(src.vessels.mmsis) {
+        list_push(ms, list_get(src.vessels.mmsis, i))
+        list_push(ns, list_get(src.vessels.names, i))
+    }
+    val ks: list<str> = list()
+    val wxs: list<MarineWeather> = list()
+    val isos: list<str> = list()
+    val lfs: list<i64> = list()
+    val fms: list<i64> = list()
+    for j in 0..list_len(src.weather.keys) {
+        list_push(ks, list_get(src.weather.keys, j))
+        list_push(wxs, list_get(src.weather.weathers, j))
+        list_push(isos, list_get(src.weather.isos, j))
+        list_push(lfs, list_get(src.weather.live_flags, j))
+        list_push(fms, list_get(src.weather.fetched_ms, j))
+    }
+    return LiveCaches {
+        vessels: VesselMetaCache { mmsis: ms, names: ns },
+        weather: WeatherGridCache {
+            keys: ks,
+            weathers: wxs,
+            isos: isos,
+            live_flags: lfs,
+            fetched_ms: fms,
+        },
+    }
+}
+
+def sync_vessels_detached(dst: VesselMetaCache, src: VesselMetaCache) -> i64 effect alloc {
+    val start = list_len(dst.mmsis)
+    for i in start..list_len(src.mmsis) {
+        if list_len(dst.mmsis) >= 512 {
+            return 0
+        }
+        list_push(dst.mmsis, list_get(src.mmsis, i))
+        list_push(dst.names, clone_str_detached(list_get(src.names, i)))
+    }
+    return 0
+}
+
+def sync_weather_detached(dst: WeatherGridCache, src: WeatherGridCache) -> i64 effect alloc {
+    val orig = list_len(dst.keys)
+    val total = list_len(src.keys)
+    for i in 0..total {
+        val src_ms = list_get(src.fetched_ms, i)
+        if i < orig {
+            if src_ms > list_get(dst.fetched_ms, i) {
+                list_set(dst.weathers, i, clone_weather_detached(list_get(src.weathers, i)))
+                list_set(dst.isos, i, clone_str_detached(list_get(src.isos, i)))
+                list_set(dst.live_flags, i, list_get(src.live_flags, i))
+                list_set(dst.fetched_ms, i, src_ms)
+            }
+        } else if list_len(dst.keys) < 256 {
+            list_push(dst.keys, clone_str_detached(list_get(src.keys, i)))
+            list_push(dst.weathers, clone_weather_detached(list_get(src.weathers, i)))
+            list_push(dst.isos, clone_str_detached(list_get(src.isos, i)))
+            list_push(dst.live_flags, list_get(src.live_flags, i))
+            list_push(dst.fetched_ms, src_ms)
+        }
+    }
+    return 0
+}
+
+def publish_worker_tick_detached(
+    ws: WorkerState,
+    res: ConsoleEvalResult,
+    caches: LiveCaches,
+    src_caches: LiveCaches,
+    tick_ch: chan<TelemetryTick>,
+) -> WorkerState effect alloc {
+    send(tick_ch, clone_tick_detached(ws.tick, ws.cfg, res))
+    val _sv = sync_vessels_detached(caches.vessels, src_caches.vessels)
+    val _sw = sync_weather_detached(caches.weather, src_caches.weather)
+    return WorkerState {
+        cfg: ws.cfg,
+        paused: ws.paused,
+        tick: ws.tick + 1,
+        force_now: false,
+        stop: ws.stop,
+    }
+}
+
+def eval_worker_tick_in_pool(
+    pool: i64,
+    ws: WorkerState,
+    weights: list<f64>,
+    caches: LiveCaches,
+    tick_ch: chan<TelemetryTick>,
+) -> WorkerState effect net, fs, io, alloc, thread, time {
+    val scratch = clone_caches_shallow(caches)
+    val eng = pilot_engine_from_weights(ws.cfg.state_dir, weights)
+    val pair = evaluate_console_cached(ws.cfg, eng, ws.tick, scratch)
+    return when pair.0 {
+        ok(res) => {
+            val _ps = ui_frame_pool_pause()
+            val _sw = pilot_weights_save(res.engine, weights)
+            val nw = publish_worker_tick_detached(ws, res, caches, pair.1, tick_ch)
+            val _rs = ui_frame_pool_resume(pool)
+            nw
+        },
+        err(_e) => {
+            val _ps = ui_frame_pool_pause()
+            val nw = WorkerState {
+                cfg: ws.cfg,
+                paused: ws.paused,
+                tick: ws.tick,
+                force_now: false,
+                stop: ws.stop,
+            }
+            val _rs = ui_frame_pool_resume(pool)
+            nw
+        },
+    }
+}
+
+def run_worker_tick(
+    ws: WorkerState,
+    weights: list<f64>,
+    caches: LiveCaches,
+    tick_ch: chan<TelemetryTick>,
+) -> WorkerState effect net, fs, io, alloc, thread, time {
+    val pool = ui_frame_pool_begin()
+    val next_ws = eval_worker_tick_in_pool(pool, ws, weights, caches, tick_ch)
+    val _dp = ui_frame_pool_destroy(pool)
+    return next_ws
+}
+
+def worker_poll_ms(cfg: CliConfig) -> i64 {
+    if cfg.offline {
+        return 800
+    }
+    return when cfg.corridor {
+        CorridorKind.Skagerrak => 600,
+        _ => 300,
+    }
+}
+
+def spawn_telemetry_worker(
+    cfg: CliConfig,
+    eng_init: PilotEngine,
+    tick_ch: chan<TelemetryTick>,
+    cmd_ch: chan<WorkerCmd>,
+    stop_ch: chan<i64>,
+) -> i64 effect net, fs, io, alloc, thread, time {
+    val weights = pilot_weights_new(eng_init)
+    spawn {
+        var caches = LiveCaches { vessels: vessel_cache_new(), weather: weather_grid_new() }
+        var ws = WorkerState {
+            cfg: cfg,
+            paused: false,
+            tick: if cfg.offline { 1 } else { 0 },
+            force_now: !cfg.offline,
+            stop: false,
+        }
+        while !ws.stop {
+            if is_some(chan_try_recv(stop_ch)) {
+                ws.stop = true
+            } else {
+                ws = drain_worker_cmds(cmd_ch, ws)
+            }
+            if !ws.stop && (ws.force_now || !ws.paused) {
+                ws = run_worker_tick(ws, weights, caches, tick_ch)
+            }
+            ws = drain_worker_cmds(cmd_ch, ws)
+            if !ws.stop && !ws.force_now {
+                ws = wait_worker_interval(cmd_ch, stop_ch, ws, worker_poll_ms(ws.cfg))
+            }
+        }
+    }
+    return 0
+}
+
+def build_initial_desktop_console(
+    cfg: CliConfig,
+    eng_in: PilotEngine,
+) -> result<
+    (ConsoleState, PilotEngine),
+    AisError
+> effect net, fs, io, alloc, random, thread, throw, time {
+    if cfg.offline || len(cfg.nmea_file) > 0 {
+        val snap = evaluate_console_full(cfg, eng_in, 0, vessel_cache_new()).0?
+        val st0 = init_console_state(snap.summary, snap.own_ship, snap.decisions, cfg.offline)
+        return ok(
+            (
+                ConsoleState {
+                    corridor: st0.corridor,
+                    offline: st0.offline,
+                    tick: st0.tick,
+                    alert_range_nm: st0.alert_range_nm,
+                    filter_text: st0.filter_text,
+                    selected_mmsi: st0.selected_mmsi,
+                    alerts_only: st0.alerts_only,
+                    paused: st0.paused,
+                    loading: false,
+                    feed_status: snap.status_note,
+                    summary: st0.summary,
+                    own_ship: st0.own_ship,
+                    decisions: st0.decisions,
+                    conf_history: st0.conf_history,
+                    cpa_history: st0.cpa_history,
+                },
+                snap.engine,
+            ),
+        )
+    }
+    val anchor = sector_station_contact(
+        cfg.corridor,
+        cfg.custom_lat,
+        cfg.custom_lon,
+        cfg.custom_label,
+    )
+    val empty_decs: list<SentinelDecision> = list()
+    val init_sum = FleetSummary {
+        corridor: corridor_display_name(cfg.corridor),
+        corridor_kind: cfg.corridor,
+        waypoint_count: 0,
+        override_count: 0,
+        min_cpa_nm: 0.0,
+        max_wave_m: 0.0,
+        max_gust_kn: 0.0,
+        avg_health: 1.0,
+        pomdp_saved_path: if len(cfg.state_dir) > 0 { cfg.state_dir } else { "ephemeral" },
+        observed_at_iso: "syncing",
+        feed_source: "connecting",
+        feed_ok: true,
+    }
+    val st0 = init_console_state(init_sum, anchor, empty_decs, false)
+    return ok(
+        (
+            ConsoleState {
+                corridor: st0.corridor,
+                offline: false,
+                tick: 0,
+                alert_range_nm: st0.alert_range_nm,
+                filter_text: "",
+                selected_mmsi: 0,
+                alerts_only: false,
+                paused: false,
+                loading: true,
+                feed_status: "Syncing live AIS & Open-Meteo marine telemetry...",
+                summary: st0.summary,
+                own_ship: anchor,
+                decisions: empty_decs,
+                conf_history: st0.conf_history,
+                cpa_history: st0.cpa_history,
+            },
+            eng_in,
+        ),
+    )
+}
+
+record DesktopGuiEnv {
+    lib: NativeUiLib,
+    tick_ch: chan<TelemetryTick>,
+    cmd_ch: chan<WorkerCmd>,
+}
+
+record DesktopGuiCtx {
+    console: ConsoleState,
+    ui_st: UiState,
+    cfg: CliConfig,
+    buf: DrawBuffer,
+    last_w: f64 = -1.0,
+    last_h: f64 = -1.0,
+    rendered: bool = false,
+    running: bool = true,
+}
+
+def drain_pending_ticks(
+    tick_ch: chan<TelemetryTick>,
+    console_in: ConsoleState,
+    cfg: CliConfig,
+) -> (ConsoleState, bool) effect alloc {
+    var st = console_in
+    var received = false
+    var keep = true
+    while keep {
+        when chan_try_recv(tick_ch) {
+            some(t) => {
+                if corridor_eq_cfg(t.corridor, cfg.corridor) && t.offline == cfg.offline {
+                    st = console_with_tick(st, t)
+                    received = true
+                }
+            },
+            none => {
+                keep = false
+            },
+        }
+    }
+    return (st, received)
+}
+
+def paint_console_in_pool(
+    console: ConsoleState,
+    ui_st: UiState,
+    buf: DrawBuffer,
+    size: UiSize,
+) -> i64 effect ffi, alloc {
+    var tree = ui_new()
+    val root = build_ais_console_tree(console, tree)
+    tree = ui_layout(ui_set_root(tree, root), size.w, size.h)
+    val _painted = ui_paint(tree, ui_st, buf)
+    return 0
+}
+
+def render_desktop_pooled(
+    env: DesktopGuiEnv,
+    ctx: DesktopGuiCtx,
+    size: UiSize,
+) -> DesktopGuiCtx effect ffi, alloc {
+    val pool = ui_frame_pool_begin()
+    val _ok = paint_console_in_pool(ctx.console, ctx.ui_st, ctx.buf, size)
+    val _freed = ui_frame_pool_destroy(pool)
+    val _sub = ui_native_submit(env.lib, ctx.buf)
+    val clean_ui = ui_state_mark_clean(ctx.ui_st)
+    return DesktopGuiCtx {
+        console: ctx.console,
+        ui_st: clean_ui,
+        cfg: ctx.cfg,
+        buf: ctx.buf,
+        last_w: size.w,
+        last_h: size.h,
+        rendered: true,
+        running: !clean_ui.close_requested,
+    }
+}
+
+def eval_events_in_pool(
+    pool: i64,
+    ctx: DesktopGuiCtx,
+    events: list<HostEvent>,
+    size: UiSize,
+    out_ui: list<UiState>,
+) -> i64 effect ffi, alloc {
+    var tree = ui_new()
+    val root = build_ais_console_tree(ctx.console, tree)
+    tree = ui_layout(ui_set_root(tree, root), size.w, size.h)
+    val next_ui = ui_process_events(tree, ui_clear_events(ctx.ui_st), events)
+    val picked = pick_radar_mmsi(ctx.console, next_ui, tree)
+    val _p = ui_frame_pool_pause()
+    val clean_ui = ui_state_detach(next_ui)
+    list_push(out_ui, clean_ui)
+    val _r = ui_frame_pool_resume(pool)
+    return picked
+}
+
+def handle_desktop_events(
+    env: DesktopGuiEnv,
+    ctx: DesktopGuiCtx,
+    size: UiSize,
+    poll_ms: i64,
+) -> DesktopGuiCtx effect ffi, alloc {
+    val pool = ui_frame_pool_begin()
+    val events = ui_native_poll(env.lib, poll_ms)
+    if list_len(events) == 0 {
+        val _d = ui_frame_pool_destroy(pool)
+        return ctx
+    }
+    val out_ui: list<UiState> = list()
+    val picked = eval_events_in_pool(pool, ctx, events, size, out_ui)
+    val next_ui = if list_len(out_ui) > 0 { list_get(out_ui, 0) } else { ctx.ui_st }
+    // The UiState pushed into out_ui was detached onto the main heap; the
+    // event list, HostEvent records and transient trees die with the pool.
+    val _d = ui_frame_pool_destroy(pool)
+    val next_console = apply_console_ui_with_pick(ctx.console, next_ui, picked)
+    val sync = dispatch_ui_to_worker(ctx.console, next_console, next_ui, ctx.cfg, env.cmd_ch)
+    val settled_ui = ui_clear_events(sync.1)
+    return DesktopGuiCtx {
+        console: next_console,
+        ui_st: settled_ui,
+        cfg: sync.0,
+        buf: ctx.buf,
+        last_w: ctx.last_w,
+        last_h: ctx.last_h,
+        rendered: ctx.rendered,
+        running: !settled_ui.close_requested,
+    }
+}
+
+def desktop_gui_step(env: DesktopGuiEnv, ctx: DesktopGuiCtx) -> DesktopGuiCtx effect ffi, alloc {
+    val metrics = ui_native_metrics(env.lib)
+    if !metrics.is_open || ctx.ui_st.close_requested {
+        return DesktopGuiCtx {
+            console: ctx.console,
+            ui_st: ctx.ui_st,
+            cfg: ctx.cfg,
+            buf: ctx.buf,
+            last_w: ctx.last_w,
+            last_h: ctx.last_h,
+            rendered: ctx.rendered,
+            running: false,
+        }
+    }
+    val drained = drain_pending_ticks(env.tick_ch, ctx.console, ctx.cfg)
+    val vw = if metrics.width > 100.0 { metrics.width } else { 1280.0 }
+    val vh = if metrics.height > 100.0 { metrics.height } else { 800.0 }
+    val size = UiSize { w: vw, h: vh }
+    val need_draw = !ctx.rendered
+        || drained.1
+        || ctx.ui_st.dirty
+        || vw != ctx.last_w
+        || vh != ctx.last_h
+    var cur = if drained.1 {
+        DesktopGuiCtx {
+            console: drained.0,
+            ui_st: ctx.ui_st,
+            cfg: ctx.cfg,
+            buf: ctx.buf,
+            last_w: ctx.last_w,
+            last_h: ctx.last_h,
+            rendered: ctx.rendered,
+            running: ctx.running,
+        }
+    } else {
+        ctx
+    }
+    var poll_ms = 33
+    if need_draw {
+        cur = render_desktop_pooled(env, cur, size)
+        poll_ms = 0
+    }
+    if !cur.running {
+        return cur
+    }
+    return handle_desktop_events(env, cur, size, poll_ms)
+}
+
+def dispatch_ui_to_worker(
+    prev_st: ConsoleState,
+    next_st: ConsoleState,
+    ui_st: UiState,
+    cfg_in: CliConfig,
+    cmd_ch: chan<WorkerCmd>,
+) -> (CliConfig, UiState) effect alloc {
+    val next_ui = if ui_st.dispatched_action == "clear_filter" {
+        ui_state_set_text(ui_st, "inp_filter", "")
+    } else {
+        ui_st
+    }
+    val act = ui_st.dispatched_action
+    val cor_changed = !corridor_eq_cfg(prev_st.corridor, next_st.corridor)
+    val mode_changed = prev_st.offline != next_st.offline
+    val pause_changed = prev_st.paused != next_st.paused
+    val force = cor_changed
+        || mode_changed
+        || act == "step_sim"
+        || act == "refresh_live"
+        || act == "reset_sim"
+    val next_cfg = CliConfig {
+        corridor: next_st.corridor,
+        nmea_raw: cfg_in.nmea_raw,
+        nmea_file: cfg_in.nmea_file,
+        custom_lat: cfg_in.custom_lat,
+        custom_lon: cfg_in.custom_lon,
+        has_custom_coord: cfg_in.has_custom_coord,
+        custom_label: cfg_in.custom_label,
+        state_dir: cfg_in.state_dir,
+        json_path: cfg_in.json_path,
+        offline: next_st.offline,
+        show_help: false,
+    }
+    if force || pause_changed {
+        send(
+            cmd_ch,
+            WorkerCmd {
+                corridor: next_st.corridor,
+                offline: next_st.offline,
+                paused: next_st.paused,
+                force_refresh: force,
+                reset_tick: act == "reset_sim" || cor_changed || mode_changed,
+            },
+        )
+    }
+    return (next_cfg, next_ui)
+}
+
+def run_desktop_gui(
+    cfg: CliConfig,
+) -> result<i64, AisError> effect net, fs, io, ffi, alloc, thread, time {
+    val init_pair = build_initial_desktop_console(cfg, init_pilot_engine(cfg.state_dir))?
+    var console = init_pair.0
+    val eng = init_pair.1
+    val opened = ui_open_native_host(
+        UiHostMode.Desktop,
+        "AIS Sentinel - Maritime Radar & AI Pilot Console",
+        1280,
+        800,
+        "",
+    )
+    val lib = when opened {
+        ok(l) => l,
+        err(msg) => {
+            return err(AisError.IoFailed(f"failed to open desktop GUI window: {msg}"))
+        },
+    }
+    val tick_ch: chan<TelemetryTick> = channel(-1)
+    val cmd_ch: chan<WorkerCmd> = channel(32)
+    val stop_ch: chan<i64> = channel(1)
+    val _w = spawn_telemetry_worker(cfg, eng, tick_ch, cmd_ch, stop_ch)
+    val env = DesktopGuiEnv { lib: lib, tick_ch: tick_ch, cmd_ch: cmd_ch }
+    var ctx = DesktopGuiCtx {
+        console: console,
+        ui_st: ui_state_new(),
+        cfg: cfg,
+        buf: draw_buf_new(32768),
+    }
+    while ctx.running {
+        ctx = desktop_gui_step(env, ctx)
+    }
+    send(stop_ch, 1)
+    val _fb = draw_buf_free(ctx.buf)
+    val _cl = ui_close_native_host(lib)
+    if len(cfg.state_dir) > 0 {
+        val _sv = save_pilot_engine(eng, cfg.state_dir)
+    }
+    return ok(0)
+}
+
+/// Application entry point parsing CLI flags and running batch, singleton, GUI, or web mirror mode.
+pub def main() -> i64 effect net, fs, io, ffi, alloc, thread, time {
+    val cfg = when parse_cli_args(args()) {
+        ok(c) => c,
+        err(e) => {
+            println(f"error: {ais_error_message(e)}")
+            return 1
+        },
+    }
+    if cfg.show_help {
+        return print_usage()
+    }
+    val outcome = if cfg.gui_mode {
+        run_desktop_gui(cfg)
+    } else if cfg.gui_headless || len(cfg.gui_snapshot_path) > 0 {
+        run_gui_headless(cfg)
+    } else if cfg.web_mirror_port > 0 {
+        run_web_mirror(cfg)
+    } else if len(cfg.nmea_raw) > 0 || cfg.has_custom_coord {
+        run_singleton_pipeline(cfg)
+    } else {
+        run_batch_pipeline(cfg)
+    }
+    return when outcome {
+        ok(code) => code,
+        err(e) => {
+            println(f"error: {ais_error_message(e)}")
+            1
+        },
+    }
+}
+
+def test_cli_gui_flags() -> i64 effect alloc, throw {
+    val c_gui = unwrap(parse_cli_args(list("ais_sentinel", "--offline", "--gui")))
+    assert(c_gui.offline && c_gui.gui_mode && !c_gui.gui_headless)
+    val c_snap = unwrap(
+        parse_cli_args(
+            list("ais_sentinel", "--offline", "--gui-headless", "--gui-snapshot", "out.png"),
+        ),
+    )
+    assert(c_snap.gui_headless && c_snap.gui_snapshot_path == "out.png")
+    val c_web = unwrap(parse_cli_args(list("ais_sentinel", "--web-mirror", "8088")))
+    assert(c_web.web_mirror_port == 8088)
+    assert(is_err(parse_cli_args(list("ais_sentinel", "--web-mirror", "99999"))))
+    return 0
+}
+
+def test_hkt_and_typestate_ais() -> i64 effect net, fs, io, alloc, thread, throw, time {
+    val cfg = CliConfig { corridor: CorridorKind.DoverStrait, offline: true }
+    val acq = unwrap(stage_acquire_batch(cfg))
+    assert(acq.container.is_populated())
+    val eng0 = init_pilot_engine("")
+    val sensed = stage_sense_and_pilot_batch(acq, eng0, true)
+    assert(sensed.1.eval_count == 3)
+    val summary = build_fleet_summary(
+        acq.witness.corridor,
+        CorridorKind.DoverStrait,
+        sensed.0,
+        "mem",
+    )
+    val cert = seal_stage(AisGovernedWitness { summary: summary }, sensed.0.container)
+    assert(cert.payload.cardinality() == 3)
+    assert(contains(render_bounded(SingleBox { value: cert.witness.summary }), "dover_strait"))
+    return 0
+}
+
+def test_cli_and_singleton_nmea_pipeline() -> i64 effect net, fs, io, alloc, thread, throw, time {
+    val parsed = parse_cli_args(
+        list("ais_sentinel", "--corridor", "skagerrak", "--offline", "--state-dir", "tmp_dir"),
+    )
+    assert(is_ok(parsed))
+    val c = unwrap(parsed)
+    assert(c.offline && c.state_dir == "tmp_dir")
+    assert(is_err(parse_cli_args(list("ais_sentinel", "--corridor"))))
+    assert(is_err(parse_cli_args(list("ais_sentinel", "--lat", "99.9"))))
+    val nmea_cfg = CliConfig {
+        nmea_raw: "!AIVDM,1,1,,B,177KQJ5000G?tO`K>RA1wUbN0TKH,0*5C",
+        custom_label: "MV_SEATTLE",
+        offline: true,
+    }
+    val rc = unwrap(run_singleton_pipeline(nmea_cfg))
+    assert(rc == 0)
+    val c_aland = unwrap(
+        parse_cli_args(list("ais_sentinel", "--corridor", "aland_sea", "--offline")),
+    )
+    val aland_eval = unwrap(
+        evaluate_console_full(c_aland, init_pilot_engine(""), 0, vessel_cache_new()).0,
+    )
+    assert(aland_eval.summary.corridor == "aland_sea")
+    assert(aland_eval.summary.feed_source == "offline-tss-sim")
+    assert(list_len(aland_eval.decisions) == 3)
+    return 0
+}

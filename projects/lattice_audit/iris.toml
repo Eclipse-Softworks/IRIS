@@ -1,0 +1,6 @@
+[package]
+name = "lattice_audit"
+version = "0.1.0"
+entry = "main.iris"
+
+[dependencies]

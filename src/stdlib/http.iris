@@ -61,12 +61,12 @@ pub def http_send(request: HttpRequest) -> result<HttpResponse, str> effect net,
 // ── HTTP Request building ────────────────────────────────────────────────────
 
 /// Build a minimal GET request string for raw TCP usage.
-pub def http_get_request(host: str, path: str) -> str effect alloc, io {
+pub def http_get_request(host: str, path: str) -> str effect alloc {
     concat(concat(concat(concat("GET ", path), " HTTP/1.1\r\nHost: "), host), "\r\n\r\n")
 }
 
 /// Build a minimal POST request string for raw TCP usage.
-pub def http_post_request(host: str, path: str, body: str) -> str effect alloc, io {
+pub def http_post_request(host: str, path: str, body: str) -> str effect alloc {
     val body_len = to_str(len(body))
     concat(concat(concat(concat(concat(concat(concat(
         "POST ", path), " HTTP/1.1\r\nHost: "), host),
@@ -74,7 +74,7 @@ pub def http_post_request(host: str, path: str, body: str) -> str effect alloc, 
 }
 
 /// Build an HTTP/1.1 response string with status, status text, and body.
-pub def http_response(status: i64, status_text: str, body: str) -> str effect alloc, io {
+pub def http_response(status: i64, status_text: str, body: str) -> str effect alloc {
     val body_len = to_str(len(body))
     val line1 = concat(concat(concat(concat("HTTP/1.1 ", to_str(status)), " "), status_text), "\r\n")
     val headers = concat("Content-Length: ", concat(body_len, "\r\n"))
@@ -84,7 +84,7 @@ pub def http_response(status: i64, status_text: str, body: str) -> str effect al
 // ── HTTP Request parsing ────────────────────────────────────────────────────
 
 /// Extract the HTTP method from a raw request ("GET", "POST", etc.).
-pub def http_request_method(raw: str) -> str effect throw {
+pub def http_request_method(raw: str) -> str effect alloc, throw {
     val first_space = find(raw, " ")
     if is_some(first_space) {
         slice(raw, 0, unwrap(first_space))
@@ -94,7 +94,7 @@ pub def http_request_method(raw: str) -> str effect throw {
 }
 
 /// Extract the request path from a raw HTTP request.
-pub def http_request_path(raw: str) -> str effect throw {
+pub def http_request_path(raw: str) -> str effect alloc, throw {
     val first_space = find(raw, " ")
     if is_some(first_space) {
         val after_method = slice(raw, unwrap(first_space) + 1, len(raw))
@@ -110,7 +110,7 @@ pub def http_request_path(raw: str) -> str effect throw {
 }
 
 /// Extract the body from a raw HTTP message (after "\r\n\r\n").
-pub def http_body(raw: str) -> str effect throw {
+pub def http_body(raw: str) -> str effect alloc, throw {
     val sep = find(raw, "\r\n\r\n")
     if is_some(sep) {
         slice(raw, unwrap(sep) + 4, len(raw))
@@ -123,7 +123,7 @@ pub def http_body(raw: str) -> str effect throw {
 
 /// Extract the status code (as i64) from a raw HTTP response.
 /// Format: "HTTP/1.1 200 OK\r\n..."
-pub def http_status_code(raw: str) -> i64 effect throw {
+pub def http_status_code(raw: str) -> i64 effect alloc, throw {
     val space1 = find(raw, " ")
     if is_some(space1) {
         val after_version = slice(raw, unwrap(space1) + 1, len(raw))
@@ -142,7 +142,7 @@ pub def http_status_code(raw: str) -> i64 effect throw {
 
 /// Extract a named header value from a raw HTTP message.
 /// Returns empty string if header not found.
-pub def http_header(raw: str, name: str) -> str effect alloc, io, throw {
+pub def http_header(raw: str, name: str) -> str effect alloc, throw {
     val header_search = concat(name, ": ")
     // Split headers section (before \r\n\r\n)
     val body_sep = find(raw, "\r\n\r\n")

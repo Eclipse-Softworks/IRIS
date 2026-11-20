@@ -1,0 +1,2976 @@
+// std.ui_layout -- Non-recursive widget arena, HKT reactive signals, iterative BoxConstraints layout, hit-testing, and CPU vector painter.
+
+pub bring std.ui_theme
+pub bring std.ui_protocol
+pub bring std.ui_motion
+
+/// Reactive HKT value cell carrying monotonic revision counter.
+pub record SignalBox[T] {
+    value: T,
+    version: i64 = 0,
+}
+
+/// Reactive HKT homogeneous list container for bindings.
+pub record UiListBox[T] {
+    items: list<T>,
+    version: i64 = 0,
+}
+
+/// Reactive HKT optional selection container for bindings.
+pub record UiOptionBox[T] {
+    maybe: option<T>,
+    version: i64 = 0,
+}
+
+/// Higher-kinded reactive container contract (`F[_]`).
+pub trait UiReactive[F[_]] {
+    def reactive_kind(self: Self) -> str
+    def revision(self: Self) -> i64
+    def reactive_summary(self: Self) -> str effect alloc
+}
+
+/// Create a reactive `SignalBox<T>` seeded at revision `0`.
+pub def signal_new[T](initial: T) -> SignalBox<T> {
+    return SignalBox { value: initial, version: 0 }
+}
+
+/// Read the current payload inside a `SignalBox<T>`.
+pub def signal_get[T](sig: SignalBox<T>) -> T {
+    return sig.value
+}
+
+/// Produce an updated `SignalBox<T>` incrementing its monotonic version.
+pub def signal_set[T](sig: SignalBox<T>, next: T) -> SignalBox<T> {
+    return SignalBox { value: next, version: sig.version + 1 }
+}
+
+/// Read the monotonic revision and value of a `SignalBox<T>` alongside formatted summary.
+pub def ui_signal_summary(label: str, sig: SignalBox<str>) -> str effect alloc {
+    return f"{label}(v={sig.version}, {sig.value})"
+}
+
+/// Functor map over `SignalBox<A>` preserving revision number.
+pub def map_signal[A, B](sig: SignalBox<A>, f: |A| -> B) -> SignalBox<B> {
+    return SignalBox { value: f(sig.value), version: sig.version }
+}
+
+/// Wrap `list<T>` in a versioned `UiListBox<T>`.
+pub def ui_list_box[T](items: list<T>, version: i64) -> UiListBox<T> {
+    return UiListBox { items: items, version: version }
+}
+
+/// Return the first item of `UiListBox<T>`, or `fallback` when empty.
+pub def ui_list_box_first[T](lb: UiListBox<T>, fallback: T) -> T effect alloc {
+    if list_len(lb.items) == 0 {
+        return fallback
+    }
+    return list_get(lb.items, 0)
+}
+
+/// Wrap `option<T>` in a versioned `UiOptionBox<T>`.
+pub def ui_option_box[T](maybe: option<T>, version: i64) -> UiOptionBox<T> {
+    return UiOptionBox { maybe: maybe, version: version }
+}
+
+/// Unwrap an `UiOptionBox<T>` or return `fallback` when `none`.
+pub def ui_option_box_or[T](ob: UiOptionBox<T>, fallback: T) -> T {
+    return when ob.maybe {
+        some(v) => v,
+        none => fallback,
+    }
+}
+
+/// Parametric HKT identity pass-through preserving reactive container `F<T>`.
+pub def hkt_bind_signal[F[_], T](container: F<T>) -> F<T> {
+    return container
+}
+
+/// Core layout, interaction, and data-visualization widget discriminator.
+pub choice WidgetKind {
+    Col,
+    Row,
+    Stack,
+    Card,
+    Spacer,
+    Label,
+    Badge,
+    Button,
+    TextInput,
+    Checkbox,
+    Toggle,
+    Slider,
+    Sparkline,
+    LineChart,
+    RadarScope,
+    TensorView,
+    TableHeader,
+    TableRow,
+}
+
+/// Polar radar target contact plotted on `RadarScope`.
+pub record RadarBlip {
+    label: str = "",
+    bearing_deg: f64 = 0.0,
+    range_nm: f64 = 1.0,
+    course_deg: f64 = 0.0,
+    speed_kn: f64 = 0.0,
+    tone: UiTone = UiTone.Accent,
+}
+
+/// Numeric series plotted by `Sparkline` and `LineChart`.
+pub record ChartSeries {
+    label: str = "",
+    xs: list<f64>,
+    ys: list<f64>,
+    tone: UiTone = UiTone.Primary,
+    fill: bool = false,
+}
+
+/// Polar radar scope display configuration and contacts.
+pub record RadarSpec {
+    title: str = "RADAR",
+    range_nm: f64 = 12.0,
+    own_heading_deg: f64 = 0.0,
+    ring_count: i64 = 3,
+    blips: list<RadarBlip>,
+}
+
+/// 2D numeric heatmap grid rendered via CPU RGBA rasterization.
+pub record TensorSpec {
+    width: i64 = 0,
+    height: i64 = 0,
+    cells: list<f64>,
+    vmin: f64 = 0.0,
+    vmax: f64 = 1.0,
+    title: str = "",
+}
+
+/// Flat arena UI node referencing child indices in `UiTree.nodes` (no recursion).
+pub record UiNode {
+    id: i64 = 0,
+    key: str = "",
+    kind: WidgetKind = WidgetKind.Col,
+    text: str = "",
+    placeholder: str = "",
+    action: str = "",
+    tone: UiTone = UiTone.Neutral,
+    style: UiStyle = UiStyle {},
+    checked: bool = false,
+    value: f64 = 0.0,
+    min_val: f64 = 0.0,
+    max_val: f64 = 1.0,
+    data_idx: i64 = -1,
+    children: list<i64>,
+    layout: UiRect = UiRect {},
+    measured: UiSize = UiSize {},
+}
+
+/// Flat topological widget arena and auxiliary visualization tables.
+pub record UiTree {
+    theme: UiTheme,
+    root: i64 = -1,
+    nodes: list<UiNode>,
+    charts: list<ChartSeries>,
+    radars: list<RadarSpec>,
+    tensors: list<TensorSpec>,
+    width: f64 = 800.0,
+    height: f64 = 600.0,
+    // Vertical scroll applied to containers styled with `scrollable: true`.
+    scroll_y: f64 = 0.0,
+}
+
+/// Multi-select, drag/drop, clipboard and multi-line editing state retained by `UiState`.
+pub record UiInteraction {
+    selected_keys: list<str> = list(),
+    selection_anchor: str = "",
+    has_selection_change: bool = false,
+    clipboard: str = "",
+    drag_key: str = "",
+    drag_payload: str = "",
+    drag_x: f64 = 0.0,
+    drag_y: f64 = 0.0,
+    drop_key: str = "",
+    has_drop: bool = false,
+    multiline: bool = false,
+    text_line: i64 = 0,
+    text_col: i64 = 0,
+}
+
+/// Retained interaction, pointer, focus, scroll, motion and edge-action state.
+pub record UiState {
+    hovered_key: str = "",
+    active_key: str = "",
+    focused_key: str = "",
+    pointer_x: f64 = 0.0,
+    pointer_y: f64 = 0.0,
+    pointer_down: bool = false,
+    dragging_key: str = "",
+    scroll_offset: f64 = 0.0,
+    dispatched_action: str = "",
+    last_text_key: str = "",
+    last_text_val: str = "",
+    // -1 means "at end"; otherwise a UTF-8 character index into last_text_val.
+    text_caret: i64 = -1,
+    last_toggle_key: str = "",
+    last_toggle_val: bool = false,
+    has_toggle_change: bool = false,
+    last_slider_key: str = "",
+    last_slider_val: f64 = 0.0,
+    has_slider_change: bool = false,
+    close_requested: bool = false,
+    dirty: bool = true,
+    // Widget transitions are owned by the state machine, not the application.
+    motion: UiMotion = UiMotion {},
+    interaction: UiInteraction = UiInteraction {},
+}
+
+def fmin(a: f64, b: f64) -> f64 {
+    return if a < b { a } else { b }
+}
+
+def fmax(a: f64, b: f64) -> f64 {
+    return if a > b { a } else { b }
+}
+
+def clamp01(t: f64) -> f64 {
+    return fmin(1.0, fmax(0.0, t))
+}
+
+/// Construct an empty `UiTree` bound to `theme`.
+pub def ui_tree_new(theme: UiTheme) -> UiTree effect alloc {
+    val nodes: list<UiNode> = list()
+    val charts: list<ChartSeries> = list()
+    val radars: list<RadarSpec> = list()
+    val tensors: list<TensorSpec> = list()
+    return UiTree {
+        theme: theme,
+        root: -1,
+        nodes: nodes,
+        charts: charts,
+        radars: radars,
+        tensors: tensors,
+    }
+}
+
+/// Append a node into `tree.nodes` in post-order (children added before parents) and return its ID.
+pub def ui_add_node(tree: UiTree, node: UiNode) -> i64 effect alloc {
+    val id = list_len(tree.nodes)
+    val stored = UiNode {
+        id: id,
+        key: node.key,
+        kind: node.kind,
+        text: node.text,
+        placeholder: node.placeholder,
+        action: node.action,
+        tone: node.tone,
+        style: node.style,
+        checked: node.checked,
+        value: node.value,
+        min_val: node.min_val,
+        max_val: node.max_val,
+        data_idx: node.data_idx,
+        children: node.children,
+        layout: node.layout,
+        measured: node.measured,
+    }
+    list_push(tree.nodes, stored)
+    return id
+}
+
+/// Mark `root_id` as the entry widget of `tree`.
+pub def ui_set_root(tree: UiTree, root_id: i64) -> UiTree {
+    return UiTree {
+        theme: tree.theme,
+        root: root_id,
+        nodes: tree.nodes,
+        charts: tree.charts,
+        radars: tree.radars,
+        tensors: tree.tensors,
+        width: tree.width,
+        height: tree.height,
+    }
+}
+
+/// Register a `ChartSeries` payload inside `tree.charts` and return its index.
+pub def ui_push_chart(tree: UiTree, series: ChartSeries) -> i64 effect alloc {
+    val idx = list_len(tree.charts)
+    list_push(tree.charts, series)
+    return idx
+}
+
+/// Register a `RadarSpec` payload inside `tree.radars` and return its index.
+pub def ui_push_radar(tree: UiTree, spec: RadarSpec) -> i64 effect alloc {
+    val idx = list_len(tree.radars)
+    list_push(tree.radars, spec)
+    return idx
+}
+
+/// Register a `TensorSpec` payload inside `tree.tensors` and return its index.
+pub def ui_push_tensor(tree: UiTree, spec: TensorSpec) -> i64 effect alloc {
+    val idx = list_len(tree.tensors)
+    list_push(tree.tensors, spec)
+    return idx
+}
+
+/// Find the arena index of the first node whose `key` equals `key`.
+pub def ui_find_node_key(tree: UiTree, key: str) -> option<i64> effect alloc {
+    val n = list_len(tree.nodes)
+    for i in 0..n {
+        if list_get(tree.nodes, i).key == key {
+            return some(i)
+        }
+    }
+    return none
+}
+
+def apply_style_bounds(raw: UiSize, style: UiStyle) -> UiSize {
+    var w = fmax(raw.w, style.min_w)
+    var h = fmax(raw.h, style.min_h)
+    // An explicit maximum wins over both the estimate and the minimum: a
+    // conflicting min/max must not make a node overflow its neighbours.
+    if style.max_w > 0.0 {
+        w = fmin(w, style.max_w)
+    }
+    if style.max_h > 0.0 {
+        h = fmin(h, style.max_h)
+    }
+    return UiSize { w: w, h: h }
+}
+
+def estimate_text_size(text: str, style: UiStyle) -> UiSize {
+    val font_sz = if style.font_size > 0.0 { style.font_size } else { 14.0 }
+    val lh = if style.line_height > 0.0 { style.line_height } else { font_sz * 1.4 }
+    // Slightly conservative ratios: the native host shapes real glyphs, which
+    // can be wider than a flat average. Under-estimating used to let labels
+    // run into their neighbours before the renderer wrapped them.
+    val char_ratio = if style.monospace { 0.68 } else { 0.62 }
+    val raw_w = to_f64(len(text)) * font_sz * char_ratio
+    if style.max_w > 0.0 && raw_w > style.max_w {
+        val line_count = to_f64(((raw_w / style.max_w) to i64) + 1)
+        return UiSize { w: style.max_w, h: lh * line_count }
+    }
+    return UiSize { w: fmax(raw_w, 8.0), h: lh }
+}
+
+def estimate_leaf_size(node: UiNode) -> UiSize {
+    val txt_sz = estimate_text_size(node.text, node.style)
+    val ph_sz = estimate_text_size(node.placeholder, node.style)
+    val pad2 = node.style.padding * 2.0
+    return when node.kind {
+        WidgetKind.Spacer => UiSize {
+            w: fmax(8.0, node.style.min_w),
+            h: fmax(8.0, node.style.min_h),
+        },
+        WidgetKind.Label => UiSize { w: txt_sz.w + pad2, h: txt_sz.h + pad2 },
+        WidgetKind.Badge => UiSize { w: txt_sz.w + 18.0, h: fmax(22.0, txt_sz.h + 4.0) },
+        WidgetKind.Button => UiSize { w: txt_sz.w + 28.0, h: fmax(34.0, txt_sz.h + 14.0) },
+        WidgetKind.TextInput => UiSize {
+            w: fmax(180.0, fmax(txt_sz.w, ph_sz.w) + 24.0),
+            h: fmax(36.0, txt_sz.h + 14.0),
+        },
+        WidgetKind.Checkbox => UiSize { w: txt_sz.w + 30.0, h: fmax(26.0, txt_sz.h + 6.0) },
+        WidgetKind.Toggle => UiSize { w: txt_sz.w + 54.0, h: fmax(28.0, txt_sz.h + 6.0) },
+        WidgetKind.Slider => UiSize {
+            w: fmax(170.0, txt_sz.w + 40.0),
+            h: if len(node.text) > 0 { 42.0 } else { 28.0 },
+        },
+        WidgetKind.Sparkline => UiSize { w: 160.0, h: 42.0 },
+        WidgetKind.LineChart => UiSize { w: 260.0, h: 150.0 },
+        WidgetKind.RadarScope => UiSize { w: 260.0, h: 260.0 },
+        WidgetKind.TensorView => UiSize { w: 220.0, h: 160.0 },
+        WidgetKind.TableHeader => UiSize { w: fmax(220.0, txt_sz.w + 20.0), h: 28.0 },
+        WidgetKind.TableRow => UiSize { w: fmax(220.0, txt_sz.w + 20.0), h: 26.0 },
+        WidgetKind.Col => UiSize { w: 0.0, h: 0.0 },
+        WidgetKind.Row => UiSize { w: 0.0, h: 0.0 },
+        WidgetKind.Stack => UiSize { w: 0.0, h: 0.0 },
+        WidgetKind.Card => UiSize { w: 0.0, h: 0.0 },
+    }
+}
+
+def measure_col_like(tree: UiTree, node: UiNode) -> UiSize effect alloc {
+    val cc = list_len(node.children)
+    val pad2 = node.style.padding * 2.0
+    var max_w = 0.0
+    var sum_h = 0.0
+    for j in 0..cc {
+        val cm = list_get(tree.nodes, list_get(node.children, j)).measured
+        max_w = fmax(max_w, cm.w)
+        sum_h = sum_h + cm.h
+    }
+    val gaps = if cc > 1 { node.style.gap * to_f64(cc - 1) } else { 0.0 }
+    return UiSize { w: max_w + pad2, h: sum_h + gaps + pad2 }
+}
+
+def measure_row_like(tree: UiTree, node: UiNode) -> UiSize effect alloc {
+    val cc = list_len(node.children)
+    val pad2 = node.style.padding * 2.0
+    var sum_w = 0.0
+    var max_h = 0.0
+    for j in 0..cc {
+        val cm = list_get(tree.nodes, list_get(node.children, j)).measured
+        sum_w = sum_w + cm.w
+        max_h = fmax(max_h, cm.h)
+    }
+    val gaps = if cc > 1 { node.style.gap * to_f64(cc - 1) } else { 0.0 }
+    return UiSize { w: sum_w + gaps + pad2, h: max_h + pad2 }
+}
+
+def measure_stack_like(tree: UiTree, node: UiNode) -> UiSize effect alloc {
+    val cc = list_len(node.children)
+    val pad2 = node.style.padding * 2.0
+    var max_w = 0.0
+    var max_h = 0.0
+    for j in 0..cc {
+        val cm = list_get(tree.nodes, list_get(node.children, j)).measured
+        max_w = fmax(max_w, cm.w)
+        max_h = fmax(max_h, cm.h)
+    }
+    return UiSize { w: max_w + pad2, h: max_h + pad2 }
+}
+
+def update_node_measured(tree: UiTree, idx: i64, sz: UiSize) -> i64 effect alloc {
+    val n = list_get(tree.nodes, idx)
+    val next = UiNode {
+        id: n.id,
+        key: n.key,
+        kind: n.kind,
+        text: n.text,
+        placeholder: n.placeholder,
+        action: n.action,
+        tone: n.tone,
+        style: n.style,
+        checked: n.checked,
+        value: n.value,
+        min_val: n.min_val,
+        max_val: n.max_val,
+        data_idx: n.data_idx,
+        children: n.children,
+        layout: n.layout,
+        measured: sz,
+    }
+    list_set(tree.nodes, idx, next)
+    return 0
+}
+
+def update_node_layout(tree: UiTree, idx: i64, r: UiRect) -> i64 effect alloc {
+    val n = list_get(tree.nodes, idx)
+    val next = UiNode {
+        id: n.id,
+        key: n.key,
+        kind: n.kind,
+        text: n.text,
+        placeholder: n.placeholder,
+        action: n.action,
+        tone: n.tone,
+        style: n.style,
+        checked: n.checked,
+        value: n.value,
+        min_val: n.min_val,
+        max_val: n.max_val,
+        data_idx: n.data_idx,
+        children: n.children,
+        layout: r,
+        measured: n.measured,
+    }
+    list_set(tree.nodes, idx, next)
+    return 0
+}
+
+def measure_pass(tree: UiTree) -> i64 effect alloc {
+    val n = list_len(tree.nodes)
+    for i in 0..n {
+        val node = list_get(tree.nodes, i)
+        val raw = when node.kind {
+            WidgetKind.Col => measure_col_like(tree, node),
+            WidgetKind.Card => measure_col_like(tree, node),
+            WidgetKind.Row => measure_row_like(tree, node),
+            WidgetKind.Stack => measure_stack_like(tree, node),
+            _ => estimate_leaf_size(node),
+        }
+        val _u = update_node_measured(tree, i, apply_style_bounds(raw, node.style))
+    }
+    return 0
+}
+
+def align_pos(start: f64, avail: f64, size: f64, align: UiAlign) -> f64 {
+    return when align {
+        UiAlign.Center => start + fmax(0.0, (avail - size) * 0.5),
+        UiAlign.End => start + fmax(0.0, avail - size),
+        UiAlign.Start => start,
+        UiAlign.Stretch => start,
+    }
+}
+
+def child_span_on_cross(avail: f64, measured: f64, style: UiStyle) -> f64 {
+    return when style.align {
+        UiAlign.Stretch => avail,
+        _ => fmin(avail, measured),
+    }
+}
+
+def is_col_stretch_widget(kind: WidgetKind) -> bool {
+    return when kind {
+        WidgetKind.Col => true,
+        WidgetKind.Row => true,
+        WidgetKind.Stack => true,
+        WidgetKind.Card => true,
+        WidgetKind.TextInput => true,
+        WidgetKind.Slider => true,
+        WidgetKind.Sparkline => true,
+        WidgetKind.LineChart => true,
+        WidgetKind.RadarScope => true,
+        WidgetKind.TensorView => true,
+        WidgetKind.TableHeader => true,
+        WidgetKind.TableRow => true,
+        _ => false,
+    }
+}
+
+def col_child_width(iw: f64, c: UiNode) -> f64 {
+    val want_stretch = when c.style.align {
+        UiAlign.Stretch => true,
+        UiAlign.Start => is_col_stretch_widget(c.kind) && c.style.max_w == 0.0,
+        _ => false,
+    }
+    return if want_stretch { iw } else { fmin(iw, c.measured.w) }
+}
+
+def arrange_col_children(tree: UiTree, node: UiNode, work: list<i64>) -> i64 effect alloc {
+    val cc = list_len(node.children)
+    if cc == 0 {
+        return 0
+    }
+    val pad = node.style.padding
+    val ix = node.layout.x + pad
+    val iy = node.layout.y + pad
+    val iw = fmax(0.0, node.layout.w - pad * 2.0)
+    val ih = fmax(0.0, node.layout.h - pad * 2.0)
+    var fixed_h = 0.0
+    var flex_sum = 0.0
+    for j in 0..cc {
+        val c = list_get(tree.nodes, list_get(node.children, j))
+        if c.style.flex > 0.0 {
+            flex_sum = flex_sum + c.style.flex
+        } else {
+            fixed_h = fixed_h + c.measured.h
+        }
+    }
+    val gaps = node.style.gap * to_f64(cc - 1)
+    val flex_avail = fmax(0.0, ih - fixed_h - gaps)
+    var overflow_scale = 1.0
+    val total_fixed = fixed_h + gaps
+    if ih > 0.0 && total_fixed > ih {
+        overflow_scale = ih / total_fixed
+    }
+    var cy = iy - if node.style.scrollable { tree.scroll_y } else { 0.0 }
+    for j in 0..cc {
+        val cid = list_get(node.children, j)
+        val c = list_get(tree.nodes, cid)
+        val ch = if c.style.flex > 0.0 && flex_sum > 0.0 {
+            flex_avail * (c.style.flex / flex_sum)
+        } else {
+            c.measured.h * overflow_scale
+        }
+        val bounded_h = if c.style.max_h > 0.0 { fmin(ch, c.style.max_h) } else { ch }
+        val final_h = fmax(bounded_h, c.style.min_h)
+        val cw = col_child_width(iw, c)
+        val cx = align_pos(ix, iw, cw, c.style.align)
+        val _u = update_node_layout(tree, cid, UiRect { x: cx, y: cy, w: cw, h: final_h })
+        list_push(work, cid)
+        cy = cy + final_h + node.style.gap
+    }
+    return 0
+}
+
+def arrange_row_children(tree: UiTree, node: UiNode, work: list<i64>) -> i64 effect alloc {
+    val cc = list_len(node.children)
+    if cc == 0 {
+        return 0
+    }
+    val pad = node.style.padding
+    val ix = node.layout.x + pad
+    val iy = node.layout.y + pad
+    val iw = fmax(0.0, node.layout.w - pad * 2.0)
+    val ih = fmax(0.0, node.layout.h - pad * 2.0)
+    var fixed_w = 0.0
+    var flex_sum = 0.0
+    for j in 0..cc {
+        val c = list_get(tree.nodes, list_get(node.children, j))
+        if c.style.flex > 0.0 {
+            flex_sum = flex_sum + c.style.flex
+        } else {
+            fixed_w = fixed_w + c.measured.w
+        }
+    }
+    val gaps = node.style.gap * to_f64(cc - 1)
+    val flex_avail = fmax(0.0, iw - fixed_w - gaps)
+    var overflow_scale = 1.0
+    val total_fixed = fixed_w + gaps
+    if iw > 0.0 && total_fixed > iw {
+        overflow_scale = iw / total_fixed
+    }
+    var cx = ix
+    for j in 0..cc {
+        val cid = list_get(node.children, j)
+        val c = list_get(tree.nodes, cid)
+        val cw = if c.style.flex > 0.0 && flex_sum > 0.0 {
+            flex_avail * (c.style.flex / flex_sum)
+        } else {
+            c.measured.w * overflow_scale
+        }
+        val bounded_w = if c.style.max_w > 0.0 { fmin(cw, c.style.max_w) } else { cw }
+        val final_w = fmax(bounded_w, c.style.min_w)
+        val ch = child_span_on_cross(ih, c.measured.h, c.style)
+        val cy = align_pos(iy, ih, ch, c.style.align)
+        val _u = update_node_layout(tree, cid, UiRect { x: cx, y: cy, w: final_w, h: ch })
+        list_push(work, cid)
+        cx = cx + final_w + node.style.gap
+    }
+    return 0
+}
+
+def arrange_stack_children(tree: UiTree, node: UiNode, work: list<i64>) -> i64 effect alloc {
+    val cc = list_len(node.children)
+    val pad = node.style.padding
+    val ix = node.layout.x + pad
+    val iy = node.layout.y + pad
+    val iw = fmax(0.0, node.layout.w - pad * 2.0)
+    val ih = fmax(0.0, node.layout.h - pad * 2.0)
+    for j in 0..cc {
+        val cid = list_get(node.children, j)
+        val c = list_get(tree.nodes, cid)
+        val cw = child_span_on_cross(iw, c.measured.w, c.style)
+        val ch = child_span_on_cross(ih, c.measured.h, c.style)
+        val cx = align_pos(ix, iw, cw, c.style.align)
+        val cy = align_pos(iy, ih, ch, c.style.align)
+        val _u = update_node_layout(tree, cid, UiRect { x: cx, y: cy, w: cw, h: ch })
+        list_push(work, cid)
+    }
+    return 0
+}
+
+/// Run two-pass iterative $O(N)$ layout resolving logical `UiRect` bounds for all nodes.
+pub def ui_layout(tree: UiTree, viewport_w: f64, viewport_h: f64) -> UiTree effect alloc {
+    val _m = measure_pass(tree)
+    if tree.root >= 0 && tree.root < list_len(tree.nodes) {
+        val _r = update_node_layout(
+            tree,
+            tree.root,
+            UiRect { x: 0.0, y: 0.0, w: viewport_w, h: viewport_h },
+        )
+        val work: list<i64> = list()
+        list_push(work, tree.root)
+        var head = 0
+        while head < list_len(work) {
+            val cur = list_get(work, head)
+            head = head + 1
+            val node = list_get(tree.nodes, cur)
+            val _a = when node.kind {
+                WidgetKind.Col => arrange_col_children(tree, node, work),
+                WidgetKind.Card => arrange_col_children(tree, node, work),
+                WidgetKind.Row => arrange_row_children(tree, node, work),
+                WidgetKind.Stack => arrange_stack_children(tree, node, work),
+                _ => 0,
+            }
+        }
+    }
+    return UiTree {
+        theme: tree.theme,
+        root: tree.root,
+        nodes: tree.nodes,
+        charts: tree.charts,
+        radars: tree.radars,
+        tensors: tree.tensors,
+        width: viewport_w,
+        height: viewport_h,
+        scroll_y: tree.scroll_y,
+    }
+}
+
+/// Layout with an explicit vertical scroll offset for scrollable columns.
+pub def ui_layout_scrolled(tree: UiTree, viewport_w: f64, viewport_h: f64, scroll_y: f64) -> UiTree effect alloc {
+    return ui_layout(
+        UiTree {
+            theme: tree.theme,
+            root: tree.root,
+            nodes: tree.nodes,
+            charts: tree.charts,
+            radars: tree.radars,
+            tensors: tree.tensors,
+            width: tree.width,
+            height: tree.height,
+            scroll_y: if scroll_y > 0.0 { scroll_y } else { 0.0 },
+        },
+        viewport_w,
+        viewport_h,
+    )
+}
+
+def is_interactive_kind(kind: WidgetKind) -> bool {
+    return when kind {
+        WidgetKind.Button => true,
+        WidgetKind.TextInput => true,
+        WidgetKind.Checkbox => true,
+        WidgetKind.Toggle => true,
+        WidgetKind.Slider => true,
+        WidgetKind.TableRow => true,
+        _ => false,
+    }
+}
+
+def is_interactive_node(node: UiNode) -> bool {
+    if is_interactive_kind(node.kind) {
+        return true
+    }
+    return when node.kind {
+        WidgetKind.RadarScope => len(node.action) > 0,
+        _ => false,
+    }
+}
+
+/// Only list-like rows participate in built-in multi-select/drag. Buttons,
+/// toggles, sliders and text inputs stay ordinary controls, so clicking a
+/// toolbar button never replaces the user's list selection.
+def is_selectable_node(node: UiNode) -> bool {
+    return when node.kind {
+        WidgetKind.TableRow => true,
+        _ => false,
+    }
+}
+
+def is_container_kind(kind: WidgetKind) -> bool {
+    return when kind {
+        WidgetKind.Col => true,
+        WidgetKind.Row => true,
+        WidgetKind.Stack => true,
+        WidgetKind.Card => true,
+        WidgetKind.Spacer => true,
+        _ => false,
+    }
+}
+
+/// Find the topmost interactive (or visible leaf) widget under logical `(px, py)`.
+pub def ui_hit_test(tree: UiTree, px: f64, py: f64) -> option<i64> effect alloc {
+    val n = list_len(tree.nodes)
+    var i = n - 1
+    while i >= 0 {
+        val node = list_get(tree.nodes, i)
+        if is_interactive_node(node) && rect_contains(node.layout, px, py) {
+            return some(i)
+        }
+        i = i - 1
+    }
+    var j = n - 1
+    while j >= 0 {
+        val leaf = list_get(tree.nodes, j)
+        if !is_container_kind(leaf.kind) && rect_contains(leaf.layout, px, py) {
+            return some(j)
+        }
+        j = j - 1
+    }
+    return none
+}
+
+/// Look up the laid-out rectangle of a widget by its stable key.
+/// Returns an empty rect when the key is absent (before layout or after a
+/// tree rebuild). Useful for overlay painters in `std.ui_widgets`.
+pub def ui_node_rect(tree: UiTree, key: str) -> UiRect effect alloc {
+    var i = 0
+    while i < list_len(tree.nodes) {
+        val node = list_get(tree.nodes, i)
+        if node.key == key {
+            return node.layout
+        }
+        i = i + 1
+    }
+    return UiRect {}
+}
+
+/// True when a key is present in the laid-out tree.
+pub def ui_has_node(tree: UiTree, key: str) -> bool effect alloc {
+    var i = 0
+    while i < list_len(tree.nodes) {
+        if list_get(tree.nodes, i).key == key {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+def pop_last_utf8_char(s: str) -> str effect alloc {
+    val chars = str_chars(s)
+    val n = list_len(chars)
+    if n <= 0 {
+        return ""
+    }
+    var out = ""
+    for i in 0..(n - 1) {
+        out = concat(out, list_get(chars, i))
+    }
+    return out
+}
+
+/// Insert `chunk` at UTF-8 character index `idx` (-1 appends).
+def text_insert_at(s: str, idx: i64, chunk: str) -> str effect alloc {
+    val chars = str_chars(s)
+    val n = list_len(chars)
+    var out = ""
+    var i = 0
+    val at = if idx < 0 { n } else if idx > n { n } else { idx }
+    while i < at {
+        out = concat(out, list_get(chars, i))
+        i = i + 1
+    }
+    out = concat(out, chunk)
+    while i < n {
+        out = concat(out, list_get(chars, i))
+        i = i + 1
+    }
+    return out
+}
+
+/// Remove the character at UTF-8 character index `idx`.
+def text_remove_at(s: str, idx: i64) -> str effect alloc {
+    val chars = str_chars(s)
+    val n = list_len(chars)
+    if idx < 0 || idx >= n {
+        return s
+    }
+    var out = ""
+    var i = 0
+    while i < n {
+        if i != idx {
+            out = concat(out, list_get(chars, i))
+        }
+        i = i + 1
+    }
+    return out
+}
+
+def text_len_chars(s: str) -> i64 effect alloc {
+    return list_len(str_chars(s))
+}
+
+/// `(line, column)` of a caret positioned at UTF-8 character index `caret`
+/// (`-1` means end of text).
+pub def text_line_col_at(text: str, caret: i64) -> UiSize effect alloc {
+    val chars = str_chars(text)
+    val n = list_len(chars)
+    val limit = if caret < 0 || caret > n { n } else { caret }
+    var line = 0
+    var col = 0
+    var i = 0
+    while i < limit {
+        if list_get(chars, i) == "\n" {
+            line = line + 1
+            col = 0
+        } else {
+            col = col + 1
+        }
+        i = i + 1
+    }
+    return UiSize { w: to_f64(line), h: to_f64(col) }
+}
+
+/// Split `s` on LF, preserving interior empty lines.
+def split_text_lines(s: str) -> list<str> effect alloc {
+    val out: list<str> = list()
+    val chars = str_chars(s)
+    var cur = ""
+    var i = 0
+    while i < list_len(chars) {
+        val ch = list_get(chars, i)
+        if ch == "\n" {
+            list_push(out, cur)
+            cur = ""
+        } else {
+            cur = concat(cur, ch)
+        }
+        i = i + 1
+    }
+    list_push(out, cur)
+    return out
+}
+
+/// Map a click inside a text input to a caret character index (`-1` at end).
+def text_caret_for_point(
+    text: str,
+    layout: UiRect,
+    px: f64,
+    py: f64,
+    multiline: bool,
+) -> i64 effect alloc {
+    val chars = str_chars(text)
+    val n = list_len(chars)
+    var line = 0
+    if multiline {
+        val rel_y = py - (layout.y + 8.0)
+        val approx = (rel_y / 18.0) to i64
+        line = if approx > 0 { approx } else { 0 }
+    }
+    var idx = 0
+    var cur_line = 0
+    while idx < n && cur_line < line {
+        if list_get(chars, idx) == "\n" {
+            cur_line = cur_line + 1
+        }
+        idx = idx + 1
+    }
+    val rel_x = px - (layout.x + 10.0)
+    val approx_col = (rel_x / 7.6) to i64
+    val col = if approx_col > 0 { approx_col } else { 0 }
+    var c = 0
+    while c < col && idx < n && list_get(chars, idx) != "\n" {
+        idx = idx + 1
+        c = c + 1
+    }
+    if idx >= n {
+        return -1
+    }
+    return idx
+}
+
+def slider_value_at_x(node: UiNode, px: f64) -> f64 {
+    val track_x = node.layout.x + 8.0
+    val track_w = fmax(24.0, node.layout.w - 16.0)
+    val t = clamp01((px - track_x) / track_w)
+    return node.min_val + t * (node.max_val - node.min_val)
+}
+
+def collect_focusable_keys(tree: UiTree) -> list<str> effect alloc {
+    val keys: list<str> = list()
+    for i in 0..list_len(tree.nodes) {
+        val n = list_get(tree.nodes, i)
+        if is_interactive_node(n) && len(n.key) > 0 {
+            list_push(keys, n.key)
+        }
+    }
+    return keys
+}
+
+def cycle_focus_key(tree: UiTree, cur_key: str, reverse: bool) -> str effect alloc {
+    val keys = collect_focusable_keys(tree)
+    val n = list_len(keys)
+    if n == 0 {
+        return ""
+    }
+    var found = -1
+    for i in 0..n {
+        if list_get(keys, i) == cur_key {
+            found = i
+        }
+    }
+    if found < 0 {
+        return if reverse { list_get(keys, n - 1) } else { list_get(keys, 0) }
+    }
+    val next_idx = if reverse { (found + n - 1) % n } else { (found + 1) % n }
+    return list_get(keys, next_idx)
+}
+
+def with_state_copy(s: UiState, hovered: str, active: str, focused: str, dragging: str) -> UiState {
+    return UiState {
+        hovered_key: hovered,
+        active_key: active,
+        focused_key: focused,
+        pointer_x: s.pointer_x,
+        pointer_y: s.pointer_y,
+        pointer_down: s.pointer_down,
+        dragging_key: dragging,
+        scroll_offset: s.scroll_offset,
+        motion: s.motion,
+        interaction: s.interaction,
+        dispatched_action: s.dispatched_action,
+        last_text_key: s.last_text_key,
+        last_text_val: s.last_text_val,
+        text_caret: s.text_caret,
+        last_toggle_key: s.last_toggle_key,
+        last_toggle_val: s.last_toggle_val,
+        has_toggle_change: s.has_toggle_change,
+        last_slider_key: s.last_slider_key,
+        last_slider_val: s.last_slider_val,
+        has_slider_change: s.has_slider_change,
+        close_requested: s.close_requested,
+        dirty: true,
+    }
+}
+
+def clone_str_safe(s: str) -> str effect alloc {
+    if len(s) == 0 {
+        return ""
+    }
+    return "" + s
+}
+
+def set_state_dirty(state: UiState, dirty: bool) -> UiState {
+    return UiState {
+        hovered_key: state.hovered_key,
+        active_key: state.active_key,
+        focused_key: state.focused_key,
+        pointer_x: state.pointer_x,
+        pointer_y: state.pointer_y,
+        pointer_down: state.pointer_down,
+        dragging_key: state.dragging_key,
+        scroll_offset: state.scroll_offset,
+        motion: state.motion,
+        interaction: state.interaction,
+        dispatched_action: state.dispatched_action,
+        last_text_key: state.last_text_key,
+        last_text_val: state.last_text_val,
+        text_caret: state.text_caret,
+        last_toggle_key: state.last_toggle_key,
+        last_toggle_val: state.last_toggle_val,
+        has_toggle_change: state.has_toggle_change,
+        last_slider_key: state.last_slider_key,
+        last_slider_val: state.last_slider_val,
+        has_slider_change: state.has_slider_change,
+        close_requested: state.close_requested,
+        dirty: dirty,
+    }
+}
+
+/// Return a copy of `state` with `dirty` cleared once a rendered frame is presented.
+pub def ui_state_mark_clean(state: UiState) -> UiState {
+    return set_state_dirty(state, false)
+}
+
+def clone_interaction(i: UiInteraction) -> UiInteraction effect alloc {
+    val keys: list<str> = list()
+    for k in i.selected_keys {
+        list_push(keys, clone_str_safe(k))
+    }
+    return UiInteraction {
+        selected_keys: keys,
+        selection_anchor: clone_str_safe(i.selection_anchor),
+        has_selection_change: i.has_selection_change,
+        clipboard: clone_str_safe(i.clipboard),
+        drag_key: clone_str_safe(i.drag_key),
+        drag_payload: clone_str_safe(i.drag_payload),
+        drag_x: i.drag_x,
+        drag_y: i.drag_y,
+        drop_key: clone_str_safe(i.drop_key),
+        has_drop: i.has_drop,
+        multiline: i.multiline,
+        text_line: i.text_line,
+        text_col: i.text_col,
+    }
+}
+
+def clone_motion(m: UiMotion) -> UiMotion effect alloc {
+    val tweens: list<UiTween> = list()
+    for t in m.tweens {
+        list_push(
+            tweens,
+            UiTween {
+                key: clone_str_safe(t.key),
+                from: t.from,
+                to: t.to,
+                started: t.started,
+                duration: t.duration,
+                ease: t.ease,
+            },
+        )
+    }
+    val keys: list<str> = list()
+    for k in m.keys {
+        list_push(keys, clone_str_safe(k))
+    }
+    // `settled` is a heap list too: copying the reference would leave the new
+    // state pointing into the frame pool that is destroyed at end of frame.
+    val settled: list<f64> = list()
+    for v in m.settled {
+        list_push(settled, v)
+    }
+    return UiMotion {
+        // Records are boxed on this runtime: copying `m.clock` by field would
+        // retain a pool-owned allocation. Rebuild it on the detached heap.
+        clock: UiClock { now: m.clock.now, dt: m.clock.dt },
+        tweens: tweens,
+        settled: settled,
+        keys: keys,
+    }
+}
+
+/// Clone `state`'s string fields onto the current active heap before destroying a frame pool.
+pub def ui_state_detach(state: UiState) -> UiState effect alloc {
+    return UiState {
+        hovered_key: clone_str_safe(state.hovered_key),
+        active_key: clone_str_safe(state.active_key),
+        focused_key: clone_str_safe(state.focused_key),
+        pointer_x: state.pointer_x,
+        pointer_y: state.pointer_y,
+        pointer_down: state.pointer_down,
+        dragging_key: clone_str_safe(state.dragging_key),
+        scroll_offset: state.scroll_offset,
+        motion: clone_motion(state.motion),
+        interaction: clone_interaction(state.interaction),
+        dispatched_action: clone_str_safe(state.dispatched_action),
+        last_text_key: clone_str_safe(state.last_text_key),
+        last_text_val: clone_str_safe(state.last_text_val),
+        text_caret: state.text_caret,
+        last_toggle_key: clone_str_safe(state.last_toggle_key),
+        last_toggle_val: state.last_toggle_val,
+        has_toggle_change: state.has_toggle_change,
+        last_slider_key: clone_str_safe(state.last_slider_key),
+        last_slider_val: state.last_slider_val,
+        has_slider_change: state.has_slider_change,
+        close_requested: state.close_requested,
+        dirty: state.dirty,
+    }
+}
+
+/// Clear transient per-frame action/toggle/slider edge flags after application processing.
+pub def ui_clear_events(state: UiState) -> UiState {
+    return UiState {
+        hovered_key: state.hovered_key,
+        active_key: state.active_key,
+        focused_key: state.focused_key,
+        pointer_x: state.pointer_x,
+        pointer_y: state.pointer_y,
+        pointer_down: state.pointer_down,
+        dragging_key: state.dragging_key,
+        scroll_offset: state.scroll_offset,
+        motion: state.motion,
+        interaction: state.interaction,
+        dispatched_action: "",
+        last_text_key: state.last_text_key,
+        last_text_val: state.last_text_val,
+        text_caret: state.text_caret,
+        last_toggle_key: state.last_toggle_key,
+        last_toggle_val: state.last_toggle_val,
+        has_toggle_change: false,
+        last_slider_key: state.last_slider_key,
+        last_slider_val: state.last_slider_val,
+        has_slider_change: false,
+        close_requested: state.close_requested,
+        dirty: state.dirty,
+    }
+}
+
+/// Synchronize the tracked text value for widget `key` (for app-driven clear/reset).
+pub def ui_state_set_text(state: UiState, key: str, val_str: str) -> UiState effect alloc {
+    return with_text_value(state, key, val_str, -1)
+}
+
+def with_state_parts(state: UiState, m: UiMotion, i: UiInteraction) -> UiState {
+    return UiState {
+        hovered_key: state.hovered_key,
+        active_key: state.active_key,
+        focused_key: state.focused_key,
+        pointer_x: state.pointer_x,
+        pointer_y: state.pointer_y,
+        pointer_down: state.pointer_down,
+        dragging_key: state.dragging_key,
+        scroll_offset: state.scroll_offset,
+        dispatched_action: state.dispatched_action,
+        last_text_key: state.last_text_key,
+        last_text_val: state.last_text_val,
+        text_caret: state.text_caret,
+        last_toggle_key: state.last_toggle_key,
+        last_toggle_val: state.last_toggle_val,
+        has_toggle_change: state.has_toggle_change,
+        last_slider_key: state.last_slider_key,
+        last_slider_val: state.last_slider_val,
+        has_slider_change: state.has_slider_change,
+        close_requested: state.close_requested,
+        dirty: true,
+        motion: m,
+        interaction: i,
+    }
+}
+
+def with_motion(state: UiState, m: UiMotion) -> UiState {
+    return with_state_parts(state, m, state.interaction)
+}
+
+def with_interaction(state: UiState, i: UiInteraction) -> UiState {
+    return with_state_parts(state, state.motion, i)
+}
+
+// --- Widget transitions owned by UiState -----------------------------------
+
+/// Advance the clock owned by `state` and retire finished widget tweens.
+/// The application only supplies `now` (seconds); it no longer stores `UiMotion`.
+pub def ui_state_tick(state: UiState, now: f64) -> UiState effect alloc {
+    return with_motion(state, ui_motion_tick(state.motion, now))
+}
+
+/// Advance the state clock by its own `dt` (one frame) without an external timer.
+pub def ui_state_tick_next(state: UiState) -> UiState effect alloc {
+    return ui_state_tick(state, state.motion.clock.now + state.motion.clock.dt)
+}
+
+/// Start or retarget a named widget transition held by `state`.
+pub def ui_state_animate(
+    state: UiState,
+    key: str,
+    target: f64,
+    duration: f64,
+    curve: UiEase,
+) -> UiState effect alloc {
+    return with_motion(
+        state,
+        ui_motion_to(state.motion, key, target, duration, curve, state.motion.clock.now),
+    )
+}
+
+/// Read the current eased value of a transition owned by `state`.
+pub def ui_state_animated_value(state: UiState, key: str, fallback: f64) -> f64 {
+    return ui_motion_value(state.motion, key, fallback)
+}
+
+/// The frame clock retained inside `state`, suitable for immediate-mode painters.
+pub def ui_state_clock(state: UiState) -> UiClock {
+    return state.motion.clock
+}
+
+/// True while any widget transition is still in flight (drives redraw scheduling).
+pub def ui_state_has_active_transitions(state: UiState) -> bool {
+    return list_len(state.motion.tweens) > 0
+}
+
+pub def ui_state_hover_progress(state: UiState, key: str) -> f64 {
+    return ui_motion_value(state.motion, "hover:" + key, 0.0)
+}
+
+pub def ui_state_press_progress(state: UiState, key: str) -> f64 {
+    return ui_motion_value(state.motion, "press:" + key, 0.0)
+}
+
+pub def ui_state_focus_progress(state: UiState, key: str) -> f64 {
+    return ui_motion_value(state.motion, "focus:" + key, 0.0)
+}
+
+def animate_key(state: UiState, key: str, target: f64) -> UiState effect alloc {
+    if len(key) == 0 {
+        return state
+    }
+    return ui_state_animate(state, key, target, 0.18, UiEase.OutCubic)
+}
+
+/// Retarget the built-in hover/press/focus transitions when interaction edges change.
+pub def ui_state_sync_transitions(before: UiState, after: UiState) -> UiState effect alloc {
+    var s = after
+    if before.hovered_key != after.hovered_key {
+        s = animate_key(s, "hover:" + before.hovered_key, 0.0)
+        s = animate_key(s, "hover:" + after.hovered_key, 1.0)
+    }
+    if before.active_key != after.active_key {
+        s = animate_key(s, "press:" + before.active_key, 0.0)
+        s = animate_key(s, "press:" + after.active_key, 1.0)
+    }
+    if before.focused_key != after.focused_key {
+        s = animate_key(s, "focus:" + before.focused_key, 0.0)
+        s = animate_key(s, "focus:" + after.focused_key, 1.0)
+    }
+    return s
+}
+
+// --- Multi-select / drag & drop / clipboard / multi-line editing ------------
+
+pub def ui_state_is_selected(state: UiState, key: str) -> bool {
+    for i in 0..list_len(state.interaction.selected_keys) {
+        if list_get(state.interaction.selected_keys, i) == key {
+            return true
+        }
+    }
+    return false
+}
+
+pub def ui_state_selected_count(state: UiState) -> i64 {
+    return list_len(state.interaction.selected_keys)
+}
+
+def selection_with(
+    state: UiState,
+    keys: list<str>,
+    anchor: str,
+) -> UiState effect alloc {
+    val i = state.interaction
+    return with_interaction(
+        state,
+        UiInteraction {
+            selected_keys: keys,
+            selection_anchor: anchor,
+            has_selection_change: true,
+            clipboard: i.clipboard,
+            drag_key: i.drag_key,
+            drag_payload: i.drag_payload,
+            drag_x: i.drag_x,
+            drag_y: i.drag_y,
+            drop_key: i.drop_key,
+            has_drop: i.has_drop,
+            multiline: i.multiline,
+            text_line: i.text_line,
+            text_col: i.text_col,
+        },
+    )
+}
+
+/// Replace the selection with `keys`.
+pub def ui_state_set_selection(state: UiState, keys: list<str>) -> UiState effect alloc {
+    val anchor = if list_len(keys) > 0 { list_get(keys, 0) } else { "" }
+    return selection_with(state, keys, anchor)
+}
+
+/// Ctrl-click style toggle: add `key` when absent, remove it when present.
+pub def ui_state_toggle_selection(state: UiState, key: str) -> UiState effect alloc {
+    val next: list<str> = list()
+    for k in state.interaction.selected_keys {
+        if k != key {
+            list_push(next, k)
+        }
+    }
+    if !ui_state_is_selected(state, key) {
+        list_push(next, key)
+    }
+    return selection_with(state, next, key)
+}
+
+/// Select a contiguous range of selectable widgets in `tree` from anchor to `key`.
+pub def ui_state_select_range(tree: UiTree, state: UiState, key: str) -> UiState effect alloc {
+    val keys: list<str> = list()
+    var start = -1
+    var end = -1
+    for i in 0..list_len(tree.nodes) {
+        val node = list_get(tree.nodes, i)
+        if is_interactive_node(node) && len(node.key) > 0 {
+            list_push(keys, node.key)
+            if node.key == state.interaction.selection_anchor {
+                start = list_len(keys) - 1
+            }
+            if node.key == key {
+                end = list_len(keys) - 1
+            }
+        }
+    }
+    if start < 0 || end < 0 {
+        return selection_with(state, list(key), key)
+    }
+    val lo = if start < end { start } else { end }
+    val hi = if start < end { end } else { start }
+    val chosen: list<str> = list()
+    for i in lo..hi + 1 {
+        list_push(chosen, list_get(keys, i))
+    }
+    return selection_with(state, chosen, state.interaction.selection_anchor)
+}
+
+pub def ui_state_clear_selection(state: UiState) -> UiState effect alloc {
+    return selection_with(state, list(), "")
+}
+
+pub def ui_state_begin_drag(
+    state: UiState,
+    key: str,
+    payload: str,
+    x: f64,
+    y: f64,
+) -> UiState effect alloc {
+    val i = state.interaction
+    return with_interaction(
+        state,
+        UiInteraction {
+            selected_keys: i.selected_keys,
+            selection_anchor: i.selection_anchor,
+            has_selection_change: i.has_selection_change,
+            clipboard: i.clipboard,
+            drag_key: key,
+            drag_payload: payload,
+            drag_x: x,
+            drag_y: y,
+            drop_key: "",
+            has_drop: false,
+            multiline: i.multiline,
+            text_line: i.text_line,
+            text_col: i.text_col,
+        },
+    )
+}
+
+pub def ui_state_is_dragging(state: UiState) -> bool {
+    return len(state.interaction.drag_key) > 0
+}
+
+pub def ui_state_move_drag(state: UiState, x: f64, y: f64) -> UiState {
+    val i = state.interaction
+    return with_interaction(
+        state,
+        UiInteraction {
+            selected_keys: i.selected_keys,
+            selection_anchor: i.selection_anchor,
+            has_selection_change: i.has_selection_change,
+            clipboard: i.clipboard,
+            drag_key: i.drag_key,
+            drag_payload: i.drag_payload,
+            drag_x: x,
+            drag_y: y,
+            drop_key: i.drop_key,
+            has_drop: i.has_drop,
+            multiline: i.multiline,
+            text_line: i.text_line,
+            text_col: i.text_col,
+        },
+    )
+}
+
+pub def ui_state_end_drag(state: UiState, drop_key: str) -> UiState effect alloc {
+    val i = state.interaction
+    return with_interaction(
+        state,
+        UiInteraction {
+            selected_keys: i.selected_keys,
+            selection_anchor: i.selection_anchor,
+            has_selection_change: i.has_selection_change,
+            clipboard: i.clipboard,
+            drag_key: "",
+            drag_payload: "",
+            drag_x: i.drag_x,
+            drag_y: i.drag_y,
+            drop_key: drop_key,
+            has_drop: len(drop_key) > 0,
+            multiline: i.multiline,
+            text_line: i.text_line,
+            text_col: i.text_col,
+        },
+    )
+}
+
+pub def ui_state_clipboard(state: UiState) -> str {
+    return state.interaction.clipboard
+}
+
+pub def ui_state_set_clipboard(state: UiState, text: str) -> UiState effect alloc {
+    val i = state.interaction
+    return with_interaction(
+        state,
+        UiInteraction {
+            selected_keys: i.selected_keys,
+            selection_anchor: i.selection_anchor,
+            has_selection_change: i.has_selection_change,
+            clipboard: clone_str_safe(text),
+            drag_key: i.drag_key,
+            drag_payload: i.drag_payload,
+            drag_x: i.drag_x,
+            drag_y: i.drag_y,
+            drop_key: i.drop_key,
+            has_drop: i.has_drop,
+            multiline: i.multiline,
+            text_line: i.text_line,
+            text_col: i.text_col,
+        },
+    )
+}
+
+def selected_widget_text(tree: UiTree, state: UiState) -> str effect alloc {
+    var out = ""
+    for k in state.interaction.selected_keys {
+        val _unused = when ui_find_node_key(tree, k) {
+            some(idx) => {
+                val txt = list_get(tree.nodes, idx).text
+                out = if len(out) == 0 { txt } else { out + "\n" + txt }
+                0
+            },
+            none => 0,
+        }
+    }
+    return out
+}
+
+def focused_text_input(tree: UiTree, state: UiState) -> bool effect alloc {
+    if len(state.focused_key) == 0 {
+        return false
+    }
+    val idx = when ui_find_node_key(tree, state.focused_key) {
+        some(i) => i,
+        none => -1,
+    }
+    if idx < 0 {
+        return false
+    }
+    return when list_get(tree.nodes, idx).kind {
+        WidgetKind.TextInput => true,
+        _ => false,
+    }
+}
+
+/// Copy the current selection (or focused text value) into the retained clipboard.
+pub def ui_state_copy(tree: UiTree, state: UiState) -> UiState effect alloc {
+    val text = if focused_text_input(tree, state) {
+        state.last_text_val
+    } else if ui_state_selected_count(state) > 0 {
+        selected_widget_text(tree, state)
+    } else {
+        state.last_text_val
+    }
+    return ui_state_set_clipboard(state, text)
+}
+
+/// Copy then clear the focused text value.
+pub def ui_state_cut(tree: UiTree, state: UiState) -> UiState effect alloc {
+    val copied = ui_state_copy(tree, state)
+    if len(copied.last_text_key) == 0 || !focused_text_input(tree, copied) {
+        return copied
+    }
+    return with_text_value(copied, copied.last_text_key, "", 0)
+}
+
+/// Insert the retained clipboard at the current text caret.
+pub def ui_state_paste(state: UiState) -> UiState effect alloc {
+    val text = state.interaction.clipboard
+    if len(text) == 0 || len(state.last_text_key) == 0 {
+        return state
+    }
+    val next = text_insert_at(state.last_text_val, state.text_caret, text)
+    val caret = if state.text_caret < 0 { -1 } else { state.text_caret + text_len_chars(text) }
+    return with_text_value(state, state.last_text_key, next, caret)
+}
+
+pub def ui_state_set_multiline(state: UiState, enabled: bool) -> UiState {
+    val i = state.interaction
+    return with_interaction(
+        state,
+        UiInteraction {
+            selected_keys: i.selected_keys,
+            selection_anchor: i.selection_anchor,
+            has_selection_change: i.has_selection_change,
+            clipboard: i.clipboard,
+            drag_key: i.drag_key,
+            drag_payload: i.drag_payload,
+            drag_x: i.drag_x,
+            drag_y: i.drag_y,
+            drop_key: i.drop_key,
+            has_drop: i.has_drop,
+            multiline: enabled,
+            text_line: i.text_line,
+            text_col: i.text_col,
+        },
+    )
+}
+
+/// Current `(line, column)` of the text caret, derived from `last_text_val`.
+pub def ui_state_text_position(state: UiState) -> UiSize {
+    return UiSize {
+        w: to_f64(state.interaction.text_line),
+        h: to_f64(state.interaction.text_col),
+    }
+}
+
+def with_text_position(state: UiState, text: str, caret: i64) -> UiState effect alloc {
+    return with_text_value(state, state.last_text_key, text, caret)
+}
+
+def multiline_caret(state: UiState, delta_line: i64) -> UiState effect alloc {
+    val text = state.last_text_val
+    val chars = str_chars(text)
+    val caret = if state.text_caret < 0 { list_len(chars) } else { state.text_caret }
+    val target_line = state.interaction.text_line + delta_line
+    var line = 0
+    var col = 0
+    var i = 0
+    while i < list_len(chars) && line < target_line {
+        if list_get(chars, i) == "\n" {
+            line = line + 1
+        }
+        i = i + 1
+    }
+    var next = i
+    var c = 0
+    while c < state.interaction.text_col && next < list_len(chars) && list_get(chars, next) != "\n" {
+        next = next + 1
+        c = c + 1
+    }
+    val clamped = if next > list_len(chars) { list_len(chars) } else { next }
+    return with_text_position(state, text, clamped)
+}
+
+/// Fold the extra interactions (multi-select, drag/drop, clipboard, multi-line)
+/// into the state produced by the core event machine.
+def ui_apply_interaction_extras(
+    tree: UiTree,
+    before: UiState,
+    after: UiState,
+    ev: HostEvent,
+) -> UiState effect alloc {
+    var s = ui_state_sync_transitions(before, after)
+    if ev.kind == UiEventKind.PointerDown {
+        val hit = when ui_hit_test(tree, after.pointer_x, after.pointer_y) {
+            some(idx) => idx,
+            none => -1,
+        }
+        if hit >= 0 {
+            val node = list_get(tree.nodes, hit)
+            if is_selectable_node(node) && len(node.key) > 0 {
+                val ctrl = (ev.modifiers % 8) >= 2
+                val shift = (ev.modifiers % 2) == 1
+                if ctrl {
+                    s = ui_state_toggle_selection(s, node.key)
+                } else if shift {
+                    s = ui_state_select_range(tree, s, node.key)
+                } else {
+                    s = ui_state_set_selection(s, list(node.key))
+                }
+                s = ui_state_begin_drag(s, node.key, node.text, after.pointer_x, after.pointer_y)
+            }
+        }
+    } else if ev.kind == UiEventKind.PointerMove {
+        if ui_state_is_dragging(s) {
+            s = ui_state_move_drag(s, after.pointer_x, after.pointer_y)
+        }
+    } else if ev.kind == UiEventKind.PointerUp {
+        if ui_state_is_dragging(s) {
+            val hit = when ui_hit_test(tree, after.pointer_x, after.pointer_y) {
+                some(idx) => idx,
+                none => -1,
+            }
+            var target = ""
+            if hit >= 0 {
+                val node = list_get(tree.nodes, hit)
+                if is_selectable_node(node) && node.key != s.interaction.drag_key {
+                    target = node.key
+                }
+            }
+            s = ui_state_end_drag(s, target)
+        }
+    } else if ev.kind == UiEventKind.KeyDown {
+        val ctrl = (ev.modifiers % 8) >= 2
+        if ctrl {
+            if ev.key_code == 99 {
+                return ui_state_copy(tree, s)
+            }
+            if ev.key_code == 120 {
+                return ui_state_cut(tree, s)
+            }
+            if ev.key_code == 118 {
+                return ui_state_paste(s)
+            }
+            if ev.key_code == 97 {
+                val keys: list<str> = list()
+                for i in 0..list_len(tree.nodes) {
+                    val node = list_get(tree.nodes, i)
+                    if is_selectable_node(node) && len(node.key) > 0 {
+                        list_push(keys, node.key)
+                    }
+                }
+                return ui_state_set_selection(s, keys)
+            }
+        }
+        if s.interaction.multiline && len(s.focused_key) > 0 {
+            if ev.key_code == 7 {
+                return multiline_caret(s, -1)
+            }
+            if ev.key_code == 8 {
+                return multiline_caret(s, 1)
+            }
+            if ev.key_code == 1 {
+                val next = text_insert_at(s.last_text_val, s.text_caret, "\n")
+                val caret = if s.text_caret < 0 { -1 } else { s.text_caret + 1 }
+                return with_text_position(s, next, caret)
+            }
+        }
+    }
+    return s
+}
+
+def resolve_event_pos(state: UiState, ev: HostEvent) -> UiSize {
+    if ev.x > 0.0 || ev.y > 0.0 {
+        return UiSize { w: ev.x, h: ev.y }
+    }
+    return UiSize { w: state.pointer_x, h: state.pointer_y }
+}
+
+def apply_pointer_move(tree: UiTree, state: UiState, ev: HostEvent) -> UiState effect alloc {
+    val hit = ui_hit_test(tree, ev.x, ev.y)
+    var hov = ""
+    val _h = when hit {
+        some(idx) => {
+            val node = list_get(tree.nodes, idx)
+            if is_interactive_node(node) {
+                hov = node.key
+            }
+            0
+        },
+        none => 0,
+    }
+    var slider_key = state.last_slider_key
+    var slider_val = state.last_slider_val
+    var slider_chg = state.has_slider_change
+    var slider_moved = false
+    if state.pointer_down && len(state.dragging_key) > 0 {
+        val _d = when ui_find_node_key(tree, state.dragging_key) {
+            some(didx) => {
+                slider_key = state.dragging_key
+                slider_val = slider_value_at_x(list_get(tree.nodes, didx), ev.x)
+                slider_chg = true
+                slider_moved = true
+                0
+            },
+            none => 0,
+        }
+    }
+    val next_dirty = state.dirty || hov != state.hovered_key || slider_moved
+    return UiState {
+        hovered_key: hov,
+        active_key: state.active_key,
+        focused_key: state.focused_key,
+        pointer_x: ev.x,
+        pointer_y: ev.y,
+        pointer_down: state.pointer_down,
+        dragging_key: state.dragging_key,
+        scroll_offset: state.scroll_offset,
+        motion: state.motion,
+        interaction: state.interaction,
+        dispatched_action: state.dispatched_action,
+        last_text_key: state.last_text_key,
+        last_text_val: state.last_text_val,
+        last_toggle_key: state.last_toggle_key,
+        last_toggle_val: state.last_toggle_val,
+        has_toggle_change: state.has_toggle_change,
+        last_slider_key: slider_key,
+        last_slider_val: slider_val,
+        has_slider_change: slider_chg,
+        close_requested: state.close_requested,
+        dirty: next_dirty,
+    }
+}
+
+def state_clear_focus_down(state: UiState, pos: UiSize) -> UiState {
+    return UiState {
+        hovered_key: state.hovered_key,
+        active_key: "",
+        focused_key: "",
+        pointer_x: pos.w,
+        pointer_y: pos.h,
+        pointer_down: true,
+        dragging_key: "",
+        scroll_offset: state.scroll_offset,
+        motion: state.motion,
+        interaction: state.interaction,
+        dispatched_action: state.dispatched_action,
+        last_text_key: state.last_text_key,
+        last_text_val: state.last_text_val,
+        last_toggle_key: state.last_toggle_key,
+        last_toggle_val: state.last_toggle_val,
+        has_toggle_change: state.has_toggle_change,
+        last_slider_key: state.last_slider_key,
+        last_slider_val: state.last_slider_val,
+        has_slider_change: state.has_slider_change,
+        close_requested: state.close_requested,
+        dirty: true,
+    }
+}
+
+def apply_pointer_down(tree: UiTree, state: UiState, ev: HostEvent) -> UiState effect alloc {
+    val pos = resolve_event_pos(state, ev)
+    val hit_idx = when ui_hit_test(tree, pos.w, pos.h) {
+        some(idx) => idx,
+        none => {
+            return state_clear_focus_down(state, pos)
+        },
+    }
+    val node = list_get(tree.nodes, hit_idx)
+    if !is_interactive_node(node) {
+        return with_state_copy(state, state.hovered_key, "", "", "")
+    }
+    val is_slider = when node.kind {
+        WidgetKind.Slider => true,
+        _ => false,
+    }
+    val is_text = when node.kind {
+        WidgetKind.TextInput => true,
+        _ => false,
+    }
+    val text_now = if is_text {
+        if state.last_text_key == node.key { state.last_text_val } else { node.text }
+    } else {
+        state.last_text_val
+    }
+    val caret = if is_text {
+        text_caret_for_point(text_now, node.layout, pos.w, pos.h, state.interaction.multiline)
+    } else {
+        state.text_caret
+    }
+    val tpos = if is_text {
+        text_line_col_at(text_now, caret)
+    } else {
+        UiSize { w: to_f64(state.interaction.text_line), h: to_f64(state.interaction.text_col) }
+    }
+    val int = state.interaction
+    val next_int = if is_text {
+        UiInteraction {
+            selected_keys: int.selected_keys,
+            selection_anchor: int.selection_anchor,
+            has_selection_change: int.has_selection_change,
+            clipboard: int.clipboard,
+            drag_key: int.drag_key,
+            drag_payload: int.drag_payload,
+            drag_x: int.drag_x,
+            drag_y: int.drag_y,
+            drop_key: int.drop_key,
+            has_drop: int.has_drop,
+            multiline: int.multiline,
+            text_line: tpos.w to i64,
+            text_col: tpos.h to i64,
+        }
+    } else {
+        int
+    }
+    return UiState {
+        hovered_key: node.key,
+        active_key: node.key,
+        focused_key: node.key,
+        pointer_x: pos.w,
+        pointer_y: pos.h,
+        pointer_down: true,
+        dragging_key: if is_slider { node.key } else { "" },
+        scroll_offset: state.scroll_offset,
+        motion: state.motion,
+        interaction: next_int,
+        dispatched_action: state.dispatched_action,
+        last_text_key: if is_text { node.key } else { state.last_text_key },
+        last_text_val: text_now,
+        text_caret: caret,
+        last_toggle_key: state.last_toggle_key,
+        last_toggle_val: state.last_toggle_val,
+        has_toggle_change: state.has_toggle_change,
+        last_slider_key: if is_slider { node.key } else { state.last_slider_key },
+        last_slider_val: if is_slider {
+            slider_value_at_x(node, pos.w)
+        } else {
+            state.last_slider_val
+        },
+        has_slider_change: if is_slider { true } else { state.has_slider_change },
+        close_requested: state.close_requested,
+        dirty: true,
+    }
+}
+
+def dispatch_action_state(state: UiState, act: str) -> UiState {
+    return UiState {
+        hovered_key: state.hovered_key,
+        active_key: "",
+        focused_key: state.focused_key,
+        pointer_x: state.pointer_x,
+        pointer_y: state.pointer_y,
+        pointer_down: false,
+        dragging_key: "",
+        scroll_offset: state.scroll_offset,
+        motion: state.motion,
+        interaction: state.interaction,
+        dispatched_action: act,
+        last_text_key: state.last_text_key,
+        last_text_val: state.last_text_val,
+        last_toggle_key: state.last_toggle_key,
+        last_toggle_val: state.last_toggle_val,
+        has_toggle_change: state.has_toggle_change,
+        last_slider_key: state.last_slider_key,
+        last_slider_val: state.last_slider_val,
+        has_slider_change: state.has_slider_change,
+        close_requested: state.close_requested,
+        dirty: true,
+    }
+}
+
+def dispatch_toggle_state(node: UiNode, state: UiState) -> UiState {
+    val act = if len(node.action) > 0 { node.action } else { state.dispatched_action }
+    return UiState {
+        hovered_key: state.hovered_key,
+        active_key: "",
+        focused_key: state.focused_key,
+        pointer_x: state.pointer_x,
+        pointer_y: state.pointer_y,
+        pointer_down: false,
+        dragging_key: "",
+        scroll_offset: state.scroll_offset,
+        motion: state.motion,
+        interaction: state.interaction,
+        dispatched_action: act,
+        last_text_key: state.last_text_key,
+        last_text_val: state.last_text_val,
+        last_toggle_key: node.key,
+        last_toggle_val: !node.checked,
+        has_toggle_change: true,
+        last_slider_key: state.last_slider_key,
+        last_slider_val: state.last_slider_val,
+        has_slider_change: state.has_slider_change,
+        close_requested: state.close_requested,
+        dirty: true,
+    }
+}
+
+def activate_widget(node: UiNode, state: UiState) -> UiState {
+    val act = if len(node.action) > 0 { node.action } else { node.key }
+    return when node.kind {
+        WidgetKind.Button => dispatch_action_state(state, act),
+        WidgetKind.TableRow => dispatch_action_state(state, act),
+        WidgetKind.RadarScope => if len(node.action) > 0 {
+            dispatch_action_state(state, node.action)
+        } else {
+            with_state_copy(state, state.hovered_key, "", state.focused_key, "")
+        },
+        WidgetKind.Checkbox => dispatch_toggle_state(node, state),
+        WidgetKind.Toggle => dispatch_toggle_state(node, state),
+        _ => with_state_copy(state, state.hovered_key, "", state.focused_key, ""),
+    }
+}
+
+def apply_pointer_up(tree: UiTree, state: UiState, ev: HostEvent) -> UiState effect alloc {
+    val pos = resolve_event_pos(state, ev)
+    val hit = ui_hit_test(tree, pos.w, pos.h)
+    val cleared = UiState {
+        hovered_key: state.hovered_key,
+        active_key: "",
+        focused_key: state.focused_key,
+        pointer_x: pos.w,
+        pointer_y: pos.h,
+        pointer_down: false,
+        dragging_key: "",
+        scroll_offset: state.scroll_offset,
+        motion: state.motion,
+        interaction: state.interaction,
+        dispatched_action: state.dispatched_action,
+        last_text_key: state.last_text_key,
+        last_text_val: state.last_text_val,
+        last_toggle_key: state.last_toggle_key,
+        last_toggle_val: state.last_toggle_val,
+        has_toggle_change: state.has_toggle_change,
+        last_slider_key: state.last_slider_key,
+        last_slider_val: state.last_slider_val,
+        has_slider_change: state.has_slider_change,
+        close_requested: state.close_requested,
+        dirty: true,
+    }
+    if len(state.active_key) > 0 {
+        return when hit {
+            some(hidx) => {
+                val node = list_get(tree.nodes, hidx)
+                if node.key == state.active_key {
+                    activate_widget(node, cleared)
+                } else {
+                    cleared
+                }
+            },
+            none => cleared,
+        }
+    }
+    return cleared
+}
+
+def apply_text_input(tree: UiTree, state: UiState, ev: HostEvent) -> UiState effect alloc {
+    if len(state.focused_key) == 0 || len(ev.text) == 0 {
+        return state
+    }
+    val found_idx = when ui_find_node_key(tree, state.focused_key) {
+        some(i) => i,
+        none => {
+            return state
+        },
+    }
+    val node = list_get(tree.nodes, found_idx)
+    val is_text = when node.kind {
+        WidgetKind.TextInput => true,
+        _ => false,
+    }
+    if !is_text {
+        return state
+    }
+    val base = if state.last_text_key == node.key { state.last_text_val } else { node.text }
+    val next = text_insert_at(base, state.text_caret, ev.text)
+    val next_caret = if state.text_caret < 0 { -1 } else { state.text_caret + text_len_chars(ev.text) }
+    return with_text_value(state, node.key, next, next_caret)
+}
+
+def apply_key_down(tree: UiTree, state: UiState, ev: HostEvent) -> UiState effect alloc {
+    // Escape clears focus without closing the window.
+    if ev.key_code == 4 {
+        return with_state_copy(state, "", state.active_key, "", state.dragging_key)
+    }
+    if ev.key_code == 3 {
+        val next_focus = cycle_focus_key(tree, state.focused_key, (ev.modifiers % 2) == 1)
+        return with_state_copy(
+            state,
+            state.hovered_key,
+            state.active_key,
+            next_focus,
+            state.dragging_key,
+        )
+    }
+    if len(state.focused_key) == 0 {
+        return state
+    }
+    val found_idx = when ui_find_node_key(tree, state.focused_key) {
+        some(i) => i,
+        none => {
+            return state
+        },
+    }
+    val node = list_get(tree.nodes, found_idx)
+    val is_text = when node.kind {
+        WidgetKind.TextInput => true,
+        _ => false,
+    }
+    val base = if state.last_text_key == node.key { state.last_text_val } else { node.text }
+    val nchars = if is_text { text_len_chars(base) } else { 0 }
+
+    // Caret navigation and editing for text inputs.
+    if is_text && (ev.key_code == 5 || ev.key_code == 6 || ev.key_code == 9 || ev.key_code == 10 || ev.key_code == 2 || ev.key_code == 11) {
+        var caret = state.text_caret
+        if caret < 0 { caret = nchars }
+        if ev.key_code == 5 {
+            if caret > 0 { caret = caret - 1 }
+        } else if ev.key_code == 6 {
+            if caret < nchars { caret = caret + 1 }
+        } else if ev.key_code == 9 {
+            caret = 0
+        } else if ev.key_code == 10 {
+            caret = nchars
+        } else if ev.key_code == 2 {
+            if caret > 0 {
+                val next = text_remove_at(base, caret - 1)
+                caret = caret - 1
+                return with_text_value(state, node.key, next, caret)
+            }
+        } else if ev.key_code == 11 {
+            if caret < nchars {
+                val next = text_remove_at(base, caret)
+                return with_text_value(state, node.key, next, caret)
+            }
+        }
+        return with_text_value(state, node.key, base, if caret >= nchars { -1 } else { caret })
+    }
+    if ev.key_code == 1 || ev.key_code == 12 {
+        return activate_widget(node, state)
+    }
+    return state
+}
+
+def with_text_value(state: UiState, key: str, value: str, caret: i64) -> UiState effect alloc {
+    val copy = with_state_copy(state, state.hovered_key, state.active_key, state.focused_key, state.dragging_key)
+    val pos = text_line_col_at(value, caret)
+    val int = copy.interaction
+    return UiState {
+        hovered_key: copy.hovered_key,
+        active_key: copy.active_key,
+        focused_key: copy.focused_key,
+        pointer_x: copy.pointer_x,
+        pointer_y: copy.pointer_y,
+        pointer_down: copy.pointer_down,
+        dragging_key: copy.dragging_key,
+        scroll_offset: copy.scroll_offset,
+        motion: copy.motion,
+        interaction: UiInteraction {
+            selected_keys: int.selected_keys,
+            selection_anchor: int.selection_anchor,
+            has_selection_change: int.has_selection_change,
+            clipboard: int.clipboard,
+            drag_key: int.drag_key,
+            drag_payload: int.drag_payload,
+            drag_x: int.drag_x,
+            drag_y: int.drag_y,
+            drop_key: int.drop_key,
+            has_drop: int.has_drop,
+            multiline: int.multiline,
+            text_line: pos.w to i64,
+            text_col: pos.h to i64,
+        },
+        dispatched_action: copy.dispatched_action,
+        last_text_key: key,
+        last_text_val: value,
+        text_caret: caret,
+        last_toggle_key: copy.last_toggle_key,
+        last_toggle_val: copy.last_toggle_val,
+        has_toggle_change: copy.has_toggle_change,
+        last_slider_key: copy.last_slider_key,
+        last_slider_val: copy.last_slider_val,
+        has_slider_change: copy.has_slider_change,
+        close_requested: copy.close_requested,
+        dirty: true,
+    }
+}
+def set_close_requested(state: UiState) -> UiState {
+    return UiState {
+        hovered_key: state.hovered_key,
+        active_key: state.active_key,
+        focused_key: state.focused_key,
+        pointer_x: state.pointer_x,
+        pointer_y: state.pointer_y,
+        pointer_down: state.pointer_down,
+        dragging_key: state.dragging_key,
+        scroll_offset: state.scroll_offset,
+        motion: state.motion,
+        interaction: state.interaction,
+        dispatched_action: state.dispatched_action,
+        last_text_key: state.last_text_key,
+        last_text_val: state.last_text_val,
+        last_toggle_key: state.last_toggle_key,
+        last_toggle_val: state.last_toggle_val,
+        has_toggle_change: state.has_toggle_change,
+        last_slider_key: state.last_slider_key,
+        last_slider_val: state.last_slider_val,
+        has_slider_change: state.has_slider_change,
+        close_requested: true,
+        dirty: state.dirty,
+    }
+}
+
+def apply_wheel(state: UiState, ev: HostEvent) -> UiState {
+    return UiState {
+        hovered_key: state.hovered_key,
+        active_key: state.active_key,
+        focused_key: state.focused_key,
+        pointer_x: state.pointer_x,
+        pointer_y: state.pointer_y,
+        pointer_down: state.pointer_down,
+        dragging_key: state.dragging_key,
+        scroll_offset: fmax(0.0, state.scroll_offset - ev.y),
+        motion: state.motion,
+        interaction: state.interaction,
+        dispatched_action: state.dispatched_action,
+        last_text_key: state.last_text_key,
+        last_text_val: state.last_text_val,
+        last_toggle_key: state.last_toggle_key,
+        last_toggle_val: state.last_toggle_val,
+        has_toggle_change: state.has_toggle_change,
+        last_slider_key: state.last_slider_key,
+        last_slider_val: state.last_slider_val,
+        has_slider_change: state.has_slider_change,
+        close_requested: state.close_requested,
+        dirty: true,
+    }
+}
+
+/// Apply one `HostEvent` to `state` against the laid-out `tree`.
+pub def ui_apply_event(tree: UiTree, state: UiState, ev: HostEvent) -> UiState effect alloc {
+    val next = when ev.kind {
+        UiEventKind.CloseRequested => set_close_requested(state),
+        UiEventKind.PointerMove => apply_pointer_move(tree, state, ev),
+        UiEventKind.PointerDown => apply_pointer_down(tree, state, ev),
+        UiEventKind.PointerUp => apply_pointer_up(tree, state, ev),
+        UiEventKind.Wheel => apply_wheel(state, ev),
+        UiEventKind.KeyDown => apply_key_down(tree, state, ev),
+        UiEventKind.TextInput => apply_text_input(tree, state, ev),
+        UiEventKind.Resized => set_state_dirty(state, true),
+        UiEventKind.KeyUp => state,
+        UiEventKind.FocusChanged => state,
+        UiEventKind.RedrawRequested => set_state_dirty(state, true),
+        UiEventKind.ScaleChanged => set_state_dirty(state, true),
+        UiEventKind.Unknown => state,
+    }
+    return ui_apply_interaction_extras(tree, state, next, ev)
+}
+
+/// Map a `WidgetKind` to its `AccessKit` integer role code understood by `iris_ui_host`.
+pub def ui_a11y_role(kind: WidgetKind) -> i64 {
+    return when kind {
+        WidgetKind.Label => 2,
+        WidgetKind.Badge => 2,
+        WidgetKind.Button => 3,
+        WidgetKind.TextInput => 4,
+        WidgetKind.Checkbox => 5,
+        WidgetKind.Toggle => 6,
+        WidgetKind.Slider => 7,
+        WidgetKind.TableHeader => 8,
+        WidgetKind.TableRow => 9,
+        WidgetKind.Sparkline => 10,
+        WidgetKind.LineChart => 10,
+        WidgetKind.RadarScope => 10,
+        WidgetKind.TensorView => 10,
+        WidgetKind.Col => 0,
+        WidgetKind.Row => 0,
+        WidgetKind.Stack => 0,
+        WidgetKind.Card => 0,
+        WidgetKind.Spacer => 0,
+    }
+}
+
+/// Map normalized intensity `t` in `[0.0, 1.0]` onto `theme`'s semantic thermal ramp.
+pub def ui_thermal_color_for(theme: UiTheme, t: f64) -> UiColor {
+    val u = clamp01(t)
+    val c0 = mix_color(theme.bg, theme.azure, 0.22)
+    val c1 = theme.azure
+    val c2 = theme.teal
+    val c3 = theme.amber
+    val c4 = theme.coral
+    if u < 0.25 {
+        return mix_color(c0, c1, u * 4.0)
+    }
+    if u < 0.50 {
+        return mix_color(c1, c2, (u - 0.25) * 4.0)
+    }
+    if u < 0.75 {
+        return mix_color(c2, c3, (u - 0.50) * 4.0)
+    }
+    return mix_color(c3, c4, (u - 0.75) * 4.0)
+}
+
+/// Map normalized intensity `t` in `[0.0, 1.0]` onto the IRIS Obsidian thermal ramp.
+pub def ui_thermal_color(t: f64) -> UiColor {
+    return ui_thermal_color_for(obsidian_theme(), t)
+}
+
+def emit_node_a11y(buf: DrawBuffer, node: UiNode) -> DrawBuffer effect ffi, alloc {
+    val lbl = if len(node.text) > 0 {
+        node.text
+    } else {
+        if len(node.placeholder) > 0 { node.placeholder } else { node.key }
+    }
+    if len(lbl) == 0 && !is_interactive_node(node) {
+        return buf
+    }
+    return draw_cmd_a11y(buf, node.id + 1, ui_a11y_role(node.kind), node.layout, lbl)
+}
+
+def paint_card_or_box(
+    theme: UiTheme,
+    node: UiNode,
+    buf: DrawBuffer,
+) -> DrawBuffer effect ffi, alloc {
+    val is_card = when node.kind {
+        WidgetKind.Card => true,
+        _ => false,
+    }
+    if is_card {
+        val bg = if node.style.bg.a > 0 { node.style.bg } else { theme.panel }
+        val br = if node.style.border.a > 0 { node.style.border } else { theme.border }
+        val bw = if node.style.border_width > 0.0 { node.style.border_width } else { 1.0 }
+        val st = UiStyle { bg: bg, border: br, border_width: bw }
+        return draw_cmd_round_rect(buf, node.layout, fmax(4.0, node.style.radius), st)
+    }
+    if node.style.bg.a > 0 || node.style.border_width > 0.0 {
+        return draw_cmd_round_rect(buf, node.layout, node.style.radius, node.style)
+    }
+    return buf
+}
+
+def paint_badge(theme: UiTheme, node: UiNode, buf: DrawBuffer) -> DrawBuffer effect ffi, alloc {
+    val accent = tone_color(theme, node.tone)
+    val bg = mix_color(theme.surface, accent, 0.22)
+    val box_st = UiStyle { bg: bg, border: accent, border_width: 1.0 }
+    var b = draw_cmd_round_rect(buf, node.layout, node.layout.h * 0.5, box_st)
+    val txt_r = UiRect {
+        x: node.layout.x + 9.0,
+        y: node.layout.y + 3.0,
+        w: fmax(0.0, node.layout.w - 18.0),
+        h: node.layout.h - 4.0,
+    }
+    val txt_st = UiStyle { fg: accent, font_size: 12.0, bold: true }
+    b = draw_cmd_text(b, txt_r, node.text, txt_st)
+    return emit_node_a11y(b, node)
+}
+
+def paint_button(
+    theme: UiTheme,
+    node: UiNode,
+    state: UiState,
+    buf: DrawBuffer,
+) -> DrawBuffer effect ffi, alloc {
+    val accent = tone_color(theme, node.tone)
+    var fill = if node.style.bg.a > 0 {
+        node.style.bg
+    } else {
+        mix_color(theme.panel_alt, accent, 0.28)
+    }
+    val is_hov = len(node.key) > 0 && state.hovered_key == node.key
+    val is_act = len(node.key) > 0 && state.active_key == node.key
+    val is_foc = len(node.key) > 0 && state.focused_key == node.key
+    // Eased transitions live in UiState; fall back to the discrete edge so
+    // states built without a motion clock still render their hover feedback.
+    val hov = fmax(ui_state_hover_progress(state, node.key), if is_hov { 1.0 } else { 0.0 })
+    val act = fmax(ui_state_press_progress(state, node.key), if is_act { 1.0 } else { 0.0 })
+    if hov > 0.0 {
+        fill = mix_color(fill, theme.fg, 0.10 * hov)
+    }
+    if act > 0.0 {
+        fill = mix_color(fill, accent, 0.30 * act)
+    }
+    if ui_state_is_selected(state, node.key) {
+        fill = mix_color(fill, theme.cyan, 0.22)
+    }
+    val br = if is_foc {
+        theme.cyan
+    } else {
+        if node.style.border.a > 0 { node.style.border } else { accent }
+    }
+    val bw = if is_foc { 2.0 } else { 1.0 }
+    var b = draw_cmd_round_rect(
+        buf,
+        node.layout,
+        node.style.radius,
+        UiStyle { bg: fill, border: br, border_width: bw },
+    )
+    val fs = if node.style.font_size > 0.0 { node.style.font_size } else { 14.0 }
+    val txt_r = UiRect {
+        x: node.layout.x + 12.0,
+        y: node.layout.y + fmax(4.0, (node.layout.h - fs * 1.35) * 0.5),
+        w: fmax(0.0, node.layout.w - 24.0),
+        h: node.layout.h,
+    }
+    b = draw_cmd_text(b, txt_r, node.text, UiStyle { fg: theme.fg, font_size: fs, bold: true })
+    return emit_node_a11y(b, node)
+}
+
+def paint_text_input(
+    theme: UiTheme,
+    node: UiNode,
+    state: UiState,
+    buf: DrawBuffer,
+) -> DrawBuffer effect ffi, alloc {
+    val focused = len(node.key) > 0 && state.focused_key == node.key
+    val br = if focused { theme.cyan } else { theme.border }
+    var b = draw_cmd_round_rect(
+        buf,
+        node.layout,
+        6.0,
+        UiStyle { bg: theme.surface, border: br, border_width: if focused { 1.5 } else { 1.0 } },
+    )
+    val clip_r = UiRect {
+        x: node.layout.x + 10.0,
+        y: node.layout.y + 4.0,
+        w: fmax(4.0, node.layout.w - 20.0),
+        h: fmax(4.0, node.layout.h - 8.0),
+    }
+    b = draw_cmd_push_clip(b, clip_r)
+    val active_txt = if len(node.key) > 0 && state.last_text_key == node.key {
+        state.last_text_val
+    } else {
+        node.text
+    }
+    val has_text = len(active_txt) > 0
+    val fg = if has_text { theme.fg } else { theme.fg_muted }
+    if state.interaction.multiline && has_text {
+        val lines = split_text_lines(active_txt)
+        var li = 0
+        while li < list_len(lines) {
+            b = draw_cmd_text(
+                b,
+                UiRect {
+                    x: clip_r.x,
+                    y: node.layout.y + 7.0 + to_f64(li) * 18.0,
+                    w: clip_r.w,
+                    h: 18.0,
+                },
+                list_get(lines, li),
+                UiStyle { fg: fg, font_size: 13.0, monospace: true },
+            )
+            li = li + 1
+        }
+    } else {
+        val shown = if has_text { active_txt } else { node.placeholder }
+        val txt_r = UiRect { x: clip_r.x, y: node.layout.y + 8.0, w: clip_r.w, h: clip_r.h }
+        b = draw_cmd_text(b, txt_r, shown, UiStyle { fg: fg, font_size: 13.0, monospace: true })
+    }
+    if focused {
+        val caret = if state.text_caret < 0 { text_len_chars(active_txt) } else { state.text_caret }
+        val col = if state.interaction.multiline { state.interaction.text_col } else { caret }
+        val line = if state.interaction.multiline { state.interaction.text_line } else { 0 }
+        val cx = fmin(clip_r.x + clip_r.w - 3.0, clip_r.x + to_f64(col) * 7.6 + 2.0)
+        val cy = node.layout.y + 7.0 + to_f64(line) * 18.0
+        val cy2 = if state.interaction.multiline { cy + 15.0 } else { node.layout.y + node.layout.h - 7.0 }
+        b = draw_cmd_line(
+            b,
+            UiRect { x: cx, y: cy, w: cx, h: cy2 },
+            theme.cyan,
+            1.5,
+            false,
+        )
+    }
+    b = draw_cmd_pop_clip(b)
+    return emit_node_a11y(b, node)
+}
+
+def fmt_slider_f1(v: f64) -> str effect alloc {
+    val sign = if v < 0.0 { "-" } else { "" }
+    val av = if v < 0.0 { 0.0 - v } else { v }
+    val scaled = (av * 10.0 + 0.5) to i64
+    val whole = scaled / 10
+    val frac = scaled % 10
+    return f"{sign}{whole}.{frac}"
+}
+
+def paint_checkbox(
+    theme: UiTheme,
+    node: UiNode,
+    state: UiState,
+    buf: DrawBuffer,
+) -> DrawBuffer effect ffi, alloc {
+    val accent = tone_color(theme, node.tone)
+    val is_foc = len(node.key) > 0 && state.focused_key == node.key
+    val is_hov = len(node.key) > 0 && state.hovered_key == node.key
+    val box_r = UiRect {
+        x: node.layout.x + 2.0,
+        y: node.layout.y + fmax(2.0, (node.layout.h - 18.0) * 0.5),
+        w: 18.0,
+        h: 18.0,
+    }
+    val box_bg = if node.checked { accent } else { theme.surface }
+    val box_br = if is_foc {
+        theme.cyan
+    } else if node.checked || is_hov {
+        accent
+    } else {
+        theme.border
+    }
+    var b = draw_cmd_round_rect(
+        buf,
+        box_r,
+        4.0,
+        UiStyle { bg: box_bg, border: box_br, border_width: 1.5 },
+    )
+    if node.checked {
+        b = draw_cmd_line(
+            b,
+            UiRect { x: box_r.x + 4.0, y: box_r.y + 9.0, w: box_r.x + 8.0, h: box_r.y + 13.0 },
+            theme.bg,
+            2.0,
+            false,
+        )
+        b = draw_cmd_line(
+            b,
+            UiRect { x: box_r.x + 8.0, y: box_r.y + 13.0, w: box_r.x + 14.0, h: box_r.y + 5.0 },
+            theme.bg,
+            2.0,
+            false,
+        )
+    }
+    val txt_r = UiRect {
+        x: box_r.x + 26.0,
+        y: node.layout.y + 4.0,
+        w: fmax(0.0, node.layout.w - 30.0),
+        h: node.layout.h,
+    }
+    b = draw_cmd_text(b, txt_r, node.text, UiStyle { fg: theme.fg, font_size: 13.0 })
+    return emit_node_a11y(b, node)
+}
+
+def paint_toggle(
+    theme: UiTheme,
+    node: UiNode,
+    state: UiState,
+    buf: DrawBuffer,
+) -> DrawBuffer effect ffi, alloc {
+    val is_foc = len(node.key) > 0 && state.focused_key == node.key
+    val is_hov = len(node.key) > 0 && state.hovered_key == node.key
+    val accent = if node.checked { tone_color(theme, node.tone) } else { theme.panel_alt }
+    val track_br = if is_foc {
+        theme.cyan
+    } else if node.checked || is_hov {
+        mix_color(theme.border, tone_color(theme, node.tone), 0.7)
+    } else {
+        theme.border
+    }
+    val track_r = UiRect {
+        x: node.layout.x + 2.0,
+        y: node.layout.y + fmax(2.0, (node.layout.h - 22.0) * 0.5),
+        w: 40.0,
+        h: 22.0,
+    }
+    var b = draw_cmd_round_rect(
+        buf,
+        track_r,
+        11.0,
+        UiStyle { bg: accent, border: track_br, border_width: if is_foc { 1.5 } else { 1.0 } },
+    )
+    val knob_x = if node.checked { track_r.x + 29.0 } else { track_r.x + 11.0 }
+    val knob_fill = if node.checked { theme.bg } else { theme.fg }
+    b = draw_cmd_circle(
+        b,
+        knob_x,
+        track_r.y + 11.0,
+        8.0,
+        UiStyle { bg: knob_fill, border: theme.surface, border_width: 0.75 },
+    )
+    val txt_r = UiRect {
+        x: track_r.x + 48.0,
+        y: node.layout.y + 4.0,
+        w: fmax(0.0, node.layout.w - 52.0),
+        h: node.layout.h,
+    }
+    b = draw_cmd_text(b, txt_r, node.text, UiStyle { fg: theme.fg, font_size: 13.0 })
+    return emit_node_a11y(b, node)
+}
+
+def paint_slider(
+    theme: UiTheme,
+    node: UiNode,
+    state: UiState,
+    buf: DrawBuffer,
+) -> DrawBuffer effect ffi, alloc {
+    val accent = tone_color(theme, node.tone)
+    val is_foc = len(node.key) > 0 && state.focused_key == node.key
+    val is_hov = len(node.key) > 0
+        && (state.hovered_key == node.key || state.dragging_key == node.key)
+    val has_lbl = len(node.text) > 0
+    var b = buf
+    if has_lbl {
+        val lbl = f"{node.text}: {fmt_slider_f1(node.value)}"
+        b = draw_cmd_text(
+            b,
+            UiRect { x: node.layout.x + 4.0, y: node.layout.y + 2.0, w: node.layout.w, h: 18.0 },
+            lbl,
+            UiStyle { fg: theme.fg, font_size: 12.0 },
+        )
+    }
+    val ty = node.layout.y + (if has_lbl { 27.0 } else { node.layout.h * 0.5 })
+    val tx = node.layout.x + 8.0
+    val tw = fmax(24.0, node.layout.w - 16.0)
+    val span = fmax(0.0001, node.max_val - node.min_val)
+    val t = clamp01((node.value - node.min_val) / span)
+    b = draw_cmd_round_rect(
+        b,
+        UiRect { x: tx, y: ty - 3.0, w: tw, h: 6.0 },
+        3.0,
+        UiStyle { bg: theme.panel_alt },
+    )
+    b = draw_cmd_round_rect(
+        b,
+        UiRect { x: tx, y: ty - 3.0, w: tw * t, h: 6.0 },
+        3.0,
+        UiStyle { bg: accent },
+    )
+    val knob_br = if is_foc || is_hov { theme.cyan } else { accent }
+    b = draw_cmd_circle(
+        b,
+        tx + tw * t,
+        ty,
+        if is_hov { 8.5 } else { 7.5 },
+        UiStyle { bg: theme.fg, border: knob_br, border_width: 2.0 },
+    )
+    return emit_node_a11y(b, node)
+}
+
+def normalize_series_points(
+    series: ChartSeries,
+    plot_r: UiRect,
+) -> (list<f64>, list<f64>) effect alloc {
+    val pxs: list<f64> = list()
+    val pys: list<f64> = list()
+    val n = list_len(series.ys)
+    if n == 0 {
+        return (pxs, pys)
+    }
+    var ymin = list_get(series.ys, 0)
+    var ymax = ymin
+    for i in 1..n {
+        val v = list_get(series.ys, i)
+        ymin = fmin(ymin, v)
+        ymax = fmax(ymax, v)
+    }
+    val yspan = if ymax - ymin < 0.0001 { 1.0 } else { ymax - ymin }
+    val denom = if n > 1 { to_f64(n - 1) } else { 1.0 }
+    for i in 0..n {
+        val tx = to_f64(i) / denom
+        val ty = (list_get(series.ys, i) - ymin) / yspan
+        list_push(pxs, plot_r.x + tx * plot_r.w)
+        list_push(pys, plot_r.y + plot_r.h - ty * plot_r.h)
+    }
+    return (pxs, pys)
+}
+
+def paint_chart(
+    tree: UiTree,
+    node: UiNode,
+    is_spark: bool,
+    buf: DrawBuffer,
+) -> DrawBuffer effect ffi, alloc {
+    val theme = tree.theme
+    var b = draw_cmd_round_rect(
+        buf,
+        node.layout,
+        if is_spark { 6.0 } else { 8.0 },
+        UiStyle { bg: theme.surface, border: theme.border, border_width: 1.0 },
+    )
+    if node.data_idx < 0 || node.data_idx >= list_len(tree.charts) {
+        return b
+    }
+    val series = list_get(tree.charts, node.data_idx)
+    val accent = tone_color(theme, series.tone)
+    val top_pad = if is_spark { 6.0 } else { 26.0 }
+    val plot_r = UiRect {
+        x: node.layout.x + 8.0,
+        y: node.layout.y + top_pad,
+        w: fmax(16.0, node.layout.w - 16.0),
+        h: fmax(12.0, node.layout.h - top_pad - 8.0),
+    }
+    if !is_spark {
+        b = draw_cmd_text(
+            b,
+            UiRect {
+                x: node.layout.x + 10.0,
+                y: node.layout.y + 6.0,
+                w: node.layout.w - 20.0,
+                h: 18.0,
+            },
+            series.label,
+            UiStyle { fg: theme.fg_muted, font_size: 12.0, bold: true },
+        )
+        val mid_y = plot_r.y + plot_r.h * 0.5
+        b = draw_cmd_line(
+            b,
+            UiRect { x: plot_r.x, y: mid_y, w: plot_r.x + plot_r.w, h: mid_y },
+            theme.border,
+            1.0,
+            true,
+        )
+    }
+    val pts = normalize_series_points(series, plot_r)
+    val fill_c = if series.fill { with_alpha(accent, 42) } else { rgba(0, 0, 0, 0) }
+    b = draw_cmd_push_clip(b, plot_r)
+    b = draw_cmd_polyline(b, pts.0, pts.1, accent, fill_c)
+    b = draw_cmd_pop_clip(b)
+    return emit_node_a11y(b, node)
+}
+
+def paint_radar_rings(
+    theme: UiTheme,
+    cx: f64,
+    cy: f64,
+    rad: f64,
+    spec: RadarSpec,
+    buf: DrawBuffer,
+) -> DrawBuffer effect ffi, alloc {
+    var b = buf
+    val ring_st = UiStyle {
+        bg: rgba(0, 0, 0, 0),
+        border: mix_color(theme.border, theme.teal, 0.32),
+        border_width: 1.0,
+    }
+    val rings = if spec.ring_count > 0 { spec.ring_count } else { 3 }
+    for r_i in 1..(rings + 1) {
+        val rr = rad * (to_f64(r_i) / to_f64(rings))
+        b = draw_cmd_circle(b, cx, cy, rr, ring_st)
+    }
+    b = draw_cmd_line(b, UiRect { x: cx - rad, y: cy, w: cx + rad, h: cy }, theme.border, 1.0, true)
+    b = draw_cmd_line(b, UiRect { x: cx, y: cy - rad, w: cx, h: cy + rad }, theme.border, 1.0, true)
+    val own_r = spec.own_heading_deg * 0.017453292519943295
+    b = draw_cmd_line(
+        b,
+        UiRect { x: cx, y: cy, w: cx + sin(own_r) * rad * 0.85, h: cy - cos(own_r) * rad * 0.85 },
+        with_alpha(theme.cyan, 140),
+        1.5,
+        true,
+    )
+    return draw_cmd_circle(
+        b,
+        cx,
+        cy,
+        4.0,
+        UiStyle { bg: theme.cyan, border: theme.fg, border_width: 1.0 },
+    )
+}
+
+def radar_blip_xy(layout: UiRect, max_r: f64, blip: RadarBlip) -> UiSize {
+    val cx = layout.x + layout.w * 0.5
+    val cy = layout.y + 22.0 + (layout.h - 28.0) * 0.5
+    val rad = fmax(24.0, fmin(layout.w, layout.h - 28.0) * 0.41)
+    val br = blip.bearing_deg * 0.017453292519943295
+    val d = clamp01(blip.range_nm / max_r) * rad
+    return UiSize { w: cx + sin(br) * d, h: cy - cos(br) * d }
+}
+
+/// Find the index of the closest radar blip within 18 logical pixels of `(px, py)`.
+pub def ui_radar_pick_blip(tree: UiTree, key: str, px: f64, py: f64) -> option<i64> effect alloc {
+    val idx = when ui_find_node_key(tree, key) {
+        some(i) => i,
+        none => {
+            return none
+        },
+    }
+    val node = list_get(tree.nodes, idx)
+    if node.data_idx < 0 || node.data_idx >= list_len(tree.radars) {
+        return none
+    }
+    val spec = list_get(tree.radars, node.data_idx)
+    val max_r = if spec.range_nm > 0.1 { spec.range_nm } else { 12.0 }
+    var best_idx = -1
+    var best_d2 = 324.0
+    for i in 0..list_len(spec.blips) {
+        val pos = radar_blip_xy(node.layout, max_r, list_get(spec.blips, i))
+        val dx = px - pos.w
+        val dy = py - pos.h
+        val d2 = dx * dx + dy * dy
+        if d2 <= best_d2 {
+            best_d2 = d2
+            best_idx = i
+        }
+    }
+    return if best_idx >= 0 { some(best_idx) } else { none }
+}
+
+def paint_radar_blip(
+    theme: UiTheme,
+    node: UiNode,
+    rad_r: f64,
+    blip: RadarBlip,
+    buf: DrawBuffer,
+) -> DrawBuffer effect ffi, alloc {
+    val bpos = radar_blip_xy(node.layout, rad_r, blip)
+    val bx = bpos.w
+    val by = bpos.h
+    val c = tone_color(theme, blip.tone)
+    val cr = blip.course_deg * 0.017453292519943295
+    val vlen = fmin(22.0, 6.0 + blip.speed_kn * 0.8)
+    var b = draw_cmd_line(
+        buf,
+        UiRect { x: bx, y: by, w: bx + sin(cr) * vlen, h: by - cos(cr) * vlen },
+        c,
+        1.5,
+        false,
+    )
+    if len(node.placeholder) > 0 && blip.label == node.placeholder {
+        b = draw_cmd_circle(
+            b,
+            bx,
+            by,
+            9.5,
+            UiStyle { bg: rgba(0, 0, 0, 0), border: theme.cyan, border_width: 1.5 },
+        )
+    }
+    b = draw_cmd_circle(b, bx, by, 4.5, UiStyle { bg: c, border: theme.bg, border_width: 1.0 })
+    if len(blip.label) == 0 {
+        return b
+    }
+    val est_w = fmax(48.0, to_f64(len(blip.label)) * 7.2 + 8.0)
+    val fits_right = bx + 6.0 + est_w <= node.layout.x + node.layout.w - 6.0
+    val lbl_x = if fits_right { bx + 6.0 } else { fmax(node.layout.x + 8.0, bx - 6.0 - est_w) }
+    val lbl_y = fmax(node.layout.y + 24.0, fmin(by - 8.0, node.layout.y + node.layout.h - 20.0))
+    return draw_cmd_text(
+        b,
+        UiRect { x: lbl_x, y: lbl_y, w: est_w, h: 16.0 },
+        blip.label,
+        UiStyle { fg: c, font_size: 11.0, monospace: true },
+    )
+}
+
+def paint_radar_scope(
+    tree: UiTree,
+    node: UiNode,
+    state: UiState,
+    buf: DrawBuffer,
+) -> DrawBuffer effect ffi, alloc {
+    val theme = tree.theme
+    val scope_bg = mix_color(theme.bg, theme.surface, 0.35)
+    val is_foc = len(node.action) > 0 && len(node.key) > 0 && state.focused_key == node.key
+    val is_hov = len(node.action) > 0 && len(node.key) > 0 && state.hovered_key == node.key
+    val scope_br = if is_foc {
+        theme.cyan
+    } else if is_hov {
+        mix_color(theme.border, theme.cyan, 0.45)
+    } else {
+        theme.border
+    }
+    var b = draw_cmd_round_rect(
+        buf,
+        node.layout,
+        10.0,
+        UiStyle { bg: scope_bg, border: scope_br, border_width: if is_foc { 1.5 } else { 1.0 } },
+    )
+    if node.data_idx < 0 || node.data_idx >= list_len(tree.radars) {
+        return b
+    }
+    val spec = list_get(tree.radars, node.data_idx)
+    b = draw_cmd_text(
+        b,
+        UiRect {
+            x: node.layout.x + 12.0,
+            y: node.layout.y + 8.0,
+            w: node.layout.w - 24.0,
+            h: 18.0,
+        },
+        spec.title,
+        UiStyle { fg: theme.teal, font_size: 12.0, bold: true },
+    )
+    val cx = node.layout.x + node.layout.w * 0.5
+    val cy = node.layout.y + 22.0 + (node.layout.h - 28.0) * 0.5
+    val rad = fmax(24.0, fmin(node.layout.w, node.layout.h - 28.0) * 0.41)
+    b = draw_cmd_push_clip(b, node.layout)
+    b = paint_radar_rings(theme, cx, cy, rad, spec, b)
+    val max_r = if spec.range_nm > 0.1 { spec.range_nm } else { 12.0 }
+    for i in 0..list_len(spec.blips) {
+        b = paint_radar_blip(theme, node, max_r, list_get(spec.blips, i), b)
+    }
+    b = draw_cmd_pop_clip(b)
+    return emit_node_a11y(b, node)
+}
+
+def paint_tensor_view(tree: UiTree, node: UiNode, buf: DrawBuffer) -> DrawBuffer effect ffi, alloc {
+    val theme = tree.theme
+    var b = draw_cmd_round_rect(
+        buf,
+        node.layout,
+        8.0,
+        UiStyle { bg: theme.surface, border: theme.border, border_width: 1.0 },
+    )
+    if node.data_idx < 0 || node.data_idx >= list_len(tree.tensors) {
+        return b
+    }
+    val spec = list_get(tree.tensors, node.data_idx)
+    if len(spec.title) > 0 {
+        b = draw_cmd_text(
+            b,
+            UiRect {
+                x: node.layout.x + 10.0,
+                y: node.layout.y + 6.0,
+                w: node.layout.w - 20.0,
+                h: 18.0,
+            },
+            spec.title,
+            UiStyle { fg: theme.fg_muted, font_size: 12.0, bold: true },
+        )
+    }
+    val pixels: list<i64> = list()
+    val span = if spec.vmax - spec.vmin < 0.0001 { 1.0 } else { spec.vmax - spec.vmin }
+    val total = spec.width * spec.height
+    val avail = list_len(spec.cells)
+    for i in 0..total {
+        val raw = if i < avail { list_get(spec.cells, i) } else { spec.vmin }
+        list_push(pixels, pack_rgba(ui_thermal_color_for(theme, (raw - spec.vmin) / span)))
+    }
+    val top_y = if len(spec.title) > 0 { 26.0 } else { 8.0 }
+    val dest = UiRect {
+        x: node.layout.x + 8.0,
+        y: node.layout.y + top_y,
+        w: fmax(16.0, node.layout.w - 16.0),
+        h: fmax(16.0, node.layout.h - top_y - 8.0),
+    }
+    if spec.width > 0 && spec.height > 0 {
+        b = draw_cmd_image_rgba(b, dest, spec.width, spec.height, pixels)
+    }
+    return emit_node_a11y(b, node)
+}
+
+def paint_table_band(
+    theme: UiTheme,
+    node: UiNode,
+    state: UiState,
+    is_header: bool,
+    buf: DrawBuffer,
+) -> DrawBuffer effect ffi, alloc {
+    val accent = if is_header { theme.cyan } else { tone_color(theme, node.tone) }
+    val is_hov = !is_header && len(node.key) > 0 && state.hovered_key == node.key
+    val is_sel = !is_header && (node.checked || ui_state_is_selected(state, node.key))
+    var bg = if is_header {
+        theme.panel_alt
+    } else {
+        mix_color(mix_color(theme.surface, theme.panel, 0.45), accent, 0.10)
+    }
+    if is_hov {
+        bg = mix_color(bg, theme.fg, 0.08)
+    }
+    if is_sel {
+        bg = mix_color(theme.panel_alt, accent, 0.22)
+    }
+    val br = if is_sel { accent } else { theme.border }
+    val bw = if is_sel { 1.25 } else { 0.0 }
+    var b = draw_cmd_round_rect(
+        buf,
+        node.layout,
+        4.0,
+        UiStyle { bg: bg, border: br, border_width: bw },
+    )
+    if is_sel {
+        b = draw_cmd_round_rect(
+            b,
+            UiRect {
+                x: node.layout.x + 1.0,
+                y: node.layout.y + 3.0,
+                w: 3.0,
+                h: fmax(4.0, node.layout.h - 6.0),
+            },
+            1.5,
+            UiStyle { bg: accent },
+        )
+    }
+    val fg = if is_header { accent } else { mix_color(theme.fg, accent, 0.35) }
+    b = draw_cmd_text(
+        b,
+        UiRect {
+            x: node.layout.x + 10.0,
+            y: node.layout.y + 5.0,
+            w: fmax(0.0, node.layout.w - 20.0),
+            h: node.layout.h,
+        },
+        node.text,
+        UiStyle {
+            fg: fg,
+            font_size: 12.0,
+            bold: is_header || is_sel,
+            monospace: true,
+        },
+    )
+    val by = node.layout.y + node.layout.h
+    b = draw_cmd_line(
+        b,
+        UiRect { x: node.layout.x, y: by, w: node.layout.x + node.layout.w, h: by },
+        theme.border,
+        1.0,
+        false,
+    )
+    return emit_node_a11y(b, node)
+}
+
+def paint_node(
+    tree: UiTree,
+    node: UiNode,
+    state: UiState,
+    buf: DrawBuffer,
+) -> DrawBuffer effect ffi, alloc {
+    val theme = tree.theme
+    return when node.kind {
+        WidgetKind.Col => paint_card_or_box(theme, node, buf),
+        WidgetKind.Row => paint_card_or_box(theme, node, buf),
+        WidgetKind.Stack => paint_card_or_box(theme, node, buf),
+        WidgetKind.Card => paint_card_or_box(theme, node, buf),
+        WidgetKind.Spacer => buf,
+        WidgetKind.Label => emit_node_a11y(
+            draw_cmd_text(buf, node.layout, node.text, node.style),
+            node,
+        ),
+        WidgetKind.Badge => paint_badge(theme, node, buf),
+        WidgetKind.Button => paint_button(theme, node, state, buf),
+        WidgetKind.TextInput => paint_text_input(theme, node, state, buf),
+        WidgetKind.Checkbox => paint_checkbox(theme, node, state, buf),
+        WidgetKind.Toggle => paint_toggle(theme, node, state, buf),
+        WidgetKind.Slider => paint_slider(theme, node, state, buf),
+        WidgetKind.Sparkline => paint_chart(tree, node, true, buf),
+        WidgetKind.LineChart => paint_chart(tree, node, false, buf),
+        WidgetKind.RadarScope => paint_radar_scope(tree, node, state, buf),
+        WidgetKind.TensorView => paint_tensor_view(tree, node, buf),
+        WidgetKind.TableHeader => paint_table_band(theme, node, state, true, buf),
+        WidgetKind.TableRow => paint_table_band(theme, node, state, false, buf),
+    }
+}
+
+/// Encode the entire laid-out `tree` into `buf` using iterative depth-first pre-order traversal.
+pub def ui_paint(tree: UiTree, state: UiState, buf: DrawBuffer) -> DrawBuffer effect ffi, alloc {
+    var b = draw_buf_begin(buf, tree.theme.bg)
+    val stack: list<i64> = list()
+    if tree.root >= 0 && tree.root < list_len(tree.nodes) {
+        list_push(stack, tree.root)
+    }
+    while list_len(stack) > 0 {
+        val cur = list_pop(stack)
+        // Negative stack entries are pop-clip sentinels for a painted parent.
+        if cur < 0 {
+            b = draw_cmd_pop_clip(b)
+            continue
+        }
+        val node = list_get(tree.nodes, cur)
+        // Clip every subtree to its own layout rect. Text that wraps past its
+        // measured height and children that overflow a parent can no longer
+        // paint over their neighbours.
+        val clipped = node.layout.w > 1.0 && node.layout.h > 1.0
+        if clipped {
+            b = draw_cmd_push_clip(b, node.layout)
+            list_push(stack, -(cur + 1))
+        }
+        b = paint_node(tree, node, state, b)
+        val cc = list_len(node.children)
+        var k = cc - 1
+        while k >= 0 {
+            list_push(stack, list_get(node.children, k))
+            k = k - 1
+        }
+    }
+    return draw_buf_finish(b)
+}
+

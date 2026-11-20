@@ -75,7 +75,7 @@ pub def duration_add(a: Duration, b: Duration) -> Duration {
 }
 
 /// Format a duration in ms as a human-readable string (e.g. "1.23s", "450ms", "2m30s", "1d4h").
-pub def format_duration(ms: i64) -> str {
+pub def format_duration(ms: i64) -> str effect alloc {
     if ms >= 86400000 {
         val days = ms / 86400000;
         val hours = (ms % 86400000) / 3600000;
@@ -166,11 +166,11 @@ pub def datetime_to_epoch_s(dt: DateTime) -> i64 {
 }
 
 // Internal zero-padding helpers
-def pad2(n: i64) -> str {
+def pad2(n: i64) -> str effect alloc {
     if n < 10 { concat("0", to_str(n)) } else { to_str(n) }
 }
 
-def pad3(n: i64) -> str {
+def pad3(n: i64) -> str effect alloc {
     if n < 10 {
         concat("00", to_str(n))
     } else if n < 100 {
@@ -180,7 +180,7 @@ def pad3(n: i64) -> str {
     }
 }
 
-def pad4(n: i64) -> str {
+def pad4(n: i64) -> str effect alloc {
     if n < 10 {
         concat("000", to_str(n))
     } else if n < 100 {
@@ -193,7 +193,7 @@ def pad4(n: i64) -> str {
 }
 
 /// Formats epoch milliseconds as ISO 8601 string: "YYYY-MM-DDTHH:MM:SS.mmmZ"
-pub def format_iso8601(epoch_ms: i64) -> str {
+pub def format_iso8601(epoch_ms: i64) -> str effect alloc {
     val dt = epoch_ms_to_datetime(epoch_ms);
     concat(
         concat(pad4(dt.year), "-"),
@@ -217,7 +217,7 @@ pub def format_iso8601(epoch_ms: i64) -> str {
 }
 
 /// Formats epoch milliseconds as date only: "YYYY-MM-DD"
-pub def format_date(epoch_ms: i64) -> str {
+pub def format_date(epoch_ms: i64) -> str effect alloc {
     val dt = epoch_ms_to_datetime(epoch_ms);
     concat(
         concat(pad4(dt.year), "-"),
@@ -226,7 +226,7 @@ pub def format_date(epoch_ms: i64) -> str {
 }
 
 /// Formats epoch milliseconds as time clock: "HH:MM:SS"
-pub def format_clock(epoch_ms: i64) -> str {
+pub def format_clock(epoch_ms: i64) -> str effect alloc {
     val dt = epoch_ms_to_datetime(epoch_ms);
     concat(
         concat(pad2(dt.hour), ":"),

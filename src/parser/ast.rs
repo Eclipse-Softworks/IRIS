@@ -408,6 +408,10 @@ pub struct AstFunction {
 /// A block of statements with an optional tail expression (the block's value).
 #[derive(Debug, Clone)]
 pub struct AstBlock {
+    /// Stable source-level identity for this `{ ... }` block, assigned by the
+    /// parser. `0` marks a compiler-synthesized block with no explicit scope.
+    /// Lowering uses this to emit structured `EnterBlock` / `ExitBlock` markers.
+    pub scope_id: u32,
     pub stmts: Vec<AstStmt>,
     /// The final expression in the block, if any. Its value is the block's value.
     pub tail: Option<Box<AstExpr>>,

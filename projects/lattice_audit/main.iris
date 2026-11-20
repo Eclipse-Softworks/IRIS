@@ -1,0 +1,705 @@
+bring "domain.iris"
+bring "lockfile.iris"
+bring "registry.iris"
+bring "attest.iris"
+bring "render.iris"
+
+/// CLI configuration for `lattice_audit`.
+pub record CliConfig {
+    lock_path: str = "Cargo.lock",
+    limit: i64 = 6,
+    target_crate: str = "",
+    json_path: str = "",
+    hmac_key: str = "lattice-audit-hmac-v1",
+    offline: bool = false,
+    show_help: bool = false,
+}
+
+/// Higher-kinded singleton box constructor (`SingleBox[T]`).
+pub record SingleBox[T] {
+    value: T,
+}
+
+/// Higher-kinded optional box constructor (`OptionBox[T]`).
+pub record OptionBox[T] {
+    maybe: option<T>,
+}
+
+/// Higher-kinded sequence box constructor (`ListBox[T]`).
+pub record ListBox[T] {
+    items: list<T>,
+}
+
+/// Stack-allocated fixed-capacity window parameterized by const generic `N`.
+pub record TopRiskWindow[T, const N: usize] {
+    slots: [T; N],
+    len: i64,
+}
+
+/// Type-state witness certifying `Cargo.lock` parsing & SHA-256 validation.
+pub record RawLockWitness {
+    source_tag: str,
+    lockfile_sha256: Sha256Digest,
+}
+
+/// Type-state witness certifying registry & OSV advisory inspection.
+pub record RegistryCheckedWitness {
+    queries_ok: i64,
+    queries_failed: i64,
+    offline: bool,
+}
+
+/// Type-state witness certifying cryptographic Merkle root & HMAC seal.
+pub record AttestedCertWitness {
+    summary: AttestationSummary,
+}
+
+/// Type-state envelope parameterized by stage witness `S`, HKT constructor `F[_]`, and element `T`.
+pub record StageEnvelope[S, F[_], T] {
+    witness: S,
+    container: F<T>,
+}
+
+/// Stage-sealed payload bundle ensuring transition witnesses cannot be spoofed.
+pub record StageBox[S, P] {
+    witness: S,
+    payload: P,
+}
+
+/// Higher-kinded container algebra inspecting container kind and cardinality across `F[_]`.
+pub trait HktContainer[F[_]] {
+    def container_kind(self: Self) -> str
+    def cardinality(self: Self) -> i64 effect alloc
+    def is_populated(self: Self) -> bool effect alloc
+}
+
+impl HktContainer[list] for ListBox<LockedPackage> {
+    def container_kind(self: Self) -> str {
+        return "ListBox<LockedPackage>"
+    }
+
+    def cardinality(self: Self) -> i64 effect alloc {
+        return list_len(self.items)
+    }
+
+    def is_populated(self: Self) -> bool effect alloc {
+        return list_len(self.items) > 0
+    }
+}
+
+impl HktContainer[list] for ListBox<AuditedPackage> {
+    def container_kind(self: Self) -> str {
+        return "ListBox<AuditedPackage>"
+    }
+
+    def cardinality(self: Self) -> i64 effect alloc {
+        return list_len(self.items)
+    }
+
+    def is_populated(self: Self) -> bool effect alloc {
+        return list_len(self.items) > 0
+    }
+}
+
+impl HktContainer[option] for OptionBox<LockedPackage> {
+    def container_kind(self: Self) -> str {
+        return "OptionBox<LockedPackage>"
+    }
+
+    def cardinality(self: Self) -> i64 effect alloc {
+        return if is_some(self.maybe) { 1 } else { 0 }
+    }
+
+    def is_populated(self: Self) -> bool effect alloc {
+        return is_some(self.maybe)
+    }
+}
+
+impl HktContainer[SingleBox] for SingleBox<AuditedPackage> {
+    def container_kind(self: Self) -> str {
+        return "SingleBox<AuditedPackage>"
+    }
+
+    def cardinality(self: Self) -> i64 effect alloc {
+        return 1
+    }
+
+    def is_populated(self: Self) -> bool effect alloc {
+        return true
+    }
+}
+
+impl HktContainer[SingleBox] for SingleBox<AttestationSummary> {
+    def container_kind(self: Self) -> str {
+        return "SingleBox<AttestationSummary>"
+    }
+
+    def cardinality(self: Self) -> i64 effect alloc {
+        return 1
+    }
+
+    def is_populated(self: Self) -> bool effect alloc {
+        return true
+    }
+}
+
+/// Polymorphic summary interface supporting bounded generic rendering.
+pub trait AuditSummarizable {
+    def summarize(self: Self) -> str effect alloc, io
+}
+
+impl[T] AuditSummarizable for list<T> {
+    def summarize(self: Self) -> str effect alloc, io {
+        return f"batch(crates={list_len(self)})"
+    }
+}
+
+impl[T] AuditSummarizable for option<T> {
+    def summarize(self: Self) -> str effect alloc, io {
+        return if is_some(self) { "singleton(present)" } else { "singleton(empty)" }
+    }
+}
+
+impl AuditSummarizable for SingleBox<AuditedPackage> {
+    def summarize(self: Self) -> str effect alloc, io {
+        return format_package_row(self.value)
+    }
+}
+
+impl AuditSummarizable for SingleBox<AttestationSummary> {
+    def summarize(self: Self) -> str effect alloc, io {
+        return format_summary_banner(self.value)
+    }
+}
+
+/// Render any type satisfying `AuditSummarizable` via bounded parametric polymorphism.
+pub def render_summary_bound[T where T: AuditSummarizable](item: T) -> str effect alloc, io {
+    return item.summarize()
+}
+
+/// Parametric HKT identity preserving container shape without inspecting elements.
+pub def passthrough_hkt[F[_], T](container: F<T>) -> F<T> {
+    return container
+}
+
+/// Seal a stage payload `P` behind a witness token `S`.
+pub def seal_stage[S, P](witness: S, payload: P) -> StageBox<S, P> {
+    return StageBox { witness: witness, payload: payload }
+}
+
+/// Generic functor map over arbitrary element types in `list<A>`.
+pub def map_list_gen[A, B](xs: list<A>, f: |A| -> B) -> list<B> effect alloc {
+    val out: list<B> = list()
+    for i in 0..list_len(xs) {
+        val _ = list_push(out, f(list_get(xs, i)))
+    }
+    return out
+}
+
+/// Generic predicate filter over `list<T>`.
+pub def filter_list_gen[T](xs: list<T>, pred: |T| -> bool) -> list<T> effect alloc {
+    val out: list<T> = list()
+    for i in 0..list_len(xs) {
+        val item = list_get(xs, i)
+        val _ = if pred(item) { list_push(out, item) } else { 0 }
+    }
+    return out
+}
+
+/// Generic left fold over `list<A>` into accumulator `B`.
+pub def fold_list_gen[A, B](xs: list<A>, init: B, step: |B, A| -> B) -> B effect alloc {
+    var acc = init
+    for i in 0..list_len(xs) {
+        acc = step(acc, list_get(xs, i))
+    }
+    return acc
+}
+
+/// Generic functor map over `option<A>`.
+pub def map_option_gen[A, B](opt: option<A>, f: |A| -> B) -> option<B> {
+    return when opt {
+        some(v) => some(f(v)),
+        none => none(),
+    }
+}
+
+/// Generic functor map over `SingleBox<A>`.
+pub def map_single_gen[A, B](box_val: SingleBox<A>, f: |A| -> B) -> SingleBox<B> {
+    return SingleBox { value: f(box_val.value) }
+}
+
+def insert_top_risk5(
+    w: TopRiskWindow<AuditedPackage, 5>,
+    item: AuditedPackage,
+) -> TopRiskWindow<AuditedPackage, 5> {
+    var slots = w.slots
+    var len = w.len
+    if len < 5 {
+        slots[len] = item
+        len = len + 1
+    } else if item.risk_score > slots[4].risk_score {
+        slots[4] = item
+    }
+    for _pass in 0..4 {
+        for j in 0..4 {
+            if j + 1 < len && slots[j].risk_score < slots[j + 1].risk_score {
+                val tmp_item = slots[j]
+                slots[j] = slots[j + 1]
+                slots[j + 1] = tmp_item
+            }
+        }
+    }
+    return TopRiskWindow { slots: slots, len: len }
+}
+
+def build_risk_window5(
+    items: list<AuditedPackage>,
+) -> option<TopRiskWindow<AuditedPackage, 5>> effect alloc {
+    if list_len(items) == 0 {
+        return none()
+    }
+    val seed = list_get(items, 0)
+    var win = TopRiskWindow {
+        slots: [seed, seed, seed, seed, seed],
+        len: 0,
+    }
+    for i in 0..list_len(items) {
+        win = insert_top_risk5(win, list_get(items, i))
+    }
+    return some(win)
+}
+
+def stage_load_batch(
+    lock_rep: LockfileReport,
+    limit: i64,
+) -> result<StageEnvelope<RawLockWitness, ListBox, LockedPackage>, AuditError> effect alloc {
+    val selected = passthrough_hkt(select_lock_candidates(lock_rep, limit))
+    val lb = ListBox { items: selected }
+    val witness = RawLockWitness { source_tag: lock_rep.path, lockfile_sha256: lock_rep.sha256 }
+    return ok(StageEnvelope { witness: witness, container: lb })
+}
+
+def stage_verify_batch(
+    env: StageEnvelope<RawLockWitness, ListBox, LockedPackage>,
+    offline: bool,
+) -> StageEnvelope<RegistryCheckedWitness, ListBox, AuditedPackage> effect net, alloc, io {
+    val pkgs = env.container.items
+    val audited: list<AuditedPackage> = list()
+    var ok_cnt = 0
+    var fail_cnt = 0
+    for i in 0..list_len(pkgs) {
+        val pkg = list_get(pkgs, i)
+        val tel = if offline {
+            build_offline_telemetry(pkg, "offline mode")
+        } else {
+            fetch_registry_live(pkg)
+        }
+        ok_cnt = if tel.lookup_ok { ok_cnt + 1 } else { ok_cnt }
+        fail_cnt = if !tel.lookup_ok { fail_cnt + 1 } else { fail_cnt }
+        val _ = list_push(audited, evaluate_audited_package(pkg, tel, offline))
+    }
+    val checked_list = passthrough_hkt(audited)
+    return StageEnvelope {
+        witness: RegistryCheckedWitness {
+            queries_ok: ok_cnt,
+            queries_failed: fail_cnt,
+            offline: offline,
+        },
+        container: ListBox { items: checked_list },
+    }
+}
+
+def stage_attest_batch(
+    lock_rep: LockfileReport,
+    env: StageEnvelope<RegistryCheckedWitness, ListBox, AuditedPackage>,
+    hmac_key: str,
+) -> result<
+    StageBox<AttestedCertWitness, ListBox<AuditedPackage>>,
+    AuditError
+> effect alloc, io, time {
+    val summary = seal_attestation_summary(lock_rep, env.container.items, hmac_key)?
+    val witness = AttestedCertWitness { summary: summary }
+    return ok(seal_stage(witness, env.container))
+}
+
+def print_top_risk_window(items: list<AuditedPackage>) -> i64 effect alloc, io {
+    val win_opt = build_risk_window5(items)
+    when win_opt {
+        some(win) => {
+            println(f"Top-5 Risk Window (stack [T; 5], populated={win.len}):")
+            for i in 0..win.len {
+                val pkg = win.slots[i]
+                println(
+                    f"  #{i + 1}: {pkg.pkg.name.value}@{pkg.pkg.version.raw} score={pkg.risk_score} ({severity_label(pkg.severity)})",
+                )
+            }
+        },
+        none => {},
+    }
+    return 0
+}
+
+def emit_attested_batch(
+    cert: StageBox<AttestedCertWitness, ListBox<AuditedPackage>>,
+    json_path: str,
+) -> result<str, AuditError> effect alloc, fs, io {
+    val summary_box = SingleBox { value: cert.witness.summary }
+    println(f"HKT Container : {cert.payload.container_kind()} | {summary_box.container_kind()}")
+    println(f"Generic Summary: {render_summary_bound(cert.payload.items)}")
+    println(render_summary_bound(summary_box))
+    println("Package Verdicts:")
+    val items = cert.payload.items
+    for i in 0..list_len(items) {
+        println(render_summary_bound(SingleBox { value: list_get(items, i) }))
+    }
+    val elevated = filter_list_gen(items, |p: AuditedPackage| p.risk_score > 0)
+    val total_risk = fold_list_gen(items, 0, |acc: i64, p: AuditedPackage| acc + p.risk_score)
+    val scores = map_list_gen(items, |p: AuditedPackage| p.risk_score)
+    println(
+        f"Elevated Risk : {list_len(elevated)}/{list_len(scores)} crates | aggregate_score={total_risk}",
+    )
+    val _w = print_top_risk_window(items)
+    val json_str_out = render_attestation_json(cert.witness.summary, items)
+    if len(json_path) > 0 {
+        val _wrote = write_json_certificate(json_path, json_str_out)?
+        println(f"Wrote JSON Certificate: {json_path} ({len(json_str_out)} bytes)")
+    }
+    return ok(json_str_out)
+}
+
+def resolve_crate_spec(
+    spec: str,
+    lock_opt: option<LockfileReport>,
+) -> result<(LockfileReport, OptionBox<LockedPackage>), AuditError> effect alloc, io {
+    val empty_dups: list<str> = list()
+    val synth_sha = parse_sha256(hash_sha256(spec))?
+    val at_parts = split(spec, "@")
+    if list_len(at_parts) == 2 {
+        val pname = parse_package_name(list_get(at_parts, 0))?
+        val pver = parse_semver(list_get(at_parts, 1))?
+        val pkg = LockedPackage {
+            name: pname,
+            version: pver,
+            origin: PackageOrigin.CratesIo,
+            checksum: none(),
+            dep_count: 0,
+            deps: list(),
+        }
+        val rep = LockfileReport {
+            path: f"cli:{spec}",
+            sha256: synth_sha,
+            packages: list(pkg),
+            duplicate_names: empty_dups,
+            workspace_count: 0,
+            missing_checksum_count: 0,
+        }
+        val opt_pkg: option<LockedPackage> = passthrough_hkt(some(pkg))
+        return ok((rep, OptionBox { maybe: opt_pkg }))
+    }
+    val rep = when lock_opt {
+        some(r) => r,
+        none => {
+            return err(AuditError.ValidationFailed("bare --crate requires --lock or name@version"))
+        },
+    }
+    val found = passthrough_hkt(find_locked_crate(rep, spec))
+    return ok((rep, OptionBox { maybe: found }))
+}
+
+def run_singleton_crate_pipeline(
+    cfg: CliConfig,
+) -> result<str, AuditError> effect alloc, fs, io, net, time {
+    val lock_opt = if contains(cfg.target_crate, "@") {
+        none()
+    } else {
+        some(load_cargo_lock(cfg.lock_path)?)
+    }
+    val resolved = resolve_crate_spec(cfg.target_crate, lock_opt)?
+    val lock_rep = resolved.0
+    val env_raw: StageEnvelope<RawLockWitness, OptionBox, LockedPackage> = StageEnvelope {
+        witness: RawLockWitness { source_tag: lock_rep.path, lockfile_sha256: lock_rep.sha256 },
+        container: resolved.1,
+    }
+    val crate_label = render_summary_bound(env_raw.container.maybe)
+    val pkg = when env_raw.container.maybe {
+        some(p) => p,
+        none => {
+            return err(
+                AuditError.ValidationFailed(
+                    concat("crate not found in lockfile: ", cfg.target_crate),
+                ),
+            )
+        },
+    }
+    val tel = if cfg.offline {
+        build_offline_telemetry(pkg, "offline mode")
+    } else {
+        fetch_registry_live(pkg)
+    }
+    val eval_box = map_single_gen(
+        SingleBox { value: pkg },
+        |p: LockedPackage| evaluate_audited_package(p, tel, cfg.offline),
+    )
+    val summary = seal_attestation_summary(lock_rep, list(eval_box.value), cfg.hmac_key)?
+    val cert = seal_stage(AttestedCertWitness { summary: summary }, eval_box)
+    println(
+        f"HKT Container : {env_raw.container.container_kind()} -> {cert.payload.container_kind()} | {crate_label}",
+    )
+    println(render_summary_bound(SingleBox { value: cert.witness.summary }))
+    println(render_summary_bound(SingleBox { value: cert.payload.value }))
+    val json_out = render_attestation_json(cert.witness.summary, list(cert.payload.value))
+    if len(cfg.json_path) > 0 {
+        val _w = write_json_certificate(cfg.json_path, json_out)?
+    }
+    return ok(json_out)
+}
+
+def run_batch_pipeline(cfg: CliConfig) -> result<str, AuditError> effect alloc, fs, io, net, time {
+    val lock_rep = load_cargo_lock(cfg.lock_path)?
+    val raw_env = stage_load_batch(lock_rep, cfg.limit)?
+    val checked_env = stage_verify_batch(raw_env, cfg.offline)
+    val cert = stage_attest_batch(lock_rep, checked_env, cfg.hmac_key)?
+    return emit_attested_batch(cert, cfg.json_path)
+}
+
+def with_string_flag(cfg: CliConfig, flag: str, v: str) -> CliConfig {
+    val lock_path = if flag == "--lock" { v } else { cfg.lock_path }
+    val target_crate = if flag == "--crate" { v } else { cfg.target_crate }
+    val json_path = if flag == "--json" { v } else { cfg.json_path }
+    val hmac_key = if flag == "--hmac-key" { v } else { cfg.hmac_key }
+    return CliConfig {
+        lock_path: lock_path,
+        limit: cfg.limit,
+        target_crate: target_crate,
+        json_path: json_path,
+        hmac_key: hmac_key,
+        offline: cfg.offline,
+        show_help: cfg.show_help,
+    }
+}
+
+def with_mode_flags(cfg: CliConfig, limit: i64, offline: bool, show_help: bool) -> CliConfig {
+    return CliConfig {
+        lock_path: cfg.lock_path,
+        limit: limit,
+        target_crate: cfg.target_crate,
+        json_path: cfg.json_path,
+        hmac_key: cfg.hmac_key,
+        offline: offline,
+        show_help: show_help,
+    }
+}
+
+def require_flag_value(argv: list<str>, i: i64, flag: str) -> result<str, AuditError> effect alloc {
+    if i + 1 >= list_len(argv) {
+        return err(AuditError.ValidationFailed(concat(flag, " requires a value")))
+    }
+    return ok(list_get(argv, i + 1))
+}
+
+def step_cli_arg(
+    argv: list<str>,
+    i: i64,
+    cfg: CliConfig,
+) -> result<(i64, CliConfig), AuditError> effect alloc {
+    val flag = list_get(argv, i)
+    if flag == "--help" || flag == "-h" {
+        return ok((i + 1, with_mode_flags(cfg, cfg.limit, cfg.offline, true)))
+    }
+    if flag == "--offline" {
+        return ok((i + 1, with_mode_flags(cfg, cfg.limit, true, cfg.show_help)))
+    }
+    if flag == "--limit" {
+        val raw = require_flag_value(argv, i, flag)?
+        val n = parse_uint_digits(raw)?
+        return ok((i + 2, with_mode_flags(cfg, n, cfg.offline, cfg.show_help)))
+    }
+    if flag == "--lock" || flag == "--crate" || flag == "--json" || flag == "--hmac-key" {
+        val v = require_flag_value(argv, i, flag)?
+        return ok((i + 2, with_string_flag(cfg, flag, v)))
+    }
+    return err(AuditError.ValidationFailed(concat("unknown option: ", flag)))
+}
+
+/// Parse command-line arguments into validated `CliConfig`.
+pub def parse_cli_args(argv: list<str>) -> result<CliConfig, AuditError> effect alloc {
+    var cfg = CliConfig {}
+    var i = 1
+    while i < list_len(argv) {
+        val step = step_cli_arg(argv, i, cfg)?
+        i = step.0
+        cfg = step.1
+    }
+    return ok(cfg)
+}
+
+def print_usage() -> i64 effect io {
+    println("lattice_audit -- Type-Safe, Generic & HKT Cargo Supply-Chain Attestor")
+    println("Usage: lattice_audit [OPTIONS]")
+    println("  --lock <path>      Path to Cargo.lock (default: Cargo.lock)")
+    println("  --limit <n>        Max crates.io entries to audit in batch mode (default: 6, 0=all)")
+    println(
+        "  --crate <spec>     Audit single crate via OptionBox/SingleBox HKT flow (name or name@ver)",
+    )
+    println("  --json <path>      Write Merkle + HMAC-SHA256 JSON attestation certificate")
+    println("  --hmac-key <key>   Custom HMAC signing key")
+    println(
+        "  --offline          Verify Cargo.lock digests/SemVer structurally without HTTP queries",
+    )
+    println("  --help             Show this help message")
+    return 0
+}
+
+/// Program entrypoint executing batch (`ListBox`) or singleton (`OptionBox`/`SingleBox`) HKT pipeline.
+pub def main() -> i64 effect alloc, fs, io, net, time {
+    val cfg = when parse_cli_args(args()) {
+        ok(c) => c,
+        err(e) => {
+            println(concat("Error: ", audit_error_message(e)))
+            val _ = print_usage()
+            return 2
+        },
+    }
+    if cfg.show_help {
+        return print_usage()
+    }
+    val res = if len(cfg.target_crate) > 0 {
+        run_singleton_crate_pipeline(cfg)
+    } else {
+        run_batch_pipeline(cfg)
+    }
+    return when res {
+        ok(_) => 0,
+        err(e) => {
+            println(concat("Audit failed: ", audit_error_message(e)))
+            1
+        },
+    }
+}
+
+def make_sample_audited(
+    name: str,
+    ver: str,
+    score: i64,
+    yanked: bool,
+) -> AuditedPackage effect alloc, throw {
+    val sha = unwrap(
+        parse_sha256("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+    )
+    val pkg = LockedPackage {
+        name: unwrap(parse_package_name(name)),
+        version: unwrap(parse_semver(ver)),
+        origin: PackageOrigin.CratesIo,
+        checksum: some(sha),
+        dep_count: 1,
+        deps: list("core"),
+    }
+    val tel = RegistryTelemetry {
+        pkg_name: name,
+        locked_ver: ver,
+        yanked: yanked,
+        upstream_checksum: some(sha),
+        max_stable: some(pkg.version),
+        license: "MIT",
+        crate_size_bytes: 1024,
+        downloads: 100,
+        advisories: list(),
+        lookup_ok: true,
+        error_note: "",
+    }
+    val sev = if score >= 60 {
+        Severity.High
+    } else if score > 0 {
+        Severity.Medium
+    } else {
+        Severity.Clean
+    }
+    return AuditedPackage {
+        pkg: pkg,
+        telemetry: tel,
+        digest_verdict: DigestVerdict.VerifiedMatch,
+        advisory_verdict: AdvisoryVerdict.NoKnownCves,
+        risk_score: score,
+        severity: sev,
+        notes: "fixture",
+    }
+}
+
+def test_hkt_and_bounded_traits() -> i64 effect alloc, throw {
+    val a1 = make_sample_audited("alpha", "1.0.0", 15, false)
+    val a2 = make_sample_audited("beta", "0.2.0", 45, true)
+    val xs: list<AuditedPackage> = passthrough_hkt(list(a1, a2))
+    val lb = ListBox { items: xs }
+    assert(lb.container_kind() == "ListBox<AuditedPackage>")
+    assert(lb.cardinality() == 2 && lb.is_populated())
+    assert(render_summary_bound(xs) == "batch(crates=2)")
+    val opt_present: option<LockedPackage> = some(a1.pkg)
+    val ob = OptionBox { maybe: opt_present }
+    assert(ob.cardinality() == 1 && render_summary_bound(opt_present) == "singleton(present)")
+    val opt_mapped = map_option_gen(opt_present, |p: LockedPackage| p.name.value)
+    assert(is_some(opt_mapped) && unwrap(opt_mapped) == "alpha")
+    val scores = map_list_gen(xs, |p: AuditedPackage| p.risk_score)
+    val total = fold_list_gen(scores, 0, |acc: i64, s: i64| acc + s)
+    assert(total == 60)
+    return 0
+}
+
+def test_typestate_and_risk_window() -> i64 effect alloc, io, time, throw {
+    val a1 = make_sample_audited("low_c", "1.0.0", 5, false)
+    val a2 = make_sample_audited("high_c", "0.1.0", 85, true)
+    val a3 = make_sample_audited("mid_c", "2.0.0", 25, false)
+    val items = list(a1, a2, a3)
+    val win = unwrap(build_risk_window5(items))
+    assert(win.len == 3 && win.slots[0].risk_score == 85 && win.slots[0].pkg.name.value == "high_c")
+    val empty_dups: list<str> = list()
+    val rep = LockfileReport {
+        path: "test.lock",
+        sha256: unwrap(
+            parse_sha256("cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"),
+        ),
+        packages: list(a1.pkg, a2.pkg, a3.pkg),
+        duplicate_names: empty_dups,
+        workspace_count: 0,
+        missing_checksum_count: 0,
+    }
+    val raw_env: StageEnvelope<
+        RawLockWitness,
+        ListBox,
+        LockedPackage
+    > = unwrap(stage_load_batch(rep, 3))
+    val checked_env: StageEnvelope<
+        RegistryCheckedWitness,
+        ListBox,
+        AuditedPackage
+    > = StageEnvelope {
+        witness: RegistryCheckedWitness { queries_ok: 3, queries_failed: 0, offline: false },
+        container: ListBox { items: items },
+    }
+    assert(raw_env.container.cardinality() == 3)
+    val cert = unwrap(stage_attest_batch(rep, checked_env, "unit-key"))
+    assert(cert.payload.cardinality() == 3)
+    assert(contains(render_summary_bound(SingleBox { value: cert.witness.summary }), "Merkle Root"))
+    return 0
+}
+
+def test_cli_and_singleton_hkt_pipeline() -> i64 effect alloc, fs, io, net, time, throw {
+    val parsed = parse_cli_args(
+        list("lattice_audit", "--lock", "Cargo.lock", "--limit", "4", "--offline"),
+    )
+    assert(is_ok(parsed))
+    val cfg = unwrap(parsed)
+    assert(cfg.lock_path == "Cargo.lock" && cfg.limit == 4 && cfg.offline)
+    assert(is_err(parse_cli_args(list("lattice_audit", "--limit"))))
+    assert(is_err(parse_cli_args(list("lattice_audit", "--limit", "nan"))))
+    assert(is_err(parse_cli_args(list("lattice_audit", "--bogus"))))
+    val res_single = run_singleton_crate_pipeline(
+        CliConfig {
+            lock_path: "Cargo.lock",
+            target_crate: "serde@1.0.228",
+            offline: true,
+        },
+    )
+    assert(is_ok(res_single))
+    assert(contains(unwrap(res_single), "\"name\":\"serde\""))
+    return 0
+}

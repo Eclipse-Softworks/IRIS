@@ -1,0 +1,1038 @@
+bring std.math
+bring std.ui
+bring "domain.iris"
+bring "analytics.iris"
+bring "render.iris"
+bring "gui_theme.iris"
+bring "gui_state.iris"
+
+/// Precomputed orthographic-viewport window bounds mapping geographic coordinates onto screen pixels.
+pub record MapProj {
+    rect: UiRect,
+    lon_min: f64,
+    lon_max: f64,
+    lat_min: f64,
+    lat_max: f64,
+}
+
+/// Build an equirectangular `MapProj` bounded inside `rect` from `MapViewport` pan/zoom settings.
+pub def build_map_projection(rect: UiRect, vp: MapViewport) -> MapProj {
+    val pad_r = UiRect {
+        x: rect.x + 8.0,
+        y: rect.y + 8.0,
+        w: max_f64(40.0, rect.w - 16.0),
+        h: max_f64(40.0, rect.h - 16.0),
+    }
+    if vp.zoom <= 1.05 {
+        return MapProj {
+            rect: pad_r,
+            lon_min: -180.0,
+            lon_max: 180.0,
+            lat_min: -78.0,
+            lat_max: 82.0,
+        }
+    }
+    val half_lon = 180.0 / vp.zoom
+    val half_lat = 80.0 / vp.zoom
+    val cl_lon = clamp_f64(vp.center_lon, -180.0 + half_lon, 180.0 - half_lon)
+    val cl_lat = clamp_f64(vp.center_lat, -78.0 + half_lat, 82.0 - half_lat)
+    return MapProj {
+        rect: pad_r,
+        lon_min: cl_lon - half_lon,
+        lon_max: cl_lon + half_lon,
+        lat_min: cl_lat - half_lat,
+        lat_max: cl_lat + half_lat,
+    }
+}
+
+/// Project WGS-84 `(lon, lat)` degrees onto screen `(x, y)` coordinates inside `proj.rect`.
+pub def map_to_screen(proj: MapProj, lon_deg: f64, lat_deg: f64) -> (f64, f64) {
+    val lon_span = max_f64(1.0, proj.lon_max - proj.lon_min)
+    val lat_span = max_f64(1.0, proj.lat_max - proj.lat_min)
+    val tx = (lon_deg - proj.lon_min) / lon_span
+    val ty = (proj.lat_max - lat_deg) / lat_span
+    return (proj.rect.x + tx * proj.rect.w, proj.rect.y + ty * proj.rect.h)
+}
+
+/// Invert screen `(px, py)` coordinates back to WGS-84 `(lon, lat)` degrees.
+pub def screen_to_map(proj: MapProj, px: f64, py: f64) -> (f64, f64) {
+    val tx = clamp_f64((px - proj.rect.x) / max_f64(1.0, proj.rect.w), 0.0, 1.0)
+    val ty = clamp_f64((py - proj.rect.y) / max_f64(1.0, proj.rect.h), 0.0, 1.0)
+    val lon = proj.lon_min + tx * (proj.lon_max - proj.lon_min)
+    val lat = proj.lat_max - ty * (proj.lat_max - proj.lat_min)
+    return (lon, lat)
+}
+
+/// Hit-test filtered seismic markers inside `map_r`, returning the closest `event_id` within `16 px`.
+pub def hit_test_map_quake(
+    st: TelemetryGuiState,
+    map_r: UiRect,
+    px: f64,
+    py: f64,
+) -> option<str> effect alloc {
+    if !rect_contains(map_r, px, py) {
+        return none
+    }
+    val proj = build_map_projection(map_r, st.map)
+    val idxs = filtered_event_indices(st)
+    var best_id = ""
+    var best_d2 = 256.0
+    var i = list_len(idxs) - 1
+    while i >= 0 {
+        val ev = list_get(st.snap.events, list_get(idxs, i))
+        val pos = map_to_screen(proj, ev.coord.lon_deg, ev.coord.lat_deg)
+        val dx = px - pos.0
+        val dy = py - pos.1
+        val d2 = dx * dx + dy * dy
+        if d2 <= best_d2 {
+            best_d2 = d2
+            best_id = ev.event_id
+        }
+        i = i - 1
+    }
+    if len(best_id) > 0 {
+        return some(best_id)
+    }
+    return none
+}
+
+def paint_map_lon_grid(
+    buf: DrawBuffer,
+    proj: MapProj,
+    step: f64,
+) -> DrawBuffer effect ffi, io, alloc {
+    val grid_col = rgb(28, 36, 48)
+    val axis_col = rgb(44, 58, 76)
+    var b = buf
+    var lon = -180.0
+    while lon <= 180.0 {
+        if lon >= proj.lon_min && lon <= proj.lon_max {
+            val sx = map_to_screen(proj, lon, 0.0).0
+            val col = if abs_f64(lon) < 0.01 { axis_col } else { grid_col }
+            b = draw_cmd_line(
+                b,
+                UiRect { x: sx, y: proj.rect.y, w: sx, h: proj.rect.y + proj.rect.h },
+                col,
+                1.0,
+                false,
+            )
+            if abs_f64(lon) < 175.0 {
+                b = draw_cmd_text(
+                    b,
+                    UiRect { x: sx + 3.0, y: proj.rect.y + proj.rect.h - 16.0, w: 40.0, h: 14.0 },
+                    f"{format_fixed_0(lon)}",
+                    UiStyle { fg: rgb(90, 104, 122), font_size: 10.0, monospace: true },
+                )
+            }
+        }
+        lon = lon + step
+    }
+    return b
+}
+
+def paint_map_lat_grid(
+    buf: DrawBuffer,
+    theme: UiTheme,
+    proj: MapProj,
+    step: f64,
+) -> DrawBuffer effect ffi, io, alloc {
+    val grid_col = rgb(28, 36, 48)
+    val axis_col = rgb(44, 58, 76)
+    var b = buf
+    var lat = -60.0
+    while lat <= 60.0 {
+        if lat >= proj.lat_min && lat <= proj.lat_max {
+            val sy = map_to_screen(proj, 0.0, lat).1
+            val col = if abs_f64(lat) < 0.01 { axis_col } else { grid_col }
+            b = draw_cmd_line(
+                b,
+                UiRect { x: proj.rect.x, y: sy, w: proj.rect.x + proj.rect.w, h: sy },
+                col,
+                1.0,
+                false,
+            )
+            b = draw_cmd_text(
+                b,
+                UiRect { x: proj.rect.x + 4.0, y: sy + 2.0, w: 36.0, h: 14.0 },
+                if abs_f64(lat) < 0.01 { "EQ" } else { format_fixed_0(lat) },
+                UiStyle { fg: theme.fg_muted, font_size: 10.0, monospace: true },
+            )
+        }
+        lat = lat + step
+    }
+    return b
+}
+
+def paint_map_graticule(
+    buf: DrawBuffer,
+    theme: UiTheme,
+    proj: MapProj,
+    zoom: f64,
+) -> DrawBuffer effect ffi, io, alloc {
+    val step = if zoom >= 2.2 { 15.0 } else { 30.0 }
+    val with_lon = paint_map_lon_grid(buf, proj, step)
+    return paint_map_lat_grid(with_lon, theme, proj, step)
+}
+
+def paint_map_ring_segments(
+    buf: DrawBuffer,
+    proj: MapProj,
+    coords: list<f64>,
+    style: (UiColor, f64, bool),
+) -> DrawBuffer effect ffi, alloc {
+    var b = buf
+    val n = list_len(coords)
+    var i = 0
+    while (i + 3) < n {
+        val p0 = map_to_screen(proj, list_get(coords, i), list_get(coords, i + 1))
+        val p1 = map_to_screen(proj, list_get(coords, i + 2), list_get(coords, i + 3))
+        if abs_f64(p0.0 - p1.0) < proj.rect.w * 0.7 {
+            b = draw_cmd_line(
+                b,
+                UiRect { x: p0.0, y: p0.1, w: p1.0, h: p1.1 },
+                style.0,
+                style.1,
+                style.2,
+            )
+        }
+        i = i + 2
+    }
+    return b
+}
+
+def paint_map_coastlines(
+    buf: DrawBuffer,
+    proj: MapProj,
+    show_arcs: bool,
+) -> DrawBuffer effect ffi, alloc {
+    var b = buf
+    val coasts = world_coastline_polylines()
+    val land_col = rgb(66, 84, 108)
+    for i in 0..list_len(coasts) {
+        b = paint_map_ring_segments(b, proj, list_get(coasts, i), (land_col, 1.25, false))
+    }
+    if show_arcs {
+        val arcs = pacific_arc_polylines()
+        val arc_col = rgb(90, 118, 150)
+        for j in 0..list_len(arcs) {
+            b = paint_map_ring_segments(b, proj, list_get(arcs, j), (arc_col, 1.4, true))
+        }
+    }
+    return b
+}
+
+def quake_marker_radius(mag: f64, zoom: f64) -> f64 {
+    val boost = 1.0 + (zoom - 1.0) * 0.22
+    return clamp_f64((mag - 1.2) * 2.5 * boost, 3.0, 16.0)
+}
+
+def paint_reticle_crosshair(
+    buf: DrawBuffer,
+    theme: UiTheme,
+    pt: (f64, f64),
+    r: f64,
+) -> DrawBuffer effect ffi, alloc {
+    val sx = pt.0
+    val sy = pt.1
+    val arm = r + 9.0
+    val gap = r + 2.0
+    var b = draw_cmd_circle(
+        buf,
+        sx,
+        sy,
+        r + 4.5,
+        UiStyle { bg: rgba(0, 0, 0, 0), border: theme.fg, border_width: 1.5 },
+    )
+    b = draw_cmd_line(b, UiRect { x: sx - arm, y: sy, w: sx - gap, h: sy }, theme.fg, 1.25, false)
+    b = draw_cmd_line(b, UiRect { x: sx + gap, y: sy, w: sx + arm, h: sy }, theme.fg, 1.25, false)
+    b = draw_cmd_line(b, UiRect { x: sx, y: sy - arm, w: sx, h: sy - gap }, theme.fg, 1.25, false)
+    return draw_cmd_line(
+        b,
+        UiRect { x: sx, y: sy + gap, w: sx, h: sy + arm },
+        theme.fg,
+        1.25,
+        false,
+    )
+}
+
+def paint_selected_quake_reticle(
+    buf: DrawBuffer,
+    theme: UiTheme,
+    proj: MapProj,
+    ev: SeismicEvent,
+    r: f64,
+) -> DrawBuffer effect ffi, io, alloc {
+    val pt = map_to_screen(proj, ev.coord.lon_deg, ev.coord.lat_deg)
+    var b = paint_reticle_crosshair(buf, theme, pt, r)
+    val lbl = f"M{format_fixed_1(ev.magnitude)} {tp_fit_width(ev.place, 28)}"
+    val lx = clamp_f64(pt.0 + r + 8.0, proj.rect.x + 6.0, proj.rect.x + proj.rect.w - 220.0)
+    val ly = clamp_f64(pt.1 - 18.0, proj.rect.y + 24.0, proj.rect.y + proj.rect.h - 24.0)
+    b = draw_cmd_round_rect(
+        b,
+        UiRect { x: lx, y: ly, w: 214.0, h: 20.0 },
+        4.0,
+        UiStyle { bg: rgba(17, 22, 29, 225), border: theme.border, border_width: 1.0 },
+    )
+    return draw_cmd_text(
+        b,
+        UiRect { x: lx + 6.0, y: ly + 3.0, w: 202.0, h: 15.0 },
+        lbl,
+        UiStyle { fg: theme.fg, font_size: 11.0, bold: true, monospace: true },
+    )
+}
+
+def paint_single_quake_dot(
+    buf: DrawBuffer,
+    theme: UiTheme,
+    st: TelemetryGuiState,
+    proj: MapProj,
+    ev: SeismicEvent,
+) -> DrawBuffer effect ffi, alloc {
+    val pt = map_to_screen(proj, ev.coord.lon_deg, ev.coord.lat_deg)
+    val r = quake_marker_radius(ev.magnitude, st.map.zoom)
+    val base = tp_depth_color(theme, ev.coord.depth_km)
+    val fill = with_alpha(base, 175)
+    val stroke = mix_color(base, theme.fg, 0.35)
+    var b = draw_cmd_circle(
+        buf,
+        pt.0,
+        pt.1,
+        r,
+        UiStyle { bg: fill, border: stroke, border_width: 1.0 },
+    )
+    if len(st.hovered_event_id) > 0 && ev.event_id == st.hovered_event_id {
+        b = draw_cmd_circle(
+            b,
+            pt.0,
+            pt.1,
+            r + 3.5,
+            UiStyle { bg: rgba(0, 0, 0, 0), border: theme.cyan, border_width: 1.25 },
+        )
+    }
+    return b
+}
+
+def paint_map_earthquakes(
+    buf: DrawBuffer,
+    theme: UiTheme,
+    st: TelemetryGuiState,
+    proj: MapProj,
+) -> DrawBuffer effect ffi, io, alloc {
+    var b = buf
+    val idxs = filtered_event_indices(st)
+    var sel_ev_opt: option<SeismicEvent> = none
+    var i = list_len(idxs) - 1
+    while i >= 0 {
+        val ev = list_get(st.snap.events, list_get(idxs, i))
+        b = paint_single_quake_dot(b, theme, st, proj, ev)
+        if ev.event_id == st.selected_event_id {
+            sel_ev_opt = some(ev)
+        }
+        i = i - 1
+    }
+    when sel_ev_opt {
+        some(sel_ev) => {
+            if st.map.show_labels {
+                val r = quake_marker_radius(sel_ev.magnitude, st.map.zoom)
+                b = paint_selected_quake_reticle(b, theme, proj, sel_ev, r)
+            }
+        },
+        none => {},
+    }
+    return b
+}
+
+def paint_map_weather_pins(
+    buf: DrawBuffer,
+    theme: UiTheme,
+    stations: list<SurfaceWeather>,
+    proj: MapProj,
+    show_labels: bool,
+) -> DrawBuffer effect ffi, io, alloc {
+    var b = buf
+    for i in 0..list_len(stations) {
+        val wx = list_get(stations, i)
+        val pt = map_to_screen(proj, wx.lon, wx.lat)
+        b = draw_cmd_round_rect(
+            b,
+            UiRect { x: pt.0 - 4.0, y: pt.1 - 4.0, w: 8.0, h: 8.0 },
+            2.0,
+            UiStyle { bg: theme.emerald, border: theme.fg, border_width: 0.9 },
+        )
+        if show_labels {
+            val tag = f"{format_fixed_1(wx.temp_c)}C"
+            val tx = clamp_f64(pt.0 + 7.0, proj.rect.x + 6.0, proj.rect.x + proj.rect.w - 48.0)
+            val ty = clamp_f64(pt.1 - 6.0, proj.rect.y + 38.0, proj.rect.y + proj.rect.h - 18.0)
+            b = draw_cmd_text(
+                b,
+                UiRect { x: tx, y: ty, w: 54.0, h: 14.0 },
+                tag,
+                UiStyle { fg: theme.emerald, font_size: 10.5, bold: true, monospace: true },
+            )
+        }
+    }
+    return b
+}
+
+def paint_iss_footprint_and_tether(
+    buf: DrawBuffer,
+    theme: UiTheme,
+    st: TelemetryGuiState,
+    proj: MapProj,
+    ipt: (f64, f64),
+) -> DrawBuffer effect ffi, alloc {
+    val iss = st.snap.iss
+    var b = buf
+    if st.map.show_footprint && iss.footprint_km > 10.0 {
+        val lon_span = max_f64(1.0, proj.lon_max - proj.lon_min)
+        val rad_deg = (iss.footprint_km * 0.5) / 111.32
+        val pix_r = clamp_f64((rad_deg / lon_span) * proj.rect.w, 12.0, proj.rect.w * 0.45)
+        b = draw_cmd_circle(
+            b,
+            ipt.0,
+            ipt.1,
+            pix_r,
+            UiStyle {
+                bg: with_alpha(theme.cyan, 18),
+                border: with_alpha(theme.cyan, 140),
+                border_width: 1.0,
+            },
+        )
+    }
+    val events = st.snap.events
+    if list_len(events) > 0 && st.snap.analytics.closest_iss_idx < list_len(events) {
+        val near_ev = list_get(events, st.snap.analytics.closest_iss_idx)
+        val npt = map_to_screen(proj, near_ev.coord.lon_deg, near_ev.coord.lat_deg)
+        b = draw_cmd_line(
+            b,
+            UiRect { x: ipt.0, y: ipt.1, w: npt.0, h: npt.1 },
+            with_alpha(theme.cyan, 125),
+            1.1,
+            true,
+        )
+    }
+    return b
+}
+
+def paint_map_iss_overlay(
+    buf: DrawBuffer,
+    theme: UiTheme,
+    st: TelemetryGuiState,
+    proj: MapProj,
+) -> DrawBuffer effect ffi, io, alloc {
+    val iss = st.snap.iss
+    if iss.timestamp_s <= 0 {
+        return buf
+    }
+    val ipt = map_to_screen(proj, iss.longitude, iss.latitude)
+    var b = paint_iss_footprint_and_tether(buf, theme, st, proj, ipt)
+    val spt = map_to_screen(proj, iss.solar_lon, iss.solar_lat)
+    b = draw_cmd_circle(
+        b,
+        spt.0,
+        spt.1,
+        4.0,
+        UiStyle { bg: with_alpha(theme.amber, 190), border: theme.fg, border_width: 0.75 },
+    )
+    b = draw_cmd_circle(
+        b,
+        ipt.0,
+        ipt.1,
+        5.5,
+        UiStyle { bg: theme.cyan, border: theme.fg, border_width: 1.25 },
+    )
+    if st.map.show_labels {
+        val lx = clamp_f64(ipt.0 + 9.0, proj.rect.x + 6.0, proj.rect.x + proj.rect.w - 130.0)
+        val ly = clamp_f64(ipt.1 + 7.0, proj.rect.y + 8.0, proj.rect.y + proj.rect.h - 20.0)
+        b = draw_cmd_text(
+            b,
+            UiRect { x: lx, y: ly, w: 126.0, h: 15.0 },
+            f"ISS {format_fixed_0(iss.altitude_km)}km",
+            UiStyle { fg: theme.cyan, font_size: 11.0, bold: true, monospace: true },
+        )
+    }
+    return b
+}
+
+def paint_legend_chip(
+    buf: DrawBuffer,
+    theme: UiTheme,
+    pos: (f64, f64),
+    col: UiColor,
+    label_and_w: (str, f64),
+) -> (DrawBuffer, f64) effect ffi, alloc {
+    var b = draw_cmd_circle(buf, pos.0 + 4.0, pos.1, 3.8, UiStyle { bg: col })
+    b = draw_cmd_text(
+        b,
+        UiRect { x: pos.0 + 12.0, y: pos.1 - 8.0, w: label_and_w.1, h: 16.0 },
+        label_and_w.0,
+        UiStyle { fg: theme.fg_muted, font_size: 10.5, bold: true },
+    )
+    return (b, pos.0 + 12.0 + label_and_w.1 + 8.0)
+}
+
+def paint_map_hud_badges(
+    buf: DrawBuffer,
+    theme: UiTheme,
+    st: TelemetryGuiState,
+    rect: UiRect,
+) -> DrawBuffer effect ffi, io, alloc {
+    val cy = rect.y + 23.0
+    var b = draw_cmd_round_rect(
+        buf,
+        UiRect { x: rect.x + 12.0, y: rect.y + 12.0, w: 306.0, h: 22.0 },
+        4.0,
+        UiStyle { bg: rgba(16, 20, 26, 210), border: theme.border, border_width: 1.0 },
+    )
+    var cx = rect.x + 20.0
+    val s1 = paint_legend_chip(b, theme, (cx, cy), theme.coral, ("Shallow", 48.0))
+    b = s1.0
+    cx = s1.1
+    val s2 = paint_legend_chip(b, theme, (cx, cy), theme.amber, ("Mid", 26.0))
+    b = s2.0
+    cx = s2.1
+    val s3 = paint_legend_chip(b, theme, (cx, cy), theme.teal, ("Deep", 34.0))
+    b = s3.0
+    cx = s3.1
+    val s4 = paint_legend_chip(b, theme, (cx, cy), theme.cyan, ("ISS", 26.0))
+    b = s4.0
+    cx = s4.1
+    val s5 = paint_legend_chip(b, theme, (cx, cy), theme.emerald, ("Meteo", 40.0))
+    b = s5.0
+    val z_txt = f"Zoom {format_fixed_1(st.map.zoom)}x"
+    b = draw_cmd_round_rect(
+        b,
+        UiRect { x: rect.x + rect.w - 86.0, y: rect.y + 12.0, w: 74.0, h: 22.0 },
+        4.0,
+        UiStyle { bg: rgba(16, 20, 26, 210), border: theme.border, border_width: 1.0 },
+    )
+    return draw_cmd_text(
+        b,
+        UiRect { x: rect.x + rect.w - 79.0, y: rect.y + 15.0, w: 62.0, h: 16.0 },
+        z_txt,
+        UiStyle { fg: theme.fg, font_size: 11.0, bold: true, monospace: true },
+    )
+}
+
+def paint_global_map_viewport(
+    buf: DrawBuffer,
+    theme: UiTheme,
+    st: TelemetryGuiState,
+    rect: UiRect,
+) -> DrawBuffer effect ffi, io, alloc {
+    val proj = build_map_projection(rect, st.map)
+    var b = draw_cmd_round_rect(
+        buf,
+        rect,
+        6.0,
+        UiStyle { bg: rgb(14, 18, 25), border: theme.border, border_width: 1.0 },
+    )
+    b = draw_cmd_push_clip(b, proj.rect)
+    b = paint_map_graticule(b, theme, proj, st.map.zoom)
+    b = paint_map_coastlines(b, proj, st.map.show_arcs)
+    b = paint_map_iss_overlay(b, theme, st, proj)
+    if st.map.show_weather {
+        b = paint_map_weather_pins(b, theme, st.snap.weather, proj, st.map.show_labels)
+        b = paint_map_weather_pins(b, theme, st.probed_weather, proj, true)
+    }
+    b = paint_map_earthquakes(b, theme, st, proj)
+    b = paint_map_hud_badges(b, theme, st, rect)
+    return draw_cmd_pop_clip(b)
+}
+
+def paint_ad_grid_lines(buf: DrawBuffer, px_r: UiRect) -> DrawBuffer effect ffi, alloc {
+    var b = buf
+    for g in 1..5 {
+        val gy = px_r.y + px_r.h * (to_f64(g) / 4.0)
+        b = draw_cmd_line(
+            b,
+            UiRect { x: px_r.x, y: gy, w: px_r.x + px_r.w, h: gy },
+            rgb(30, 38, 50),
+            1.0,
+            true,
+        )
+    }
+    return b
+}
+
+def paint_ad_series_and_fit(
+    buf: DrawBuffer,
+    theme: UiTheme,
+    px_r: UiRect,
+    gr: GutenbergRichterFit,
+    bins: (list<f64>, list<f64>),
+) -> DrawBuffer effect ffi, alloc {
+    val (ms, logs) = bins
+    var max_y = 2.5
+    for i in 0..list_len(logs) {
+        max_y = max_f64(max_y, list_get(logs, i) + 0.35)
+    }
+    val x_min = 1.0
+    val x_max = 7.5
+    val xs: list<f64> = list()
+    val ys: list<f64> = list()
+    for i in 0..list_len(ms) {
+        val mx = px_r.x + clamp_f64((list_get(ms, i) - x_min) / (x_max - x_min), 0.0, 1.0) * px_r.w
+        val my = px_r.y + px_r.h - clamp_f64(list_get(logs, i) / max_y, 0.0, 1.0) * px_r.h
+        val _ = list_push(xs, mx)
+        val _ = list_push(ys, my)
+    }
+    var b = draw_cmd_push_clip(buf, px_r)
+    if list_len(xs) >= 2 {
+        b = draw_cmd_polyline(b, xs, ys, theme.azure, with_alpha(theme.azure, 36))
+    }
+    val y0_pred = clamp_f64((gr.a_value - gr.b_value * x_min) / max_y, 0.0, 1.0)
+    val y1_pred = clamp_f64((gr.a_value - gr.b_value * x_max) / max_y, 0.0, 1.0)
+    if gr.bin_count >= 2 {
+        val fit_rect = UiRect {
+            x: px_r.x,
+            y: px_r.y + px_r.h - y0_pred * px_r.h,
+            w: px_r.x + px_r.w,
+            h: px_r.y + px_r.h - y1_pred * px_r.h,
+        }
+        b = draw_cmd_line(b, fit_rect, theme.fg, 1.75, false)
+    }
+    for j in 0..list_len(xs) {
+        val st_pt = UiStyle { bg: theme.cyan, border: theme.fg, border_width: 1.0 }
+        b = draw_cmd_circle(b, list_get(xs, j), list_get(ys, j), 4.0, st_pt)
+    }
+    return draw_cmd_pop_clip(b)
+}
+
+def paint_ad_plot_area(
+    buf: DrawBuffer,
+    theme: UiTheme,
+    st: TelemetryGuiState,
+    plot_r: UiRect,
+) -> DrawBuffer effect ffi, io, alloc {
+    val bins = compute_gr_curve(st.snap.events)
+    val gr = st.snap.analytics.gr_fit
+    var b = draw_cmd_round_rect(
+        buf,
+        plot_r,
+        6.0,
+        UiStyle { bg: rgb(14, 18, 25), border: theme.border, border_width: 1.0 },
+    )
+    val px_r = UiRect {
+        x: plot_r.x + 56.0,
+        y: plot_r.y + 34.0,
+        w: max_f64(80.0, plot_r.w - 84.0),
+        h: max_f64(80.0, plot_r.h - 70.0),
+    }
+    b = draw_cmd_text(
+        b,
+        UiRect { x: plot_r.x + 16.0, y: plot_r.y + 10.0, w: plot_r.w - 32.0, h: 18.0 },
+        f"Gutenberg-Richter AD Calibration: log10(N >= M) = {format_fixed_2(gr.a_value)} - {format_fixed_2(gr.b_value)} * M   (R^2 = {format_fixed_2(gr.r2_score)}, bins = {gr.bin_count})",
+        UiStyle { fg: theme.fg, font_size: 12.5, bold: true, monospace: true },
+    )
+    b = paint_ad_grid_lines(b, px_r)
+    b = paint_ad_series_and_fit(b, theme, px_r, gr, bins)
+    return draw_cmd_text(
+        b,
+        UiRect { x: px_r.x, y: px_r.y + px_r.h + 8.0, w: px_r.w, h: 16.0 },
+        "Magnitude Threshold M (1.0 .. 7.5)   |   Solid: AD Fit   Cyan: Observed log10(N >= M)",
+        UiStyle { fg: theme.fg_muted, font_size: 11.0, monospace: true },
+    )
+}
+
+def paint_depth_regime_row(
+    buf: DrawBuffer,
+    theme: UiTheme,
+    row_r: UiRect,
+    label: str,
+    stats: (i64, f64, UiColor),
+) -> DrawBuffer effect ffi, alloc {
+    val cnt = stats.0
+    val total = stats.1
+    val col = stats.2
+    val inner_w = row_r.w
+    val frac = clamp_f64(to_f64(cnt) / total, 0.0, 1.0)
+    var b = draw_cmd_text(
+        buf,
+        UiRect { x: row_r.x + 14.0, y: row_r.y + 2.0, w: 132.0, h: 16.0 },
+        label,
+        UiStyle { fg: theme.fg_muted, font_size: 11.5, monospace: true },
+    )
+    b = draw_cmd_round_rect(
+        b,
+        UiRect { x: row_r.x + 150.0, y: row_r.y + 3.0, w: inner_w, h: 14.0 },
+        3.0,
+        UiStyle { bg: rgb(25, 31, 40) },
+    )
+    if cnt > 0 {
+        val fill_r = UiRect {
+            x: row_r.x + 150.0,
+            y: row_r.y + 3.0,
+            w: max_f64(6.0, inner_w * frac),
+            h: 14.0,
+        }
+        b = draw_cmd_round_rect(b, fill_r, 3.0, UiStyle { bg: col })
+    }
+    return draw_cmd_text(
+        b,
+        UiRect { x: row_r.x + 160.0 + inner_w, y: row_r.y + 2.0, w: 48.0, h: 16.0 },
+        to_str(cnt),
+        UiStyle { fg: theme.fg, font_size: 11.5, bold: true, monospace: true },
+    )
+}
+
+def paint_depth_regime_bars(
+    buf: DrawBuffer,
+    theme: UiTheme,
+    a: RunAnalytics,
+    bar_r: UiRect,
+) -> DrawBuffer effect ffi, io, alloc {
+    var b = draw_cmd_round_rect(
+        buf,
+        bar_r,
+        6.0,
+        UiStyle { bg: rgb(14, 18, 25), border: theme.border, border_width: 1.0 },
+    )
+    val total = if a.total_quakes > 0 { to_f64(a.total_quakes) } else { 1.0 }
+    val inner_w = max_f64(60.0, bar_r.w - 220.0)
+    b = draw_cmd_text(
+        b,
+        UiRect { x: bar_r.x + 14.0, y: bar_r.y + 10.0, w: bar_r.w - 28.0, h: 18.0 },
+        f"Focal Depth Regime Distribution   |   E[N>=M5]={format_fixed_2(a.gr_fit.expected_daily_m5)}/d   E[N>=M6]={format_fixed_2(a.gr_fit.expected_daily_m6)}/d",
+        UiStyle { fg: theme.fg, font_size: 12.0, bold: true, monospace: true },
+    )
+    val labels = list("Shallow (<70km)", "Mid (70-300km)", "Deep (>300km)")
+    val counts = list(a.shallow_count, a.intermediate_count, a.deep_count)
+    val colors = list(theme.coral, theme.amber, theme.teal)
+    for k in 0..3 {
+        val row_r = UiRect { x: bar_r.x, y: bar_r.y + 38.0 + to_f64(k) * 26.0, w: inner_w, h: 20.0 }
+        val stats = (list_get(counts, k), total, list_get(colors, k))
+        b = paint_depth_regime_row(b, theme, row_r, list_get(labels, k), stats)
+    }
+    return b
+}
+
+def paint_ad_fit_viewport(
+    buf: DrawBuffer,
+    theme: UiTheme,
+    st: TelemetryGuiState,
+    rect: UiRect,
+) -> DrawBuffer effect ffi, io, alloc {
+    val split_h = max_f64(140.0, rect.h - 134.0)
+    val top_r = UiRect { x: rect.x, y: rect.y, w: rect.w, h: split_h }
+    val bot_r = UiRect { x: rect.x, y: rect.y + split_h + 10.0, w: rect.w, h: 124.0 }
+    val b = paint_ad_plot_area(buf, theme, st, top_r)
+    return paint_depth_regime_bars(b, theme, st.snap.analytics, bot_r)
+}
+
+def paint_kp_bars(
+    buf: DrawBuffer,
+    theme: UiTheme,
+    kps: list<GeomagneticSample>,
+    inner: UiRect,
+) -> DrawBuffer effect ffi, alloc {
+    val n = list_len(kps)
+    val start = if n > 28 { n - 28 } else { 0 }
+    val count = n - start
+    if count <= 0 {
+        return buf
+    }
+    var b = buf
+    val slot = inner.w / to_f64(count)
+    for i in 0..count {
+        val s = list_get(kps, start + i)
+        val h = clamp_f64((s.kp_index / 9.0) * inner.h, 3.0, inner.h)
+        val col = if s.kp_index >= 5.0 {
+            theme.coral
+        } else if s.kp_index >= 4.0 {
+            theme.amber
+        } else {
+            theme.azure
+        }
+        val bar_r = UiRect {
+            x: inner.x + to_f64(i) * slot + 2.0,
+            y: inner.y + inner.h - h,
+            w: max_f64(4.0, slot - 4.0),
+            h: h,
+        }
+        val st_b = UiStyle {
+            bg: col,
+            border: if i == count - 1 { theme.fg } else { col },
+            border_width: if i == count - 1 { 1.2 } else { 0.0 },
+        }
+        b = draw_cmd_round_rect(b, bar_r, 2.5, st_b)
+    }
+    return b
+}
+
+def paint_kp_y_grid(
+    buf: DrawBuffer,
+    theme: UiTheme,
+    chart_x: f64,
+    inner: UiRect,
+) -> DrawBuffer effect ffi, alloc {
+    val ticks = list(0.0, 3.0, 5.0, 7.0, 9.0)
+    val labels = list("0", "3", "5 G1", "7", "9")
+    var b = buf
+    for k in 0..list_len(ticks) {
+        val kp_val = list_get(ticks, k)
+        val gy = inner.y + inner.h - (kp_val / 9.0) * inner.h
+        val is_g1 = kp_val > 4.5 && kp_val < 5.5
+        val col = if is_g1 { with_alpha(theme.coral, 180) } else { rgb(30, 38, 50) }
+        b = draw_cmd_line(
+            b,
+            UiRect { x: inner.x, y: gy, w: inner.x + inner.w, h: gy },
+            col,
+            1.0,
+            k > 0,
+        )
+        b = draw_cmd_text(
+            b,
+            UiRect { x: chart_x + 10.0, y: gy - 7.0, w: 32.0, h: 14.0 },
+            list_get(labels, k),
+            UiStyle {
+                fg: if is_g1 { theme.coral } else { theme.fg_muted },
+                font_size: 10.0,
+                monospace: true,
+            },
+        )
+    }
+    return b
+}
+
+def paint_kp_chart_panel(
+    buf: DrawBuffer,
+    theme: UiTheme,
+    st: TelemetryGuiState,
+    chart_r: UiRect,
+) -> DrawBuffer effect ffi, io, alloc {
+    var b = draw_cmd_round_rect(
+        buf,
+        chart_r,
+        6.0,
+        UiStyle { bg: rgb(14, 18, 25), border: theme.border, border_width: 1.0 },
+    )
+    b = draw_cmd_text(
+        b,
+        UiRect { x: chart_r.x + 14.0, y: chart_r.y + 10.0, w: chart_r.w - 28.0, h: 18.0 },
+        f"NOAA SWPC Planetary Geomagnetic Kp (3h Bins)   |   Latest={format_fixed_2(st.snap.analytics.kp_latest)}   Peak={format_fixed_2(st.snap.analytics.kp_peak)}   95% CI [{format_fixed_2(st.snap.analytics.kp_ci_low)}, {format_fixed_2(st.snap.analytics.kp_ci_high)}]",
+        UiStyle { fg: theme.fg, font_size: 12.0, bold: true, monospace: true },
+    )
+    val inner = UiRect {
+        x: chart_r.x + 48.0,
+        y: chart_r.y + 42.0,
+        w: max_f64(60.0, chart_r.w - 68.0),
+        h: max_f64(60.0, chart_r.h - 62.0),
+    }
+    b = paint_kp_y_grid(b, theme, chart_r.x, inner)
+    val g1_y = inner.y + inner.h - (5.0 / 9.0) * inner.h
+    b = draw_cmd_text(
+        b,
+        UiRect { x: inner.x + inner.w - 72.0, y: g1_y - 15.0, w: 70.0, h: 14.0 },
+        "G1 Storm",
+        UiStyle { fg: theme.coral, font_size: 10.5, monospace: true },
+    )
+    return paint_kp_bars(b, theme, st.snap.kps, inner)
+}
+
+def paint_sqlite_runs_panel(
+    buf: DrawBuffer,
+    theme: UiTheme,
+    st: TelemetryGuiState,
+    runs_r: UiRect,
+) -> DrawBuffer effect ffi, io, alloc {
+    var b = draw_cmd_round_rect(
+        buf,
+        runs_r,
+        6.0,
+        UiStyle { bg: rgb(14, 18, 25), border: theme.border, border_width: 1.0 },
+    )
+    b = draw_cmd_text(
+        b,
+        UiRect { x: runs_r.x + 14.0, y: runs_r.y + 8.0, w: runs_r.w - 28.0, h: 18.0 },
+        f"SQLite Longitudinal Run Archive ({st.db_path})   |   Stored Quakes={st.delta.stored_events_total}   New This Run=+{st.delta.new_events_count}",
+        UiStyle { fg: theme.fg, font_size: 12.0, bold: true, monospace: true },
+    )
+    val n = list_len(st.recent_runs)
+    val max_show = if n < 4 { n } else { 4 }
+    if max_show == 0 {
+        return draw_cmd_text(
+            b,
+            UiRect { x: runs_r.x + 14.0, y: runs_r.y + 36.0, w: runs_r.w - 28.0, h: 18.0 },
+            "No prior SQLite telemetry snapshots loaded yet.",
+            UiStyle { fg: theme.fg_muted, font_size: 11.5, monospace: true },
+        )
+    }
+    for i in 0..max_show {
+        val r = list_get(st.recent_runs, i)
+        val line = f"Run #{tp_fit_width(to_str(r.run_id), 4)}  Quakes={tp_fit_width(to_str(r.quake_count), 4)}  Peak=M{format_fixed_2(r.max_mag)}  Kp={format_fixed_2(r.kp_latest)}  b={format_fixed_2(r.gr_b)}  [{r.alert_tier}]"
+        b = draw_cmd_text(
+            b,
+            UiRect {
+                x: runs_r.x + 14.0,
+                y: runs_r.y + 34.0 + to_f64(i) * 20.0,
+                w: runs_r.w - 28.0,
+                h: 18.0,
+            },
+            line,
+            UiStyle {
+                fg: if i == 0 { theme.fg } else { theme.fg_muted },
+                font_size: 11.5,
+                monospace: true,
+            },
+        )
+    }
+    return b
+}
+
+def paint_kp_viewport(
+    buf: DrawBuffer,
+    theme: UiTheme,
+    st: TelemetryGuiState,
+    rect: UiRect,
+) -> DrawBuffer effect ffi, io, alloc {
+    val split_h = max_f64(140.0, rect.h - 134.0)
+    val top_r = UiRect { x: rect.x, y: rect.y, w: rect.w, h: split_h }
+    val bot_r = UiRect { x: rect.x, y: rect.y + split_h + 10.0, w: rect.w, h: 124.0 }
+    val b = paint_kp_chart_panel(buf, theme, st, top_r)
+    return paint_sqlite_runs_panel(b, theme, st, bot_r)
+}
+
+def paint_weather_station_row(
+    buf: DrawBuffer,
+    theme: UiTheme,
+    wx: SurfaceWeather,
+    row_r: UiRect,
+) -> DrawBuffer effect ffi, io, alloc {
+    var b = draw_cmd_round_rect(
+        buf,
+        row_r,
+        5.0,
+        UiStyle { bg: rgb(20, 25, 33), border: theme.border, border_width: 1.0 },
+    )
+    b = draw_cmd_text(
+        b,
+        UiRect { x: row_r.x + 12.0, y: row_r.y + 8.0, w: row_r.w - 24.0, h: 16.0 },
+        f"{tp_fit_width(wx.label, 38)}  ({format_fixed_2(wx.lat)}, {format_fixed_2(wx.lon)})",
+        UiStyle { fg: theme.fg, font_size: 12.0, bold: true, monospace: true },
+    )
+    val metrics = f"Temp {format_fixed_1(wx.temp_c)} C   |   Wind {format_fixed_1(wx.wind_kmh)} km/h   |   Pressure {format_fixed_1(wx.pressure_hpa)} hPa   |   RH {format_fixed_0(wx.humidity_pct)}%"
+    return draw_cmd_text(
+        b,
+        UiRect { x: row_r.x + 12.0, y: row_r.y + 28.0, w: row_r.w - 24.0, h: 16.0 },
+        metrics,
+        UiStyle { fg: theme.fg_muted, font_size: 11.5, monospace: true },
+    )
+}
+
+def paint_weather_viewport(
+    buf: DrawBuffer,
+    theme: UiTheme,
+    st: TelemetryGuiState,
+    rect: UiRect,
+) -> DrawBuffer effect ffi, io, alloc {
+    var b = draw_cmd_round_rect(
+        buf,
+        rect,
+        6.0,
+        UiStyle { bg: rgb(14, 18, 25), border: theme.border, border_width: 1.0 },
+    )
+    b = draw_cmd_text(
+        b,
+        UiRect { x: rect.x + 14.0, y: rect.y + 10.0, w: rect.w - 28.0, h: 18.0 },
+        "Open-Meteo Correlated Surface Conditions & Interactive Epicenter Weather Probes",
+        UiStyle { fg: theme.fg, font_size: 12.5, bold: true, monospace: true },
+    )
+    val combined: list<SurfaceWeather> = list()
+    for i in 0..list_len(st.probed_weather) {
+        val _ = list_push(combined, list_get(st.probed_weather, i))
+    }
+    for j in 0..list_len(st.snap.weather) {
+        val _ = list_push(combined, list_get(st.snap.weather, j))
+    }
+    if list_len(combined) == 0 {
+        return draw_cmd_text(
+            b,
+            UiRect { x: rect.x + 14.0, y: rect.y + 42.0, w: rect.w - 28.0, h: 18.0 },
+            "No surface weather observations loaded yet. Select an event and click 'Probe Weather'.",
+            UiStyle { fg: theme.fg_muted, font_size: 12.0 },
+        )
+    }
+    val max_cards = ((rect.h - 46.0) / 58.0) to i64
+    val show_n = if list_len(combined) < max_cards { list_len(combined) } else { max_cards }
+    for k in 0..show_n {
+        val rr = UiRect {
+            x: rect.x + 14.0,
+            y: rect.y + 38.0 + to_f64(k) * 58.0,
+            w: max_f64(120.0, rect.w - 28.0),
+            h: 50.0,
+        }
+        b = paint_weather_station_row(b, theme, list_get(combined, k), rr)
+    }
+    return b
+}
+
+/// Append the custom vector scene (`GlobalMap`, `AdFitView`, `GeomagneticView`, or `AtmosphericView`)
+/// into `buf` bounded to the laid-out `"map_viewport"` slot and finalize command count.
+pub def paint_active_viewport_overlay(
+    buf: DrawBuffer,
+    tree: UiTree,
+    st: TelemetryGuiState,
+) -> DrawBuffer effect ffi, io, alloc {
+    val slot_opt = ui_find_node_key(tree, "map_viewport")
+    val slot_r = when slot_opt {
+        some(idx) => list_get(tree.nodes, idx).layout,
+        none => {
+            return draw_buf_finish(buf)
+        },
+    }
+    if slot_r.w < 40.0 || slot_r.h < 40.0 {
+        return draw_buf_finish(buf)
+    }
+    val next = when st.active_view {
+        WorkspaceView.GlobalMap => paint_global_map_viewport(buf, tree.theme, st, slot_r),
+        WorkspaceView.AdFitView => paint_ad_fit_viewport(buf, tree.theme, st, slot_r),
+        WorkspaceView.GeomagneticView => paint_kp_viewport(buf, tree.theme, st, slot_r),
+        WorkspaceView.AtmosphericView => paint_weather_viewport(buf, tree.theme, st, slot_r),
+    }
+    return draw_buf_finish(next)
+}
+
+def test_map_projection_and_hittest() -> i64 effect alloc, thread, throw {
+    val rect = UiRect { x: 20.0, y: 20.0, w: 800.0, h: 400.0 }
+    val proj = build_map_projection(rect, MapViewport {})
+    val origin = map_to_screen(proj, 0.0, 2.0)
+    val inv = screen_to_map(proj, origin.0, origin.1)
+    assert(abs_f64(inv.0) < 0.25 && abs_f64(inv.1 - 2.0) < 0.25)
+
+    val ev = SeismicEvent {
+        event_id: "map_hit_1",
+        time_utc: "2026-11-15T10:00:00Z",
+        coord: GeoCoord { lat_deg: 35.0, lon_deg: 140.0, depth_km: 18.0 },
+        magnitude: 5.6,
+        mag_type: "mww",
+        place: "Tokyo Bay",
+    }
+    val iss0 = OrbitalState {
+        name: "iss",
+        latitude: 0.0,
+        longitude: 0.0,
+        altitude_km: 416.0,
+        velocity_kmh: 27590.0,
+        footprint_km: 4480.0,
+        visibility: "daylight",
+        timestamp_s: 1794690639,
+        solar_lat: -18.0,
+        solar_lon: 110.0,
+    }
+    val an = analyze_observatory_feeds(list(ev), list(), iss0)
+    val snap = ObservatorySnapshot {
+        events: list(ev),
+        kps: list(),
+        iss: iss0,
+        weather: list(),
+        analytics: an,
+    }
+    val base = gui_state_init(GuiLaunchOpts {})
+    val st = apply_live_snapshot(base, snap, base.delta, list(), (50, 20, "ok"))
+    val pt = map_to_screen(proj, 140.0, 35.0)
+    val hit = hit_test_map_quake(st, rect, pt.0 + 2.0, pt.1 - 2.0)
+    assert(is_some(hit) && unwrap(hit) == "map_hit_1")
+    assert(is_none(hit_test_map_quake(st, rect, rect.x + 15.0, rect.y + 15.0)))
+    return 0
+}

@@ -13,6 +13,94 @@ use super::{
 };
 
 impl<'m> Lowerer<'m> {
+    fn find_loop_frame(
+        &self,
+        op: &str,
+        label: &Option<String>,
+        span: Span,
+    ) -> Result<super::LoopFrame, LowerError> {
+        if let Some(target_label) = label {
+            self.loop_stack
+                .iter()
+                .rev()
+                .find(|frame| frame.label.as_ref() == Some(target_label))
+                .cloned()
+                .ok_or_else(|| {
+                    LowerError::rich(
+                        "E0123",
+                        crate::diagnostics::Diagnostic::error(format!(
+                            "`{op} {target_label}`: no enclosing loop has that label"
+                        ))
+                        .with_primary_span(
+                            (span).start.0,
+                            (span).end.0,
+                            None,
+                        ),
+                    )
+                })
+        } else {
+            self.loop_stack.last().cloned().ok_or_else(|| {
+                LowerError::rich(
+                    "E0123",
+                    crate::diagnostics::Diagnostic::error(format!("`{op}` outside a loop"))
+                        .with_primary_span((span).start.0, (span).end.0, None),
+                )
+            })
+        }
+    }
+
+    fn collect_loop_jump_args(
+        &self,
+        frame: &super::LoopFrame,
+        first_override: Option<ValueId>,
+        span: Span,
+    ) -> Result<Vec<ValueId>, LowerError> {
+        let mut args = Vec::with_capacity(frame.loop_var_names.len());
+        for (idx, name) in frame.loop_var_names.iter().enumerate() {
+            if idx == 0 {
+                if let Some(val) = first_override {
+                    args.push(val);
+                    continue;
+                }
+            }
+            let Some((value, _)) = self.scope.get(name) else {
+                return Err(LowerError::rich(
+                    "E0900",
+                    crate::diagnostics::Diagnostic::error(format!(
+                        "internal compiler error: loop variable `{name}` was not tracked"
+                    ))
+                    .with_primary_span((span).start.0, (span).end.0, None),
+                ));
+            };
+            args.push(*value);
+        }
+        Ok(args)
+    }
+
+    fn collect_for_range_back_edge_vals(
+        &self,
+        loop_vars: &[(String, ValueId, IrType)],
+        next_loop_var: ValueId,
+        taped_loop_vars: &[(usize, ValueId)],
+    ) -> Vec<ValueId> {
+        let mut updated_vals = Vec::with_capacity(loop_vars.len() + taped_loop_vars.len());
+        updated_vals.push(next_loop_var);
+        for (name, original_val, _) in loop_vars.iter().skip(1) {
+            updated_vals.push(
+                self.scope
+                    .get(name)
+                    .map(|(v, _)| *v)
+                    .unwrap_or(*original_val),
+            );
+        }
+        for (i, incoming) in taped_loop_vars {
+            let current = updated_vals[*i];
+            let handle = self.tape_nodes.get(&current).copied().unwrap_or(*incoming);
+            updated_vals.push(handle);
+        }
+        updated_vals
+    }
+
     fn collect_loop_rebound_vars(
         &self,
         rebound: &[String],
@@ -127,14 +215,13 @@ impl<'m> Lowerer<'m> {
 
         self.builder.set_current_block(body_bb);
         let loop_var_names: Vec<String> = loop_vars.iter().map(|(n, _, _)| n.clone()).collect();
-        self.loop_stack.push((
+        self.loop_stack.push(super::LoopFrame {
             header_bb,
             merge_bb,
-            header_bb,
             loop_var_names,
-            label.clone(),
-            false,
-        ));
+            label: label.clone(),
+            for_range_var: None,
+        });
         if body.tail.is_some() {
             let _ = self.lower_thir_block(body)?;
         } else {
@@ -239,14 +326,13 @@ impl<'m> Lowerer<'m> {
 
         self.builder.set_current_block(body_bb);
         let loop_var_names: Vec<String> = loop_vars.iter().map(|(n, _, _)| n.clone()).collect();
-        self.loop_stack.push((
+        self.loop_stack.push(super::LoopFrame {
             header_bb,
             merge_bb,
-            header_bb,
             loop_var_names,
-            label.clone(),
-            false,
-        ));
+            label: label.clone(),
+            for_range_var: None,
+        });
         if body.tail.is_some() {
             let _ = self.lower_thir_block(body)?;
         } else {
@@ -385,9 +471,16 @@ impl<'m> Lowerer<'m> {
             None,
         );
 
+        let shadowed_outer_var = if var != "_" {
+            self.scope.get(var).cloned()
+        } else {
+            None
+        };
         self.builder.set_current_block(header_bb);
         for ((name, _, ty), &param_val) in loop_vars.iter().zip(header_params.iter()) {
-            self.scope.insert(name.clone(), (param_val, ty.clone()));
+            if name != "_" {
+                self.scope.insert(name.clone(), (param_val, ty.clone()));
+            }
         }
         for ((i, _), &hp) in taped_loop_vars.iter().zip(header_handle_params.iter()) {
             self.taped_values.insert(header_params[*i]);
@@ -426,14 +519,13 @@ impl<'m> Lowerer<'m> {
 
         self.builder.set_current_block(body_bb);
         let loop_var_names: Vec<String> = loop_vars.iter().map(|(n, _, _)| n.clone()).collect();
-        self.loop_stack.push((
+        self.loop_stack.push(super::LoopFrame {
             header_bb,
             merge_bb,
-            header_bb,
             loop_var_names,
-            label.clone(),
-            true,
-        ));
+            label: label.clone(),
+            for_range_var: Some((loop_var_param, loop_var_ty.clone())),
+        });
         if body.tail.is_some() {
             let _ = self.lower_thir_block(body)?;
         } else {
@@ -442,11 +534,7 @@ impl<'m> Lowerer<'m> {
         self.loop_stack.pop();
 
         if !self.builder.is_current_block_terminated() {
-            let cur_loop_var = self
-                .scope
-                .get(var)
-                .map(|(v, _)| *v)
-                .unwrap_or(loop_var_param);
+            let cur_loop_var = loop_var_param;
             let step_val = if let Some(step_expr) = step {
                 self.lower_thir_expr_req(step_expr)?.0
             } else {
@@ -472,23 +560,9 @@ impl<'m> Lowerer<'m> {
                 },
                 Some(loop_var_ty.clone()),
             );
-            self.scope
-                .insert(var.to_string(), (incremented, loop_var_ty));
 
-            let mut updated_vals: Vec<ValueId> = loop_vars
-                .iter()
-                .map(|(name, original_val, _)| {
-                    self.scope
-                        .get(name)
-                        .map(|(v, _)| *v)
-                        .unwrap_or(*original_val)
-                })
-                .collect();
-            for (i, incoming) in &taped_loop_vars {
-                let current = updated_vals[*i];
-                let handle = self.tape_nodes.get(&current).copied().unwrap_or(*incoming);
-                updated_vals.push(handle);
-            }
+            let updated_vals =
+                self.collect_for_range_back_edge_vals(&loop_vars, incremented, &taped_loop_vars);
             self.builder.push_instr(
                 IrInstr::Br {
                     target: header_bb,
@@ -500,11 +574,14 @@ impl<'m> Lowerer<'m> {
 
         self.builder.set_current_block(merge_bb);
         self.cell_vars = outer_cells;
-        for ((name, _, ty), &merge_val) in loop_vars.iter().zip(merge_params.iter()) {
-            if name == var {
-                self.scope.remove(name);
+        for ((name, _, ty), &merge_val) in loop_vars.iter().zip(merge_params.iter()).skip(1) {
+            self.scope.insert(name.clone(), (merge_val, ty.clone()));
+        }
+        if var != "_" {
+            if let Some((prev_val, prev_ty)) = shadowed_outer_var {
+                self.scope.insert(var.to_string(), (prev_val, prev_ty));
             } else {
-                self.scope.insert(name.clone(), (merge_val, ty.clone()));
+                self.scope.remove(var);
             }
         }
         for ((i, _), &hp) in taped_loop_vars.iter().zip(merge_handle_params.iter()) {
@@ -787,14 +864,13 @@ impl<'m> Lowerer<'m> {
         self.scope.insert(var.to_string(), (elem_val, elem_ty));
 
         let loop_var_names: Vec<String> = loop_vars.iter().map(|(n, _, _)| n.clone()).collect();
-        self.loop_stack.push((
+        self.loop_stack.push(super::LoopFrame {
             header_bb,
             merge_bb,
-            header_bb,
             loop_var_names,
-            label.clone(),
-            false,
-        ));
+            label: label.clone(),
+            for_range_var: None,
+        });
         if body.tail.is_some() {
             let _ = self.lower_thir_block(body)?;
         } else {
@@ -1016,14 +1092,13 @@ impl<'m> Lowerer<'m> {
         // Lower body block.
         self.builder.set_current_block(body_bb);
         let loop_var_names: Vec<String> = loop_vars.iter().map(|(n, _, _)| n.clone()).collect();
-        self.loop_stack.push((
+        self.loop_stack.push(super::LoopFrame {
             header_bb,
             merge_bb,
-            header_bb,
-            loop_var_names.clone(),
-            label.clone(),
-            false,
-        ));
+            loop_var_names: loop_var_names.clone(),
+            label: label.clone(),
+            for_range_var: None,
+        });
         let _ = self.lower_block(body)?;
         self.loop_stack.pop();
 
@@ -1193,10 +1268,17 @@ impl<'m> Lowerer<'m> {
             None,
         );
 
+        let shadowed_outer_var = if var.name != "_" {
+            self.scope.get(&var.name).cloned()
+        } else {
+            None
+        };
         // 8. Header: update scope with params, emit loop_var < end (or <=) condition.
         self.builder.set_current_block(header_bb);
         for ((name, _, ty), &param_val) in loop_vars.iter().zip(header_params.iter()) {
-            self.scope.insert(name.clone(), (param_val, ty.clone()));
+            if name != "_" {
+                self.scope.insert(name.clone(), (param_val, ty.clone()));
+            }
         }
         for ((i, _), &hp) in taped_loop_vars.iter().zip(header_handle_params.iter()) {
             self.taped_values.insert(header_params[*i]);
@@ -1236,14 +1318,13 @@ impl<'m> Lowerer<'m> {
         // 9. Body block.
         self.builder.set_current_block(body_bb);
         let loop_var_names: Vec<String> = loop_vars.iter().map(|(n, _, _)| n.clone()).collect();
-        self.loop_stack.push((
+        self.loop_stack.push(super::LoopFrame {
             header_bb,
             merge_bb,
-            header_bb,
             loop_var_names,
-            label.clone(),
-            true,
-        ));
+            label: label.clone(),
+            for_range_var: Some((loop_var_param, loop_var_ty.clone())),
+        });
         // Use lower_block (not lower_block_stmts) so tail expressions like `print(x)` without `;`
         // are also evaluated as side-effecting statements.
         self.lower_block(body)?;
@@ -1251,11 +1332,7 @@ impl<'m> Lowerer<'m> {
 
         // 10. Emit increment and back-edge (if body not terminated by break/continue).
         if !self.builder.is_current_block_terminated() {
-            let cur_loop_var = self
-                .scope
-                .get(&var.name)
-                .map(|(v, _)| *v)
-                .unwrap_or(loop_var_param);
+            let cur_loop_var = loop_var_param;
             let step_val = if let Some(step_expr) = step {
                 self.lower_expr(step_expr)?.0
             } else {
@@ -1281,23 +1358,9 @@ impl<'m> Lowerer<'m> {
                 },
                 Some(loop_var_ty.clone()),
             );
-            self.scope
-                .insert(var.name.clone(), (incremented, loop_var_ty));
 
-            let mut updated_vals: Vec<ValueId> = loop_vars
-                .iter()
-                .map(|(name, original_val, _)| {
-                    self.scope
-                        .get(name)
-                        .map(|(v, _)| *v)
-                        .unwrap_or(*original_val)
-                })
-                .collect();
-            for (i, incoming) in &taped_loop_vars {
-                let current = updated_vals[*i];
-                let handle = self.tape_nodes.get(&current).copied().unwrap_or(*incoming);
-                updated_vals.push(handle);
-            }
+            let updated_vals =
+                self.collect_for_range_back_edge_vals(&loop_vars, incremented, &taped_loop_vars);
             self.builder.push_instr(
                 IrInstr::Br {
                     target: header_bb,
@@ -1308,15 +1371,17 @@ impl<'m> Lowerer<'m> {
         }
 
         // 11. Move to merge block; update scope with final values of rebound outer
-        //     variables, but remove the loop variable (it's no longer in scope).
+        //     variables, and restore any outer binding shadowed by the loop variable.
         self.builder.set_current_block(merge_bb);
         self.cell_vars = outer_cells;
-        for ((name, _, ty), &merge_val) in loop_vars.iter().zip(merge_params.iter()) {
-            if name == &var.name {
-                // Loop variable goes out of scope at the end of the for loop.
-                self.scope.remove(name);
+        for ((name, _, ty), &merge_val) in loop_vars.iter().zip(merge_params.iter()).skip(1) {
+            self.scope.insert(name.clone(), (merge_val, ty.clone()));
+        }
+        if var.name != "_" {
+            if let Some((prev_val, prev_ty)) = shadowed_outer_var {
+                self.scope.insert(var.name.clone(), (prev_val, prev_ty));
             } else {
-                self.scope.insert(name.clone(), (merge_val, ty.clone()));
+                self.scope.remove(&var.name);
             }
         }
         for ((i, _), &hp) in taped_loop_vars.iter().zip(merge_handle_params.iter()) {
@@ -1519,14 +1584,13 @@ impl<'m> Lowerer<'m> {
         self.scope.insert(var.name.clone(), (elem_val, elem_ty));
 
         let loop_var_names: Vec<String> = loop_vars.iter().map(|(n, _, _)| n.clone()).collect();
-        self.loop_stack.push((
+        self.loop_stack.push(super::LoopFrame {
             header_bb,
             merge_bb,
-            header_bb,
-            loop_var_names.clone(),
-            None,
-            false,
-        ));
+            loop_var_names: loop_var_names.clone(),
+            label: None,
+            for_range_var: None,
+        });
         let _ = self.lower_block(body)?;
         self.loop_stack.pop();
 
@@ -1663,14 +1727,13 @@ impl<'m> Lowerer<'m> {
         // Lower body block.
         self.builder.set_current_block(body_bb);
         let loop_var_names: Vec<String> = loop_vars.iter().map(|(n, _, _)| n.clone()).collect();
-        self.loop_stack.push((
+        self.loop_stack.push(super::LoopFrame {
             header_bb,
             merge_bb,
-            header_bb,
-            loop_var_names.clone(),
-            label.clone(),
-            false,
-        ));
+            loop_var_names: loop_var_names.clone(),
+            label: label.clone(),
+            for_range_var: None,
+        });
         let _ = self.lower_block(body)?;
         self.loop_stack.pop();
 
@@ -1713,54 +1776,13 @@ impl<'m> Lowerer<'m> {
         label: &Option<String>,
         span: Span,
     ) -> Result<(), LowerError> {
-        let (_, merge_bb, _, loop_var_names, _, _) = if let Some(target_label) = label {
-            self.loop_stack
-                .iter()
-                .rev()
-                .find(|(_, _, _, _, lbl, _)| lbl.as_ref() == Some(target_label))
-                .cloned()
-                .ok_or_else(|| {
-                    LowerError::rich(
-                        "E0123",
-                        crate::diagnostics::Diagnostic::error(format!(
-                            "`break {}`: no enclosing loop has that label",
-                            target_label
-                        ))
-                        .with_primary_span(
-                            (span).start.0,
-                            (span).end.0,
-                            None,
-                        ),
-                    )
-                })?
-        } else {
-            self.loop_stack.last().cloned().ok_or_else(|| {
-                LowerError::rich(
-                    "E0123",
-                    crate::diagnostics::Diagnostic::error("`break` outside a loop".to_string())
-                        .with_primary_span((span).start.0, (span).end.0, None),
-                )
-            })?
-        };
-
-        let mut args = Vec::with_capacity(loop_var_names.len());
-        for name in &loop_var_names {
-            let Some((value, _)) = self.scope.get(name) else {
-                return Err(LowerError::rich(
-                    "E0900",
-                    crate::diagnostics::Diagnostic::error(format!(
-                        "internal compiler error: loop variable `{}` was not tracked",
-                        name
-                    ))
-                    .with_primary_span((span).start.0, (span).end.0, None),
-                ));
-            };
-            args.push(*value);
-        }
+        let frame = self.find_loop_frame("break", label, span)?;
+        let first_override = frame.for_range_var.as_ref().map(|(v, _)| *v);
+        let args = self.collect_loop_jump_args(&frame, first_override, span)?;
 
         self.builder.push_instr(
             IrInstr::Br {
-                target: merge_bb,
+                target: frame.merge_bb,
                 args,
             },
             None,
@@ -1774,50 +1796,9 @@ impl<'m> Lowerer<'m> {
         label: &Option<String>,
         span: Span,
     ) -> Result<(), LowerError> {
-        let (header_bb, _, _, loop_var_names, _, is_for_range) = if let Some(target_label) = label {
-            self.loop_stack
-                .iter()
-                .rev()
-                .find(|(_, _, _, _, lbl, _)| lbl.as_ref() == Some(target_label))
-                .cloned()
-                .ok_or_else(|| {
-                    LowerError::rich(
-                        "E0123",
-                        crate::diagnostics::Diagnostic::error(format!(
-                            "`continue {}`: no enclosing loop has that label",
-                            target_label
-                        ))
-                        .with_primary_span(
-                            (span).start.0,
-                            (span).end.0,
-                            None,
-                        ),
-                    )
-                })?
-        } else {
-            self.loop_stack.last().cloned().ok_or_else(|| {
-                LowerError::rich(
-                    "E0123",
-                    crate::diagnostics::Diagnostic::error("`continue` outside a loop".to_string())
-                        .with_primary_span((span).start.0, (span).end.0, None),
-                )
-            })?
-        };
+        let frame = self.find_loop_frame("continue", label, span)?;
 
-        if is_for_range {
-            // For-range: increment the loop var inline, then branch to header with all
-            // updated values. Save and restore scope so the increment doesn't leak.
-            let saved_scope: Vec<_> = self
-                .scope
-                .iter()
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect();
-
-            let (cur_loop_var, loop_var_ty) = self
-                .scope
-                .get(&loop_var_names[0])
-                .cloned()
-                .unwrap_or((ValueId(0), IrType::Scalar(DType::I64)));
+        let first_override = if let Some((cur_loop_var, ref loop_var_ty)) = frame.for_range_var {
             let one = self.builder.fresh_value();
             self.builder.push_instr(
                 IrInstr::ConstInt {
@@ -1838,69 +1819,19 @@ impl<'m> Lowerer<'m> {
                 },
                 Some(loop_var_ty.clone()),
             );
-            self.scope
-                .insert(loop_var_names[0].clone(), (incremented, loop_var_ty));
-
-            let mut args = Vec::with_capacity(loop_var_names.len());
-            for name in &loop_var_names {
-                let Some((value, _)) = self.scope.get(name) else {
-                    return Err(LowerError::rich(
-                        "E0900",
-                        crate::diagnostics::Diagnostic::error(format!(
-                            "internal compiler error: loop variable `{}` was not tracked",
-                            name
-                        ))
-                        .with_primary_span(
-                            (span).start.0,
-                            (span).end.0,
-                            None,
-                        ),
-                    ));
-                };
-                args.push(*value);
-            }
-
-            // Restore scope so subsequent code isn't affected.
-            self.scope.clear();
-            for (k, v) in saved_scope {
-                self.scope.insert(k, v);
-            }
-
-            self.builder.push_instr(
-                IrInstr::Br {
-                    target: header_bb,
-                    args,
-                },
-                None,
-            );
+            Some(incremented)
         } else {
-            // While/loop: just pass current values of loop vars to header params.
-            let mut args = Vec::with_capacity(loop_var_names.len());
-            for name in &loop_var_names {
-                let Some((value, _)) = self.scope.get(name) else {
-                    return Err(LowerError::rich(
-                        "E0900",
-                        crate::diagnostics::Diagnostic::error(format!(
-                            "internal compiler error: loop variable `{}` was not tracked",
-                            name
-                        ))
-                        .with_primary_span(
-                            (span).start.0,
-                            (span).end.0,
-                            None,
-                        ),
-                    ));
-                };
-                args.push(*value);
-            }
-            self.builder.push_instr(
-                IrInstr::Br {
-                    target: header_bb,
-                    args,
-                },
-                None,
-            );
-        }
+            None
+        };
+
+        let args = self.collect_loop_jump_args(&frame, first_override, span)?;
+        self.builder.push_instr(
+            IrInstr::Br {
+                target: frame.header_bb,
+                args,
+            },
+            None,
+        );
         Ok(())
     }
 }

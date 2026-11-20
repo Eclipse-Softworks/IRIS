@@ -1027,6 +1027,7 @@ mod tests {
             return_ty: AstType::Scalar(AstScalarKind::I64, dummy_span()),
             effects: vec![],
             body: AstBlock {
+                scope_id: 0,
                 stmts: vec![AstStmt::Return {
                     value: Some(Box::new(bin_op(
                         AstBinOp::Mul,
@@ -1094,6 +1095,7 @@ mod tests {
         let eval = ConstEvaluator::new();
         // let mut sum = 0; for i in 1..=5 { sum += i }; sum -> 15
         let block = AstBlock {
+            scope_id: 0,
             stmts: vec![
                 AstStmt::Let {
                     name: Ident {
@@ -1116,6 +1118,7 @@ mod tests {
                     inclusive: true,
                     step: None,
                     body: AstBlock {
+                        scope_id: 0,
                         stmts: vec![AstStmt::Assign {
                             target: Box::new(AstExpr::Ident(Ident {
                                 name: "sum".into(),

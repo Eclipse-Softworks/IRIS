@@ -6,28 +6,28 @@ bring std.buffer
 
 
 /// Generate a UUID v4 string (random).
-pub def generate_uuid() -> str {
+pub def generate_uuid() -> str effect alloc, random, time {
     uuid()
 }
 
 /// Alias: `uuid()` is also exposed directly.
-pub def new_uuid() -> str {
+pub def new_uuid() -> str effect alloc, random, time {
     uuid()
 }
 
 /// Compute SHA-256 hash of a string.
 /// Returns a 64-character hexadecimal string.
-pub def hash_sha256(data: str) -> str {
+pub def hash_sha256(data: str) -> str effect alloc {
     sha256(data)
 }
 
 /// Encode a string to hexadecimal.
-pub def to_hex(data: str) -> str {
+pub def to_hex(data: str) -> str effect alloc {
     hex_encode(data)
 }
 
 /// Decode a hexadecimal string back to the original bytes.
-pub def from_hex(data: str) -> str {
+pub def from_hex(data: str) -> str effect alloc {
     hex_decode(data)
 }
 
@@ -38,39 +38,39 @@ pub def hash_code(data: str) -> i64 {
 }
 
 /// Encode a string to base64.
-pub def to_base64(data: str) -> str {
+pub def to_base64(data: str) -> str effect alloc {
     base64_encode(data)
 }
 
 /// Decode a base64 string back to the original bytes.
-pub def from_base64(data: str) -> str {
+pub def from_base64(data: str) -> str effect alloc {
     base64_decode(data)
 }
 
 /// Compute a simple HMAC-like signature: `sha256(key + ":" + data)`.
 /// For a real HMAC use an external C library via FFI; this is a lightweight
 /// substitute for request signing in trusted internal services.
-pub def hmac_simple(key: str, data: str) -> str {
+pub def hmac_simple(key: str, data: str) -> str effect alloc {
     sha256(concat(concat(key, ":"), data))
 }
 
 /// Verify a simple signature produced by `hmac_simple`.
-pub def hmac_verify(key: str, data: str, signature: str) -> bool {
+pub def hmac_verify(key: str, data: str, signature: str) -> bool effect alloc {
     hmac_simple(key, data) == signature
 }
 
 /// Build a Bearer-token Authorization header value.
-pub def bearer_token(token: str) -> str {
+pub def bearer_token(token: str) -> str effect alloc {
     concat("Bearer ", token)
 }
 
 /// Build a Basic-auth header value (base64(user:pass)).
-pub def basic_auth(user: str, pass: str) -> str {
+pub def basic_auth(user: str, pass: str) -> str effect alloc {
     concat("Basic ", to_base64(concat(concat(user, ":"), pass)))
 }
 
 /// Constant-time byte list comparison to prevent side-channel timing attacks.
-pub def bytes_timing_safe_equal(a: list<i64>, b: list<i64>) -> bool {
+pub def bytes_timing_safe_equal(a: list<i64>, b: list<i64>) -> bool effect alloc {
     if list_len(a) != list_len(b) {
         return false
     }
@@ -82,7 +82,7 @@ pub def bytes_timing_safe_equal(a: list<i64>, b: list<i64>) -> bool {
 }
 
 /// Constant-time string comparison to prevent side-channel timing attacks.
-pub def timing_safe_equal(a: str, b: str) -> bool {
+pub def timing_safe_equal(a: str, b: str) -> bool effect alloc {
     if len(a) != len(b) {
         return false
     }
@@ -94,7 +94,7 @@ pub def timing_safe_equal(a: str, b: str) -> bool {
 /// RC4 Key Scheduling Algorithm (KSA) and Pseudo-Random Generation Algorithm (PRGA).
 /// Encrypts or decrypts a byte list using a symmetric key.
 /// Since RC4 is an involution under XOR, encrypting ciphertext with the same key restores plaintext.
-pub def rc4_crypt_bytes(key: list<i64>, data: list<i64>) -> list<i64> {
+pub def rc4_crypt_bytes(key: list<i64>, data: list<i64>) -> list<i64> effect alloc {
     val key_len = list_len(key);
     if key_len == 0 {
         return data
@@ -133,7 +133,7 @@ pub def rc4_crypt_bytes(key: list<i64>, data: list<i64>) -> list<i64> {
 }
 
 /// Encrypt or decrypt a ByteBuffer using RC4 stream cipher.
-pub def rc4_crypt_buffer(key: ByteBuffer, data: ByteBuffer) -> ByteBuffer {
+pub def rc4_crypt_buffer(key: ByteBuffer, data: ByteBuffer) -> ByteBuffer effect alloc {
     val res_bytes = rc4_crypt_bytes(key.data, data.data);
     ByteBuffer {
         data: res_bytes,
@@ -142,7 +142,7 @@ pub def rc4_crypt_buffer(key: ByteBuffer, data: ByteBuffer) -> ByteBuffer {
 }
 
 /// Encrypt or decrypt string using RC4 with a string key, returning a byte list.
-pub def rc4_crypt_str(key: str, data: str) -> list<i64> {
+pub def rc4_crypt_str(key: str, data: str) -> list<i64> effect alloc {
     rc4_crypt_bytes(str_bytes(key), str_bytes(data))
 }
 
@@ -171,7 +171,7 @@ pub def chacha20_quarter_round(a: i64, b: i64, c: i64, d: i64) -> (i64, i64, i64
 }
 
 /// Encode arbitrary binary bytes (including embedded nulls) to Base64.
-pub def bytes_to_base64(bytes: list<i64>) -> str {
+pub def bytes_to_base64(bytes: list<i64>) -> str effect alloc {
     val b64_table = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     val n = list_len(bytes);
     var out = "";
@@ -200,7 +200,7 @@ pub def bytes_to_base64(bytes: list<i64>) -> str {
 }
 
 /// Compute SHA-1 digest of raw byte list, returning a 20-byte list.
-pub def sha1_bytes(data: list<i64>) -> list<i64> {
+pub def sha1_bytes(data: list<i64>) -> list<i64> effect alloc {
     val orig_len = list_len(data);
     val orig_bits = orig_len * 8;
     val padded: list<i64> = list();
@@ -303,19 +303,19 @@ pub def sha1_bytes(data: list<i64>) -> list<i64> {
 }
 
 /// Compute SHA-1 digest of ByteBuffer, returning 20-byte list.
-pub def sha1_buffer(buf: ByteBuffer) -> list<i64> {
+pub def sha1_buffer(buf: ByteBuffer) -> list<i64> effect alloc {
     sha1_bytes(buf.data)
 }
 
 /// Compute SHA-1 digest of a string, returning 40-character hex string.
-pub def sha1_str(data: str) -> str {
+pub def sha1_str(data: str) -> str effect alloc {
     val h = sha1_bytes(str_bytes(data));
     byte_buffer_to_hex(ByteBuffer { data: h, len: 20 })
 }
 
 /// MD5 (RFC 1321) of raw bytes: 16 bytes. MD5 is broken as a security hash;
 /// it is here for identifiers defined with it, such as JA3 TLS fingerprints.
-pub def md5_bytes(data: list<i64>) -> list<i64> {
+pub def md5_bytes(data: list<i64>) -> list<i64> effect alloc {
     val k = [
         0xd76aa478, 0xe8c7b756, 0x242070db, 0xc1bdceee,
         0xf57c0faf, 0x4787c62a, 0xa8304613, 0xfd469501,
@@ -414,17 +414,17 @@ pub def md5_bytes(data: list<i64>) -> list<i64> {
 }
 
 /// MD5 of a string's bytes, as 32 lowercase hex characters.
-pub def md5_str(data: str) -> str {
+pub def md5_str(data: str) -> str effect alloc {
     md5_hex(str_bytes(data))
 }
 
 /// MD5 of raw bytes, as 32 lowercase hex characters.
-pub def md5_hex(data: list<i64>) -> str {
+pub def md5_hex(data: list<i64>) -> str effect alloc {
     byte_buffer_to_hex(ByteBuffer { data: md5_bytes(data), len: 16 })
 }
 
 /// Calculate RFC 6455 Sec-WebSocket-Accept key from client key.
-pub def websocket_accept_key(sec_ws_key: str) -> str {
+pub def websocket_accept_key(sec_ws_key: str) -> str effect alloc {
     val guid = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
     val combined = concat(sec_ws_key, guid);
     val hash20 = sha1_bytes(str_bytes(combined));
@@ -461,7 +461,7 @@ def aes_gf_mul(a: i64, b: i64) -> i64 {
 }
 
 /// AES-128 Key Expansion producing 44 32-bit words (176 bytes) of round keys.
-pub def aes128_key_expansion(key: list<i64>) -> list<i64> {
+pub def aes128_key_expansion(key: list<i64>) -> list<i64> effect alloc {
     val sbox = byte_buffer_from_hex(AES_SBOX_HEX);
     val rcon: list<i64> = list();
     list_push(rcon, 0x00);
@@ -514,7 +514,7 @@ pub def aes128_key_expansion(key: list<i64>) -> list<i64> {
     w
 }
 
-def aes_add_round_key(state: list<i64>, w: list<i64>, round_offset: i64) -> list<i64> {
+def aes_add_round_key(state: list<i64>, w: list<i64>, round_offset: i64) -> list<i64> effect alloc {
     val res: list<i64> = list();
     for i in 0 .. 16 {
         list_push(res, bxor(list_get(state, i), list_get(w, round_offset + i)));
@@ -522,7 +522,7 @@ def aes_add_round_key(state: list<i64>, w: list<i64>, round_offset: i64) -> list
     res
 }
 
-def aes_sub_bytes(state: list<i64>, sbox: ByteBuffer) -> list<i64> {
+def aes_sub_bytes(state: list<i64>, sbox: ByteBuffer) -> list<i64> effect alloc {
     val res: list<i64> = list();
     for i in 0 .. 16 {
         list_push(res, byte_buffer_get(sbox, list_get(state, i)));
@@ -530,7 +530,7 @@ def aes_sub_bytes(state: list<i64>, sbox: ByteBuffer) -> list<i64> {
     res
 }
 
-def aes_inv_sub_bytes(state: list<i64>, inv_sbox: ByteBuffer) -> list<i64> {
+def aes_inv_sub_bytes(state: list<i64>, inv_sbox: ByteBuffer) -> list<i64> effect alloc {
     val res: list<i64> = list();
     for i in 0 .. 16 {
         list_push(res, byte_buffer_get(inv_sbox, list_get(state, i)));
@@ -538,7 +538,7 @@ def aes_inv_sub_bytes(state: list<i64>, inv_sbox: ByteBuffer) -> list<i64> {
     res
 }
 
-def aes_shift_rows(s: list<i64>) -> list<i64> {
+def aes_shift_rows(s: list<i64>) -> list<i64> effect alloc {
     val p: list<i64> = list();
     list_push(p, list_get(s, 0));
     list_push(p, list_get(s, 5));
@@ -559,7 +559,7 @@ def aes_shift_rows(s: list<i64>) -> list<i64> {
     p
 }
 
-def aes_inv_shift_rows(s: list<i64>) -> list<i64> {
+def aes_inv_shift_rows(s: list<i64>) -> list<i64> effect alloc {
     val p: list<i64> = list();
     list_push(p, list_get(s, 0));
     list_push(p, list_get(s, 13));
@@ -580,7 +580,7 @@ def aes_inv_shift_rows(s: list<i64>) -> list<i64> {
     p
 }
 
-def aes_mix_columns(s: list<i64>) -> list<i64> {
+def aes_mix_columns(s: list<i64>) -> list<i64> effect alloc {
     val res: list<i64> = list();
     for c in 0 .. 4 {
         val i = c * 4;
@@ -596,7 +596,7 @@ def aes_mix_columns(s: list<i64>) -> list<i64> {
     res
 }
 
-def aes_inv_mix_columns(s: list<i64>) -> list<i64> {
+def aes_inv_mix_columns(s: list<i64>) -> list<i64> effect alloc {
     val res: list<i64> = list();
     for c in 0 .. 4 {
         val i = c * 4;
@@ -613,7 +613,7 @@ def aes_inv_mix_columns(s: list<i64>) -> list<i64> {
 }
 
 /// Encrypt a single 16-byte block using AES-128 and pre-expanded round keys.
-pub def aes128_encrypt_block(state: list<i64>, w: list<i64>) -> list<i64> {
+pub def aes128_encrypt_block(state: list<i64>, w: list<i64>) -> list<i64> effect alloc {
     val sbox = byte_buffer_from_hex(AES_SBOX_HEX);
     var s = aes_add_round_key(state, w, 0);
     for r in 1 .. 10 {
@@ -628,7 +628,7 @@ pub def aes128_encrypt_block(state: list<i64>, w: list<i64>) -> list<i64> {
 }
 
 /// Decrypt a single 16-byte block using AES-128 and pre-expanded round keys.
-pub def aes128_decrypt_block(state: list<i64>, w: list<i64>) -> list<i64> {
+pub def aes128_decrypt_block(state: list<i64>, w: list<i64>) -> list<i64> effect alloc {
     val inv_sbox = byte_buffer_from_hex(AES_INV_SBOX_HEX);
     var s = aes_add_round_key(state, w, 160);
     s = aes_inv_shift_rows(s);
@@ -644,7 +644,7 @@ pub def aes128_decrypt_block(state: list<i64>, w: list<i64>) -> list<i64> {
 }
 
 /// Apply standard PKCS#7 padding to a ByteBuffer so its length is a multiple of 16.
-pub def aes_pad_pkcs7(buf: ByteBuffer) -> ByteBuffer {
+pub def aes_pad_pkcs7(buf: ByteBuffer) -> ByteBuffer effect alloc {
     val rem = buf.len % 16;
     val pad_len = 16 - rem;
     val out_bytes: list<i64> = list();
@@ -661,7 +661,7 @@ pub def aes_pad_pkcs7(buf: ByteBuffer) -> ByteBuffer {
 }
 
 /// Validate and remove PKCS#7 padding from a decrypted buffer.
-pub def aes_unpad_pkcs7(buf: ByteBuffer) -> result<ByteBuffer, str> {
+pub def aes_unpad_pkcs7(buf: ByteBuffer) -> result<ByteBuffer, str> effect alloc {
     if buf.len == 0 || (buf.len % 16) != 0 {
         return err("invalid block size for pkcs7 unpad")
     }
@@ -680,7 +680,7 @@ pub def aes_unpad_pkcs7(buf: ByteBuffer) -> result<ByteBuffer, str> {
 }
 
 /// Encrypt arbitrary-length buffer using AES-128 in CBC mode with PKCS#7 padding.
-pub def aes128_encrypt_cbc(key: ByteBuffer, iv: ByteBuffer, pt: ByteBuffer) -> ByteBuffer {
+pub def aes128_encrypt_cbc(key: ByteBuffer, iv: ByteBuffer, pt: ByteBuffer) -> ByteBuffer effect alloc {
     val w = aes128_key_expansion(key.data);
     val padded = aes_pad_pkcs7(pt);
     val num_blocks = padded.len / 16;
@@ -709,7 +709,7 @@ pub def aes128_encrypt_cbc(key: ByteBuffer, iv: ByteBuffer, pt: ByteBuffer) -> B
 }
 
 /// Decrypt ciphertext using AES-128 in CBC mode and strip PKCS#7 padding.
-pub def aes128_decrypt_cbc(key: ByteBuffer, iv: ByteBuffer, ct: ByteBuffer) -> result<ByteBuffer, str> {
+pub def aes128_decrypt_cbc(key: ByteBuffer, iv: ByteBuffer, ct: ByteBuffer) -> result<ByteBuffer, str> effect alloc {
     if ct.len == 0 || (ct.len % 16) != 0 {
         return err("ciphertext length must be a multiple of 16")
     }

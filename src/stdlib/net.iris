@@ -22,7 +22,7 @@ extern def iris_tcp_listen_loopback(port: i64) -> i64 effect net
 
 /// Connect and configure bounded blocking I/O. Errors are explicit rather than
 /// encoded as a raw negative handle.
-pub def tcp_connect_checked(host: str, port: i64, read_timeout_ms: i64, write_timeout_ms: i64) -> result<TcpStream, str> effect net {
+pub def tcp_connect_checked(host: str, port: i64, read_timeout_ms: i64, write_timeout_ms: i64) -> result<TcpStream, str> effect net, alloc {
     val handle = tcp_connect(host, port)
     if handle < 0 {
         return err("tcp connect failed")
@@ -34,7 +34,7 @@ pub def tcp_connect_checked(host: str, port: i64, read_timeout_ms: i64, write_ti
     return ok(TcpStream { handle: handle })
 }
 
-pub def tcp_listen_checked(port: i64) -> result<TcpListener, str> effect net {
+pub def tcp_listen_checked(port: i64) -> result<TcpListener, str> effect net, alloc {
     val handle = tcp_listen(port)
     if handle < 0 { return err("tcp listen failed") }
     return ok(TcpListener { handle: handle })
@@ -42,13 +42,13 @@ pub def tcp_listen_checked(port: i64) -> result<TcpListener, str> effect net {
 
 /// Like `tcp_listen_checked`, but reachable from this machine only
 /// (127.0.0.1) rather than on every interface.
-pub def tcp_listen_local_checked(port: i64) -> result<TcpListener, str> effect net {
+pub def tcp_listen_local_checked(port: i64) -> result<TcpListener, str> effect net, alloc {
     val handle = iris_tcp_listen_loopback(port)
     if handle < 0 { return err("tcp listen failed") }
     return ok(TcpListener { handle: handle })
 }
 
-pub def tcp_accept_checked(listener: TcpListener, read_timeout_ms: i64, write_timeout_ms: i64) -> result<TcpStream, str> effect net {
+pub def tcp_accept_checked(listener: TcpListener, read_timeout_ms: i64, write_timeout_ms: i64) -> result<TcpStream, str> effect net, alloc {
     val handle = tcp_accept(listener.handle)
     if handle < 0 { return err("tcp accept failed") }
     if iris_tcp_set_timeout(handle, read_timeout_ms, write_timeout_ms) != 0 {
@@ -61,7 +61,7 @@ pub def tcp_accept_checked(listener: TcpListener, read_timeout_ms: i64, write_ti
 /// Accept the next connection without blocking the thread: other tasks run
 /// until one arrives. Use from an `async def` (`await tcp_accept_async(..)`),
 /// so one thread can wait on many sockets and timers at once.
-pub async def tcp_accept_async(listener: TcpListener, read_timeout_ms: i64, write_timeout_ms: i64) -> result<TcpStream, str> effect net {
+pub async def tcp_accept_async(listener: TcpListener, read_timeout_ms: i64, write_timeout_ms: i64) -> result<TcpStream, str> effect net, alloc {
     await async_readable(listener.handle);
     tcp_accept_checked(listener, read_timeout_ms, write_timeout_ms)
 }
@@ -73,7 +73,7 @@ pub async def tcp_read_async(stream: TcpStream, max_bytes: i64) -> result<str, s
     tcp_read_bounded(stream, max_bytes)
 }
 
-pub def tcp_write_all_checked(stream: TcpStream, data: str) -> result<i64, str> effect net {
+pub def tcp_write_all_checked(stream: TcpStream, data: str) -> result<i64, str> effect net, alloc {
     val written = iris_tcp_write_all(stream.handle, data)
     if written < 0 { return err("tcp write failed") }
     return ok(written)
@@ -99,7 +99,7 @@ pub def tcp_read_with_timeout(stream: TcpStream, timeout_ms: i64, max_bytes: i64
 }
 
 /// Read binary ByteBuffer directly from stream within timeout.
-pub def tcp_read_bytes(stream: TcpStream, timeout_ms: i64, max_bytes: i64) -> result<ByteBuffer, str> effect net, alloc {
+pub def tcp_read_bytes(stream: TcpStream, timeout_ms: i64, max_bytes: i64) -> result<ByteBuffer, str> effect net, alloc, throw {
     val res = tcp_read_with_timeout(stream, timeout_ms, max_bytes);
     if is_ok(res) {
         val s = unwrap(res);
@@ -110,7 +110,7 @@ pub def tcp_read_bytes(stream: TcpStream, timeout_ms: i64, max_bytes: i64) -> re
 }
 
 /// Write a binary ByteBuffer directly to the stream.
-pub def tcp_write_bytes(stream: TcpStream, buf: ByteBuffer) -> result<i64, str> effect net {
+pub def tcp_write_bytes(stream: TcpStream, buf: ByteBuffer) -> result<i64, str> effect net, alloc {
     val s = byte_buffer_to_ascii_lossy(buf);
     tcp_write_all_checked(stream, s)
 }
@@ -126,7 +126,7 @@ pub record WebSocketFrame {
 }
 
 /// Unmask payload with 4-byte masking key: byte[i] ^ mask_key[i % 4]
-pub def ws_unmask_payload(payload: ByteBuffer, mask_key: list<i64>) -> ByteBuffer {
+pub def ws_unmask_payload(payload: ByteBuffer, mask_key: list<i64>) -> ByteBuffer effect alloc {
     val out = byte_buffer_zeros(payload.len);
     for i in 0 .. payload.len {
         val b = byte_buffer_get(payload, i);
@@ -137,7 +137,7 @@ pub def ws_unmask_payload(payload: ByteBuffer, mask_key: list<i64>) -> ByteBuffe
 }
 
 /// Encode RFC 6455 WebSocket frame (supports standard payloads <= 125 bytes, and 16-bit payloads <= 65535)
-pub def ws_encode_frame(fin: bool, opcode: i64, payload: ByteBuffer, is_masked: bool, mask_key: list<i64>) -> ByteBuffer {
+pub def ws_encode_frame(fin: bool, opcode: i64, payload: ByteBuffer, is_masked: bool, mask_key: list<i64>) -> ByteBuffer effect alloc {
     var buf = byte_buffer_new();
     var b0 = opcode % 16;
     if fin {
@@ -167,7 +167,7 @@ pub def ws_encode_frame(fin: bool, opcode: i64, payload: ByteBuffer, is_masked: 
 }
 
 /// Decode RFC 6455 WebSocket frame from raw ByteBuffer
-pub def ws_decode_frame(buf: ByteBuffer) -> result<WebSocketFrame, str> {
+pub def ws_decode_frame(buf: ByteBuffer) -> result<WebSocketFrame, str> effect alloc {
     if buf.len < 2 {
         return err("frame too short (< 2 bytes)")
     }
@@ -220,7 +220,7 @@ pub def ws_decode_frame(buf: ByteBuffer) -> result<WebSocketFrame, str> {
 }
 
 /// Parse Sec-WebSocket-Key from an HTTP Upgrade request header string.
-pub def ws_extract_key(header: str) -> option<str> {
+pub def ws_extract_key(header: str) -> option<str> effect alloc, throw {
     val key_prefix = "Sec-WebSocket-Key: ";
     val idx = find(header, key_prefix);
     if is_some(idx) {
@@ -237,7 +237,7 @@ pub def ws_extract_key(header: str) -> option<str> {
 }
 
 /// Generate RFC 6455 101 Switching Protocols response for a WebSocket upgrade request.
-pub def ws_server_handshake(request: str) -> result<str, str> {
+pub def ws_server_handshake(request: str) -> result<str, str> effect alloc, throw {
     val key_opt = ws_extract_key(request);
     match key_opt {
         some(key) => {
@@ -250,7 +250,7 @@ pub def ws_server_handshake(request: str) -> result<str, str> {
 }
 
 /// Send a WebSocket text message over a TcpStream.
-pub def ws_send_text(stream: TcpStream, text: str, is_masked: bool) -> result<i64, str> effect net {
+pub def ws_send_text(stream: TcpStream, text: str, is_masked: bool) -> result<i64, str> effect net, alloc {
     val payload = byte_buffer_from_str(text);
     val mask_key: list<i64> = list();
     list_push(mask_key, 0x11);
@@ -262,7 +262,7 @@ pub def ws_send_text(stream: TcpStream, text: str, is_masked: bool) -> result<i6
 }
 
 /// Send a WebSocket binary message over a TcpStream.
-pub def ws_send_binary(stream: TcpStream, payload: ByteBuffer, is_masked: bool) -> result<i64, str> effect net {
+pub def ws_send_binary(stream: TcpStream, payload: ByteBuffer, is_masked: bool) -> result<i64, str> effect net, alloc {
     val mask_key: list<i64> = list();
     list_push(mask_key, 0x55);
     list_push(mask_key, 0x66);
@@ -273,7 +273,7 @@ pub def ws_send_binary(stream: TcpStream, payload: ByteBuffer, is_masked: bool) 
 }
 
 /// Send a WebSocket Ping frame over a TcpStream.
-pub def ws_send_ping(stream: TcpStream, payload: ByteBuffer, is_masked: bool) -> result<i64, str> effect net {
+pub def ws_send_ping(stream: TcpStream, payload: ByteBuffer, is_masked: bool) -> result<i64, str> effect net, alloc {
     val mask_key: list<i64> = list();
     list_push(mask_key, 0xaa);
     list_push(mask_key, 0xbb);
@@ -284,7 +284,7 @@ pub def ws_send_ping(stream: TcpStream, payload: ByteBuffer, is_masked: bool) ->
 }
 
 /// Send a WebSocket Pong frame over a TcpStream.
-pub def ws_send_pong(stream: TcpStream, payload: ByteBuffer, is_masked: bool) -> result<i64, str> effect net {
+pub def ws_send_pong(stream: TcpStream, payload: ByteBuffer, is_masked: bool) -> result<i64, str> effect net, alloc {
     val mask_key: list<i64> = list();
     list_push(mask_key, 0x00);
     list_push(mask_key, 0x00);
@@ -296,18 +296,18 @@ pub def ws_send_pong(stream: TcpStream, payload: ByteBuffer, is_masked: bool) ->
 
 
 
-pub def tcp_shutdown_checked(stream: TcpStream) -> result<i64, str> effect net {
+pub def tcp_shutdown_checked(stream: TcpStream) -> result<i64, str> effect net, alloc {
     val status = iris_tcp_shutdown(stream.handle)
     if status != 0 { return err("tcp shutdown failed") }
     return ok(status)
 }
 
-pub def tcp_close_checked(stream: TcpStream) -> i64 effect net {
+pub def tcp_close_checked(stream: TcpStream) -> i64 effect net, alloc {
     tcp_close(stream.handle);
     return 0
 }
 
-pub def tcp_close_listener(listener: TcpListener) -> i64 effect net {
+pub def tcp_close_listener(listener: TcpListener) -> i64 effect net, alloc {
     tcp_close(listener.handle);
     return 0
 }
@@ -316,23 +316,23 @@ pub def tcp_close_listener(listener: TcpListener) -> i64 effect net {
 
 /// Connect to a remote TCP host and port.
 /// Returns socket handle on success, or -1 on failure.
-pub def tcp_connect_to(host: str, port: i64) -> i64 effect net {
+pub def tcp_connect_to(host: str, port: i64) -> i64 effect net, alloc {
     tcp_connect(host, port)
 }
 
 /// Write string data to a TCP connection handle.
-pub def tcp_write_conn(handle: i64, data: str) -> bool effect net {
+pub def tcp_write_conn(handle: i64, data: str) -> bool effect net, alloc {
     tcp_write(handle, data);
     true
 }
 
 /// Read incoming data from a TCP connection handle as a string.
-pub def tcp_read_conn(handle: i64) -> str effect net {
+pub def tcp_read_conn(handle: i64) -> str effect net, alloc {
     tcp_read(handle)
 }
 
 /// Close a TCP connection handle.
-pub def tcp_close_conn(handle: i64) -> bool effect net {
+pub def tcp_close_conn(handle: i64) -> bool effect net, alloc {
     tcp_close(handle);
     true
 }
@@ -341,7 +341,7 @@ pub def tcp_close_conn(handle: i64) -> bool effect net {
 
 /// Listen on a TCP port on every interface (0.0.0.0).
 /// Returns server socket handle on success, or -1 on failure.
-pub def tcp_listen_on(port: i64) -> i64 effect net {
+pub def tcp_listen_on(port: i64) -> i64 effect net, alloc {
     tcp_listen(port)
 }
 
@@ -354,12 +354,12 @@ pub def tcp_listen_local(port: i64) -> i64 effect net {
 /// Accept an incoming client connection on a TCP server.
 /// Blocks until a connection is received.
 /// Returns client socket handle on success, or -1 on failure.
-pub def tcp_accept_conn(server_handle: i64) -> i64 effect net {
+pub def tcp_accept_conn(server_handle: i64) -> i64 effect net, alloc {
     tcp_accept(server_handle)
 }
 
 /// Close a TCP listening server handle.
-pub def tcp_close_server(handle: i64) -> bool effect net {
+pub def tcp_close_server(handle: i64) -> bool effect net, alloc {
     tcp_close(handle);
     true
 }
@@ -368,12 +368,12 @@ pub def tcp_close_server(handle: i64) -> bool effect net {
 
 /// Bind a UDP socket to a local port (or port 0 for an ephemeral port).
 /// Returns UDP socket handle on success, or -1 on failure.
-pub def udp_bind(port: i64) -> i64 effect net {
+pub def udp_bind(port: i64) -> i64 effect net, alloc {
     udp_open(port)
 }
 
 /// Send data over a UDP socket to a target host and port.
-pub def udp_send_to(socket_handle: i64, host: str, port: i64, data: str) -> bool effect net {
+pub def udp_send_to(socket_handle: i64, host: str, port: i64, data: str) -> bool effect net, alloc {
     val addr_port = concat(concat(concat(concat(host, ":"), to_str(port)), ":"), data)
     udp_send(socket_handle, addr_port);
     true
@@ -382,7 +382,7 @@ pub def udp_send_to(socket_handle: i64, host: str, port: i64, data: str) -> bool
 /// Receive data from a UDP socket.
 /// Blocks until a packet is received.
 /// Returns a tuple containing: (source_ip, source_port, payload_data).
-pub def udp_recv_from(socket_handle: i64) -> (str, i64, str) effect net {
+pub def udp_recv_from(socket_handle: i64) -> (str, i64, str) effect net, alloc, throw {
     val raw = udp_recv(socket_handle)
     val first_colon = find(raw, ":")
     if is_some(first_colon) {
@@ -405,7 +405,7 @@ pub def udp_recv_from(socket_handle: i64) -> (str, i64, str) effect net {
 }
 
 /// Close a UDP socket handle.
-pub def udp_close_socket(socket_handle: i64) -> bool effect net {
+pub def udp_close_socket(socket_handle: i64) -> bool effect net, alloc {
     udp_close(socket_handle);
     true
 }

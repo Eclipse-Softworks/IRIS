@@ -1,0 +1,338 @@
+bring std.http
+bring std.math
+bring std.time
+bring "domain.iris"
+bring "parser.iris"
+
+/// NOAA Space Weather Prediction Center live planetary K-index endpoint.
+pub const def noaa_kp_url() -> str {
+    return "https://services.swpc.noaa.gov/products/noaa-planetary-k-index.json"
+}
+
+/// Live WhereTheISS orbital state vector endpoint for NORAD 25544.
+pub const def iss_state_url() -> str {
+    return "https://api.wheretheiss.at/v1/satellites/25544"
+}
+
+/// Algebraic effect operation: perform an external HTTP GET returning raw body text.
+pub extern def eff_fetch_resource(url: str) -> str effect net, alloc
+
+/// Algebraic effect operation: emit a diagnostic telemetry trace message.
+pub extern def eff_record_trace(msg: str) -> str effect io, alloc
+
+/// Composite effectful fetch routed through algebraic effect operations so tests
+/// can intercept `eff_fetch_resource` / `eff_record_trace` with `handle ... with`.
+pub def probe_via_effects(url: str) -> str effect net, io, alloc {
+    val _ = eff_record_trace(concat("probe:", url))
+    return eff_fetch_resource(url)
+}
+
+/// Resolve USGS feed name (`all_day`, `2.5_day`, `2.5_week`, `4.5_week`) to its HTTPS URL.
+pub def resolve_usgs_feed_url(feed_slug: str) -> result<str, TelemetryError> effect io, alloc {
+    if feed_slug == "all_day" {
+        return ok("https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/all_day.csv")
+    }
+    if feed_slug == "2.5_day" {
+        return ok("https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/2.5_day.csv")
+    }
+    if feed_slug == "2.5_week" {
+        return ok("https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/2.5_week.csv")
+    }
+    if feed_slug == "4.5_week" {
+        return ok("https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/4.5_week.csv")
+    }
+    return err(
+        TelemetryError.MalformedPayload(concat("unsupported USGS feed selector: ", feed_slug)),
+    )
+}
+
+/// Format an `f64` coordinate to 4 decimals for URL query parameters.
+pub def format_coord_4(x: f64) -> str effect io, alloc {
+    val neg = x < 0.0
+    val abs_x = if neg { 0.0 - x } else { x }
+    val scaled = round(abs_x * 10000.0) to i64
+    val whole = scaled / 10000
+    val frac = scaled % 10000
+    val pad = if frac < 10 {
+        "000"
+    } else if frac < 100 {
+        "00"
+    } else if frac < 1000 {
+        "0"
+    } else {
+        ""
+    }
+    val prefix = if neg && scaled > 0 { "-" } else { "" }
+    return concat(prefix, concat(to_str(whole), concat(".", concat(pad, to_str(frac)))))
+}
+
+/// Construct dynamic Open-Meteo current-conditions query URL for `(lat, lon)`.
+pub def build_open_meteo_url(lat: f64, lon: f64) -> str effect io, alloc {
+    val lat_s = format_coord_4(lat)
+    val lon_s = format_coord_4(lon)
+    val base = "https://api.open-meteo.com/v1/forecast?latitude="
+    val tail = "&current=temperature_2m,relative_humidity_2m,surface_pressure,wind_speed_10m,precipitation"
+    return concat(base, concat(lat_s, concat("&longitude=", concat(lon_s, tail))))
+}
+
+/// Execute a live HTTPS GET request with strict status-code and body validation.
+pub def live_http_get(url: str) -> result<str, TelemetryError> effect net, io, alloc {
+    val req = HttpRequest {
+        method: "GET",
+        url: url,
+        headers: "User-Agent: IRIS-TerraPulse/0.1\r\nAccept: application/json,text/csv\r\n",
+        body: "",
+        timeout_ms: default_http_timeout_ms(),
+    }
+    val resp_res = http_send(req)
+    return when resp_res {
+        ok(resp) => if resp.status >= 200 && resp.status < 300 {
+            if len(resp.body) == 0 {
+                err(TelemetryError.HttpCode(resp.status, concat("empty body from ", url)))
+            } else {
+                ok(resp.body)
+            }
+        } else {
+            err(TelemetryError.HttpCode(resp.status, concat("unexpected status from ", url)))
+        },
+        err(msg) => err(TelemetryError.Transport(concat(url, concat(": ", msg)))),
+    }
+}
+
+/// Pack a worker fetch `result` into a tagged channel envelope (`<TAG>::OK::<payload>`).
+def encode_worker_envelope(tag: str, res: result<str, TelemetryError>) -> str effect io, alloc {
+    return when res {
+        ok(body) => concat(tag, concat("::OK::", body)),
+        err(e) => concat(tag, concat("::ERR::", format_telemetry_error(e))),
+    }
+}
+
+/// Strip `<TAG>::OK::` or `<TAG>::ERR::` prefix from a channel envelope.
+def decode_worker_envelope(
+    env: str,
+    prefix_ok: str,
+    prefix_err: str,
+) -> result<str, TelemetryError> effect io, alloc {
+    if starts_with(env, prefix_ok) {
+        return ok(slice(env, len(prefix_ok), len(env)))
+    }
+    if starts_with(env, prefix_err) {
+        return err(TelemetryError.Transport(slice(env, len(prefix_err), len(env))))
+    }
+    return err(TelemetryError.MalformedPayload("corrupt concurrent worker envelope"))
+}
+
+record Stage1Bodies {
+    usgs: str,
+    noaa: str,
+    iss: str,
+    first_err: str,
+    have_err: bool,
+}
+
+record WeatherTarget {
+    label: str,
+    lat: f64,
+    lon: f64,
+}
+
+def apply_stage1_result(
+    acc: Stage1Bodies,
+    tag: str,
+    res: result<str, TelemetryError>,
+) -> Stage1Bodies effect io, alloc {
+    return when res {
+        ok(b) => Stage1Bodies {
+            usgs: if tag == "USGS" { b } else { acc.usgs },
+            noaa: if tag == "NOAA" { b } else { acc.noaa },
+            iss: if tag == "ISS" { b } else { acc.iss },
+            first_err: acc.first_err,
+            have_err: acc.have_err,
+        },
+        err(e) => Stage1Bodies {
+            usgs: acc.usgs,
+            noaa: acc.noaa,
+            iss: acc.iss,
+            first_err: if !acc.have_err { format_telemetry_error(e) } else { acc.first_err },
+            have_err: true,
+        },
+    }
+}
+
+def dispatch_stage1_message(acc: Stage1Bodies, msg: str) -> Stage1Bodies effect io, alloc, throw {
+    val sep = find(msg, "::")
+    if is_none(sep) {
+        return acc
+    }
+    val tag = slice(msg, 0, unwrap(sep))
+    val res = decode_worker_envelope(msg, concat(tag, "::OK::"), concat(tag, "::ERR::"))
+    return apply_stage1_result(acc, tag, res)
+}
+
+/// Stage 1 concurrent network fetch: retrieve raw USGS, NOAA Kp, and ISS payloads
+/// in parallel using OS worker threads (`spawn` + `channel`) without parsing.
+pub def fetch_stage1_raw(
+    usgs_url: str,
+) -> result<(str, str, str, i64), TelemetryError> effect net, alloc, thread, time, throw {
+    val t0 = stopwatch_start()
+    val ch = channel(4)
+    val url_usgs = usgs_url
+    val url_noaa = noaa_kp_url()
+    val url_iss = iss_state_url()
+
+    spawn {
+        val res = live_http_get(url_usgs)
+        send(ch, encode_worker_envelope("USGS", res))
+    }
+    spawn {
+        val res = live_http_get(url_noaa)
+        send(ch, encode_worker_envelope("NOAA", res))
+    }
+    spawn {
+        val res = live_http_get(url_iss)
+        send(ch, encode_worker_envelope("ISS", res))
+    }
+
+    var acc = Stage1Bodies { usgs: "", noaa: "", iss: "", first_err: "", have_err: false }
+    for _ in 0..3 {
+        acc = dispatch_stage1_message(acc, recv(ch))
+    }
+
+    val elapsed = stopwatch_stop(t0)
+    if acc.have_err {
+        return err(TelemetryError.Transport(acc.first_err))
+    }
+    return ok((acc.usgs, acc.noaa, acc.iss, elapsed))
+}
+
+/// Stage 1 concurrent acquisition: fetch USGS earthquakes, NOAA Kp index, and ISS orbital
+/// telemetry in parallel using OS worker threads (`spawn` + `channel`).
+pub def fetch_stage1_feeds(
+    usgs_url: str,
+) -> result<
+    (list<SeismicEvent>, list<GeomagneticSample>, OrbitalState, i64),
+    TelemetryError
+> effect net, alloc, thread, time, throw {
+    val (usgs_body, noaa_body, iss_body, elapsed) = fetch_stage1_raw(usgs_url)?
+    val events = parse_usgs_csv(usgs_body)?
+    val kps = parse_noaa_kp_json(noaa_body)?
+    val iss = parse_iss_json(iss_body)?
+    return ok((events, kps, iss, elapsed))
+}
+
+def build_weather_targets(
+    events: list<SeismicEvent>,
+    iss: OrbitalState,
+    analytics: RunAnalytics,
+) -> list<WeatherTarget> effect io, alloc {
+    val targets: list<WeatherTarget> = list()
+    if list_len(events) > 0 {
+        val top_ev = list_get(events, analytics.strongest_idx)
+        val _ = list_push(
+            targets,
+            WeatherTarget {
+                label: concat("Epicenter #1: ", top_ev.place),
+                lat: top_ev.coord.lat_deg,
+                lon: top_ev.coord.lon_deg,
+            },
+        )
+        if analytics.secondary_idx != analytics.strongest_idx {
+            val sec_ev = list_get(events, analytics.secondary_idx)
+            val _ = list_push(
+                targets,
+                WeatherTarget {
+                    label: concat("Epicenter #2: ", sec_ev.place),
+                    lat: sec_ev.coord.lat_deg,
+                    lon: sec_ev.coord.lon_deg,
+                },
+            )
+        }
+    }
+    val _ = list_push(
+        targets,
+        WeatherTarget {
+            label: "ISS Sub-Satellite Ground Track",
+            lat: iss.latitude,
+            lon: iss.longitude,
+        },
+    )
+    return targets
+}
+
+def decode_weather_message(
+    targets: list<WeatherTarget>,
+    msg: str,
+    out: list<SurfaceWeather>,
+) -> i64 effect io, alloc, throw {
+    val sep = find(msg, "::")
+    if is_none(sep) {
+        return 0
+    }
+    val idx_str = slice(msg, 0, unwrap(sep))
+    val idx = parse_i64(idx_str) ?? -1
+    if idx < 0 || idx >= list_len(targets) {
+        return 0
+    }
+    val res = decode_worker_envelope(msg, concat(idx_str, "::OK::"), concat(idx_str, "::ERR::"))
+    when res {
+        ok(raw_json) => {
+            val t = list_get(targets, idx)
+            when parse_open_meteo_json(t.label, t.lat, t.lon, raw_json) {
+                ok(wx) => {
+                    val _ = list_push(out, wx)
+                }
+                err(_) => {}
+            }
+        }
+        err(_) => {}
+    }
+    return 0
+}
+
+/// Stage 2 geo-correlated acquisition: concurrently query live Open-Meteo surface conditions
+/// at the top seismic epicenter(s) and live ISS ground sub-point discovered in Stage 1.
+pub def fetch_stage2_weather(
+    events: list<SeismicEvent>,
+    iss: OrbitalState,
+    analytics: RunAnalytics,
+) -> (list<SurfaceWeather>, i64) effect net, io, alloc, thread, time, throw {
+    val t0 = stopwatch_start()
+    val ch = channel(4)
+    val targets = build_weather_targets(events, iss, analytics)
+    val count = list_len(targets)
+    for i in 0..count {
+        val tag = to_str(i)
+        val t = list_get(targets, i)
+        val url = build_open_meteo_url(t.lat, t.lon)
+        spawn {
+            val res = live_http_get(url)
+            send(ch, encode_worker_envelope(tag, res))
+        }
+    }
+
+    val weather_list: list<SurfaceWeather> = list()
+    for _ in 0..count {
+        val _ = decode_weather_message(targets, recv(ch), weather_list)
+    }
+    return (weather_list, stopwatch_stop(t0))
+}
+
+def test_telemetry_effect_handler_and_urls() -> i64 effect net, io, alloc, throw {
+    assert(is_ok(resolve_usgs_feed_url("2.5_day")))
+    assert(is_ok(resolve_usgs_feed_url("all_day")))
+    assert(is_err(resolve_usgs_feed_url("bogus_feed")))
+
+    val url = build_open_meteo_url(-33.4489, -70.6693)
+    assert(contains(url, "latitude=-33.4489"))
+    assert(contains(url, "longitude=-70.6693"))
+
+    // Verify algebraic effect dispatch using scoped `handle ... with`.
+    val body = handle {
+        probe_via_effects("https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/2.5_day.csv")
+    } with {
+        eff_record_trace(msg) -> resume(k) => k(msg),
+        eff_fetch_resource(u) -> resume(k) => k(concat("ok:", u)),
+    }
+    assert(contains(body, "ok:https://earthquake.usgs.gov"))
+    return 0
+}

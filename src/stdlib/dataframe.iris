@@ -6,12 +6,12 @@
 record DataFrame { columns: list<str>, data: list<f64>, n_rows: i64, n_cols: i64 }
 
 // Create a new empty DataFrame with the given column names.
-pub def df_new(columns: list<str>) -> DataFrame {
+pub def df_new(columns: list<str>) -> DataFrame effect alloc {
     DataFrame { columns: columns, data: list(), n_rows: 0, n_cols: list_len(columns) }
 }
 
 // Add a row (list<f64> with one value per column). Returns updated DataFrame.
-pub def df_add_row(df: DataFrame, row: list<f64>) -> DataFrame {
+pub def df_add_row(df: DataFrame, row: list<f64>) -> DataFrame effect alloc {
     val nc = df.n_cols
     val nd = list_len(df.data)
     var new_data: list<f64> = list()
@@ -35,7 +35,7 @@ pub def df_len(df: DataFrame) -> i64 {
 }
 
 // Find the column index by name, or -1 if not found.
-pub def df_col_idx(df: DataFrame, name: str) -> i64 {
+pub def df_col_idx(df: DataFrame, name: str) -> i64 effect alloc {
     val n = list_len(df.columns)
     var idx = -1
     var i = 0
@@ -48,7 +48,7 @@ pub def df_col_idx(df: DataFrame, name: str) -> i64 {
 }
 
 // Extract all values for a named column as list<f64>.
-pub def df_col(df: DataFrame, name: str) -> list<f64> {
+pub def df_col(df: DataFrame, name: str) -> list<f64> effect alloc {
     val col_i = df_col_idx(df, name)
     val nc = df.n_cols
     var result: list<f64> = list()
@@ -62,7 +62,7 @@ pub def df_col(df: DataFrame, name: str) -> list<f64> {
 }
 
 // Filter rows where the named column is in [min_val, max_val].
-pub def df_filter(df: DataFrame, col: str, min_val: f64, max_val: f64) -> DataFrame {
+pub def df_filter(df: DataFrame, col: str, min_val: f64, max_val: f64) -> DataFrame effect alloc {
     val col_i = df_col_idx(df, col)
     val nc = df.n_cols
     var new_data: list<f64> = list()
@@ -84,7 +84,7 @@ pub def df_filter(df: DataFrame, col: str, min_val: f64, max_val: f64) -> DataFr
 }
 
 // Emit the DataFrame as a CSV string.
-pub def df_to_csv(df: DataFrame) -> str {
+pub def df_to_csv(df: DataFrame) -> str effect alloc {
     val header = join(df.columns, ",")
     val nc = df.n_cols
     var lines: list<str> = list()

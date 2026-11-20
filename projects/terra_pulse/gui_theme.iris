@@ -1,0 +1,249 @@
+bring std.ui
+bring "domain.iris"
+
+/// Create TerraPulse's restrained Precision Graphite & Steel Cobalt enterprise theme.
+pub def tp_enterprise_theme() -> UiTheme {
+    return UiTheme {
+        bg: rgb(16, 19, 24),
+        surface: rgb(22, 26, 33),
+        panel: rgb(28, 33, 42),
+        panel_alt: rgb(37, 44, 56),
+        fg: rgb(228, 233, 240),
+        fg_muted: rgb(138, 149, 165),
+        border: rgb(49, 58, 73),
+        primary: rgb(74, 130, 184),
+        azure: rgb(74, 130, 184),
+        teal: rgb(72, 148, 138),
+        cyan: rgb(110, 176, 224),
+        amber: rgb(206, 150, 68),
+        coral: rgb(202, 92, 92),
+        emerald: rgb(88, 156, 126),
+        font_ui_size: 13.5,
+        font_mono_size: 12.5,
+        radius: 6.0,
+    }
+}
+
+/// Append a uniform enterprise segmented/toolbar button without rainbow tinting.
+pub def tp_button(
+    tree: UiTree,
+    key: str,
+    text: str,
+    action: str,
+    active: bool,
+) -> i64 effect alloc {
+    val empty: list<i64> = list()
+    val bg = if active { rgb(44, 69, 98) } else { rgb(31, 37, 47) }
+    val br = if active { rgb(92, 150, 206) } else { rgb(53, 63, 79) }
+    val st = UiStyle {
+        bg: bg,
+        border: br,
+        border_width: 1.0,
+        radius: 6.0,
+        font_size: 12.5,
+        bold: true,
+    }
+    return ui_add_node(
+        tree,
+        UiNode {
+            key: key,
+            kind: WidgetKind.Button,
+            text: text,
+            action: action,
+            tone: if active { UiTone.Secondary } else { UiTone.Neutral },
+            style: st,
+            children: empty,
+        },
+    )
+}
+
+/// Append a cohesive Steel Cobalt primary action button.
+pub def tp_cta_button(tree: UiTree, key: str, text: str, action: str) -> i64 effect alloc {
+    val empty: list<i64> = list()
+    val st = UiStyle {
+        bg: rgb(46, 82, 120),
+        border: rgb(96, 156, 214),
+        border_width: 1.0,
+        radius: 6.0,
+        font_size: 12.5,
+        bold: true,
+    }
+    return ui_add_node(
+        tree,
+        UiNode {
+            key: key,
+            kind: WidgetKind.Button,
+            text: text,
+            action: action,
+            tone: UiTone.Secondary,
+            style: st,
+            children: empty,
+        },
+    )
+}
+
+/// Append a sober section header label aligned with enterprise chrome hierarchy.
+pub def tp_section_title(tree: UiTree, key: str, text: str) -> i64 effect alloc {
+    return ui_label(tree, key, text, UiStyle { fg: tree.theme.fg, font_size: 13.5, bold: true })
+}
+
+/// Append a muted caption or secondary metadata label.
+pub def tp_muted_text(tree: UiTree, key: str, text: str) -> i64 effect alloc {
+    return ui_label(tree, key, text, UiStyle { fg: tree.theme.fg_muted, font_size: 12.0 })
+}
+
+/// Append a monospace data readout label.
+pub def tp_mono_text(tree: UiTree, key: str, text: str) -> i64 effect alloc {
+    return ui_label(
+        tree,
+        key,
+        text,
+        UiStyle { fg: tree.theme.fg, font_size: 12.0, monospace: true },
+    )
+}
+
+/// Append a uniform matte-graphite KPI summary card with one bold metric and context subline.
+pub def tp_kpi_card(
+    tree: UiTree,
+    key: str,
+    title: str,
+    metric: str,
+    detail: str,
+) -> i64 effect alloc {
+    val t_lbl = ui_label(
+        tree,
+        f"{key}_t",
+        title,
+        UiStyle { fg: tree.theme.fg_muted, font_size: 11.0, bold: true },
+    )
+    val m_lbl = ui_label(
+        tree,
+        f"{key}_m",
+        metric,
+        UiStyle { fg: tree.theme.fg, font_size: 17.5, bold: true, monospace: true },
+    )
+    val d_lbl = ui_label(
+        tree,
+        f"{key}_d",
+        detail,
+        UiStyle { fg: tree.theme.fg_muted, font_size: 11.0, monospace: true },
+    )
+    return ui_card(
+        tree,
+        key,
+        UiStyle {
+            bg: tree.theme.panel,
+            border: tree.theme.border,
+            border_width: 1.0,
+            padding: 10.0,
+            gap: 3.0,
+            flex: 1.0,
+            min_h: 72.0,
+        },
+        list(t_lbl, m_lbl, d_lbl),
+    )
+}
+
+/// Map operational `AlertSeverity` to the single semantic alert tone allowed in chrome badges.
+pub def tp_alert_tone(sev: AlertSeverity) -> UiTone {
+    return when sev {
+        AlertSeverity.Quiet => UiTone.Neutral,
+        AlertSeverity.Elevated => UiTone.Secondary,
+        AlertSeverity.Watch => UiTone.Warning,
+        AlertSeverity.Critical => UiTone.Danger,
+    }
+}
+
+/// Resolve reserved scientific color for seismic focal depth on data visualizations.
+pub def tp_depth_color(theme: UiTheme, depth_km: f64) -> UiColor {
+    return when depth_regime(depth_km) {
+        DepthRegime.Shallow => theme.coral,
+        DepthRegime.Intermediate => theme.amber,
+        DepthRegime.Deep => theme.teal,
+    }
+}
+
+/// Highlight only major M>=6.0 seismic events to keep catalog rows crisp monochrome slate.
+pub def tp_event_row_tone(ev: SeismicEvent) -> UiTone {
+    if ev.magnitude >= 6.0 {
+        return UiTone.Danger
+    }
+    return UiTone.Neutral
+}
+
+def ascii_lower_byte(b: i64) -> i64 {
+    if b >= 65 && b <= 90 {
+        return b + 32
+    }
+    return b
+}
+
+/// Case-insensitive ASCII substring search requiring zero intermediate string allocations.
+pub def tp_contains_ci(haystack: str, needle: str) -> bool {
+    val nl = len(needle)
+    val hl = len(haystack)
+    if nl == 0 {
+        return true
+    }
+    if nl > hl {
+        return false
+    }
+    val limit = (hl - nl) + 1
+    for start in 0..limit {
+        var matched = true
+        for off in 0..nl {
+            val hb = ascii_lower_byte(str_index(haystack, start + off))
+            val nb = ascii_lower_byte(str_index(needle, off))
+            if hb != nb {
+                matched = false
+                break
+            }
+        }
+        if matched {
+            return true
+        }
+    }
+    return false
+}
+
+/// Pad or truncate `s` into fixed width `width` for aligned monospace enterprise tables.
+pub def tp_fit_width(s: str, width: i64) -> str effect alloc {
+    val n = len(s)
+    if n == width {
+        return s
+    }
+    if n > width {
+        if width <= 2 {
+            return slice(s, 0, if width > 0 { width } else { 0 })
+        }
+        return concat(slice(s, 0, width - 2), "..")
+    }
+    var out = s
+    for _ in n..width {
+        out = concat(out, " ")
+    }
+    return out
+}
+
+/// Extract the HH:MM:SS UTC clock segment from an ISO-8601 timestamp string.
+pub def tp_short_time_utc(iso: str) -> str effect alloc, throw {
+    val t_idx = find(iso, "T")
+    if is_some(t_idx) {
+        val start = unwrap(t_idx) + 1
+        val end = if start + 8 <= len(iso) { start + 8 } else { len(iso) }
+        return slice(iso, start, end)
+    }
+    return tp_fit_width(iso, 8)
+}
+
+def test_gui_theme_and_string_helpers() -> i64 effect alloc, throw {
+    val theme = tp_enterprise_theme()
+    assert(theme.bg.r < theme.surface.r && theme.surface.r < theme.panel.r)
+    assert(tp_contains_ci("Near Coast of Honshu, Japan", "honshu"))
+    assert(tp_contains_ci("us7000live", "US7000"))
+    assert(!tp_contains_ci("Honshu", "Alaska"))
+    assert(tp_fit_width("ABC", 5) == "ABC  ")
+    assert(tp_fit_width("ABCDEFG", 5) == "ABC..")
+    assert(tp_short_time_utc("2026-11-14T19:51:04Z") == "19:51:04")
+    return 0
+}

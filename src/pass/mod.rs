@@ -11,6 +11,7 @@ pub mod drop_elaboration;
 pub mod effect_checker;
 pub mod effect_registry;
 pub mod exhaustive;
+pub mod frame_pool_scope;
 pub mod gc_annotate;
 pub mod graph_pass;
 pub mod inline;
@@ -36,6 +37,7 @@ pub use copy_prop::CopyPropPass;
 pub use dead_node::DeadNodePass;
 pub use drop_elaboration::DropElaborationPass;
 pub use exhaustive::ExhaustivePass;
+pub use frame_pool_scope::FramePoolScopePass;
 pub use gc_annotate::GcAnnotatePass;
 pub use graph_pass::{GraphPass, GraphPassManager};
 pub use inline::InlinePass;
@@ -283,6 +285,7 @@ pub fn build_standard_pipeline() -> PassManager {
     pm.add_pass(crate::pass::opt::OptPass);
     pm.add_pass(ExhaustivePass);
     pm.add_pass(GcAnnotatePass);
+    pm.add_pass(FramePoolScopePass);
     pm.add_pass(crate::pass::lint::IrLintPass);
     // Last: async poll bodies become state machines only after every other
     // pass (and the retain/release annotation) has seen them as plain code.

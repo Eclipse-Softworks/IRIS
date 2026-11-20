@@ -1,0 +1,15 @@
+bring std.os
+
+record MovePair {
+    a: i64 = 0,
+    b: i64 = 0,
+}
+
+pub def main() -> i64 {
+    val p = MovePair { a: 11, b: 29 }
+    val moved_a = move p.a
+    assert(moved_a == 11)
+    assert(p.b == 29)
+    println("partial field move ok")
+    return 0
+}

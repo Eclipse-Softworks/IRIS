@@ -108,3 +108,52 @@ fn test_while_llvm() {
         llvm
     );
 }
+
+#[test]
+fn test_for_wildcard_with_discard_let_terminates() {
+    let src = r#"
+        def count_pushes(n: i64) -> i64 effect alloc {
+            val xs: list<f64> = list()
+            for _ in 0..n {
+                val _ = list_push(xs, 1.5)
+            }
+            list_len(xs)
+        }
+        def main() -> i64 effect alloc { count_pushes(5) }
+    "#;
+    let result = compile(src, "test", EmitKind::Eval).expect("should eval");
+    assert_eq!(result.trim(), "5", "loop should push 5 times: {}", result);
+}
+
+#[test]
+fn test_for_shadowing_and_break_continue() {
+    let src = r#"
+        def run() -> i64 effect alloc {
+            val i = 100
+            val _ = "outer_discard"
+            val xs: list<i64> = list()
+            for i in 0..6 {
+                val i = 999
+                val _ = list_push(xs, i)
+                if list_len(xs) == 2 {
+                    continue
+                }
+                if list_len(xs) == 4 {
+                    break
+                }
+            }
+            while list_len(xs) < 5 {
+                val _ = list_push(xs, i)
+            }
+            list_len(xs) * 1000 + i
+        }
+        def main() -> i64 effect alloc { run() }
+    "#;
+    let result = compile(src, "test", EmitKind::Eval).expect("should eval");
+    assert_eq!(
+        result.trim(),
+        "5100",
+        "expected 5 items and preserved outer i=100: {}",
+        result
+    );
+}

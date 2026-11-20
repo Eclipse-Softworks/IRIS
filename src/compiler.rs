@@ -1727,6 +1727,7 @@ fn replace_self_in_stmt(stmt: &mut AstStmt, type_subs: &HashMap<String, AstType>
             }
             // Spawn body is Vec<AstStmt> not AstBlock
             let mut temp_block = AstBlock {
+                scope_id: 0,
                 stmts: std::mem::take(body),
                 tail: None,
                 span: Span::new(0, 0),
@@ -2250,6 +2251,7 @@ fn substitute_macro_block(
     args: &[AstExpr],
 ) -> crate::parser::ast::AstBlock {
     crate::parser::ast::AstBlock {
+        scope_id: block.scope_id,
         stmts: block
             .stmts
             .iter()

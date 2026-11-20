@@ -1,0 +1,418 @@
+bring std.math
+bring std.ml
+bring std.tensor
+bring std.uncertainty
+bring "domain.iris"
+
+/// Partition earthquake counts across Shallow, Intermediate, and Deep focal regimes
+/// using `&mut` pointers and dereference write-back (`*ptr += 1`).
+pub def tally_depth_regimes(events: list<SeismicEvent>) -> (i64, i64, i64) effect alloc {
+    var shallow = 0
+    var intermediate = 0
+    var deep = 0
+    val n = list_len(events)
+    for i in 0..n {
+        val depth = list_get(events, i).coord.depth_km
+        val bucket = if depth < shallow_depth_limit_km() {
+            &mut shallow
+        } else if depth < intermediate_depth_limit_km() {
+            &mut intermediate
+        } else {
+            &mut deep
+        }
+        *bucket += 1
+    }
+    return (shallow, intermediate, deep)
+}
+
+/// Pack seismic event latitudes, longitudes, and magnitudes into SIMD `DiffTensor` buffers.
+def pack_seismic_tensors(
+    events: list<SeismicEvent>,
+) -> (DiffTensor, DiffTensor, DiffTensor) effect alloc {
+    val n = list_len(events)
+    val lats: list<f64> = list()
+    val lons: list<f64> = list()
+    val mags: list<f64> = list()
+    for i in 0..n {
+        val ev = list_get(events, i)
+        val _ = list_push(lats, ev.coord.lat_deg)
+        val _ = list_push(lons, ev.coord.lon_deg)
+        val _ = list_push(mags, ev.magnitude)
+    }
+    return (
+        tensor_ad_from_data(lats, list(n)),
+        tensor_ad_from_data(lons, list(n)),
+        tensor_ad_from_data(mags, list(n)),
+    )
+}
+
+/// Allocate a zero-initialized `n`-element `DiffTensor`.
+def zero_tensor_1d(n: i64) -> DiffTensor effect alloc {
+    val buf: list<f64> = list()
+    for _ in 0..n {
+        val _ = list_push(buf, 0.0)
+    }
+    return tensor_ad_from_data(buf, list(n))
+}
+
+/// Vectorized `par for` SIMD kernel evaluating seismic energy exponent (`log10(E_J)`)
+/// and fast radial separation (km) from a live reference coordinate across all events.
+pub def run_simd_geophysical_kernels(
+    events: list<SeismicEvent>,
+    ref_lat: f64,
+    ref_lon: f64,
+) -> (DiffTensor, DiffTensor, i64) effect alloc, thread {
+    val n = list_len(events)
+    val (lat_t, lon_t, mag_t) = pack_seismic_tensors(events)
+    val dist_t = zero_tensor_1d(n)
+    val energy_t = zero_tensor_1d(n)
+
+    val d2r = PI / 180.0
+    val r_earth = earth_radius_km()
+    val lat0_r = ref_lat * d2r
+    val lon0_r = ref_lon * d2r
+    val cos_mid = cos(lat0_r)
+
+    par for i in 0..n {
+        val d_lat = ((lat_t[i] to f64) * d2r) - lat0_r
+        var d_lon = ((lon_t[i] to f64) * d2r) - lon0_r
+        if d_lon > PI {
+            d_lon = d_lon - TAU
+        } else if d_lon < -PI {
+            d_lon = d_lon + TAU
+        }
+        val dx = d_lon * cos_mid
+        dist_t[i] = (r_earth * sqrt((d_lat * d_lat) + (dx * dx))) to f32
+    }
+
+    val slope = gutenberg_energy_slope()
+    val offset = gutenberg_energy_offset()
+    val significant_cnt = atomic(0)
+    par for i in 0..n {
+        val mag = mag_t[i] to f64
+        energy_t[i] = ((mag * slope) + offset) to f32
+    }
+    par for i in 0..n {
+        if (mag_t[i] to f64) >= 4.0 {
+            val _ = atomic_add(significant_cnt, 1)
+        }
+    }
+    return (dist_t, energy_t, atomic_load(significant_cnt))
+}
+
+/// Build cumulative magnitude-frequency bins `(thresholds, log10_counts)` from live events.
+def build_gr_cumulative_bins(
+    events: list<SeismicEvent>,
+) -> (list<f64>, list<f64>, f64) effect alloc {
+    val n = list_len(events)
+    var min_mag = list_get(events, 0).magnitude
+    var max_mag = min_mag
+    for i in 1..n {
+        val m = list_get(events, i).magnitude
+        min_mag = min_f64(min_mag, m)
+        max_mag = max_f64(max_mag, m)
+    }
+    val ms: list<f64> = list()
+    val log_counts: list<f64> = list()
+    val step = max_f64(0.15, (max_mag - min_mag) / 14.0)
+    var thresh = min_mag
+    var prev_count = -1
+    var k = 0
+    while thresh <= max_mag + 0.001 && k < 20 {
+        var count = 0
+        for i in 0..n {
+            if list_get(events, i).magnitude >= thresh {
+                count = count + 1
+            }
+        }
+        if count >= 1 && count != prev_count {
+            val _ = list_push(ms, thresh)
+            val _ = list_push(log_counts, log(to_f64(count)) / LN10)
+            prev_count = count
+        }
+        thresh = thresh + step
+        k = k + 1
+    }
+    return (ms, log_counts, min_mag)
+}
+
+/// Build cumulative magnitude-frequency bins `(thresholds, log10_counts)` from live events.
+pub def compute_gr_curve(events: list<SeismicEvent>) -> (list<f64>, list<f64>) effect alloc {
+    if list_len(events) < 2 {
+        val empty_x: list<f64> = list()
+        val empty_y: list<f64> = list()
+        return (empty_x, empty_y)
+    }
+    val (ms, log_counts, _) = build_gr_cumulative_bins(events)
+    return (ms, log_counts)
+}
+
+/// Fit centered linear Gutenberg-Richter law `log10(N) = alpha - b * (M - m_bar)` via IRIS AD.
+def fit_gr_via_autodiff(
+    ms: list<f64>,
+    log_counts: list<f64>,
+    m_bar: f64,
+    y_bar: f64,
+) -> (f64, f64) effect alloc {
+    val nbins = list_len(ms)
+    var alpha = y_bar
+    var b_slope = 0.9
+    val lr = 0.25
+    val inv_n = 1.0 / to_f64(nbins)
+    for _epoch in 0..240 {
+        val t_alpha = tape(alpha)
+        val t_slope = tape(b_slope)
+        var loss = tape(0.0)
+        for idx in 0..nbins {
+            val pred = t_alpha - (t_slope * (list_get(ms, idx) - m_bar))
+            val diff = pred - list_get(log_counts, idx)
+            loss = loss + (diff * diff)
+        }
+        val _ = backward(loss)
+        alpha = alpha - (lr * grad(t_alpha) * inv_n)
+        b_slope = clamp_f64(b_slope - (lr * grad(t_slope) * inv_n), 0.0, 5.0)
+    }
+    return (alpha + (b_slope * m_bar), b_slope)
+}
+
+/// Calibrate the Gutenberg-Richter law `log10(N >= M) = a - b * M` directly from live
+/// USGS earthquake observations via IRIS reverse-mode automatic differentiation (`tape`/`backward`/`grad`).
+pub def calibrate_gutenberg_richter(
+    events: list<SeismicEvent>,
+) -> GutenbergRichterFit effect alloc {
+    val n = list_len(events)
+    if n < 2 {
+        return GutenbergRichterFit {
+            a_value: 0.0,
+            b_value: 1.0,
+            r2_score: 0.0,
+            bin_count: 0,
+            expected_daily_m5: 0.0,
+            expected_daily_m6: 0.0,
+        }
+    }
+    val (ms, log_counts, min_mag) = build_gr_cumulative_bins(events)
+    val nbins = list_len(ms)
+    if nbins < 2 {
+        val a_fb = (log(to_f64(n)) / LN10) + min_mag
+        return GutenbergRichterFit {
+            a_value: a_fb,
+            b_value: 1.0,
+            r2_score: 0.0,
+            bin_count: nbins,
+            expected_daily_m5: exp((a_fb - 5.0) * LN10),
+            expected_daily_m6: exp((a_fb - 6.0) * LN10),
+        }
+    }
+    val m_bar = vec_mean(ms)
+    val y_bar = vec_mean(log_counts)
+    val (a_val, b_slope) = fit_gr_via_autodiff(ms, log_counts, m_bar, y_bar)
+    val preds: list<f64> = list()
+    for i in 0..nbins {
+        val _ = list_push(preds, a_val - (b_slope * list_get(ms, i)))
+    }
+    return GutenbergRichterFit {
+        a_value: a_val,
+        b_value: b_slope,
+        r2_score: r2_score(preds, log_counts),
+        bin_count: nbins,
+        expected_daily_m5: exp((a_val - (5.0 * b_slope)) * LN10),
+        expected_daily_m6: exp((a_val - (6.0 * b_slope)) * LN10),
+    }
+}
+
+/// Select a strong distant (> 500 km) secondary epicenter index for weather correlation.
+def find_secondary_epicenter_idx(
+    events: list<SeismicEvent>,
+    strongest_idx: i64,
+) -> i64 effect alloc {
+    val n = list_len(events)
+    if n <= 1 {
+        return strongest_idx
+    }
+    val top_ev = list_get(events, strongest_idx)
+    var sec_idx = strongest_idx
+    var best_mag = -10.0
+    for i in 0..n {
+        if i == strongest_idx {
+            continue
+        }
+        val cand = list_get(events, i)
+        val sep = haversine_km(
+            top_ev.coord.lat_deg,
+            top_ev.coord.lon_deg,
+            cand.coord.lat_deg,
+            cand.coord.lon_deg,
+        )
+        if sep > 500.0 && cand.magnitude > best_mag {
+            best_mag = cand.magnitude
+            sec_idx = i
+        }
+    }
+    return sec_idx
+}
+
+/// Summarize geomagnetic Kp samples (latest, peak, 95% Bayesian CI low/high).
+def summarize_kp_bayesian(kps: list<GeomagneticSample>) -> (f64, f64, f64, f64) effect alloc {
+    val kp_vals: list<f64> = list()
+    var kp_peak = 0.0
+    var kp_latest = 0.0
+    for i in 0..list_len(kps) {
+        val sample = list_get(kps, i)
+        val _ = list_push(kp_vals, sample.kp_index)
+        kp_latest = sample.kp_index
+        kp_peak = max_f64(kp_peak, sample.kp_index)
+    }
+    val post = nig_update_batch(nig_prior(2.0, 0.5, 2.0, 1.0), kp_vals)
+    val ci = nig_mean_credible_interval(post)
+    return (kp_latest, kp_peak, ci.0, ci.1)
+}
+
+/// Scan seismic catalog for extremum event, total energy, and closest event to ISS.
+def scan_seismic_extrema(
+    events: list<SeismicEvent>,
+    iss: OrbitalState,
+) -> (f64, i64, f64, f64, i64, list<f64>) effect alloc {
+    var max_mag = -10.0
+    var strongest_idx = 0
+    var energy_tj_sum = 0.0
+    var closest_km = 999999.0
+    var closest_idx = 0
+    val mags: list<f64> = list()
+    for i in 0..list_len(events) {
+        val ev = list_get(events, i)
+        val _ = list_push(mags, ev.magnitude)
+        if ev.magnitude > max_mag {
+            max_mag = ev.magnitude
+            strongest_idx = i
+        }
+        energy_tj_sum = energy_tj_sum + seismic_energy_tj(ev.magnitude)
+        val d_iss = haversine_km(ev.coord.lat_deg, ev.coord.lon_deg, iss.latitude, iss.longitude)
+        if d_iss < closest_km {
+            closest_km = d_iss
+            closest_idx = i
+        }
+    }
+    val log_energy = if energy_tj_sum > 0.0 {
+        12.0 + (log(energy_tj_sum) / LN10)
+    } else {
+        0.0
+    }
+    return (max_mag, strongest_idx, log_energy, closest_km, closest_idx, mags)
+}
+
+/// Analyze live seismic, geomagnetic, and orbital feeds into a `RunAnalytics` summary.
+pub def analyze_observatory_feeds(
+    events: list<SeismicEvent>,
+    kps: list<GeomagneticSample>,
+    iss: OrbitalState,
+) -> RunAnalytics effect alloc, thread {
+    val n_eq = list_len(events)
+    val regimes = tally_depth_regimes(events)
+    val (_, _, significant_cnt) = run_simd_geophysical_kernels(events, iss.latitude, iss.longitude)
+    val (
+        max_mag,
+        strongest_idx,
+        total_log10_j,
+        closest_km,
+        closest_idx,
+        mags,
+    ) = scan_seismic_extrema(events, iss)
+    val secondary_idx = find_secondary_epicenter_idx(events, strongest_idx)
+    val gr_fit = calibrate_gutenberg_richter(events)
+    val mag_post = nig_update_batch(nig_prior(3.0, 0.5, 2.0, 1.0), mags)
+    val mag_ci = nig_mean_credible_interval(mag_post)
+    val (kp_latest, kp_peak, kp_ci_lo, kp_ci_hi) = summarize_kp_bayesian(kps)
+    val top_eq_score = if n_eq > 0 { list_get(events, strongest_idx).severity_score() } else { 0.0 }
+    val kp_score = if list_len(kps) > 0 {
+        list_get(kps, list_len(kps) - 1).severity_score()
+    } else {
+        0.0
+    }
+    return RunAnalytics {
+        total_quakes: n_eq,
+        shallow_count: regimes.0,
+        intermediate_count: regimes.1,
+        deep_count: regimes.2,
+        max_magnitude: max_mag,
+        strongest_idx: strongest_idx,
+        secondary_idx: secondary_idx,
+        total_energy_log10_j: total_log10_j,
+        closest_iss_km: closest_km,
+        closest_iss_idx: closest_idx,
+        watch_plus_count: significant_cnt,
+        mag_mean: nig_mean(mag_post),
+        mag_ci_low: mag_ci.0,
+        mag_ci_high: mag_ci.1,
+        kp_latest: kp_latest,
+        kp_peak: kp_peak,
+        kp_ci_low: kp_ci_lo,
+        kp_ci_high: kp_ci_hi,
+        gr_fit: gr_fit,
+        overall_alert: classify_alert_tier(max_f64(top_eq_score, kp_score)),
+    }
+}
+
+/// Build synthetic-catalog fixture for unit testing analytics kernels.
+def build_sample_events_fixture() -> list<SeismicEvent> effect io, alloc {
+    val events: list<SeismicEvent> = list()
+    val mags: list<f64> = list(2.6, 2.9, 3.1, 3.4, 3.8, 4.2, 4.7, 5.3)
+    val depths: list<f64> = list(10.0, 25.0, 85.0, 15.0, 340.0, 18.0, 95.0, 22.0)
+    for i in 0..list_len(mags) {
+        val off = to_f64(i)
+        val _ = list_push(
+            events,
+            SeismicEvent {
+                event_id: concat("eq-", to_str(i)),
+                time_utc: "2026-11-14T20:00:00Z",
+                coord: GeoCoord {
+                    lat_deg: 35.0 + off,
+                    lon_deg: 139.0 + off,
+                    depth_km: list_get(depths, i),
+                },
+                magnitude: list_get(mags, i),
+                mag_type: "ml",
+                place: concat("Zone-", to_str(i)),
+                station_count: 15,
+                gap_deg: 40.0,
+                rms_sec: 0.25,
+            },
+        )
+    }
+    return events
+}
+
+def test_analytics_simd_deref_and_autodiff() -> i64 effect io, alloc, thread, throw {
+    val events = build_sample_events_fixture()
+    val kps: list<
+        GeomagneticSample
+    > = list(
+        GeomagneticSample { time_tag: "t0", kp_index: 2.33, a_running: 9.0, station_count: 8 },
+        GeomagneticSample { time_tag: "t1", kp_index: 3.67, a_running: 20.0, station_count: 8 },
+    )
+    val iss = OrbitalState {
+        name: "iss",
+        latitude: 35.0,
+        longitude: 139.0,
+        altitude_km: 416.0,
+        velocity_kmh: 27590.0,
+        footprint_km: 4480.0,
+        visibility: "daylight",
+        timestamp_s: 1794690639,
+        solar_lat: -18.0,
+        solar_lon: 218.0,
+    }
+    val summary = analyze_observatory_feeds(events, kps, iss)
+    assert(summary.shallow_count == 5 && summary.intermediate_count == 2 && summary.deep_count == 1)
+    assert(summary.watch_plus_count == 3 && abs_f64(summary.max_magnitude - 5.3) < 0.001)
+    assert(summary.closest_iss_km < 1.0 && summary.gr_fit.r2_score > 0.85)
+    val snap = ObservatorySnapshot {
+        events: events,
+        kps: kps,
+        iss: iss,
+        weather: list(),
+        analytics: summary,
+    }
+    assert(list_len(format_priority_dispatches(snap)) >= 3)
+    return 0
+}

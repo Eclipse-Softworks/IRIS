@@ -263,7 +263,11 @@ pub(crate) fn set_result(instr: &mut IrInstr, v: ValueId) {
         IrInstr::ArrayLoad { result, .. } => *result = v,
         IrInstr::Borrow { result, .. } => *result = v,
         IrInstr::Move { result, .. } => *result = v,
-        IrInstr::EnterScope { .. } | IrInstr::ExitScope { .. } | IrInstr::Drop { .. } => {}
+        IrInstr::EnterBlock { .. }
+        | IrInstr::ExitBlock { .. }
+        | IrInstr::EnterScope { .. }
+        | IrInstr::ExitScope { .. }
+        | IrInstr::Drop { .. } => {}
         IrInstr::ChanNew { result, .. } => *result = v,
         IrInstr::ChanRecv { result, .. } => *result = v,
         IrInstr::TaskGroupNew { result, .. } => *result = v,

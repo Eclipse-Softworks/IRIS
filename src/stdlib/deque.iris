@@ -4,58 +4,58 @@
 // All operations are O(1) amortized.
 
 /// Create a new empty deque.
-pub def deque_create() -> list<i64> {
+pub def deque_create() -> list<i64> effect alloc {
     deque_new()
 }
 
 /// Push a value to the front of the deque.
 /// Returns the modified deque for chaining.
-pub def push_front(dq: list<i64>, value: i64) -> list<i64> {
+pub def push_front(dq: list<i64>, value: i64) -> list<i64> effect alloc {
     deque_push_front(dq, value)
 }
 
 /// Push a value to the back of the deque.
 /// Returns the modified deque for chaining.
-pub def push_back(dq: list<i64>, value: i64) -> list<i64> {
+pub def push_back(dq: list<i64>, value: i64) -> list<i64> effect alloc {
     deque_push_back(dq, value)
 }
 
 /// Pop and return the value from the front of the deque.
 /// Returns 0 if the deque is empty.
-pub def pop_front(dq: list<i64>) -> i64 {
+pub def pop_front(dq: list<i64>) -> i64 effect alloc {
     deque_pop_front(dq)
 }
 
 /// Pop and return the value from the back of the deque.
 /// Returns 0 if the deque is empty.
-pub def pop_back(dq: list<i64>) -> i64 {
+pub def pop_back(dq: list<i64>) -> i64 effect alloc {
     deque_pop_back(dq)
 }
 
 /// Return the number of elements in the deque.
-pub def deque_size(dq: list<i64>) -> i64 {
+pub def deque_size(dq: list<i64>) -> i64 effect alloc {
     deque_len(dq)
 }
 
 /// Peek at the front value without removing it.
 /// Returns 0 if the deque is empty.
-pub def peek_front(dq: list<i64>) -> i64 {
+pub def peek_front(dq: list<i64>) -> i64 effect alloc {
     deque_front(dq)
 }
 
 /// Peek at the back value without removing it.
 /// Returns 0 if the deque is empty.
-pub def peek_back(dq: list<i64>) -> i64 {
+pub def peek_back(dq: list<i64>) -> i64 effect alloc {
     deque_back(dq)
 }
 
 /// Check if the deque is empty.
-pub def deque_is_empty(dq: list<i64>) -> bool {
+pub def deque_is_empty(dq: list<i64>) -> bool effect alloc {
     deque_len(dq) == 0
 }
 
 /// Convert deque elements to a regular list<i64> from front to back.
-pub def deque_to_list(dq: list<i64>) -> list<i64> {
+pub def deque_to_list(dq: list<i64>) -> list<i64> effect alloc {
     val out: list<i64> = list()
     var i = 0
     val n = deque_len(dq)
@@ -67,7 +67,7 @@ pub def deque_to_list(dq: list<i64>) -> list<i64> {
 }
 
 /// Construct a deque populated from a list<i64>.
-pub def deque_from_list(xs: list<i64>) -> list<i64> {
+pub def deque_from_list(xs: list<i64>) -> list<i64> effect alloc {
     var dq = deque_create()
     var i = 0
     val n = list_len(xs)
@@ -79,7 +79,7 @@ pub def deque_from_list(xs: list<i64>) -> list<i64> {
 }
 
 /// Check if a value exists within the deque.
-pub def deque_contains(dq: list<i64>, target: i64) -> bool {
+pub def deque_contains(dq: list<i64>, target: i64) -> bool effect alloc {
     var i = 0
     val n = deque_len(dq)
     while i < n {
@@ -92,12 +92,12 @@ pub def deque_contains(dq: list<i64>, target: i64) -> bool {
 }
 
 /// Clear all elements from the deque and return an empty deque.
-pub def deque_clear(dq: list<i64>) -> list<i64> {
+pub def deque_clear(dq: list<i64>) -> list<i64> effect alloc {
     deque_create()
 }
 
 /// Rotate deque elements to the left by n steps (front items move to back).
-pub def deque_rotate_left(dq: list<i64>, n: i64) -> list<i64> {
+pub def deque_rotate_left(dq: list<i64>, n: i64) -> list<i64> effect alloc {
     val size = deque_len(dq)
     if size <= 1 || n <= 0 { return dq }
     val steps = n % size
@@ -111,7 +111,7 @@ pub def deque_rotate_left(dq: list<i64>, n: i64) -> list<i64> {
 }
 
 /// Rotate deque elements to the right by n steps (back items move to front).
-pub def deque_rotate_right(dq: list<i64>, n: i64) -> list<i64> {
+pub def deque_rotate_right(dq: list<i64>, n: i64) -> list<i64> effect alloc {
     val size = deque_len(dq)
     if size <= 1 || n <= 0 { return dq }
     val steps = n % size

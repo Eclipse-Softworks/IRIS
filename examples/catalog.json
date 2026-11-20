@@ -953,6 +953,161 @@
       "path": "projects/realtime_embedded_actuator/test_controller.iris",
       "mode": "manual",
       "expected": ""
+    },
+    {
+      "path": "projects/ais_sentinel/main.iris",
+      "mode": "manual",
+      "expected": ""
+    },
+    {
+      "path": "projects/lattice_audit/main.iris",
+      "mode": "manual",
+      "expected": ""
+    },
+    {
+      "path": "projects/neural_cipher/main.iris",
+      "mode": "manual",
+      "expected": ""
+    },
+    {
+      "path": "projects/terra_pulse/main.iris",
+      "mode": "manual",
+      "expected": ""
+    },
+    {
+      "path": "projects/ais_sentinel/ais_live.iris",
+      "mode": "module",
+      "expected": ""
+    },
+    {
+      "path": "projects/ais_sentinel/domain.iris",
+      "mode": "module",
+      "expected": ""
+    },
+    {
+      "path": "projects/ais_sentinel/marine_net.iris",
+      "mode": "module",
+      "expected": ""
+    },
+    {
+      "path": "projects/ais_sentinel/nmea.iris",
+      "mode": "module",
+      "expected": ""
+    },
+    {
+      "path": "projects/ais_sentinel/pilot.iris",
+      "mode": "module",
+      "expected": ""
+    },
+    {
+      "path": "projects/ais_sentinel/render.iris",
+      "mode": "module",
+      "expected": ""
+    },
+    {
+      "path": "projects/lattice_audit/attest.iris",
+      "mode": "module",
+      "expected": ""
+    },
+    {
+      "path": "projects/lattice_audit/domain.iris",
+      "mode": "module",
+      "expected": ""
+    },
+    {
+      "path": "projects/lattice_audit/lockfile.iris",
+      "mode": "module",
+      "expected": ""
+    },
+    {
+      "path": "projects/lattice_audit/registry.iris",
+      "mode": "module",
+      "expected": ""
+    },
+    {
+      "path": "projects/lattice_audit/render.iris",
+      "mode": "module",
+      "expected": ""
+    },
+    {
+      "path": "projects/neural_cipher/classifier_net.iris",
+      "mode": "module",
+      "expected": ""
+    },
+    {
+      "path": "projects/neural_cipher/domain.iris",
+      "mode": "module",
+      "expected": ""
+    },
+    {
+      "path": "projects/neural_cipher/forge_net.iris",
+      "mode": "module",
+      "expected": ""
+    },
+    {
+      "path": "projects/neural_cipher/render.iris",
+      "mode": "module",
+      "expected": ""
+    },
+    {
+      "path": "projects/neural_cipher/web_corpus.iris",
+      "mode": "module",
+      "expected": ""
+    },
+    {
+      "path": "projects/terra_pulse/analytics.iris",
+      "mode": "module",
+      "expected": ""
+    },
+    {
+      "path": "projects/terra_pulse/domain.iris",
+      "mode": "module",
+      "expected": ""
+    },
+    {
+      "path": "projects/terra_pulse/gui.iris",
+      "mode": "module",
+      "expected": ""
+    },
+    {
+      "path": "projects/terra_pulse/gui_map.iris",
+      "mode": "module",
+      "expected": ""
+    },
+    {
+      "path": "projects/terra_pulse/gui_state.iris",
+      "mode": "module",
+      "expected": ""
+    },
+    {
+      "path": "projects/terra_pulse/gui_theme.iris",
+      "mode": "module",
+      "expected": ""
+    },
+    {
+      "path": "projects/terra_pulse/parser.iris",
+      "mode": "module",
+      "expected": ""
+    },
+    {
+      "path": "projects/terra_pulse/render.iris",
+      "mode": "module",
+      "expected": ""
+    },
+    {
+      "path": "projects/terra_pulse/store.iris",
+      "mode": "module",
+      "expected": ""
+    },
+    {
+      "path": "projects/terra_pulse/telemetry.iris",
+      "mode": "module",
+      "expected": ""
+    },
+    {
+      "path": "projects/ui_gallery/main.iris",
+      "mode": "module",
+      "expected": ""
     }
   ]
 }

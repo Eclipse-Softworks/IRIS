@@ -1,0 +1,698 @@
+// Concurrent multi-worker neural cipher classifier trained from scratch via std.nn Adam.
+
+bring std.nn
+bring std.tensor
+bring std.fs
+bring std.os
+bring std.json
+bring std.math
+bring domain
+
+/// Hyperparameter and topology configuration for one classifier training worker.
+pub record ClassifierSpec {
+    worker_id: i64,
+    arch_name: str,
+    hidden1: i64,
+    hidden2: i64,
+    lr: f64,
+    epochs: i64,
+    use_relu: i64,
+}
+
+/// Flattened multi-layer perceptron weights and shape metadata.
+pub record MlpWeights {
+    weights: list<f64>,
+    biases: list<f64>,
+    shapes: list<i64>,
+    use_relu: i64,
+}
+
+/// Complete trained cipher classifier candidate with validation metrics.
+pub record TrainedClassifier {
+    worker_id: i64,
+    arch_name: str,
+    model: MlpWeights,
+    train_loss: f64,
+    val_loss: f64,
+    val_acc: f64,
+    per_class_acc: list<f64>,
+}
+
+/// Complete neural prediction pairing predicted cipher family, class index, and probabilities.
+pub record CipherPrediction {
+    family: CipherFamily,
+    class_id: i64,
+    probs: list<f64>,
+}
+
+/// Flattened feature matrices and one-hot labels prepared for training and validation.
+pub record FeatureDataset {
+    x_train: list<f64>,
+    y_train: list<f64>,
+    n_train: i64,
+    x_val: list<f64>,
+    y_val: list<f64>,
+    n_val: i64,
+    samples_processed: i64,
+}
+
+record SampleShard {
+    x_flat: list<f64>,
+    y_flat: list<f64>,
+    count: i64,
+}
+
+/// Generic higher-order list mapper.
+pub def map_list[A, B](xs: list<A>, f: (A) -> B) -> list<B> effect alloc {
+    val out: list<B> = list()
+    val n = list_len(xs)
+    var i = 0
+    while i < n {
+        list_push(out, f(list_get(xs, i)))
+        i = i + 1
+    }
+    out
+}
+
+/// Generic scorer returning the highest-scoring element if non-empty.
+pub def select_best_by[T](items: list<T>, score_fn: (T) -> f64) -> option<T> effect alloc {
+    val n = list_len(items)
+    if n == 0 {
+        return none
+    }
+    var best = list_get(items, 0)
+    var best_score = score_fn(best)
+    var i = 1
+    while i < n {
+        val cand = list_get(items, i)
+        val sc = score_fn(cand)
+        if sc > best_score {
+            best = cand
+            best_score = sc
+        }
+        i = i + 1
+    }
+    some(best)
+}
+
+/// Return the 6 cipher families learned by the neural cipher identifier.
+pub def known_cipher_families() -> list<CipherFamily> effect alloc {
+    val out: list<CipherFamily> = list()
+    list_push(out, CipherFamily.Caesar)
+    list_push(out, CipherFamily.XorRepeating)
+    list_push(out, CipherFamily.Vigenere)
+    list_push(out, CipherFamily.RailFence)
+    list_push(out, CipherFamily.Rc4Stream)
+    list_push(out, CipherFamily.Aes128Cbc)
+    out
+}
+
+def make_clf_spec(
+    id_arch: (i64, str),
+    dims: (i64, i64, i64),
+    lr: f64,
+    epochs: i64,
+) -> ClassifierSpec {
+    ClassifierSpec {
+        worker_id: id_arch.0,
+        arch_name: id_arch.1,
+        hidden1: dims.0,
+        hidden2: dims.1,
+        lr: lr,
+        epochs: epochs,
+        use_relu: dims.2,
+    }
+}
+
+/// Build diverse neural architecture specs for concurrent hyperparameter search.
+pub def build_worker_specs(worker_count: i64, epochs: i64) -> list<ClassifierSpec> effect alloc {
+    val n = if worker_count < 1 {
+        1
+    } else if worker_count > 4 {
+        4
+    } else {
+        worker_count
+    }
+    val all: list<ClassifierSpec> = list()
+    list_push(all, make_clf_spec((0, "mlp-16-24-6-relu"), (24, 0, 1), 0.025, epochs))
+    list_push(all, make_clf_spec((1, "mlp-16-32-16-relu"), (32, 16, 1), 0.020, epochs))
+    list_push(all, make_clf_spec((2, "mlp-16-28-6-sigm"), (28, 0, 0), 0.030, epochs))
+    list_push(all, make_clf_spec((3, "mlp-16-20-12-relu"), (20, 12, 1), 0.022, epochs))
+    val selected: list<ClassifierSpec> = list()
+    var i = 0
+    while i < n {
+        list_push(selected, list_get(all, i))
+        i = i + 1
+    }
+    selected
+}
+
+def extract_block_shard(
+    blocks: list<PlainBlock>,
+    start_idx: i64,
+    end_idx: i64,
+) -> SampleShard effect alloc, throw {
+    val fams = known_cipher_families()
+    val x_flat: list<f64> = list()
+    val y_flat: list<f64> = list()
+    var count = 0
+    var idx = start_idx
+    while idx < end_idx {
+        val blk = list_get(blocks, idx)
+        var c = 0
+        while c < 6 {
+            val kb = str_to_u8(f"IrisKey_{idx}_{c}")
+            val key = unwrap(make_key_schedule("k", kb))
+            val ct = encrypt_for_family(list_get(fams, c), blk.bytes, key, idx + c * 7)
+            val feats = extract_cipher_features(ct)
+            append_features_and_onehot(x_flat, y_flat, feats, c)
+            count = count + 1
+            c = c + 1
+        }
+        idx = idx + 1
+    }
+    SampleShard {
+        x_flat: x_flat,
+        y_flat: y_flat,
+        count: count,
+    }
+}
+
+def append_features_and_onehot(
+    x_flat: list<f64>,
+    y_flat: list<f64>,
+    feats: list<f64>,
+    cls_id: i64,
+) -> i64 effect alloc {
+    var f = 0
+    while f < 16 {
+        list_push(x_flat, list_get(feats, f))
+        f = f + 1
+    }
+    var c = 0
+    while c < 6 {
+        list_push(y_flat, if c == cls_id { 1.0 } else { 0.0 })
+        c = c + 1
+    }
+    0
+}
+
+def generate_features_concurrent(
+    blocks: list<PlainBlock>,
+    workers: i64,
+) -> SampleShard effect alloc, thread, throw {
+    val total = list_len(blocks)
+    if total == 0 {
+        return SampleShard { x_flat: list(), y_flat: list(), count: 0 }
+    }
+    val w_eff = if workers < 1 {
+        1
+    } else if workers > total {
+        total
+    } else {
+        workers
+    }
+    val counter = atomic(0)
+    val ch: chan<SampleShard> = channel()
+    val tg = task_group()
+    val stride = (total + w_eff - 1) / w_eff
+    var w = 0
+    while w < w_eff {
+        val s = w * stride
+        val e_raw = s + stride
+        val e = if e_raw > total { total } else { e_raw }
+        if s < e {
+            spawn(tg) {
+                val shard = extract_block_shard(blocks, s, e)
+                val _p = atomic_add(counter, shard.count)
+                send(ch, shard)
+            }
+        }
+        w = w + 1
+    }
+    task_group_join(tg)
+    val _done = atomic_load(counter)
+    merge_sample_shards(ch, w_eff, total, stride)
+}
+
+def merge_sample_shards(
+    ch: chan<SampleShard>,
+    w_eff: i64,
+    total: i64,
+    stride: i64,
+) -> SampleShard effect alloc {
+    val active = compute_active_shards(w_eff, total, stride)
+    val all_x: list<f64> = list()
+    val all_y: list<f64> = list()
+    var count = 0
+    var i = 0
+    while i < active {
+        val sh = recv(ch)
+        append_f64_list(all_x, sh.x_flat)
+        append_f64_list(all_y, sh.y_flat)
+        count = count + sh.count
+        i = i + 1
+    }
+    SampleShard {
+        x_flat: all_x,
+        y_flat: all_y,
+        count: count,
+    }
+}
+
+def compute_active_shards(w_eff: i64, total: i64, stride: i64) -> i64 {
+    var active = 0
+    var w = 0
+    while w < w_eff {
+        val s = w * stride
+        if s < total {
+            active = active + 1
+        }
+        w = w + 1
+    }
+    active
+}
+
+def append_f64_list(dst: list<f64>, src: list<f64>) -> i64 effect alloc {
+    val n = list_len(src)
+    var i = 0
+    while i < n {
+        list_push(dst, list_get(src, i))
+        i = i + 1
+    }
+    n
+}
+
+/// Build labeled training and validation cipher feature datasets concurrently.
+pub def build_feature_dataset(
+    train_blocks: list<PlainBlock>,
+    val_blocks: list<PlainBlock>,
+    workers: i64,
+) -> FeatureDataset effect alloc, thread, throw {
+    val tr = generate_features_concurrent(train_blocks, workers)
+    val va = generate_features_concurrent(val_blocks, workers)
+    FeatureDataset {
+        x_train: tr.x_flat,
+        y_train: tr.y_flat,
+        n_train: tr.count,
+        x_val: va.x_flat,
+        y_val: va.y_flat,
+        n_val: va.count,
+        samples_processed: tr.count + va.count,
+    }
+}
+
+def spec_layer_sizes(spec: ClassifierSpec) -> list<i64> effect alloc {
+    val ls: list<i64> = list()
+    list_push(ls, 16)
+    list_push(ls, spec.hidden1)
+    if spec.hidden2 > 0 {
+        list_push(ls, spec.hidden2)
+    }
+    list_push(ls, 6)
+    ls
+}
+
+def slice_sample_features(x_flat: list<f64>, sample_idx: i64) -> list<f64> effect alloc {
+    val row: list<f64> = list()
+    val base = sample_idx * 16
+    var f = 0
+    while f < 16 {
+        list_push(row, list_get(x_flat, base + f))
+        f = f + 1
+    }
+    row
+}
+
+def argmax_onehot(y_flat: list<f64>, sample_idx: i64) -> i64 effect alloc {
+    val base = sample_idx * 6
+    var best_c = 0
+    var c = 1
+    while c < 6 {
+        if list_get(y_flat, base + c) > list_get(y_flat, base + best_c) {
+            best_c = c
+        }
+        c = c + 1
+    }
+    best_c
+}
+
+/// Evaluate overall and per-class accuracy of a trained classifier on flattened data.
+pub def evaluate_classifier(
+    model: MlpWeights,
+    x_flat: list<f64>,
+    y_flat: list<f64>,
+    n_samples: i64,
+) -> (f64, list<f64>) effect alloc {
+    val hits: list<i64> = list(0, 0, 0, 0, 0, 0)
+    val totals: list<i64> = list(0, 0, 0, 0, 0, 0)
+    var total_hits = 0
+    var i = 0
+    while i < n_samples {
+        val x_row = slice_sample_features(x_flat, i)
+        val true_c = argmax_onehot(y_flat, i)
+        val pred_c = mlp_predict_class(
+            model.weights,
+            model.biases,
+            model.shapes,
+            x_row,
+            model.use_relu,
+        )
+        list_set(totals, true_c, list_get(totals, true_c) + 1)
+        if pred_c == true_c {
+            list_set(hits, true_c, list_get(hits, true_c) + 1)
+            total_hits = total_hits + 1
+        }
+        i = i + 1
+    }
+    val per_cls: list<f64> = list()
+    var c = 0
+    while c < 6 {
+        val t = list_get(totals, c)
+        val acc = if t > 0 { to_f64(list_get(hits, c)) / to_f64(t) } else { 0.0 }
+        list_push(per_cls, acc)
+        c = c + 1
+    }
+    val overall = if n_samples > 0 { to_f64(total_hits) / to_f64(n_samples) } else { 0.0 }
+    (overall, per_cls)
+}
+
+def eval_candidate_metrics(
+    spec: ClassifierSpec,
+    model: MlpWeights,
+    ds: FeatureDataset,
+) -> TrainedClassifier effect alloc {
+    val tr_loss = mlp_eval_loss(
+        model.weights,
+        model.biases,
+        model.shapes,
+        ds.x_train,
+        ds.y_train,
+        ds.n_train,
+        16,
+        6,
+        spec.use_relu,
+    )
+    val va_loss = mlp_eval_loss(
+        model.weights,
+        model.biases,
+        model.shapes,
+        ds.x_val,
+        ds.y_val,
+        ds.n_val,
+        16,
+        6,
+        spec.use_relu,
+    )
+    val eval_res = evaluate_classifier(model, ds.x_val, ds.y_val, ds.n_val)
+    TrainedClassifier {
+        worker_id: spec.worker_id,
+        arch_name: spec.arch_name,
+        model: model,
+        train_loss: tr_loss,
+        val_loss: va_loss,
+        val_acc: eval_res.0,
+        per_class_acc: eval_res.1,
+    }
+}
+
+def train_single_worker(
+    spec: ClassifierSpec,
+    ds: FeatureDataset,
+) -> TrainedClassifier effect alloc, random, time {
+    val layers = spec_layer_sizes(spec)
+    val created = mlp_create(layers)
+    val trained = mlp_train_adam(
+        created.0,
+        created.1,
+        created.2,
+        ds.x_train,
+        ds.y_train,
+        ds.n_train,
+        16,
+        6,
+        spec.lr,
+        spec.epochs,
+        0.9,
+        0.999,
+        0.00000001,
+        spec.use_relu,
+    )
+    val model = MlpWeights {
+        weights: trained.0,
+        biases: trained.1,
+        shapes: created.2,
+        use_relu: spec.use_relu,
+    }
+    eval_candidate_metrics(spec, model, ds)
+}
+
+def unpack_dataset_vecs(vecs: list<list<f64>>, counts: list<i64>) -> FeatureDataset effect alloc {
+    FeatureDataset {
+        x_train: list_get(vecs, 0),
+        y_train: list_get(vecs, 1),
+        n_train: list_get(counts, 0),
+        x_val: list_get(vecs, 2),
+        y_val: list_get(vecs, 3),
+        n_val: list_get(counts, 1),
+        samples_processed: list_get(counts, 2),
+    }
+}
+
+/// Train multiple candidate cipher classifier architectures concurrently over channels.
+pub def train_classifier_tournament(
+    ds: FeatureDataset,
+    workers: i64,
+    epochs: i64,
+) -> (TrainedClassifier, list<TrainedClassifier>) effect alloc, random, thread, throw, time {
+    val specs = build_worker_specs(workers, epochs)
+    val ds_vecs = list(ds.x_train, ds.y_train, ds.x_val, ds.y_val)
+    val ds_counts = list(ds.n_train, ds.n_val, ds.samples_processed)
+    val ch: chan<TrainedClassifier> = channel()
+    val done_cnt = atomic(0)
+    val tg = task_group()
+    val n = list_len(specs)
+    var i = 0
+    while i < n {
+        val idx = i
+        spawn(tg) {
+            val cand = train_single_worker(
+                list_get(specs, idx),
+                unpack_dataset_vecs(ds_vecs, ds_counts),
+            )
+            val _p = atomic_add(done_cnt, 1)
+            send(ch, cand)
+        }
+        i = i + 1
+    }
+    task_group_join(tg)
+    val candidates: list<TrainedClassifier> = list()
+    var k = 0
+    while k < n {
+        list_push(candidates, recv(ch))
+        k = k + 1
+    }
+    val _completed = atomic_load(done_cnt)
+    val winner = unwrap(select_best_by(candidates, score_classifier_candidate))
+    (winner, candidates)
+}
+
+def score_classifier_candidate(c: TrainedClassifier) -> f64 {
+    c.val_acc - c.val_loss * 0.05
+}
+
+/// Predict cipher class and per-class confidence vector for raw ciphertext bytes.
+pub def classify_ciphertext(
+    clf: TrainedClassifier,
+    ct_bytes: list<i64>,
+) -> CipherPrediction effect alloc {
+    val feats = extract_cipher_features(ct_bytes)
+    val probs = mlp_predict(
+        clf.model.weights,
+        clf.model.biases,
+        clf.model.shapes,
+        feats,
+        clf.model.use_relu,
+    )
+    val cid = mlp_predict_class(
+        clf.model.weights,
+        clf.model.biases,
+        clf.model.shapes,
+        feats,
+        clf.model.use_relu,
+    )
+    CipherPrediction {
+        family: family_from_id(cid),
+        class_id: cid,
+        probs: probs,
+    }
+}
+
+/// Evaluate SIMD parallel RMS weight energy via an in-place par for tensor kernel.
+pub def simd_weight_energy(weights: list<f64>) -> f64 effect alloc {
+    val n = list_len(weights)
+    if n == 0 {
+        return 0.0
+    }
+    val wt = tensor_ad_from_data(weights, list(n))
+    par for i in 0..n {
+        wt[i] = wt[i] * wt[i]
+    }
+    val sum_sq = tensor_ad_item(tensor_ad_sum(wt))
+    sqrt(sum_sq / to_f64(n))
+}
+
+def encode_f64_sep(vals: list<f64>) -> str effect alloc {
+    var out = ""
+    val n = list_len(vals)
+    var i = 0
+    while i < n {
+        val item = to_str(list_get(vals, i))
+        out = if i == 0 { item } else { concat(out, concat(",", item)) }
+        i = i + 1
+    }
+    out
+}
+
+def encode_i64_sep(vals: list<i64>) -> str effect alloc {
+    var out = ""
+    val n = list_len(vals)
+    var i = 0
+    while i < n {
+        val item = to_str(list_get(vals, i))
+        out = if i == 0 { item } else { concat(out, concat(",", item)) }
+        i = i + 1
+    }
+    out
+}
+
+def parse_i64_safe(s: str) -> i64 effect throw {
+    val parsed = parse_i64(s)
+    if is_some(parsed) { unwrap(parsed) } else { 0 }
+}
+
+def parse_f64_safe(s: str) -> f64 effect throw {
+    val parsed = parse_f64(s)
+    if is_some(parsed) { unwrap(parsed) } else { 0.0 }
+}
+
+def parse_f64_sep(raw: str) -> list<f64> effect alloc, throw {
+    val parts = split(raw, ",")
+    val out: list<f64> = list()
+    var i = 0
+    while i < list_len(parts) {
+        val tok = list_get(parts, i)
+        if len(tok) > 0 { list_push(out, parse_f64_safe(tok)) }
+        i = i + 1
+    }
+    out
+}
+
+def parse_i64_sep(raw: str) -> list<i64> effect alloc, throw {
+    val parts = split(raw, ",")
+    val out: list<i64> = list()
+    var i = 0
+    while i < list_len(parts) {
+        val tok = list_get(parts, i)
+        if len(tok) > 0 { list_push(out, parse_i64_safe(tok)) }
+        i = i + 1
+    }
+    out
+}
+
+/// Persist trained cipher classifier weights and validation metadata to disk as JSON.
+pub def save_classifier_state(
+    dir_path: str,
+    clf: TrainedClassifier,
+) -> result<str, StageError> effect fs, alloc {
+    val _ok = make_dir(dir_path)
+    val path = concat(dir_path, "/classifier_state.json")
+    val keys = list(
+        "arch_name",
+        "use_relu",
+        "val_acc",
+        "val_loss",
+        "shapes_csv",
+        "weights_csv",
+        "biases_csv",
+        "per_class_csv",
+    )
+    val vals = list(
+        json_str(clf.arch_name),
+        json_num_i64(clf.model.use_relu),
+        json_num_f64(clf.val_acc),
+        json_num_f64(clf.val_loss),
+        json_str(encode_i64_sep(clf.model.shapes)),
+        json_str(encode_f64_sep(clf.model.weights)),
+        json_str(encode_f64_sep(clf.model.biases)),
+        json_str(encode_f64_sep(clf.per_class_acc)),
+    )
+    val doc = json_obj(keys, vals)
+    when write_text(path, doc) {
+        ok(_) => ok(path),
+        err(e) => err(StageError.IoFailure(e)),
+    }
+}
+
+/// Reload previously trained cipher classifier weights from JSON state on disk.
+pub def load_classifier_state(
+    dir_path: str,
+) -> result<TrainedClassifier, StageError> effect fs, alloc, throw {
+    val path = concat(dir_path, "/classifier_state.json")
+    when read_text(path) {
+        ok(raw) => {
+            val arch = json_query(raw, "arch_name")
+            if len(arch) == 0 {
+                return err(StageError.IoFailure("invalid classifier_state.json"))
+            }
+            val relu = parse_i64_safe(json_query(raw, "use_relu"))
+            val va_acc = parse_f64_safe(json_query(raw, "val_acc"))
+            val va_loss = parse_f64_safe(json_query(raw, "val_loss"))
+            val shapes = parse_i64_sep(json_query(raw, "shapes_csv"))
+            val weights = parse_f64_sep(json_query(raw, "weights_csv"))
+            val biases = parse_f64_sep(json_query(raw, "biases_csv"))
+            val per_cls = parse_f64_sep(json_query(raw, "per_class_csv"))
+            ok(
+                TrainedClassifier {
+                    worker_id: 0,
+                    arch_name: arch,
+                    model: MlpWeights {
+                        weights: weights,
+                        biases: biases,
+                        shapes: shapes,
+                        use_relu: relu,
+                    },
+                    train_loss: va_loss,
+                    val_loss: va_loss,
+                    val_acc: va_acc,
+                    per_class_acc: per_cls,
+                },
+            )
+        },
+        err(e) => err(StageError.IoFailure(e)),
+    }
+}
+
+def test_classifier_learns_offline_corpus() -> i64 effect alloc, random, thread, throw, time {
+    val pt_blocks: list<PlainBlock> = list()
+    val val_blocks: list<PlainBlock> = list()
+    val seed_a = "Experimental IP transmission over avian carriers requires non-trivial diffusion across packet framing and payload headers."
+    val seed_b = "Classical monoalphabetic shifts preserve letter counts whereas polyalphabetic tableaux and stream keys flatten frequency peaks."
+    var i = 0
+    while i < 8 {
+        list_push(pt_blocks, unwrap(make_plain_block("tr", str_to_u8(seed_a))))
+        list_push(pt_blocks, unwrap(make_plain_block("tr2", str_to_u8(seed_b))))
+        i = i + 1
+    }
+    var j = 0
+    while j < 4 {
+        list_push(val_blocks, unwrap(make_plain_block("va", str_to_u8(seed_a))))
+        j = j + 1
+    }
+    val ds = build_feature_dataset(pt_blocks, val_blocks, 2)
+    val res = train_classifier_tournament(ds, 2, 14)
+    val winner = res.0
+    assert(winner.val_acc >= 0.70)
+    assert(simd_weight_energy(winner.model.weights) > 0.0)
+    0
+}

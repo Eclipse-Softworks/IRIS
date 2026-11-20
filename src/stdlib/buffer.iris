@@ -9,7 +9,7 @@ pub record ByteBuffer {
 }
 
 /// Create a new empty ByteBuffer.
-pub def byte_buffer_new() -> ByteBuffer {
+pub def byte_buffer_new() -> ByteBuffer effect alloc {
     ByteBuffer {
         data: list(),
         len: 0,
@@ -17,7 +17,7 @@ pub def byte_buffer_new() -> ByteBuffer {
 }
 
 /// Create a ByteBuffer initialized with a given byte capacity filled with zeroes.
-pub def byte_buffer_zeros(capacity: i64) -> ByteBuffer {
+pub def byte_buffer_zeros(capacity: i64) -> ByteBuffer effect alloc {
     val d: list<i64> = list();
     for i in 0 .. capacity {
         list_push(d, 0);
@@ -29,7 +29,7 @@ pub def byte_buffer_zeros(capacity: i64) -> ByteBuffer {
 }
 
 /// Push a single raw byte (0..255) to the buffer.
-pub def byte_buffer_push(buf: ByteBuffer, byte_val: i64) -> ByteBuffer {
+pub def byte_buffer_push(buf: ByteBuffer, byte_val: i64) -> ByteBuffer effect alloc {
     val b = byte_val % 256;
     list_push(buf.data, b);
     ByteBuffer {
@@ -39,7 +39,7 @@ pub def byte_buffer_push(buf: ByteBuffer, byte_val: i64) -> ByteBuffer {
 }
 
 /// Get a byte at 0-indexed position. Returns -1 if out of bounds.
-pub def byte_buffer_get(buf: ByteBuffer, index: i64) -> i64 {
+pub def byte_buffer_get(buf: ByteBuffer, index: i64) -> i64 effect alloc {
     if index < 0 || index >= buf.len {
         return -1
     }
@@ -47,7 +47,7 @@ pub def byte_buffer_get(buf: ByteBuffer, index: i64) -> i64 {
 }
 
 /// Set a byte at 0-indexed position.
-pub def byte_buffer_set(buf: ByteBuffer, index: i64, byte_val: i64) -> bool {
+pub def byte_buffer_set(buf: ByteBuffer, index: i64, byte_val: i64) -> bool effect alloc {
     if index < 0 || index >= buf.len {
         return false
     }
@@ -57,7 +57,7 @@ pub def byte_buffer_set(buf: ByteBuffer, index: i64, byte_val: i64) -> bool {
 }
 
 /// Create a ByteBuffer by copying the bytes of an ASCII/UTF-8 string.
-pub def byte_buffer_from_str(s: str) -> ByteBuffer {
+pub def byte_buffer_from_str(s: str) -> ByteBuffer effect alloc {
     val bytes = str_bytes(s);
     val count = list_len(bytes);
     ByteBuffer {
@@ -67,7 +67,7 @@ pub def byte_buffer_from_str(s: str) -> ByteBuffer {
 }
 
 /// Convert ByteBuffer to an ASCII lossy string, replacing non-printable bytes with '.'.
-pub def byte_buffer_to_ascii_lossy(buf: ByteBuffer) -> str {
+pub def byte_buffer_to_ascii_lossy(buf: ByteBuffer) -> str effect alloc {
     var out = "";
     val ascii_chars = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~";
     for i in 0 .. buf.len {
@@ -91,7 +91,7 @@ def hex_nibble(ch: i64) -> i64 {
 
 /// Decode a hexadecimal string into a ByteBuffer.
 /// Automatically handles optional "0x" prefix, spaces, and colons.
-pub def byte_buffer_from_hex(hex_str: str) -> ByteBuffer {
+pub def byte_buffer_from_hex(hex_str: str) -> ByteBuffer effect alloc {
     val bytes: list<i64> = str_bytes(hex_str);
     val n = list_len(bytes);
     var buf = byte_buffer_new();
@@ -133,7 +133,7 @@ pub def byte_buffer_from_hex(hex_str: str) -> ByteBuffer {
 }
 
 /// Convert ByteBuffer to a hexadecimal string.
-pub def byte_buffer_to_hex(buf: ByteBuffer) -> str {
+pub def byte_buffer_to_hex(buf: ByteBuffer) -> str effect alloc {
     var out = "";
     val hex_chars = "0123456789abcdef";
     for i in 0 .. buf.len {
@@ -146,7 +146,7 @@ pub def byte_buffer_to_hex(buf: ByteBuffer) -> str {
 }
 
 /// Extract a sub-slice of a ByteBuffer from [start, end).
-pub def byte_buffer_slice(buf: ByteBuffer, start: i64, end: i64) -> ByteBuffer {
+pub def byte_buffer_slice(buf: ByteBuffer, start: i64, end: i64) -> ByteBuffer effect alloc {
     val s = if start < 0 { 0 } else { start };
     val e = if end > buf.len { buf.len } else { end };
     var out = byte_buffer_new();
@@ -161,7 +161,7 @@ pub def byte_buffer_slice(buf: ByteBuffer, start: i64, end: i64) -> ByteBuffer {
 }
 
 /// Concatenate two ByteBuffers into a new ByteBuffer.
-pub def byte_buffer_concat(a: ByteBuffer, b: ByteBuffer) -> ByteBuffer {
+pub def byte_buffer_concat(a: ByteBuffer, b: ByteBuffer) -> ByteBuffer effect alloc {
     val out_data: list<i64> = list();
     for i in 0 .. a.len {
         list_push(out_data, list_get(a.data, i));
@@ -176,7 +176,7 @@ pub def byte_buffer_concat(a: ByteBuffer, b: ByteBuffer) -> ByteBuffer {
 }
 
 /// Find the first offset of needle inside haystack, or -1 if not found.
-pub def byte_buffer_find(haystack: ByteBuffer, needle: ByteBuffer) -> i64 {
+pub def byte_buffer_find(haystack: ByteBuffer, needle: ByteBuffer) -> i64 effect alloc {
     if needle.len == 0 { return 0 }
     if needle.len > haystack.len { return -1 }
     val max_i = haystack.len - needle.len + 1;
@@ -196,12 +196,12 @@ pub def byte_buffer_find(haystack: ByteBuffer, needle: ByteBuffer) -> i64 {
 }
 
 /// Check if haystack contains needle as a sub-sequence.
-pub def byte_buffer_contains(haystack: ByteBuffer, needle: ByteBuffer) -> bool {
+pub def byte_buffer_contains(haystack: ByteBuffer, needle: ByteBuffer) -> bool effect alloc {
     byte_buffer_find(haystack, needle) >= 0
 }
 
 /// Read a big-endian 16-bit unsigned integer (network byte order).
-pub def byte_buffer_read_u16_be(buf: ByteBuffer, offset: i64) -> i64 {
+pub def byte_buffer_read_u16_be(buf: ByteBuffer, offset: i64) -> i64 effect alloc {
     if offset < 0 || offset + 1 >= buf.len { return -1 }
     val hi = list_get(buf.data, offset);
     val lo = list_get(buf.data, offset + 1);
@@ -209,7 +209,7 @@ pub def byte_buffer_read_u16_be(buf: ByteBuffer, offset: i64) -> i64 {
 }
 
 /// Read a big-endian 32-bit unsigned integer (network byte order).
-pub def byte_buffer_read_u32_be(buf: ByteBuffer, offset: i64) -> i64 {
+pub def byte_buffer_read_u32_be(buf: ByteBuffer, offset: i64) -> i64 effect alloc {
     if offset < 0 || offset + 3 >= buf.len { return -1 }
     val b0 = list_get(buf.data, offset);
     val b1 = list_get(buf.data, offset + 1);
@@ -219,14 +219,14 @@ pub def byte_buffer_read_u32_be(buf: ByteBuffer, offset: i64) -> i64 {
 }
 
 /// Write a big-endian 16-bit unsigned integer (network byte order).
-pub def byte_buffer_write_u16_be(buf: ByteBuffer, val16: i64) -> ByteBuffer {
+pub def byte_buffer_write_u16_be(buf: ByteBuffer, val16: i64) -> ByteBuffer effect alloc {
     val hi = (val16 / 256) % 256;
     val lo = val16 % 256;
     byte_buffer_push(byte_buffer_push(buf, hi), lo)
 }
 
 /// Write a big-endian 32-bit unsigned integer (network byte order).
-pub def byte_buffer_write_u32_be(buf: ByteBuffer, val32: i64) -> ByteBuffer {
+pub def byte_buffer_write_u32_be(buf: ByteBuffer, val32: i64) -> ByteBuffer effect alloc {
     val b0 = (val32 / 16777216) % 256;
     val b1 = (val32 / 65536) % 256;
     val b2 = (val32 / 256) % 256;
@@ -235,7 +235,7 @@ pub def byte_buffer_write_u32_be(buf: ByteBuffer, val32: i64) -> ByteBuffer {
 }
 
 /// Read a little-endian 16-bit unsigned integer.
-pub def byte_buffer_read_u16_le(buf: ByteBuffer, offset: i64) -> i64 {
+pub def byte_buffer_read_u16_le(buf: ByteBuffer, offset: i64) -> i64 effect alloc {
     if offset < 0 || offset + 1 >= buf.len { return -1 }
     val lo = list_get(buf.data, offset);
     val hi = list_get(buf.data, offset + 1);
@@ -243,7 +243,7 @@ pub def byte_buffer_read_u16_le(buf: ByteBuffer, offset: i64) -> i64 {
 }
 
 /// Read a little-endian 32-bit unsigned integer.
-pub def byte_buffer_read_u32_le(buf: ByteBuffer, offset: i64) -> i64 {
+pub def byte_buffer_read_u32_le(buf: ByteBuffer, offset: i64) -> i64 effect alloc {
     if offset < 0 || offset + 3 >= buf.len { return -1 }
     val b0 = list_get(buf.data, offset);
     val b1 = list_get(buf.data, offset + 1);
@@ -253,14 +253,14 @@ pub def byte_buffer_read_u32_le(buf: ByteBuffer, offset: i64) -> i64 {
 }
 
 /// Write a little-endian 16-bit unsigned integer.
-pub def byte_buffer_write_u16_le(buf: ByteBuffer, val16: i64) -> ByteBuffer {
+pub def byte_buffer_write_u16_le(buf: ByteBuffer, val16: i64) -> ByteBuffer effect alloc {
     val lo = val16 % 256;
     val hi = (val16 / 256) % 256;
     byte_buffer_push(byte_buffer_push(buf, lo), hi)
 }
 
 /// Write a little-endian 32-bit unsigned integer.
-pub def byte_buffer_write_u32_le(buf: ByteBuffer, val32: i64) -> ByteBuffer {
+pub def byte_buffer_write_u32_le(buf: ByteBuffer, val32: i64) -> ByteBuffer effect alloc {
     val b0 = val32 % 256;
     val b1 = (val32 / 256) % 256;
     val b2 = (val32 / 65536) % 256;
@@ -269,7 +269,7 @@ pub def byte_buffer_write_u32_le(buf: ByteBuffer, val32: i64) -> ByteBuffer {
 }
 
 /// Check if buffer contains null bytes (0x00).
-pub def byte_buffer_has_null(buf: ByteBuffer) -> bool {
+pub def byte_buffer_has_null(buf: ByteBuffer) -> bool effect alloc {
     for i in 0 .. buf.len {
         if list_get(buf.data, i) == 0 {
             return true

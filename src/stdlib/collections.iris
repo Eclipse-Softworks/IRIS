@@ -2,7 +2,7 @@
 
 // Remove the first occurrence of `val` from `lst` by value.
 // Returns 1 if removed, 0 if not found.
-pub def list_remove_val(lst: list<i64>, elem: i64) -> i64 {
+pub def list_remove_val(lst: list<i64>, elem: i64) -> i64 effect alloc {
     val idx = list_index_of(lst, elem);
     if idx == -1 {
         0
@@ -13,7 +13,7 @@ pub def list_remove_val(lst: list<i64>, elem: i64) -> i64 {
 }
 
 // Create a list of `n` copies of `val`.
-pub def list_fill(n: i64, elem: i64) -> list<i64> {
+pub def list_fill(n: i64, elem: i64) -> list<i64> effect alloc {
     val result: list<i64> = list();
     var i = 0;
     while i < n {
@@ -23,12 +23,12 @@ pub def list_fill(n: i64, elem: i64) -> list<i64> {
     result
 }
 
-pub def list_repeat(elem: i64, count: i64) -> list<i64> {
+pub def list_repeat(elem: i64, count: i64) -> list<i64> effect alloc {
     list_fill(count, elem)
 }
 
 // Reverses the elements of a list, returning a new list.
-pub def list_reverse(lst: list<i64>) -> list<i64> {
+pub def list_reverse(lst: list<i64>) -> list<i64> effect alloc {
     val result: list<i64> = list();
     val n = list_len(lst);
     var i = n - 1;
@@ -40,7 +40,7 @@ pub def list_reverse(lst: list<i64>) -> list<i64> {
 }
 
 // Returns a deduplicated copy of the list preserving original order.
-pub def list_unique(lst: list<i64>) -> list<i64> {
+pub def list_unique(lst: list<i64>) -> list<i64> effect alloc {
     val result: list<i64> = list();
     val n = list_len(lst);
     for i in 0 .. n {
@@ -53,7 +53,7 @@ pub def list_unique(lst: list<i64>) -> list<i64> {
 }
 
 // Counts occurrences of `elem` in `lst`.
-pub def list_count(lst: list<i64>, elem: i64) -> i64 {
+pub def list_count(lst: list<i64>, elem: i64) -> i64 effect alloc {
     var c = 0;
     val n = list_len(lst);
     for i in 0 .. n {
@@ -65,7 +65,7 @@ pub def list_count(lst: list<i64>, elem: i64) -> i64 {
 }
 
 // Checks if two lists have equal contents and lengths.
-pub def list_all_equal(a: list<i64>, b: list<i64>) -> bool {
+pub def list_all_equal(a: list<i64>, b: list<i64>) -> bool effect alloc {
     val len_a = list_len(a);
     val len_b = list_len(b);
     if len_a != len_b { return false };
@@ -78,7 +78,7 @@ pub def list_all_equal(a: list<i64>, b: list<i64>) -> bool {
 }
 
 // Computes the integer sum of elements in a list.
-pub def list_sum(lst: list<i64>) -> i64 {
+pub def list_sum(lst: list<i64>) -> i64 effect alloc {
     var total = 0;
     val n = list_len(lst);
     for i in 0 .. n {
@@ -88,7 +88,7 @@ pub def list_sum(lst: list<i64>) -> i64 {
 }
 
 // Returns minimum element in list, or none if empty.
-pub def list_min(lst: list<i64>) -> option<i64> {
+pub def list_min(lst: list<i64>) -> option<i64> effect alloc {
     val n = list_len(lst);
     if n == 0 { return none };
     var m = list_get(lst, 0);
@@ -100,7 +100,7 @@ pub def list_min(lst: list<i64>) -> option<i64> {
 }
 
 // Returns maximum element in list, or none if empty.
-pub def list_max(lst: list<i64>) -> option<i64> {
+pub def list_max(lst: list<i64>) -> option<i64> effect alloc {
     val n = list_len(lst);
     if n == 0 { return none };
     var m = list_get(lst, 0);
@@ -112,7 +112,7 @@ pub def list_max(lst: list<i64>) -> option<i64> {
 }
 
 // Returns the first `count` elements of the list.
-pub def list_take(lst: list<i64>, count: i64) -> list<i64> {
+pub def list_take(lst: list<i64>, count: i64) -> list<i64> effect alloc {
     val result: list<i64> = list();
     val n = list_len(lst);
     val limit = if count < n { count } else { n };
@@ -124,7 +124,7 @@ pub def list_take(lst: list<i64>, count: i64) -> list<i64> {
 }
 
 // Returns the list without the first `count` elements.
-pub def list_drop(lst: list<i64>, count: i64) -> list<i64> {
+pub def list_drop(lst: list<i64>, count: i64) -> list<i64> effect alloc {
     val result: list<i64> = list();
     val n = list_len(lst);
     if count >= n { return result };
@@ -136,14 +136,14 @@ pub def list_drop(lst: list<i64>, count: i64) -> list<i64> {
 }
 
 // Swaps two elements in place.
-pub def list_swap(lst: list<i64>, i: i64, j: i64) -> unit {
+pub def list_swap(lst: list<i64>, i: i64, j: i64) -> unit effect alloc {
     val tmp = list_get(lst, i);
     list_set(lst, i, list_get(lst, j));
     list_set(lst, j, tmp);
 }
 
 // Flattens a list of lists into a single 1D list.
-pub def list_flatten(nested: list<list<i64>>) -> list<i64> {
+pub def list_flatten(nested: list<list<i64>>) -> list<i64> effect alloc {
     val result: list<i64> = list();
     val outer_len = list_len(nested);
     for i in 0 .. outer_len {
@@ -159,18 +159,18 @@ pub def list_flatten(nested: list<list<i64>>) -> list<i64> {
 // --- Map Operations ---
 
 // Get a value from a map, returning `default` if the key is missing.
-pub def map_get_or(m: map<str, i64>, k: str, default: i64) -> i64 {
+pub def map_get_or(m: map<str, i64>, k: str, default: i64) -> i64 effect alloc, throw {
     val opt = map_get(m, k);
     opt.unwrap_or(default)
 }
 
 // Checks if map contains key.
-pub def map_has_key(m: map<str, i64>, k: str) -> bool {
+pub def map_has_key(m: map<str, i64>, k: str) -> bool effect alloc {
     map_contains(m, k)
 }
 
 // Merge two maps into a new map. If both have the same key, the value from `b` wins.
-pub def map_merge(a: map<str, i64>, b: map<str, i64>) -> map<str, i64> {
+pub def map_merge(a: map<str, i64>, b: map<str, i64>) -> map<str, i64> effect alloc, throw {
     val result = map();
     for k in map_keys(a) {
         map_set(result, k, map_get(a, k).unwrap_or(0));
@@ -182,7 +182,7 @@ pub def map_merge(a: map<str, i64>, b: map<str, i64>) -> map<str, i64> {
 }
 
 // Extracts all values into a list.
-pub def map_values_list(m: map<str, i64>) -> list<i64> {
+pub def map_values_list(m: map<str, i64>) -> list<i64> effect alloc, throw {
     val result: list<i64> = list();
     for k in map_keys(m) {
         push(result, map_get(m, k).unwrap_or(0));
@@ -191,7 +191,7 @@ pub def map_values_list(m: map<str, i64>) -> list<i64> {
 }
 
 // Clones a map.
-pub def map_clone(m: map<str, i64>) -> map<str, i64> {
+pub def map_clone(m: map<str, i64>) -> map<str, i64> effect alloc, throw {
     val result = map();
     for k in map_keys(m) {
         map_set(result, k, map_get(m, k).unwrap_or(0));

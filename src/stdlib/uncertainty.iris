@@ -46,7 +46,7 @@ pub def nig_update(prior : NormalInvGamma, x : f64) -> NormalInvGamma {
 
 /// Update a Normal-Inverse-Gamma posterior with multiple observations.
 /// Returns the updated posterior.
-pub def nig_update_batch(prior : NormalInvGamma, xs : list<f64>) -> NormalInvGamma {
+pub def nig_update_batch(prior : NormalInvGamma, xs : list<f64>) -> NormalInvGamma effect alloc {
     var post = prior
     for i in 0 .. list_len(xs) {
         post = nig_update(post, list_get(xs, i))
@@ -129,7 +129,7 @@ pub def error_confidence(error : f64, scale : f64) -> f64 {
 }
 
 /// Normalize a list of values into a probability distribution (sum to 1).
-pub def softmax(vals : list<f64>) -> list<f64> {
+pub def softmax(vals : list<f64>) -> list<f64> effect alloc {
     val n = list_len(vals)
     var max_val = list_get(vals, 0)
     for i in 1 .. n {
@@ -153,7 +153,7 @@ pub def softmax(vals : list<f64>) -> list<f64> {
 
 /// Compute the entropy of a categorical distribution given by a list of
 /// probabilities (assumed to sum to approximately 1).
-pub def categorical_entropy(probs : list<f64>) -> f64 {
+pub def categorical_entropy(probs : list<f64>) -> f64 effect alloc {
     var h : f64 = 0.0
     for i in 0 .. list_len(probs) {
         val p = list_get(probs, i)
@@ -174,7 +174,7 @@ pub def categorical_entropy(probs : list<f64>) -> f64 {
 /// data — list of observations
 /// data_precision — observation noise precision (1/sigma^2)
 /// Returns posterior mean of mu.
-pub def gaussian_posterior_mean(prior_mean : f64, prior_precision : f64, data : list<f64>, data_precision : f64) -> f64 {
+pub def gaussian_posterior_mean(prior_mean : f64, prior_precision : f64, data : list<f64>, data_precision : f64) -> f64 effect alloc {
     val n = list_len(data)
     if n <= 0 { return prior_mean }
 
@@ -224,7 +224,7 @@ pub def prob_exceeds_threshold(mean : f64, variance : f64, threshold : f64) -> f
 }
 
 /// Maximum likelihood estimate of variance from a list of values.
-pub def mle_variance(vals : list<f64>) -> f64 {
+pub def mle_variance(vals : list<f64>) -> f64 effect alloc {
     val n = list_len(vals)
     if n < 2 { return 0.0 }
 
@@ -241,7 +241,7 @@ pub def mle_variance(vals : list<f64>) -> f64 {
 }
 
 /// Unbiased (Bessel-corrected) sample variance.
-pub def sample_variance(vals : list<f64>) -> f64 {
+pub def sample_variance(vals : list<f64>) -> f64 effect alloc {
     val n = list_len(vals)
     if n < 2 { return 0.0 }
 

@@ -1,0 +1,522 @@
+// Comprehensive dual-backend verification for std.ui_theme, std.ui_layout, HKT signals,
+// iterative BoxConstraints layout, hit-testing, UTF-8 text input/backspace, focus/slider state machine,
+// SVG/HTML HTTP mirror output, and algebraic effect interception.
+
+bring std.tensor
+bring std.ui
+bring std.ui_motion
+bring std.ui_icons
+bring std.ui_widgets
+
+extern def mock_ui_present(cmd_count: i64, last_action: str) -> str
+
+def check_theme_and_geometry() -> i64 {
+    val obs = obsidian_theme()
+    val day = daylight_theme()
+    assert(obs.bg.r == 30 && obs.bg.g == 30 && obs.bg.b == 30)
+    assert(day.bg.r > 200)
+    val c = rgba(1, 2, 3, 4)
+    assert(pack_rgba(c) == 67305985)
+    val semi = with_alpha(rgb(100, 150, 200), 128)
+    assert(semi.a == 128 && semi.r == 100)
+    val mid = mix_color(rgb(0, 0, 0), rgb(200, 100, 50), 0.5)
+    assert(mid.r == 100 && mid.g == 50)
+    assert(tone_color(obs, UiTone.Success).g == obs.teal.g)
+    val css = color_css(rgba(30, 30, 30, 255))
+    assert(contains(css, "rgba(30,30,30,"))
+
+    val box = UiRect { x: 10.0, y: 20.0, w: 100.0, h: 40.0 }
+    assert(rect_contains(box, 50.0, 35.0))
+    assert(!rect_contains(box, 5.0, 35.0))
+    val sz = constrain_size(
+        BoxConstraints { min_w: 50.0, max_w: 120.0, min_h: 20.0, max_h: 80.0 },
+        200.0,
+        10.0,
+    )
+    assert(sz.w == 120.0 && sz.h == 20.0)
+    val cool = ui_thermal_color(0.0)
+    val warm = ui_thermal_color(1.0)
+    assert(cool.b > warm.b || warm.r > cool.r)
+    0
+}
+
+def check_hkt_reactive_signals() -> i64 {
+    val s0 = signal_new("Gulf of Finland")
+    assert(signal_get(s0) == "Gulf of Finland")
+    val s1 = signal_set(s0, "Dover Strait")
+    assert(s1.version == 1)
+    assert(signal_get(s1) == "Dover Strait")
+    assert(contains(ui_signal_summary("corridor", s1), "Dover Strait"))
+
+    val num_sig = signal_new(10.0)
+    val doubled = map_signal(num_sig, |x: f64| x * 2.5)
+    assert(signal_get(doubled) == 25.0)
+
+    val bool_sig = signal_new(true)
+    assert(signal_get(bool_sig))
+
+    val h_items: list<str> = hkt_bind_signal(list("V1", "V2"))
+    val lb = ui_list_box(h_items, 2)
+    assert(lb.version == 2 && ui_list_box_first(lb, "none") == "V1")
+    val h_opt: option<str> = hkt_bind_signal(some("selected"))
+    val ob = ui_option_box(h_opt, 1)
+    assert(ui_option_box_or(ob, "empty") == "selected")
+    0
+}
+
+def build_sample_tree() -> UiTree {
+    val tree = ui_new()
+    val hdg = ui_heading(tree, "hdr", "AIS Console", UiTone.Accent)
+    val badge = ui_badge(tree, "bdg", "LIVE", UiTone.Success)
+    val btn = ui_button(tree, "btn_step", "Step Sim", "step_sim")
+    val btn2 = ui_button_tone(tree, "btn_reset", "Reset", "reset_sim", UiTone.Warning)
+    val chk = ui_checkbox(tree, "chk_auto", "Auto", false, UiTone.Primary)
+    val tog = ui_toggle(tree, "tog_off", "Offline", false, UiTone.Success)
+    val sld = ui_slider(tree, "sld_rng", "Range", 12.0, 24.0)
+    val sld2 = ui_slider_range(tree, "sld_gain", "Gain", 5.0, UiSize { w: 1.0, h: 10.0 })
+    val inp = ui_text_input(tree, "inp_flt", "", "Filter vessel...", UiStyle {})
+
+    val spk = ui_sparkline(
+        tree,
+        "spk",
+        ChartSeries {
+            label: "SOG",
+            xs: list(0.0, 1.0, 2.0),
+            ys: list(10.0, 14.0, 12.0),
+            tone: UiTone.Accent,
+            fill: true,
+        },
+        UiStyle {},
+    )
+    val lch = ui_line_chart(
+        tree,
+        "lch",
+        ChartSeries {
+            label: "CPA",
+            xs: list(0.0, 1.0, 2.0),
+            ys: list(2.5, 1.4, 3.1),
+            tone: UiTone.Primary,
+            fill: true,
+        },
+        UiStyle { min_h: 120.0 },
+    )
+    val rad = ui_radar_scope(
+        tree,
+        "rad",
+        RadarSpec {
+            title: "TSS",
+            range_nm: 12.0,
+            own_heading_deg: 75.0,
+            ring_count: 3,
+            blips: list(
+                RadarBlip {
+                    label: "NORDIC",
+                    bearing_deg: 45.0,
+                    range_nm: 6.0,
+                    course_deg: 210.0,
+                    speed_kn: 14.0,
+                    tone: UiTone.Danger,
+                },
+            ),
+        },
+        UiStyle { flex: 1.0 },
+    )
+    val ten_a = tensor_from_data(list(0.1, 0.4, 0.7, 1.0), list(2, 2))
+    val tv = ui_tensor_surface(tree, "ten", ten_a, "Risk Grid", UiStyle { min_h: 90.0 })
+    val th = ui_table_header(tree, "th", "MMSI | CPA | VERDICT", UiStyle {})
+    val tr = ui_table_row(tree, "tr", "230001 | 1.4nm | PORT", UiTone.Warning, UiStyle {})
+    val lbl = ui_label(tree, "lbl", "Sector 01", UiStyle {})
+    val spc = ui_spacer(tree, 1.0, 8.0, 8.0)
+
+    val top_row = ui_row(tree, "top", UiStyle { gap: 8.0 }, list(hdg, spc, badge, btn, btn2))
+    val left_card = ui_card(
+        tree,
+        "left",
+        UiStyle { flex: 1.0, gap: 6.0 },
+        list(chk, tog, sld, sld2, inp, spk, lbl),
+    )
+    val right_card = ui_card(
+        tree,
+        "right",
+        UiStyle { flex: 2.0, gap: 6.0 },
+        list(rad, lch, tv, th, tr),
+    )
+    val body_row = ui_row(
+        tree,
+        "body",
+        UiStyle { gap: 10.0, flex: 1.0 },
+        list(left_card, right_card),
+    )
+    val stk = ui_stack(
+        tree,
+        "stk",
+        UiStyle { flex: 1.0 },
+        list(ui_col(tree, "main", UiStyle { padding: 12.0, gap: 10.0 }, list(top_row, body_row))),
+    )
+    return ui_set_root(ui_layout(ui_set_root(tree, stk), 960.0, 720.0), stk)
+}
+
+def check_layout_and_events() -> i64 {
+    val t = build_sample_tree()
+    assert(t.width == 960.0 && t.height == 720.0)
+
+    val btn_idx = when ui_find_node_key(t, "btn_step") {
+        some(i) => i,
+        none => -1
+    }
+    val tog_idx = when ui_find_node_key(t, "tog_off") {
+        some(i) => i,
+        none => -1
+    }
+    val sld_idx = when ui_find_node_key(t, "sld_rng") {
+        some(i) => i,
+        none => -1
+    }
+    val inp_idx = when ui_find_node_key(t, "inp_flt") {
+        some(i) => i,
+        none => -1
+    }
+    val left_idx = when ui_find_node_key(t, "left") {
+        some(i) => i,
+        none => -1
+    }
+    val right_idx = when ui_find_node_key(t, "right") {
+        some(i) => i,
+        none => -1
+    }
+    assert(btn_idx >= 0 && tog_idx >= 0 && sld_idx >= 0 && inp_idx >= 0)
+
+    val left_r = list_get(t.nodes, left_idx).layout
+    val right_r = list_get(t.nodes, right_idx).layout
+    assert(right_r.w > left_r.w)
+    assert(left_r.x + left_r.w <= right_r.x + 0.1)
+
+    val btn_r = list_get(t.nodes, btn_idx).layout
+    val bx = btn_r.x + btn_r.w * 0.5
+    val by = btn_r.y + btn_r.h * 0.5
+    val hit = ui_hit_test(t, bx, by)
+    assert(when hit {
+        some(h) => h == btn_idx,
+        none => false
+    })
+
+    var st = ui_state_new()
+    st = ui_process_events(
+        t,
+        st,
+        list(
+            HostEvent { kind: UiEventKind.PointerMove, x: bx, y: by },
+            HostEvent { kind: UiEventKind.PointerDown, x: bx, y: by },
+            HostEvent { kind: UiEventKind.PointerUp, x: bx, y: by },
+        ),
+    )
+    assert(st.hovered_key == "btn_step")
+    assert(st.dispatched_action == "step_sim")
+    assert(ui_clear_events(st).dispatched_action == "")
+
+    val tog_r = list_get(t.nodes, tog_idx).layout
+    st = ui_process_events(
+        t,
+        ui_clear_events(st),
+        list(
+            HostEvent { kind: UiEventKind.PointerDown, x: tog_r.x + 8.0, y: tog_r.y + 8.0 },
+            HostEvent { kind: UiEventKind.PointerUp, x: tog_r.x + 8.0, y: tog_r.y + 8.0 },
+        ),
+    )
+    assert(st.has_toggle_change && st.last_toggle_key == "tog_off" && st.last_toggle_val)
+
+    val sld_r = list_get(t.nodes, sld_idx).layout
+    val drag_x = sld_r.x + sld_r.w * 0.75
+    st = ui_process_events(
+        t,
+        ui_clear_events(st),
+        list(
+            HostEvent { kind: UiEventKind.PointerDown, x: sld_r.x + 12.0, y: sld_r.y + 12.0 },
+            HostEvent { kind: UiEventKind.PointerMove, x: drag_x, y: sld_r.y + 12.0 },
+            HostEvent { kind: UiEventKind.PointerUp, x: drag_x, y: sld_r.y + 12.0 },
+        ),
+    )
+    assert(st.has_slider_change && st.last_slider_key == "sld_rng" && st.last_slider_val > 14.0)
+
+    val inp_r = list_get(t.nodes, inp_idx).layout
+    st = ui_process_events(
+        t,
+        ui_clear_events(st),
+        list(
+            HostEvent { kind: UiEventKind.PointerDown, x: inp_r.x + 10.0, y: inp_r.y + 10.0 },
+            HostEvent { kind: UiEventKind.PointerUp, x: inp_r.x + 10.0, y: inp_r.y + 10.0 },
+            HostEvent { kind: UiEventKind.TextInput, text: "ABé" },
+            HostEvent { kind: UiEventKind.KeyDown, key_code: 2 },
+        ),
+    )
+    assert(st.focused_key == "inp_flt")
+    assert(st.last_text_val == "AB")
+
+    st = ui_apply_event(t, st, HostEvent { kind: UiEventKind.KeyDown, key_code: 3 })
+    assert(st.focused_key != "inp_flt")
+    st = ui_apply_event(t, st, HostEvent { kind: UiEventKind.Wheel, y: -30.0 })
+    assert(st.scroll_offset == 30.0)
+    st = ui_apply_event(t, st, HostEvent { kind: UiEventKind.CloseRequested })
+    assert(st.close_requested)
+    assert(ui_a11y_role(WidgetKind.RadarScope) == 10)
+    assert(ui_a11y_role(WidgetKind.Button) == 3)
+    0
+}
+
+def check_svg_mirror_and_effects() -> i64 {
+    val t = build_sample_tree()
+    val svg = ui_render_svg(t)
+    assert(contains(svg, "<svg xmlns=\"http://www.w3.org/2000/svg\""))
+    assert(contains(svg, "AIS Console"))
+    val html = ui_render_mirror_html(t, "AIS Live")
+    assert(contains(html, "<title>AIS Live</title>"))
+    val http = ui_http_mirror_response(t, "AIS Live")
+    assert(contains(http, "HTTP/1.1 200 OK"))
+
+    val res = handle {
+        mock_ui_present(list_len(t.nodes), "step_sim")
+    } with {
+        mock_ui_present(cmds, act) -> resume(v) => v(f"ok:{cmds}:{act}")
+    }
+    assert(starts_with(res, "ok:"))
+    assert(contains(res, "step_sim"))
+
+    val custom_t = ui_with_theme(daylight_theme())
+    assert(custom_t.theme.bg.r > 200)
+    0
+}
+
+def make_empty_child_ids() -> list<i64> effect alloc {
+    val xs: list<i64> = list()
+    return xs
+}
+
+def check_low_level_tree_and_paint() -> i64 effect ffi, alloc {
+    var t = ui_tree_new(obsidian_theme())
+    val c_idx = ui_push_chart(
+        t,
+        ChartSeries {
+            label: "CPA",
+            xs: list(0.0, 1.0, 2.0),
+            ys: list(3.5, 2.4, 1.8),
+            tone: UiTone.Warning,
+            fill: true,
+        },
+    )
+    val r_idx = ui_push_radar(
+        t,
+        RadarSpec {
+            title: "SECTOR",
+            range_nm: 6.0,
+            own_heading_deg: 45.0,
+            ring_count: 3,
+            blips: list(
+                RadarBlip {
+                    label: "MV IRIS",
+                    bearing_deg: 90.0,
+                    range_nm: 2.5,
+                    tone: UiTone.Warning,
+                },
+            ),
+        },
+    )
+    val t_idx = ui_push_tensor(
+        t,
+        TensorSpec {
+            width: 2,
+            height: 2,
+            cells: list(0.1, 0.4, 0.7, 0.9),
+            vmin: 0.0,
+            vmax: 1.0,
+            title: "RISK",
+        },
+    )
+    assert(c_idx == 0 && r_idx == 0 && t_idx == 0)
+
+    val n_lbl = ui_add_node(
+        t,
+        UiNode {
+            key: "low_lbl",
+            kind: WidgetKind.Label,
+            text: "Bridge",
+            style: UiStyle { fg: t.theme.fg, font_size: 13.0 },
+            children: make_empty_child_ids(),
+        },
+    )
+    val n_cht = ui_add_node(
+        t,
+        UiNode {
+            key: "low_cht",
+            kind: WidgetKind.LineChart,
+            data_idx: c_idx,
+            style: UiStyle { min_h: 90.0, flex: 1.0 },
+            children: make_empty_child_ids(),
+        },
+    )
+    val n_rad = ui_add_node(
+        t,
+        UiNode {
+            key: "low_rad",
+            kind: WidgetKind.RadarScope,
+            data_idx: r_idx,
+            style: UiStyle { min_h: 120.0, flex: 1.0 },
+            children: make_empty_child_ids(),
+        },
+    )
+    val n_ten = ui_add_node(
+        t,
+        UiNode {
+            key: "low_ten",
+            kind: WidgetKind.TensorView,
+            data_idx: t_idx,
+            style: UiStyle { min_h: 80.0, flex: 1.0 },
+            children: make_empty_child_ids(),
+        },
+    )
+    val root = ui_add_node(
+        t,
+        UiNode {
+            key: "low_root",
+            kind: WidgetKind.Col,
+            style: UiStyle { padding: 8.0, gap: 6.0 },
+            children: list(n_lbl, n_cht, n_rad, n_ten),
+        },
+    )
+    t = ui_set_root(t, root)
+    t = ui_layout(t, 640.0, 480.0)
+    assert(list_len(t.nodes) == 5 && t.root == root)
+
+    val painted = ui_paint(t, ui_state_new(), draw_buf_new(8192))
+    assert(painted.cmd_count > 5 && painted.word_len > 4)
+    val _freed = draw_buf_free(painted)
+    return 0
+}
+
+def check_motion_icons_and_widgets() -> i64 {
+    var m = ui_motion_new()
+    m = ui_motion_to(m, "growth", 1.0, 0.4, UiEase.OutCubic, 0.0)
+    m = ui_motion_tick(m, 0.2)
+    val v = ui_motion_value(m, "growth", 0.0)
+    assert(v > 0.0 && v < 1.0)
+    assert(motion_ease(0.0, UiEase.OutBack) > -0.0001 && motion_ease(0.0, UiEase.OutBack) < 0.0001)
+    assert(motion_ease(1.0, UiEase.OutElastic) == 1.0)
+    assert(motion_pulse(UiClock { now: 0.0 }, 1.0, 0.0) == 0.5)
+
+    val graph = ui_neural_graph_new(24)
+    assert(list_len(graph.nodes) == 24 && list_len(graph.links) > 0)
+
+    val box = draw_buf_new(32768)
+    var b = draw_buf_begin(box, UiColor { r: 0, g: 0, b: 0, a: 255 })
+    b = draw_icon(b, UiIcon.Brain, UiRect { x: 0.0, y: 0.0, w: 24.0, h: 24.0 }, rgba(255, 255, 255, 255))
+    b = draw_neural_graph(b, UiRect { x: 0.0, y: 0.0, w: 300.0, h: 300.0 }, graph, UiClock { now: 1.0 }, list(rgba(255, 0, 0, 255)), UiColor { r: 0, g: 0, b: 0, a: 255 }, 1.0)
+    b = draw_segmented(b, UiRect { x: 0.0, y: 0.0, w: 120.0, h: 30.0 }, list("a", "b"), 1, 0, 0.5, obsidian_theme())
+    val done = draw_buf_finish(b)
+    assert(done.cmd_count > 3)
+    val _freed = draw_buf_free(done)
+
+    val ev = HostEvent { kind: UiEventKind.PointerDown, x: 30.0, y: 70.0 }
+    assert(nav_item_at(UiRect { x: 0.0, y: 0.0, w: 200.0, h: 300.0 }, ev, 7) == 0)
+    assert(segmented_at(UiRect { x: 0.0, y: 0.0, w: 120.0, h: 30.0 }, HostEvent { kind: UiEventKind.PointerDown, x: 90.0, y: 10.0 }, 3) == 2)
+    return 0
+}
+
+def check_state_transitions_and_interactions() -> i64 {
+    val t = build_sample_tree()
+    var st = ui_state_new()
+
+    // Transitions are owned by UiState; the app only supplies a clock.
+    st = ui_state_animate(st, "accent", 1.0, 0.4, UiEase.OutCubic)
+    st = ui_state_tick(st, 0.2)
+    val accent = ui_state_animated_value(st, "accent", 0.0)
+    assert(accent > 0.0 && accent < 1.0)
+    assert(ui_state_clock(st).now == 0.2)
+
+    val btn = ui_node_rect(t, "btn_step")
+    val bx = btn.x + 6.0
+    val by = btn.y + 6.0
+    st = ui_apply_event(t, st, HostEvent { kind: UiEventKind.PointerMove, x: bx, y: by })
+    assert(st.hovered_key == "btn_step")
+    st = ui_state_tick(st, 0.3)
+    assert(ui_state_hover_progress(st, "btn_step") > 0.0)
+
+    // Ctrl-click multi-select on a list row (buttons stay ordinary controls).
+    val row = ui_node_rect(t, "tr")
+    val rx = row.x + 8.0
+    val ry = row.y + 8.0
+    st = ui_apply_event(t, st, HostEvent { kind: UiEventKind.PointerDown, x: rx, y: ry, modifiers: 2 })
+    assert(ui_state_is_selected(st, "tr"))
+    assert(ui_state_selected_count(st) >= 1)
+    st = ui_state_toggle_selection(st, "btn_reset")
+    assert(ui_state_is_selected(st, "btn_reset"))
+    st = ui_state_toggle_selection(st, "btn_reset")
+    assert(!ui_state_is_selected(st, "btn_reset"))
+
+    // Drag / drop lifecycle.
+    assert(ui_state_is_dragging(st))
+    st = ui_apply_event(t, st, HostEvent { kind: UiEventKind.PointerMove, x: rx + 4.0, y: ry + 4.0 })
+    assert(ui_state_is_dragging(st))
+    st = ui_apply_event(t, st, HostEvent { kind: UiEventKind.PointerUp, x: rx + 4.0, y: ry + 4.0 })
+    assert(!ui_state_is_dragging(st))
+
+    // Clipboard round-trip through the retained text value.
+    st = ui_state_set_text(st, "inp_flt", "abc")
+    st = ui_state_set_clipboard(st, "XYZ")
+    assert(ui_state_clipboard(st) == "XYZ")
+    st = ui_state_paste(st)
+    assert(st.last_text_val == "abcXYZ")
+
+    // Multi-line caret movement.
+    val inp = ui_node_rect(t, "inp_flt")
+    st = ui_apply_event(t, st, HostEvent { kind: UiEventKind.PointerDown, x: inp.x + 5.0, y: inp.y + 5.0 })
+    assert(st.focused_key == "inp_flt")
+    st = ui_state_set_text(st, "inp_flt", "one\ntwo\nthree")
+    st = ui_state_set_multiline(st, true)
+    val tp0 = ui_state_text_position(st)
+    assert(tp0.w == 2.0 && tp0.h == 5.0)
+    st = ui_apply_event(t, st, HostEvent { kind: UiEventKind.KeyDown, key_code: 7 })
+    val tp1 = ui_state_text_position(st)
+    assert(tp1.w == 1.0 && tp1.h == 3.0)
+    return 0
+}
+
+def check_extended_draw_encoders() -> i64 {
+    val buf = draw_buf_new(32768)
+    val r = UiRect { x: 0.0, y: 0.0, w: 100.0, h: 50.0 }
+    val radii = UiRadii { tl: 4.0, tr: 8.0, br: 12.0, bl: 16.0 }
+    val stops = list(
+        UiGradientStop { offset: 0.0, color: rgb(255, 0, 0) },
+        UiGradientStop { offset: 1.0, color: rgb(0, 0, 255) },
+    )
+    var b = draw_buf_begin(buf, rgb(0, 0, 0))
+    b = draw_cmd_round_rect_corners(b, r, radii, UiStyle { bg: rgb(255, 0, 0) })
+    b = draw_cmd_linear_gradient(b, r, radii, 0.0, 0.0, 100.0, 0.0, 0, stops)
+    b = draw_cmd_radial_gradient(b, r, radii, 50.0, 25.0, 50.0, 0, stops)
+    b = draw_cmd_box_shadow(b, r, radii, 2.0, 2.0, 4.0, 1.0, rgba(0, 0, 0, 120))
+    val verbs = list(
+        UiPathVerb { kind: 1, x1: 0.0, y1: 0.0 },
+        UiPathVerb { kind: 2, x1: 10.0, y1: 0.0 },
+        UiPathVerb { kind: 2, x1: 10.0, y1: 10.0 },
+        UiPathVerb { kind: 5 },
+    )
+    b = draw_cmd_path(b, UiTransform {}, verbs, rgb(0, 255, 0), rgb(255, 255, 255), 1.0, 0)
+    b = draw_cmd_push_transform(b, UiTransform { e: 5.0 })
+    b = draw_cmd_pop_transform(b)
+    b = draw_cmd_svg_path(b, r, UiSize { w: 10.0, h: 10.0 }, UiTransform {}, "M0 0 L10 0 L10 10 Z", rgb(0, 255, 255), rgb(255, 255, 255), 1.0)
+    val done = draw_buf_finish(b)
+    assert(done.cmd_count == 8)
+    val _freed = draw_buf_free(done)
+    return 0
+}
+
+def main() -> i64 {
+    assert(check_theme_and_geometry() == 0)
+    assert(check_motion_icons_and_widgets() == 0)
+    assert(check_state_transitions_and_interactions() == 0)
+    assert(check_extended_draw_encoders() == 0)
+    assert(check_hkt_reactive_signals() == 0)
+    assert(check_layout_and_events() == 0)
+    assert(check_svg_mirror_and_effects() == 0)
+    assert(check_low_level_tree_and_paint() == 0)
+    println("std ui core ok")
+    return 0
+}

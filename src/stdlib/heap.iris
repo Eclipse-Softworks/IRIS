@@ -11,35 +11,35 @@ record MinHeap[T] { data: list<T> }
 /// Takes no seed. The previous signature was `heap_new[T](v: T)`, which seeded
 /// the heap purely so `T` could be inferred from an argument — leaving an empty
 /// heap unconstructible.
-pub def heap_new[T]() -> MinHeap<T> {
+pub def heap_new[T]() -> MinHeap<T> effect alloc {
     var d: list<T> = list()
     MinHeap { data: d }
 }
 
 /// Create a heap seeded with one value, for callers that want the old shape.
-pub def heap_of[T](v: T) -> MinHeap<T> {
+pub def heap_of[T](v: T) -> MinHeap<T> effect alloc {
     var d: list<T> = list()
     push(d, v);
     MinHeap { data: d }
 }
 
 /// Return the number of elements in the heap.
-pub def heap_len[T](h: MinHeap<T>) -> i64 {
+pub def heap_len[T](h: MinHeap<T>) -> i64 effect alloc {
     list_len(h.data)
 }
 
 /// Return true if the heap has no elements.
-pub def heap_is_empty[T](h: MinHeap<T>) -> bool {
+pub def heap_is_empty[T](h: MinHeap<T>) -> bool effect alloc {
     list_len(h.data) == 0
 }
 
 /// Return the minimum element without removing it.
-pub def heap_peek[T](h: MinHeap<T>) -> T {
+pub def heap_peek[T](h: MinHeap<T>) -> T effect alloc {
     list_get(h.data, 0)
 }
 
 /// Remove and return the minimum element plus the updated heap.
-pub def heap_pop[T](h: MinHeap<T>) -> (T, MinHeap<T>) {
+pub def heap_pop[T](h: MinHeap<T>) -> (T, MinHeap<T>) effect alloc {
     val v = list_get(h.data, 0)
     var new_data: list<T> = list()
     var i = 1
@@ -57,12 +57,12 @@ pub def heap_pop[T](h: MinHeap<T>) -> (T, MinHeap<T>) {
 /// half is wanted — and destructuring it at the call site is what the tests were
 /// written against. These two accessors were referenced by the test suite but had
 /// never been defined.
-pub def heap_pop_val[T](h: MinHeap<T>) -> T {
+pub def heap_pop_val[T](h: MinHeap<T>) -> T effect alloc {
     list_get(h.data, 0)
 }
 
 /// The heap remaining after removing the minimum element.
-pub def heap_pop_heap[T](h: MinHeap<T>) -> MinHeap<T> {
+pub def heap_pop_heap[T](h: MinHeap<T>) -> MinHeap<T> effect alloc {
     var new_data: list<T> = list()
     var i = 1
     val n = list_len(h.data)
@@ -74,7 +74,7 @@ pub def heap_pop_heap[T](h: MinHeap<T>) -> MinHeap<T> {
 }
 
 /// Insert v into the heap maintaining sorted order.
-pub def heap_push[T](h: MinHeap<T>, v: T) -> MinHeap<T> {
+pub def heap_push[T](h: MinHeap<T>, v: T) -> MinHeap<T> effect alloc {
     var new_data: list<T> = list()
     var inserted = 0
     var i = 0
@@ -92,7 +92,7 @@ pub def heap_push[T](h: MinHeap<T>, v: T) -> MinHeap<T> {
 }
 
 /// Build a heap from a list.
-pub def heap_from_list[T](lst: list<T>) -> MinHeap<T> {
+pub def heap_from_list[T](lst: list<T>) -> MinHeap<T> effect alloc {
     if list_len(lst) == 0 {
         val empty_d: list<T> = list()
         return MinHeap { data: empty_d };
@@ -108,7 +108,7 @@ pub def heap_from_list[T](lst: list<T>) -> MinHeap<T> {
 }
 
 /// Return the elements as a sorted list.
-pub def heap_to_list[T](h: MinHeap<T>) -> list<T> {
+pub def heap_to_list[T](h: MinHeap<T>) -> list<T> effect alloc {
     var result: list<T> = list()
     var i = 0
     val n = list_len(h.data)
@@ -120,7 +120,7 @@ pub def heap_to_list[T](h: MinHeap<T>) -> list<T> {
 }
 
 /// Check if a value exists within the heap.
-pub def heap_contains[T](h: MinHeap<T>, target: T) -> bool {
+pub def heap_contains[T](h: MinHeap<T>, target: T) -> bool effect alloc {
     var i = 0
     val n = list_len(h.data)
     while i < n {
@@ -133,13 +133,13 @@ pub def heap_contains[T](h: MinHeap<T>, target: T) -> bool {
 }
 
 /// Clear all elements from the heap and return an empty heap.
-pub def heap_clear[T](h: MinHeap<T>) -> MinHeap<T> {
+pub def heap_clear[T](h: MinHeap<T>) -> MinHeap<T> effect alloc {
     val empty_d: list<T> = list()
     MinHeap { data: empty_d }
 }
 
 /// Merge two heaps into one.
-pub def heap_merge[T](a: MinHeap<T>, b: MinHeap<T>) -> MinHeap<T> {
+pub def heap_merge[T](a: MinHeap<T>, b: MinHeap<T>) -> MinHeap<T> effect alloc {
     var result: MinHeap<T> = a
     var i = 0
     val n = list_len(b.data)

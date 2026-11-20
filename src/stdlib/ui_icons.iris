@@ -1,0 +1,210 @@
+// std.ui_icons -- resolution-independent line icons for IRIS native UI.
+//
+// Icons are drawn from the same primitive draw commands as the rest of the
+// toolkit, so they need no font atlas, no image files, and scale to any size
+// without blurring. Coordinates are defined in a 24x24 design grid and mapped
+// onto the destination rectangle by `draw_icon`.
+
+pub bring std.ui_protocol
+pub bring std.ui_theme
+
+pub choice UiIcon {
+    Search,
+    Plus,
+    Minus,
+    Close,
+    Check,
+    ChevronLeft,
+    ChevronRight,
+    ChevronUp,
+    ChevronDown,
+    Play,
+    Pause,
+    Stop,
+    Refresh,
+    Settings,
+    Brain,
+    Network,
+    Chart,
+    Folder,
+    File,
+    Bolt,
+    Shield,
+    Eye,
+    EyeOff,
+    Home,
+    Link,
+    Download,
+    Upload,
+    Spark,
+    Radio,
+    Layers,
+    Terminal,
+    Clock,
+    Bell,
+    User,
+    Lock,
+    Unlock,
+    Filter,
+    Grid,
+    List,
+    Trash,
+    Edit,
+    Star,
+    Cpu,
+    Database,
+    Globe,
+    Activity,
+    SearchSmall,
+}
+
+def ix(r: UiRect, x: f64) -> f64 {
+    return r.x + (x / 24.0) * r.w
+}
+
+def iy(r: UiRect, y: f64) -> f64 {
+    return r.y + (y / 24.0) * r.h
+}
+
+def isz(r: UiRect, v: f64) -> f64 {
+    return (v / 24.0) * r.w
+}
+
+def iline(buf: DrawBuffer, r: UiRect, x1: f64, y1: f64, x2: f64, y2: f64, c: UiColor, w: f64) -> DrawBuffer effect ffi, alloc {
+    return draw_cmd_line(
+        buf,
+        UiRect { x: ix(r, x1), y: iy(r, y1), w: ix(r, x2), h: iy(r, y2) },
+        c,
+        w,
+        false,
+    )
+}
+
+def icircle(buf: DrawBuffer, r: UiRect, cx: f64, cy: f64, rad: f64, c: UiColor, fill: UiColor, w: f64) -> DrawBuffer effect ffi, alloc {
+    return draw_cmd_circle(buf, ix(r, cx), iy(r, cy), isz(r, rad), UiStyle { bg: fill, border: c, border_width: w })
+}
+
+def ibox(buf: DrawBuffer, r: UiRect, x: f64, y: f64, w: f64, h: f64, rad: f64, c: UiColor, fill: UiColor, bw: f64) -> DrawBuffer effect ffi, alloc {
+    return draw_cmd_round_rect(
+        buf,
+        UiRect { x: ix(r, x), y: iy(r, y), w: isz(r, w), h: isz(r, h) },
+        isz(r, rad),
+        UiStyle { bg: fill, border: c, border_width: bw },
+    )
+}
+
+def ipoly(buf: DrawBuffer, r: UiRect, xs: list<f64>, ys: list<f64>, c: UiColor, fill: UiColor) -> DrawBuffer effect ffi, alloc {
+    val px: list<f64> = list()
+    val py: list<f64> = list()
+    var i = 0
+    while i < list_len(xs) {
+        list_push(px, ix(r, list_get(xs, i)))
+        list_push(py, iy(r, list_get(ys, i)))
+        i = i + 1
+    }
+    return draw_cmd_polyline(buf, px, py, c, fill)
+}
+
+/// Draw one icon into `r` using `color` and a 1.6-unit stroke.
+pub def draw_icon(buf: DrawBuffer, icon: UiIcon, r: UiRect, color: UiColor) -> DrawBuffer effect ffi, alloc {
+    val clear = UiColor { r: 0, g: 0, b: 0, a: 0 }
+    val w = 1.6
+    return when icon {
+        UiIcon.Search => icircle(iline(buf, r, 13.0, 13.0, 20.0, 20.0, color, w), r, 10.5, 10.5, 6.5, color, clear, w),
+        UiIcon.SearchSmall => icircle(iline(buf, r, 12.0, 12.0, 16.0, 16.0, color, w), r, 9.0, 9.0, 4.5, color, clear, w),
+        UiIcon.Plus => iline(iline(buf, r, 12.0, 4.0, 12.0, 20.0, color, w), r, 4.0, 12.0, 20.0, 12.0, color, w),
+        UiIcon.Minus => iline(buf, r, 4.0, 12.0, 20.0, 12.0, color, w),
+        UiIcon.Close => iline(iline(buf, r, 5.0, 5.0, 19.0, 19.0, color, w), r, 19.0, 5.0, 5.0, 19.0, color, w),
+        UiIcon.Check => iline(iline(buf, r, 4.0, 13.0, 10.0, 19.0, color, w), r, 10.0, 19.0, 20.0, 6.0, color, w),
+        UiIcon.ChevronLeft => iline(iline(buf, r, 15.0, 4.0, 8.0, 12.0, color, w), r, 8.0, 12.0, 15.0, 20.0, color, w),
+        UiIcon.ChevronRight => iline(iline(buf, r, 9.0, 4.0, 16.0, 12.0, color, w), r, 16.0, 12.0, 9.0, 20.0, color, w),
+        UiIcon.ChevronUp => iline(iline(buf, r, 4.0, 15.0, 12.0, 8.0, color, w), r, 12.0, 8.0, 20.0, 15.0, color, w),
+        UiIcon.ChevronDown => iline(iline(buf, r, 4.0, 9.0, 12.0, 16.0, color, w), r, 12.0, 16.0, 20.0, 9.0, color, w),
+        UiIcon.Play => ipoly(buf, r, list(7.0, 7.0, 19.0), list(4.0, 20.0, 12.0), color, color),
+        UiIcon.Pause => ibox(ibox(buf, r, 6.0, 4.0, 4.0, 16.0, 1.0, color, color, 0.0), r, 14.0, 4.0, 4.0, 16.0, 1.0, color, color, 0.0),
+        UiIcon.Stop => ibox(buf, r, 5.0, 5.0, 14.0, 14.0, 2.0, color, color, 0.0),
+        UiIcon.Refresh => iline(
+            icircle(iline(buf, r, 19.0, 7.0, 20.0, 13.0, color, w), r, 12.0, 12.0, 8.0, color, clear, w),
+            r, 20.0, 13.0, 14.0, 12.0, color, w,
+        ),
+        UiIcon.Settings => {
+            var b = buf
+            var a = 0.0
+            while a < 6.28318 {
+                val x1 = 12.0 + cos(a) * 7.0
+                val y1 = 12.0 + sin(a) * 7.0
+                val x2 = 12.0 + cos(a) * 10.0
+                val y2 = 12.0 + sin(a) * 10.0
+                b = iline(b, r, x1, y1, x2, y2, color, w)
+                a = a + 0.785398
+            }
+            icircle(b, r, 12.0, 12.0, 5.0, color, clear, w)
+        },
+        UiIcon.Brain => {
+            var b = buf
+            val cx = list(12.0, 7.0, 5.0, 17.0, 19.0, 10.0, 14.0, 8.0, 16.0)
+            val cy = list(12.0, 8.0, 14.0, 8.0, 14.0, 18.0, 18.0, 12.0, 12.0)
+            val edges = list(0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 6)
+            val to = list(1, 2, 3, 4, 5, 6, 7, 8, 7, 8, 7, 8, 7, 8)
+            var i = 0
+            while i < list_len(edges) {
+                val a = list_get(edges, i)
+                val z = list_get(to, i)
+                b = iline(b, r, list_get(cx, a), list_get(cy, a), list_get(cx, z), list_get(cy, z), color, 0.8)
+                i = i + 1
+            }
+            i = 0
+            while i < list_len(cx) {
+                b = icircle(b, r, list_get(cx, i), list_get(cy, i), 1.6, color, color, 0.0)
+                i = i + 1
+            }
+            b
+        },
+        UiIcon.Network => {
+            var b = buf
+            b = iline(iline(iline(iline(buf, r, 4.0, 6.0, 12.0, 12.0, color, w), r, 4.0, 18.0, 12.0, 12.0, color, w), r, 12.0, 12.0, 20.0, 5.0, color, w), r, 12.0, 12.0, 20.0, 19.0, color, w)
+            b = icircle(icircle(icircle(icircle(b, r, 4.0, 6.0, 2.2, color, color, 0.0), r, 4.0, 18.0, 2.2, color, color, 0.0), r, 20.0, 5.0, 2.2, color, color, 0.0), r, 20.0, 19.0, 2.2, color, color, 0.0)
+            icircle(b, r, 12.0, 12.0, 3.0, color, color, 0.0)
+        },
+        UiIcon.Chart => ibox(
+            ipoly(buf, r, list(4.0, 9.0, 14.0, 20.0), list(18.0, 12.0, 15.0, 5.0), color, clear),
+            r, 4.0, 4.0, 16.0, 16.0, 2.0, color, clear, w,
+        ),
+        UiIcon.Folder => ipoly(buf, r, list(3.0, 3.0, 9.0, 21.0, 21.0, 15.0), list(6.0, 10.0, 10.0, 10.0, 10.0, 6.0), color, clear),
+        UiIcon.File => ipoly(buf, r, list(5.0, 5.0, 15.0, 19.0, 19.0), list(3.0, 21.0, 21.0, 9.0, 3.0), color, clear),
+        UiIcon.Bolt => ipoly(buf, r, list(13.0, 4.0, 10.0, 18.0, 9.0), list(2.0, 13.0, 13.0, 22.0, 11.0), color, color),
+        UiIcon.Shield => ipoly(buf, r, list(12.0, 4.0, 12.0, 20.0, 12.0), list(3.0, 7.0, 21.0, 17.0, 21.0), color, clear),
+        UiIcon.Eye => icircle(
+            ipoly(buf, r, list(2.0, 12.0, 22.0), list(12.0, 4.0, 12.0), color, clear),
+            r, 12.0, 12.0, 5.0, color, clear, w,
+        ),
+        UiIcon.EyeOff => iline(
+            icircle(ipoly(buf, r, list(2.0, 12.0, 22.0), list(12.0, 5.0, 12.0), color, clear), r, 12.0, 12.0, 4.0, color, clear, w),
+            r, 3.0, 21.0, 21.0, 3.0, color, w,
+        ),
+        UiIcon.Home => ipoly(buf, r, list(2.0, 12.0, 22.0, 18.0, 18.0, 6.0, 6.0), list(12.0, 2.0, 12.0, 12.0, 22.0, 22.0, 12.0), color, clear),
+        UiIcon.Link => iline(iline(buf, r, 10.0, 14.0, 14.0, 10.0, color, w), r, 8.0, 10.0, 6.0, 12.0, color, w),
+        UiIcon.Download => iline(iline(iline(buf, r, 12.0, 3.0, 12.0, 16.0, color, w), r, 6.0, 11.0, 12.0, 17.0, color, w), r, 18.0, 11.0, 12.0, 17.0, color, w),
+        UiIcon.Upload => iline(iline(iline(buf, r, 12.0, 17.0, 12.0, 4.0, color, w), r, 6.0, 9.0, 12.0, 3.0, color, w), r, 18.0, 9.0, 12.0, 3.0, color, w),
+        UiIcon.Spark => iline(iline(iline(iline(buf, r, 12.0, 2.0, 12.0, 22.0, color, w), r, 2.0, 12.0, 22.0, 12.0, color, w), r, 5.0, 5.0, 19.0, 19.0, color, 0.8), r, 19.0, 5.0, 5.0, 19.0, color, 0.8),
+        UiIcon.Radio => icircle(icircle(icircle(buf, r, 12.0, 12.0, 2.0, color, color, 0.0), r, 12.0, 12.0, 6.5, color, clear, w), r, 12.0, 12.0, 10.0, color, clear, w),
+        UiIcon.Layers => ipoly(ipoly(buf, r, list(12.0, 3.0, 21.0, 12.0), list(4.0, 9.0, 9.0, 4.0), color, clear), r, list(3.0, 12.0, 21.0, 12.0), list(12.0, 18.0, 12.0, 6.0), color, clear),
+        UiIcon.Terminal => ibox(iline(iline(buf, r, 6.0, 8.0, 10.0, 12.0, color, w), r, 10.0, 12.0, 6.0, 16.0, color, w), r, 2.0, 3.0, 20.0, 18.0, 3.0, color, clear, w),
+        UiIcon.Clock => iline(iline(icircle(buf, r, 12.0, 12.0, 9.0, color, clear, w), r, 12.0, 12.0, 12.0, 6.0, color, w), r, 12.0, 12.0, 16.0, 14.0, color, w),
+        UiIcon.Bell => icircle(iline(buf, r, 12.0, 19.0, 12.0, 22.0, color, w), r, 6.0, 10.0, 6.0, color, clear, w),
+        UiIcon.User => icircle(icircle(buf, r, 12.0, 8.0, 4.0, color, clear, w), r, 12.0, 20.0, 8.0, color, clear, w),
+        UiIcon.Lock => ibox(icircle(buf, r, 12.0, 9.0, 4.0, color, clear, w), r, 5.0, 12.0, 14.0, 10.0, 2.0, color, clear, w),
+        UiIcon.Unlock => ibox(icircle(buf, r, 12.0, 9.0, 4.0, color, clear, w), r, 5.0, 12.0, 14.0, 10.0, 2.0, color, clear, w),
+        UiIcon.Filter => ipoly(buf, r, list(3.0, 21.0, 15.0, 9.0), list(5.0, 5.0, 13.0, 13.0), color, clear),
+        UiIcon.Grid => ibox(ibox(ibox(ibox(buf, r, 3.0, 3.0, 8.0, 8.0, 1.0, color, clear, w), r, 13.0, 3.0, 8.0, 8.0, 1.0, color, clear, w), r, 3.0, 13.0, 8.0, 8.0, 1.0, color, clear, w), r, 13.0, 13.0, 8.0, 8.0, 1.0, color, clear, w),
+        UiIcon.List => iline(iline(iline(buf, r, 8.0, 6.0, 21.0, 6.0, color, w), r, 8.0, 12.0, 21.0, 12.0, color, w), r, 8.0, 18.0, 21.0, 18.0, color, w),
+        UiIcon.Trash => iline(iline(iline(ibox(buf, r, 5.0, 7.0, 14.0, 14.0, 2.0, color, clear, w), r, 3.0, 7.0, 21.0, 7.0, color, w), r, 9.0, 7.0, 9.0, 4.0, color, w), r, 15.0, 7.0, 15.0, 4.0, color, w),
+        UiIcon.Edit => iline(iline(buf, r, 4.0, 20.0, 4.0, 16.0, color, w), r, 4.0, 16.0, 16.0, 4.0, color, w),
+        UiIcon.Star => ipoly(buf, r, list(12.0, 15.0, 22.0, 17.0, 19.0, 12.0, 5.0, 2.0, 7.0), list(2.0, 9.0, 9.0, 21.0, 14.0, 22.0, 14.0, 9.0, 9.0), color, clear),
+        UiIcon.Cpu => ibox(ibox(buf, r, 7.0, 7.0, 10.0, 10.0, 1.0, color, clear, w), r, 3.0, 3.0, 18.0, 18.0, 3.0, color, clear, w),
+        UiIcon.Database => icircle(iline(iline(buf, r, 4.0, 6.0, 4.0, 18.0, color, w), r, 20.0, 6.0, 20.0, 18.0, color, w), r, 12.0, 6.0, 8.0, color, clear, w),
+        UiIcon.Globe => icircle(iline(iline(buf, r, 3.0, 12.0, 21.0, 12.0, color, w), r, 12.0, 3.0, 12.0, 21.0, color, w), r, 12.0, 12.0, 9.0, color, clear, w),
+        UiIcon.Activity => ipoly(buf, r, list(2.0, 7.0, 11.0, 15.0, 22.0), list(12.0, 12.0, 4.0, 20.0, 12.0), color, clear),
+    }
+}
+

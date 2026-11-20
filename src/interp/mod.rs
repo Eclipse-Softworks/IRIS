@@ -13,7 +13,7 @@ pub mod async_exec;
 
 use crate::error::InterpError;
 use crate::ir::block::BlockId;
-use crate::ir::function::IrFunction;
+use crate::ir::function::{IrFunction, ScopeId};
 use crate::ir::instr::{BinOp, HandlerArm, IrInstr, ScalarUnaryOp, TensorOp};
 use crate::ir::module::IrModule;
 use crate::ir::types::{DType, IrType};
@@ -645,6 +645,16 @@ thread_local! {
         const { std::cell::RefCell::new(Vec::new()) };
 }
 
+/// Drop target cells that no live `IrValue::WeakRef` can upgrade any more.
+/// Called after spawned threads are joined, so no weak ref is in flight.
+fn prune_weak_targets() {
+    WEAK_TARGETS.with(|targets| {
+        targets
+            .borrow_mut()
+            .retain(|arc| std::sync::Arc::weak_count(arc) > 0);
+    });
+}
+
 /// Interpreter execution options.
 #[derive(Debug, Clone, Copy)]
 pub struct InterpOptions {
@@ -893,6 +903,11 @@ pub(crate) struct Interpreter<'m> {
     spawn_handles: Vec<JoinHandle<Result<Vec<IrValue>, InterpError>>>,
     /// Stack of active effect handler frames.
     handler_stack: Vec<Vec<HandlerArm>>,
+    /// Active structured lexical blocks (`{ ... }`) in this frame. The
+    /// interpreter pushes on `EnterBlock` and pops on `ExitBlock`, giving the
+    /// block construct a real runtime presence instead of being erased during
+    /// lowering.
+    block_scopes: Vec<ScopeId>,
 }
 
 /// The source position of the instruction at `pos`, or of the nearest one
@@ -925,6 +940,25 @@ impl<'m> Interpreter<'m> {
             profiler: None,
             spawn_handles: Vec::new(),
             handler_stack: Vec::new(),
+            block_scopes: Vec::new(),
+        }
+    }
+
+    /// Enter a structured lexical block pushed by `IrInstr::EnterBlock`.
+    fn enter_block(&mut self, scope: ScopeId) {
+        self.block_scopes.push(scope);
+    }
+
+    /// Leave the matching structured block. Structured exits (`break`,
+    /// `continue`, `return`) can jump out of several nested blocks, so unwind
+    /// to and including the matching `EnterBlock` rather than requiring the
+    /// top of stack to match exactly.
+    fn exit_block(&mut self, scope: ScopeId) -> Result<(), InterpError> {
+        if let Some(pos) = self.block_scopes.iter().rposition(|s| *s == scope) {
+            self.block_scopes.truncate(pos);
+            Ok(())
+        } else {
+            Err(InterpError::UnmatchedExitBlock { scope: scope.0 })
         }
     }
 
@@ -1005,6 +1039,7 @@ impl<'m> Interpreter<'m> {
                 });
             }
         }
+        prune_weak_targets();
         Ok(())
     }
 
@@ -1742,11 +1777,20 @@ impl<'m> Interpreter<'m> {
                         }
                     }
 
+                    IrInstr::EnterBlock { scope } => {
+                        self.enter_block(*scope);
+                    }
+
+                    IrInstr::ExitBlock { scope } => {
+                        self.exit_block(*scope)?;
+                    }
+
                     IrInstr::EnterScope { .. }
                     | IrInstr::ExitScope { .. }
                     | IrInstr::Drop { .. } => {
-                        // Explicit scope markers are metadata-only; `DropElaborationPass`
+                        // Drop scopes are metadata-only; `DropElaborationPass`
                         // lowers `IrInstr::Drop` into `IrInstr::Call` before execution.
+                        // Structured blocks (`EnterBlock`/`ExitBlock`) are handled above.
                     }
 
                     IrInstr::Borrow { result, place, .. } | IrInstr::Move { result, place } => {
@@ -2243,7 +2287,11 @@ impl<'m> Interpreter<'m> {
                                         .with(|slot| *slot.borrow_mut() = None);
                                     result
                                 });
-                                tg.lock().unwrap().handles.push(handle);
+                                {
+                                    let mut group = tg.lock().unwrap();
+                                    group.handles.retain(|h| !h.is_finished());
+                                    group.handles.push(handle);
+                                }
                             }
                             other => {
                                 return Err(InterpError::TypeError {
@@ -2279,7 +2327,9 @@ impl<'m> Interpreter<'m> {
                         let tg_val = self.get(*group)?;
                         match tg_val {
                             IrValue::TaskGroup(tg) => {
-                                tg.lock().unwrap().cancelled = true;
+                                let mut group = tg.lock().unwrap();
+                                group.cancelled = true;
+                                group.handles.retain(|h| !h.is_finished());
                             }
                             other => {
                                 return Err(InterpError::TypeError {
@@ -5079,6 +5129,10 @@ impl<'m> Interpreter<'m> {
                     .unwrap_or(1),
             )),
             "iris_async_queued_tasks" => Ok(IrValue::I64(0)),
+            "iris_ui_pool_begin"
+            | "iris_ui_pool_pause"
+            | "iris_ui_pool_resume"
+            | "iris_ui_pool_destroy" => Ok(IrValue::I64(0)),
             "iris_current_task_cancelled_i64" => Ok(IrValue::I64(
                 if CURRENT_INTERP_TASK_GROUP.with(|slot| {
                     slot.borrow()
@@ -7561,8 +7615,18 @@ fn interp_builtin(name: &str, args: &[IrValue]) -> Result<IrValue, InterpError> 
             let mut map = MapStore::new();
             map.insert("allocated".to_string(), IrValue::I64(0));
             map.insert("freed".to_string(), IrValue::I64(0));
+            // Both spellings are kept: older programs used the long names,
+            // while the native runtime reports the short ones.
+            map.insert("cycles".to_string(), IrValue::I64(0));
             map.insert("cycles_collected".to_string(), IrValue::I64(0));
+            map.insert("weak_invalidated".to_string(), IrValue::I64(0));
             map.insert("weak_refs_invalidated".to_string(), IrValue::I64(0));
+            map.insert("raw_allocs".to_string(), IrValue::I64(0));
+            map.insert("raw_frees".to_string(), IrValue::I64(0));
+            map.insert("raw_bytes_live".to_string(), IrValue::I64(0));
+            map.insert("raw_bytes_peak".to_string(), IrValue::I64(0));
+            map.insert("pool_bytes_live".to_string(), IrValue::I64(0));
+            map.insert("pool_bytes_peak".to_string(), IrValue::I64(0));
             Ok(IrValue::Map(std::sync::Arc::new(std::sync::Mutex::new(
                 map,
             ))))
@@ -7721,78 +7785,8 @@ fn interp_builtin(name: &str, args: &[IrValue]) -> Result<IrValue, InterpError> 
         // ---- FFI (dynamic library loading) ----
         "ffi_open" => {
             // ffi_open(path) -> handle (i64), -1 on error
-            let _path = str_arg(&args[0]);
-            #[cfg(windows)]
-            {
-                use std::ffi::CString;
-
-                // Automatically inject known dependency paths to PATH for LoadLibrary search.
-                //
-                // ROS 2 is not among them, and AMENT_PREFIX_PATH is left alone:
-                // this used to force both to one machine's install -- and
-                // overwrote a sourced environment's AMENT_PREFIX_PATH in the CRT
-                // environment, hiding every overlay workspace from the ROS 2
-                // bridge. The bridge needs a sourced environment (or the ROS 2
-                // bin directory on PATH) and finds the rest of its install itself.
-                static INJECT_PATHS: std::sync::Once = std::sync::Once::new();
-                INJECT_PATHS.call_once(|| {
-                    if let Ok(old_path) = std::env::var("PATH") {
-                        let new_path = format!(
-                            "C:\\onnxruntime\\lib;\
-                             C:\\tensorflow\\lib;\
-                             C:\\libtorch\\lib;\
-                             C:\\openblas\\bin;{}",
-                            old_path
-                        );
-                        std::env::set_var("PATH", new_path);
-                    }
-
-                    // Windows MSVC UCRT environment block dynamic injection
-                    unsafe {
-                        let ucrt_name = b"ucrtbase.dll\0".as_ptr() as *const i8;
-                        let h_ucrt = winapi_LoadLibraryA(ucrt_name);
-                        if !h_ucrt.is_null() {
-                            let putenv_name = b"_putenv_s\0".as_ptr() as *const i8;
-                            let p_putenv = winapi_GetProcAddress(h_ucrt, putenv_name);
-                            if !p_putenv.is_null() {
-                                let putenv: unsafe extern "C" fn(*const i8, *const i8) -> i32 =
-                                    std::mem::transmute(p_putenv);
-                                if let Ok(new_path) = std::env::var("PATH") {
-                                    let c_new_path =
-                                        std::ffi::CString::new(new_path).unwrap_or_default();
-                                    putenv(b"PATH\0".as_ptr() as *const i8, c_new_path.as_ptr());
-                                }
-                            }
-                        }
-                    }
-                });
-
-                let cs = CString::new(_path.as_bytes()).unwrap_or_default();
-                let h = unsafe { winapi_LoadLibraryA(cs.as_ptr()) };
-                if h.is_null() {
-                    let err = unsafe { winapi_GetLastError() };
-                    eprintln!(
-                        "[iris_interp] LoadLibraryA(\"{}\") failed with error code: {}",
-                        _path, err
-                    );
-                    return Ok(IrValue::I64(-1));
-                }
-                Ok(IrValue::I64(h as i64))
-            }
-            #[cfg(unix)]
-            {
-                use std::ffi::CString;
-                let cs = CString::new(_path.as_bytes()).unwrap_or_default();
-                let h = unsafe { libc_dlopen(cs.as_ptr(), 1) }; // RTLD_LAZY = 1
-                if h.is_null() {
-                    return Ok(IrValue::I64(-1));
-                }
-                Ok(IrValue::I64(h as i64))
-            }
-            #[cfg(not(any(windows, unix)))]
-            {
-                Ok(IrValue::I64(-1))
-            }
+            let path = str_arg(&args[0]);
+            Ok(IrValue::I64(interp_open_dynamic_lib(&path)))
         }
         "ffi_call" => {
             // ffi_call(handle, func_name, arg1...) -> i64
@@ -7875,16 +7869,27 @@ fn interp_builtin(name: &str, args: &[IrValue]) -> Result<IrValue, InterpError> 
             }
             Ok(IrValue::I64(0))
         }
-        "ffi_out_get_f64" | "ffi_out_get_i64" | "ffi_out_get_str" => {
+        "ffi_out_len" => {
             let addr = i64_arg(&args[0]);
-            if addr == 0 || !ffi_out_cells().contains_key(&addr) {
+            let len = ffi_out_cells().get(&addr).copied().unwrap_or(0);
+            Ok(IrValue::I64(len as i64))
+        }
+        "ffi_out_get_f64"
+        | "ffi_out_get_i64"
+        | "ffi_out_get_i32_i64"
+        | "ffi_out_get_f32"
+        | "ffi_out_get_u8"
+        | "ffi_out_get_str"
+        | "ffi_out_get_str_range" => {
+            let addr = i64_arg(&args[0]);
+            let len_opt = ffi_out_cells().get(&addr).copied();
+            let Some(len) = len_opt else {
                 return Ok(match name {
-                    "ffi_out_get_f64" => IrValue::F64(0.0),
-                    "ffi_out_get_str" => IrValue::Str(String::new()),
+                    "ffi_out_get_f64" | "ffi_out_get_f32" => IrValue::F64(0.0),
+                    "ffi_out_get_str" | "ffi_out_get_str_range" => IrValue::Str(String::new()),
                     _ => IrValue::I64(0),
                 });
-            }
-            let len = ffi_out_cells()[&addr];
+            };
             let idx = if args.len() > 1 { i64_arg(&args[1]) } else { 0 };
             match name {
                 "ffi_out_get_str" => {
@@ -7894,40 +7899,168 @@ fn interp_builtin(name: &str, args: &[IrValue]) -> Result<IrValue, InterpError> 
                         String::from_utf8_lossy(&bytes[..end]).into_owned(),
                     ))
                 }
-                "ffi_out_get_f64" => {
-                    if idx < 0 || (idx as usize + 1) * 8 > len {
+                "ffi_out_get_str_range" => {
+                    let req_len = if args.len() > 2 { i64_arg(&args[2]) } else { 0 };
+                    if idx < 0 || req_len <= 0 || (idx as usize) >= len {
+                        return Ok(IrValue::Str(String::new()));
+                    }
+                    let start = idx as usize;
+                    let max_n = (req_len as usize).min(len - start);
+                    let bytes = unsafe {
+                        std::slice::from_raw_parts((addr as *const u8).add(start), max_n)
+                    };
+                    let end = bytes.iter().position(|b| *b == 0).unwrap_or(max_n);
+                    Ok(IrValue::Str(
+                        String::from_utf8_lossy(&bytes[..end]).into_owned(),
+                    ))
+                }
+                "ffi_out_get_u8" => {
+                    if idx < 0 || (idx as usize) >= len {
+                        return Ok(IrValue::I64(0));
+                    }
+                    let v = unsafe { *((addr as *const u8).add(idx as usize)) };
+                    Ok(IrValue::I64(v as i64))
+                }
+                "ffi_out_get_i32_i64" => {
+                    let Some(off) = usize::try_from(idx).ok().and_then(|i| i.checked_mul(4)) else {
+                        return Ok(IrValue::I64(0));
+                    };
+                    if off.checked_add(4).is_none_or(|end| end > len) {
+                        return Ok(IrValue::I64(0));
+                    }
+                    let v = unsafe {
+                        std::ptr::read_unaligned((addr as *const u8).add(off) as *const i32)
+                    };
+                    Ok(IrValue::I64(v as i64))
+                }
+                "ffi_out_get_f32" => {
+                    let Some(off) = usize::try_from(idx).ok().and_then(|i| i.checked_mul(4)) else {
+                        return Ok(IrValue::F64(0.0));
+                    };
+                    if off.checked_add(4).is_none_or(|end| end > len) {
                         return Ok(IrValue::F64(0.0));
                     }
-                    let v = unsafe { *(addr as *const f64).offset(idx as isize) };
+                    let v = unsafe {
+                        std::ptr::read_unaligned((addr as *const u8).add(off) as *const f32)
+                    };
+                    Ok(IrValue::F64(v as f64))
+                }
+                "ffi_out_get_f64" => {
+                    let Some(off) = usize::try_from(idx).ok().and_then(|i| i.checked_mul(8)) else {
+                        return Ok(IrValue::F64(0.0));
+                    };
+                    if off.checked_add(8).is_none_or(|end| end > len) {
+                        return Ok(IrValue::F64(0.0));
+                    }
+                    let v = unsafe {
+                        std::ptr::read_unaligned((addr as *const u8).add(off) as *const f64)
+                    };
                     Ok(IrValue::F64(v))
                 }
                 _ => {
-                    if idx < 0 || (idx as usize + 1) * 8 > len {
+                    let Some(off) = usize::try_from(idx).ok().and_then(|i| i.checked_mul(8)) else {
+                        return Ok(IrValue::I64(0));
+                    };
+                    if off.checked_add(8).is_none_or(|end| end > len) {
                         return Ok(IrValue::I64(0));
                     }
-                    let v = unsafe { *(addr as *const i64).offset(idx as isize) };
+                    let v = unsafe {
+                        std::ptr::read_unaligned((addr as *const u8).add(off) as *const i64)
+                    };
                     Ok(IrValue::I64(v))
                 }
             }
         }
-        "ffi_out_set_f64" | "ffi_out_set_i64" => {
+        "ffi_out_set_f64" | "ffi_out_set_i64" | "ffi_out_set_i32" | "ffi_out_set_f32"
+        | "ffi_out_set_u8" => {
             let addr = i64_arg(&args[0]);
             let idx = i64_arg(&args[1]);
-            if addr == 0 || !ffi_out_cells().contains_key(&addr) || idx < 0 {
+            let Some(len) = ffi_out_cells().get(&addr).copied() else {
                 return Ok(IrValue::I64(0));
-            }
-            let len = ffi_out_cells()[&addr];
-            if (idx as usize + 1) * 8 > len {
+            };
+            let Ok(ui) = usize::try_from(idx) else {
                 return Ok(IrValue::I64(0));
-            }
-            unsafe {
-                if name == "ffi_out_set_f64" {
-                    *(addr as *mut f64).offset(idx as isize) = f64_arg(&args[2]);
-                } else {
-                    *(addr as *mut i64).offset(idx as isize) = i64_arg(&args[2]);
+            };
+            match name {
+                "ffi_out_set_u8" => {
+                    if ui >= len {
+                        return Ok(IrValue::I64(0));
+                    }
+                    let v = (i64_arg(&args[2]) & 0xFF) as u8;
+                    unsafe { *((addr as *mut u8).add(ui)) = v };
+                }
+                "ffi_out_set_i32" => {
+                    let Some(off) = ui.checked_mul(4) else {
+                        return Ok(IrValue::I64(0));
+                    };
+                    if off.checked_add(4).is_none_or(|end| end > len) {
+                        return Ok(IrValue::I64(0));
+                    }
+                    let v = i64_arg(&args[2]) as i32;
+                    unsafe {
+                        std::ptr::write_unaligned((addr as *mut u8).add(off) as *mut i32, v);
+                    }
+                }
+                "ffi_out_set_f32" => {
+                    let Some(off) = ui.checked_mul(4) else {
+                        return Ok(IrValue::I64(0));
+                    };
+                    if off.checked_add(4).is_none_or(|end| end > len) {
+                        return Ok(IrValue::I64(0));
+                    }
+                    let v = f64_arg(&args[2]) as f32;
+                    unsafe {
+                        std::ptr::write_unaligned((addr as *mut u8).add(off) as *mut f32, v);
+                    }
+                }
+                "ffi_out_set_f64" => {
+                    let Some(off) = ui.checked_mul(8) else {
+                        return Ok(IrValue::I64(0));
+                    };
+                    if off.checked_add(8).is_none_or(|end| end > len) {
+                        return Ok(IrValue::I64(0));
+                    }
+                    let v = f64_arg(&args[2]);
+                    unsafe {
+                        std::ptr::write_unaligned((addr as *mut u8).add(off) as *mut f64, v);
+                    }
+                }
+                _ => {
+                    let Some(off) = ui.checked_mul(8) else {
+                        return Ok(IrValue::I64(0));
+                    };
+                    if off.checked_add(8).is_none_or(|end| end > len) {
+                        return Ok(IrValue::I64(0));
+                    }
+                    let v = i64_arg(&args[2]);
+                    unsafe {
+                        std::ptr::write_unaligned((addr as *mut u8).add(off) as *mut i64, v);
+                    }
                 }
             }
             Ok(IrValue::I64(0))
+        }
+        "ffi_out_write_bytes" => {
+            let addr = i64_arg(&args[0]);
+            let offset = i64_arg(&args[1]);
+            let s = str_arg(&args[2]);
+            let Some(len) = ffi_out_cells().get(&addr).copied() else {
+                return Ok(IrValue::I64(0));
+            };
+            let Ok(off) = usize::try_from(offset) else {
+                return Ok(IrValue::I64(0));
+            };
+            if off >= len {
+                return Ok(IrValue::I64(0));
+            }
+            let src = s.as_bytes();
+            let n = src.len().min(len - off);
+            if n > 0 {
+                unsafe {
+                    std::ptr::copy_nonoverlapping(src.as_ptr(), (addr as *mut u8).add(off), n);
+                }
+            }
+            Ok(IrValue::I64(n as i64))
         }
 
         "ffi_call_i64" | "ffi_call_f64" | "ffi_call_str" | "ffi_call_void" | "ffi_call_args" => {
@@ -8160,35 +8293,7 @@ fn interp_builtin(name: &str, args: &[IrValue]) -> Result<IrValue, InterpError> 
         "rust_lib_open" => {
             // Alias for ffi_open — open a Rust cdylib (.dll / .so / .dylib)
             let path = str_arg(&args[0]);
-            #[cfg(windows)]
-            {
-                use std::ffi::CString;
-                let cs = CString::new(path.as_bytes()).unwrap_or_default();
-                let h = unsafe { winapi_LoadLibraryA(cs.as_ptr()) };
-                if h.is_null() {
-                    let err = unsafe { winapi_GetLastError() };
-                    eprintln!(
-                        "[iris_interp] LoadLibraryA(\"{}\") failed with error code: {}",
-                        path, err
-                    );
-                    return Ok(IrValue::I64(-1));
-                }
-                Ok(IrValue::I64(h as i64))
-            }
-            #[cfg(unix)]
-            {
-                use std::ffi::CString;
-                let cs = CString::new(path.as_bytes()).unwrap_or_default();
-                let h = unsafe { libc_dlopen(cs.as_ptr(), 1) };
-                if h.is_null() {
-                    return Ok(IrValue::I64(-1));
-                }
-                Ok(IrValue::I64(h as i64))
-            }
-            #[cfg(not(any(windows, unix)))]
-            {
-                Ok(IrValue::I64(-1))
-            }
+            Ok(IrValue::I64(interp_open_dynamic_lib(&path)))
         }
         "rust_call_i64" => {
             // rust_call_i64(handle, func_name, arg1, ...) -> i64
@@ -8912,6 +9017,111 @@ fn sha256_hash(data: &[u8]) -> String {
         "{:08x}{:08x}{:08x}{:08x}{:08x}{:08x}{:08x}{:08x}",
         h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7]
     )
+}
+
+fn interp_open_dynamic_lib(path: &str) -> i64 {
+    if path.is_empty() {
+        return -1;
+    }
+    #[cfg(windows)]
+    {
+        use std::ffi::CString;
+
+        // Inject known native dependency paths into PATH once before loading DLLs.
+        static INJECT_PATHS: std::sync::Once = std::sync::Once::new();
+        INJECT_PATHS.call_once(|| {
+            if let Ok(old_path) = std::env::var("PATH") {
+                let new_path = format!(
+                    "C:\\onnxruntime\\lib;\
+                     C:\\tensorflow\\lib;\
+                     C:\\libtorch\\lib;\
+                     C:\\openblas\\bin;{}",
+                    old_path
+                );
+                std::env::set_var("PATH", new_path);
+            }
+
+            unsafe {
+                let ucrt_name = b"ucrtbase.dll\0".as_ptr() as *const i8;
+                let h_ucrt = winapi_LoadLibraryA(ucrt_name);
+                if !h_ucrt.is_null() {
+                    let putenv_name = b"_putenv_s\0".as_ptr() as *const i8;
+                    let p_putenv = winapi_GetProcAddress(h_ucrt, putenv_name);
+                    if !p_putenv.is_null() {
+                        let putenv: unsafe extern "C" fn(*const i8, *const i8) -> i32 =
+                            std::mem::transmute(p_putenv);
+                        if let Ok(new_path) = std::env::var("PATH") {
+                            let c_new_path = std::ffi::CString::new(new_path).unwrap_or_default();
+                            putenv(b"PATH\0".as_ptr() as *const i8, c_new_path.as_ptr());
+                        }
+                    }
+                }
+            }
+        });
+
+        let Ok(cs) = CString::new(path.as_bytes()) else {
+            return -1;
+        };
+        let mut h = unsafe { winapi_LoadLibraryA(cs.as_ptr()) };
+        let err = if h.is_null() {
+            unsafe { winapi_GetLastError() }
+        } else {
+            0
+        };
+        let is_bare = !path.contains('/') && !path.contains('\\') && !path.contains(':');
+        if h.is_null() && is_bare {
+            if let Some(dir) = std::env::current_exe()
+                .ok()
+                .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+            {
+                for sub in ["", "debug", "release"] {
+                    let candidate = if sub.is_empty() {
+                        dir.join(path)
+                    } else {
+                        dir.join(sub).join(path)
+                    };
+                    if candidate.is_file() {
+                        if let Ok(cand_c) = CString::new(candidate.to_string_lossy().as_bytes()) {
+                            let cand_h = unsafe { winapi_LoadLibraryA(cand_c.as_ptr()) };
+                            if !cand_h.is_null() {
+                                h = cand_h;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if h.is_null() {
+            // Suppress expected ERROR_MOD_NOT_FOUND (126) noise when probing missing candidates.
+            if err != 126 || std::path::Path::new(path).exists() {
+                eprintln!(
+                    "[iris_interp] LoadLibraryA(\"{}\") failed with error code: {}",
+                    path, err
+                );
+            }
+            return -1;
+        }
+        h as i64
+    }
+    #[cfg(unix)]
+    {
+        use std::ffi::CString;
+        let Ok(cs) = CString::new(path.as_bytes()) else {
+            return -1;
+        };
+        let h = unsafe { libc_dlopen(cs.as_ptr(), 1) };
+        if h.is_null() {
+            -1
+        } else {
+            h as i64
+        }
+    }
+    #[cfg(not(any(windows, unix)))]
+    {
+        let _ = path;
+        -1
+    }
 }
 
 // ---- FFI extern declarations ----

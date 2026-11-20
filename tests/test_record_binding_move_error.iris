@@ -1,0 +1,13 @@
+bring std.os
+
+record Packet {
+    value: i64 = 0,
+}
+
+pub def main() -> i64 {
+    val first = Packet { value: 3 }
+    val second = move first
+    val again = first.value
+    assert(again == second.value)
+    return 0
+}

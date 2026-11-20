@@ -321,7 +321,7 @@ pub def round_to_decimals(val_f: f64, decimals: i64) -> f64 {
 
 // --- Descriptive Statistics on Lists ---
 
-pub def sum_f64(vals: list<f64>) -> f64 {
+pub def sum_f64(vals: list<f64>) -> f64 effect alloc {
     var total = 0.0;
     val n = list_len(vals);
     for i in 0 .. n {
@@ -330,7 +330,7 @@ pub def sum_f64(vals: list<f64>) -> f64 {
     total
 }
 
-pub def sum_i64(vals: list<i64>) -> i64 {
+pub def sum_i64(vals: list<i64>) -> i64 effect alloc {
     var total = 0;
     val n = list_len(vals);
     for i in 0 .. n {
@@ -339,12 +339,12 @@ pub def sum_i64(vals: list<i64>) -> i64 {
     total
 }
 
-pub def mean(vals: list<f64>) -> f64 {
+pub def mean(vals: list<f64>) -> f64 effect alloc {
     val n = list_len(vals);
     if n == 0 { 0.0 } else { sum_f64(vals) / to_f64(n) }
 }
 
-pub def variance(vals: list<f64>) -> f64 {
+pub def variance(vals: list<f64>) -> f64 effect alloc {
     val n = list_len(vals);
     if n <= 1 { return 0.0 };
     val m = mean(vals);
@@ -356,12 +356,12 @@ pub def variance(vals: list<f64>) -> f64 {
     sum_sq / to_f64(n - 1)
 }
 
-pub def std_dev(vals: list<f64>) -> f64 {
+pub def std_dev(vals: list<f64>) -> f64 effect alloc {
     val v = variance(vals);
     if v < 0.00000000000001 { 0.0 } else { sqrt(v) }
 }
 
-pub def min_in_list(vals: list<f64>) -> f64 {
+pub def min_in_list(vals: list<f64>) -> f64 effect alloc {
     val n = list_len(vals);
     if n == 0 { return 0.0 };
     var m = list_get(vals, 0);
@@ -372,7 +372,7 @@ pub def min_in_list(vals: list<f64>) -> f64 {
     m
 }
 
-pub def max_in_list(vals: list<f64>) -> f64 {
+pub def max_in_list(vals: list<f64>) -> f64 effect alloc {
     val n = list_len(vals);
     if n == 0 { return 0.0 };
     var m = list_get(vals, 0);

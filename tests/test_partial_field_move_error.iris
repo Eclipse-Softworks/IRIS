@@ -1,0 +1,14 @@
+bring std.os
+
+record MovePair {
+    a: i64 = 0,
+    b: i64 = 0,
+}
+
+pub def main() -> i64 {
+    val p = MovePair { a: 11, b: 29 }
+    val moved_a = move p.a
+    val again = p.a
+    assert(again == moved_a)
+    return 0
+}

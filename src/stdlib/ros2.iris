@@ -157,7 +157,7 @@ pub def get_rcl_lib() -> str { "iris_ros2.dll" }
 // Loads the bridge (cached by the OS after the first call); -1 if it cannot.
 // A failed ffi_open is -1 in the interpreter and 0 natively (known-issues
 // #41); both come back as -1 here.
-pub def ros2_open() -> i64 {
+pub def ros2_open() -> i64 effect alloc, env, ffi {
     val custom = env_get("IRIS_ROS2_LIB")
     val first = if len(custom) > 0 { ffi_open(custom) } else { ffi_open("iris_ros2.dll") }
     if first != -1 && first != 0 { return first };
@@ -166,10 +166,10 @@ pub def ros2_open() -> i64 {
     if so != -1 && so != 0 { so } else { 0 - 1 }
 }
 
-pub def ros2_available() -> bool { ros2_open() != -1 }
+pub def ros2_available() -> bool effect alloc, env, ffi { ros2_open() != -1 }
 
 // The bridge, or a panic explaining how to get it.
-pub def ros2_lib() -> i64 {
+pub def ros2_lib() -> i64 effect alloc, env, ffi, throw {
     val h = ros2_open()
     if h == -1 {
         panic("std.ros2: the ROS 2 bridge is not loadable. Build it with `python build_ros2_bridge.py` (needs a ROS 2 install), then run inside a sourced ROS 2 environment or with the ROS 2 bin directory on PATH. IRIS_ROS2_LIB overrides the library path.");
@@ -179,17 +179,17 @@ pub def ros2_lib() -> i64 {
     }
 }
 
-pub def ros2_version() -> i64 { ffi_call_i64(ros2_lib(), "iris_ros2_version") }
+pub def ros2_version() -> i64 effect alloc, env, ffi, throw { ffi_call_i64(ros2_lib(), "iris_ros2_version") }
 
 // Why the last bridge call on this thread failed.
-pub def ros2_error() -> str {
+pub def ros2_error() -> str effect alloc, env, ffi {
     val h = ros2_open()
     if h == -1 { return "the ROS 2 bridge is not loaded" };
     ros2_text(h, ffi_call_i64(h, "iris_ros2_last_error"))
 }
 
 // The bridge's result string (a length the last call returned) as an IRIS str.
-def ros2_text(h: i64, n: i64) -> str {
+def ros2_text(h: i64, n: i64) -> str effect alloc, ffi {
     if n <= 0 { return "" };
     val cell = ffi_out_new(n + 1)
     ffi_call_i64(h, "iris_ros2_result_copy", cell, n + 1);
@@ -198,9 +198,9 @@ def ros2_text(h: i64, n: i64) -> str {
     text
 }
 
-def ros2_failed(h: i64) -> bool { ffi_call_i64(h, "iris_ros2_status") != 0 }
+def ros2_failed(h: i64) -> bool effect ffi { ffi_call_i64(h, "iris_ros2_status") != 0 }
 
-def ros2_check(rc: i64, what: str) -> i64 {
+def ros2_check(rc: i64, what: str) -> i64 effect alloc, env, ffi, throw {
     if rc < 0 {
         panic("std.ros2: " + what + ": " + ros2_error());
         rc
@@ -209,7 +209,7 @@ def ros2_check(rc: i64, what: str) -> i64 {
     }
 }
 
-def ros2_created(handle: i64, what: str) -> i64 {
+def ros2_created(handle: i64, what: str) -> i64 effect alloc, env, ffi, throw {
     if handle == 0 {
         panic("std.ros2: " + what + ": " + ros2_error());
         handle
@@ -218,41 +218,41 @@ def ros2_created(handle: i64, what: str) -> i64 {
     }
 }
 
-def ros2_string(h: i64, n: i64, what: str) -> str {
+def ros2_string(h: i64, n: i64, what: str) -> str effect alloc, env, ffi, throw {
     ros2_text(h, ros2_check(n, what))
 }
 
 // ===== Contexts and nodes =====
 
-pub def context_create() -> ROS2Context { context_create_with("", 0 - 1) }
+pub def context_create() -> ROS2Context effect alloc, env, ffi { context_create_with("", 0 - 1) }
 
 // `args`: ROS arguments for the whole context ("--ros-args --log-level debug").
 // `domain_id`: the DDS domain, or negative for ROS_DOMAIN_ID / the default.
 // Returns handle 0 when ROS 2 cannot be initialised (see ros2_error).
-pub def context_create_with(args: str, domain_id: i64) -> ROS2Context {
+pub def context_create_with(args: str, domain_id: i64) -> ROS2Context effect alloc, env, ffi {
     val h = ros2_open()
     if h == -1 { return ROS2Context { handle: 0 } };
     ROS2Context { handle: ffi_call_i64(h, "iris_ros2_context_create", args, domain_id) }
 }
 
-pub def context_destroy(ctx: ROS2Context) -> bool {
+pub def context_destroy(ctx: ROS2Context) -> bool effect alloc, env, ffi {
     val h = ros2_open()
     if h == -1 { return false };
     ffi_call_i64(h, "iris_ros2_context_destroy", ctx.handle) == 0
 }
 
-pub def context_ok(ctx: ROS2Context) -> bool {
+pub def context_ok(ctx: ROS2Context) -> bool effect alloc, env, ffi, throw {
     ffi_call_i64(ros2_lib(), "iris_ros2_context_ok", ctx.handle) == 1
 }
 
-pub def node_create(ctx: ROS2Context, name: str, ns: str) -> ROS2Node {
+pub def node_create(ctx: ROS2Context, name: str, ns: str) -> ROS2Node effect alloc, env, ffi {
     node_create_with(ctx, name, ns, "", 0)
 }
 
 // `args`: ROS arguments for this node only ("--ros-args -p use_sim_time:=true
 // -r __ns:=/robot"); `flags`: NODE_* constants or'ed together. Returns
 // handle 0 on failure (see ros2_error).
-pub def node_create_with(ctx: ROS2Context, name: str, ns: str, args: str, flags: i64) -> ROS2Node {
+pub def node_create_with(ctx: ROS2Context, name: str, ns: str, args: str, flags: i64) -> ROS2Node effect alloc, env, ffi {
     val h = ros2_open()
     if h == -1 { return ROS2Node { handle: 0, ctx: 0 } };
     val node = ffi_call_i64(h, "iris_ros2_node_create", ctx.handle, name, ns, args, flags)
@@ -260,11 +260,11 @@ pub def node_create_with(ctx: ROS2Context, name: str, ns: str, args: str, flags:
 }
 
 // A managed (rclcpp_lifecycle) node, starting unconfigured.
-pub def lifecycle_node_create(ctx: ROS2Context, name: str, ns: str) -> ROS2Node {
+pub def lifecycle_node_create(ctx: ROS2Context, name: str, ns: str) -> ROS2Node effect alloc, env, ffi {
     node_create_with(ctx, name, ns, "", NODE_LIFECYCLE)
 }
 
-pub def node_destroy(node: ROS2Node) -> bool {
+pub def node_destroy(node: ROS2Node) -> bool effect alloc, env, ffi {
     val h = ros2_open()
     if h == -1 { return false };
     ffi_call_i64(h, "iris_ros2_node_destroy", node.handle) == 0
@@ -272,54 +272,54 @@ pub def node_destroy(node: ROS2Node) -> bool {
 
 pub def node_context(node: ROS2Node) -> ROS2Context { ROS2Context { handle: node.ctx } }
 
-pub def node_name(node: ROS2Node) -> str {
+pub def node_name(node: ROS2Node) -> str effect alloc, env, ffi, throw {
     val h = ros2_lib()
     ros2_string(h, ffi_call_i64(h, "iris_ros2_node_name", node.handle), "node_name")
 }
 
 // The node's clock in nanoseconds: ROS time, which follows /clock when the
 // node's use_sim_time parameter is true.
-pub def node_now_ns(node: ROS2Node) -> i64 {
+pub def node_now_ns(node: ROS2Node) -> i64 effect alloc, env, ffi, throw {
     val h = ros2_lib()
     val t = ffi_call_i64(h, "iris_ros2_node_now", node.handle)
     if ros2_failed(h) { ros2_check(0 - 1, "node_now_ns") } else { t }
 }
 
-pub def node_uses_sim_time(node: ROS2Node) -> bool {
+pub def node_uses_sim_time(node: ROS2Node) -> bool effect alloc, env, ffi, throw {
     ros2_check(ffi_call_i64(ros2_lib(), "iris_ros2_node_sim_time", node.handle), "node_uses_sim_time") == 1
 }
 
 // System time in nanoseconds since the epoch.
-pub def ros2_now_ns() -> i64 { ffi_call_i64(ros2_lib(), "iris_ros2_time_now", 0) }
+pub def ros2_now_ns() -> i64 effect alloc, env, ffi, throw { ffi_call_i64(ros2_lib(), "iris_ros2_time_now", 0) }
 
 // Logs through the node's rclcpp logger: console, log files and /rosout.
-pub def node_log(node: ROS2Node, severity: i64, text: str) -> bool {
+pub def node_log(node: ROS2Node, severity: i64, text: str) -> bool effect alloc, env, ffi, throw {
     ros2_check(ffi_call_i64(ros2_lib(), "iris_ros2_node_log", node.handle, severity, text), "node_log") == 0
 }
-pub def log_debug(node: ROS2Node, text: str) -> bool { node_log(node, LOG_DEBUG, text) }
-pub def log_info(node: ROS2Node, text: str) -> bool { node_log(node, LOG_INFO, text) }
-pub def log_warn(node: ROS2Node, text: str) -> bool { node_log(node, LOG_WARN, text) }
-pub def log_error(node: ROS2Node, text: str) -> bool { node_log(node, LOG_ERROR, text) }
+pub def log_debug(node: ROS2Node, text: str) -> bool effect alloc, env, ffi, throw { node_log(node, LOG_DEBUG, text) }
+pub def log_info(node: ROS2Node, text: str) -> bool effect alloc, env, ffi, throw { node_log(node, LOG_INFO, text) }
+pub def log_warn(node: ROS2Node, text: str) -> bool effect alloc, env, ffi, throw { node_log(node, LOG_WARN, text) }
+pub def log_error(node: ROS2Node, text: str) -> bool effect alloc, env, ffi, throw { node_log(node, LOG_ERROR, text) }
 
 // The ROS graph as seen from `node`, as JSON: {topic: [types]},
 // {service: [types]} and [node names].
-pub def graph_topics(node: ROS2Node) -> str {
+pub def graph_topics(node: ROS2Node) -> str effect alloc, env, ffi, throw {
     val h = ros2_lib()
     ros2_string(h, ffi_call_i64(h, "iris_ros2_graph", node.handle, 0), "graph_topics")
 }
-pub def graph_services(node: ROS2Node) -> str {
+pub def graph_services(node: ROS2Node) -> str effect alloc, env, ffi, throw {
     val h = ros2_lib()
     ros2_string(h, ffi_call_i64(h, "iris_ros2_graph", node.handle, 1), "graph_services")
 }
-pub def graph_nodes(node: ROS2Node) -> str {
+pub def graph_nodes(node: ROS2Node) -> str effect alloc, env, ffi, throw {
     val h = ros2_lib()
     ros2_string(h, ffi_call_i64(h, "iris_ros2_graph", node.handle, 2), "graph_nodes")
 }
 
-pub def count_publishers(node: ROS2Node, topic: str) -> i64 {
+pub def count_publishers(node: ROS2Node, topic: str) -> i64 effect alloc, env, ffi, throw {
     ros2_check(ffi_call_i64(ros2_lib(), "iris_ros2_count_publishers", node.handle, topic), "count_publishers")
 }
-pub def count_subscribers(node: ROS2Node, topic: str) -> i64 {
+pub def count_subscribers(node: ROS2Node, topic: str) -> i64 effect alloc, env, ffi, throw {
     ros2_check(ffi_call_i64(ros2_lib(), "iris_ros2_count_subscribers", node.handle, topic), "count_subscribers")
 }
 
@@ -328,7 +328,7 @@ pub def count_subscribers(node: ROS2Node, topic: str) -> i64 {
 // Runs the context's executor until an event is ready or `timeout_ms`
 // passes (negative: wait as long as it takes; 0: only what is ready now).
 // Returns kind EVENT_NONE on timeout.
-pub def spin_once(ctx: ROS2Context, timeout_ms: i64) -> ROS2Event {
+pub def spin_once(ctx: ROS2Context, timeout_ms: i64) -> ROS2Event effect alloc, env, ffi, throw {
     val h = ros2_lib()
     val cell = ffi_out_new(48)
     val kind = ffi_call_i64(h, "iris_ros2_spin_once", ctx.handle, timeout_ms, cell)
@@ -345,19 +345,19 @@ pub def spin_once(ctx: ROS2Context, timeout_ms: i64) -> ROS2Event {
     event
 }
 
-pub def spin_node_once(node: ROS2Node, timeout_ms: i64) -> ROS2Event {
+pub def spin_node_once(node: ROS2Node, timeout_ms: i64) -> ROS2Event effect alloc, env, ffi, throw {
     spin_once(ROS2Context { handle: node.ctx }, timeout_ms)
 }
 
 // Executes the work that is ready now, leaving its events queued; returns
 // how many events are waiting.
-pub def spin_some(ctx: ROS2Context, max_ms: i64) -> i64 {
+pub def spin_some(ctx: ROS2Context, max_ms: i64) -> i64 effect alloc, env, ffi, throw {
     ros2_check(ffi_call_i64(ros2_lib(), "iris_ros2_spin_some", ctx.handle, max_ms), "spin_some")
 }
 
 // The text of the event spin_once last returned: a parameter's name, a
 // lifecycle transition's label.
-pub def event_text(ctx: ROS2Context) -> str {
+pub def event_text(ctx: ROS2Context) -> str effect alloc, env, ffi, throw {
     val h = ros2_lib()
     ros2_string(h, ffi_call_i64(h, "iris_ros2_event_text", ctx.handle), "event_text")
 }
@@ -375,17 +375,17 @@ pub def is_transition(ev: ROS2Event, node: ROS2Node) -> bool { ev.kind == EVENT_
 
 // A new message of any installed type ("geometry_msgs/msg/Twist", or
 // "geometry_msgs/Twist"), with the type's default values. Yours: msg_free it.
-pub def msg_new(msg_type: str) -> ROS2Msg {
+pub def msg_new(msg_type: str) -> ROS2Msg effect alloc, env, ffi, throw {
     ROS2Msg { handle: ros2_created(ffi_call_i64(ros2_lib(), "iris_ros2_msg_new", msg_type), "msg_new(" + msg_type + ")") }
 }
 
 // A message built from JSON; fields left out keep their defaults, unknown
 // fields are an error.
-pub def msg_from_json(msg_type: str, json: str) -> ROS2Msg {
+pub def msg_from_json(msg_type: str, json: str) -> ROS2Msg effect alloc, env, ffi, throw {
     ROS2Msg { handle: ros2_created(ffi_call_i64(ros2_lib(), "iris_ros2_msg_from_json", msg_type, json), "msg_from_json(" + msg_type + ")") }
 }
 
-pub def msg_free(m: ROS2Msg) -> bool {
+pub def msg_free(m: ROS2Msg) -> bool effect alloc, env, ffi {
     val h = ros2_open()
     if h == -1 { return false };
     ffi_call_i64(h, "iris_ros2_msg_free", m.handle) == 0
@@ -393,31 +393,31 @@ pub def msg_free(m: ROS2Msg) -> bool {
 
 // An independent copy (yours to msg_free) -- how to keep a message an event
 // delivered past the next spin_once.
-pub def msg_clone(m: ROS2Msg) -> ROS2Msg {
+pub def msg_clone(m: ROS2Msg) -> ROS2Msg effect alloc, env, ffi, throw {
     ROS2Msg { handle: ros2_created(ffi_call_i64(ros2_lib(), "iris_ros2_msg_clone", m.handle), "msg_clone") }
 }
 
-pub def msg_type(m: ROS2Msg) -> str {
+pub def msg_type(m: ROS2Msg) -> str effect alloc, env, ffi, throw {
     val h = ros2_lib()
     ros2_string(h, ffi_call_i64(h, "iris_ros2_msg_type", m.handle), "msg_type")
 }
 
 // The whole message as JSON.
-pub def msg_json(m: ROS2Msg) -> str { msg_get_json(m, "") }
+pub def msg_json(m: ROS2Msg) -> str effect alloc, env, ffi, throw { msg_get_json(m, "") }
 
 // A field (any field: a nested message, an array, a scalar) as JSON.
-pub def msg_get_json(m: ROS2Msg, path: str) -> str {
+pub def msg_get_json(m: ROS2Msg, path: str) -> str effect alloc, env, ffi, throw {
     val h = ros2_lib()
     ros2_string(h, ffi_call_i64(h, "iris_ros2_msg_json", m.handle, path), "msg_get_json(" + path + ")")
 }
 
-pub def msg_set_json(m: ROS2Msg, path: str, json: str) -> ROS2Msg {
+pub def msg_set_json(m: ROS2Msg, path: str, json: str) -> ROS2Msg effect alloc, env, ffi, throw {
     ros2_check(ffi_call_i64(ros2_lib(), "iris_ros2_msg_set_json", m.handle, path, json), "msg_set_json(" + path + ")");
     m
 }
 
 // Any numeric field as f64 (float32/float64 exactly, integers converted).
-pub def msg_f64(m: ROS2Msg, path: str) -> f64 {
+pub def msg_f64(m: ROS2Msg, path: str) -> f64 effect alloc, env, ffi, throw {
     val h = ros2_lib()
     val v = ffi_call_f64(h, "iris_ros2_msg_get_f64", m.handle, path)
     if is_nan(v) && ros2_failed(h) {
@@ -429,7 +429,7 @@ pub def msg_f64(m: ROS2Msg, path: str) -> f64 {
 }
 
 // Any integer field (or bool, or an integral float) as i64.
-pub def msg_i64(m: ROS2Msg, path: str) -> i64 {
+pub def msg_i64(m: ROS2Msg, path: str) -> i64 effect alloc, env, ffi, throw {
     val h = ros2_lib()
     val v = ffi_call_i64(h, "iris_ros2_msg_get_i64", m.handle, path)
     if v < 0 - 9223372036854775807 && ros2_failed(h) {
@@ -439,54 +439,54 @@ pub def msg_i64(m: ROS2Msg, path: str) -> i64 {
     }
 }
 
-pub def msg_bool(m: ROS2Msg, path: str) -> bool {
+pub def msg_bool(m: ROS2Msg, path: str) -> bool effect alloc, env, ffi, throw {
     ros2_check(ffi_call_i64(ros2_lib(), "iris_ros2_msg_get_bool", m.handle, path), "msg_bool(" + path + ")") == 1
 }
 
-pub def msg_str(m: ROS2Msg, path: str) -> str {
+pub def msg_str(m: ROS2Msg, path: str) -> str effect alloc, env, ffi, throw {
     val h = ros2_lib()
     ros2_string(h, ffi_call_i64(h, "iris_ros2_msg_get_str", m.handle, path), "msg_str(" + path + ")")
 }
 
 // Setters return the message, so they chain. Setting index N of a sequence
 // of length N appends to it.
-pub def msg_set_f64(m: ROS2Msg, path: str, value: f64) -> ROS2Msg {
+pub def msg_set_f64(m: ROS2Msg, path: str, value: f64) -> ROS2Msg effect alloc, env, ffi, throw {
     ros2_check(ffi_call_i64(ros2_lib(), "iris_ros2_msg_set_f64", m.handle, path, value), "msg_set_f64(" + path + ")");
     m
 }
 
-pub def msg_set_i64(m: ROS2Msg, path: str, value: i64) -> ROS2Msg {
+pub def msg_set_i64(m: ROS2Msg, path: str, value: i64) -> ROS2Msg effect alloc, env, ffi, throw {
     ros2_check(ffi_call_i64(ros2_lib(), "iris_ros2_msg_set_i64", m.handle, path, value), "msg_set_i64(" + path + ")");
     m
 }
 
-pub def msg_set_bool(m: ROS2Msg, path: str, value: bool) -> ROS2Msg {
+pub def msg_set_bool(m: ROS2Msg, path: str, value: bool) -> ROS2Msg effect alloc, env, ffi, throw {
     val bit = if value { 1 } else { 0 }
     ros2_check(ffi_call_i64(ros2_lib(), "iris_ros2_msg_set_bool", m.handle, path, bit), "msg_set_bool(" + path + ")");
     m
 }
 
-pub def msg_set_str(m: ROS2Msg, path: str, value: str) -> ROS2Msg {
+pub def msg_set_str(m: ROS2Msg, path: str, value: str) -> ROS2Msg effect alloc, env, ffi, throw {
     ros2_check(ffi_call_i64(ros2_lib(), "iris_ros2_msg_set_str", m.handle, path, value), "msg_set_str(" + path + ")");
     m
 }
 
 // The length of an array or sequence field (or of a string field).
-pub def msg_len(m: ROS2Msg, path: str) -> i64 {
+pub def msg_len(m: ROS2Msg, path: str) -> i64 effect alloc, env, ffi, throw {
     ros2_check(ffi_call_i64(ros2_lib(), "iris_ros2_msg_len", m.handle, path), "msg_len(" + path + ")")
 }
 
-pub def msg_resize(m: ROS2Msg, path: str, size: i64) -> ROS2Msg {
+pub def msg_resize(m: ROS2Msg, path: str, size: i64) -> ROS2Msg effect alloc, env, ffi, throw {
     ros2_check(ffi_call_i64(ros2_lib(), "iris_ros2_msg_resize", m.handle, path, size), "msg_resize(" + path + ")");
     m
 }
 
-pub def msg_has(m: ROS2Msg, path: str) -> bool {
+pub def msg_has(m: ROS2Msg, path: str) -> bool effect alloc, env, ffi, throw {
     ros2_check(ffi_call_i64(ros2_lib(), "iris_ros2_msg_has", m.handle, path), "msg_has") == 1
 }
 
 // A numeric array field (ranges, data, covariance...) as list<f64>.
-pub def msg_f64s(m: ROS2Msg, path: str) -> list<f64> {
+pub def msg_f64s(m: ROS2Msg, path: str) -> list<f64> effect alloc, env, ffi, throw {
     val h = ros2_lib()
     val n = ros2_check(ffi_call_i64(h, "iris_ros2_msg_get_f64s", m.handle, path, 0, 0), "msg_f64s(" + path + ")")
     val out: list<f64> = list()
@@ -502,7 +502,7 @@ pub def msg_f64s(m: ROS2Msg, path: str) -> list<f64> {
 
 // Sets a numeric array field from list<f64> (a sequence is resized; a fixed
 // array must match its length).
-pub def msg_set_f64s(m: ROS2Msg, path: str, values: list<f64>) -> ROS2Msg {
+pub def msg_set_f64s(m: ROS2Msg, path: str, values: list<f64>) -> ROS2Msg effect alloc, env, ffi, throw {
     val h = ros2_lib()
     val n = list_len(values)
     val cell = ffi_out_new(if n > 0 { n * 8 } else { 8 })
@@ -516,29 +516,29 @@ pub def msg_set_f64s(m: ROS2Msg, path: str, values: list<f64>) -> ROS2Msg {
 }
 
 // A builtin_interfaces/Time field ("header.stamp") in nanoseconds.
-pub def msg_stamp(m: ROS2Msg, path: str) -> i64 {
+pub def msg_stamp(m: ROS2Msg, path: str) -> i64 effect alloc, env, ffi, throw {
     val h = ros2_lib()
     val t = ffi_call_i64(h, "iris_ros2_msg_get_stamp", m.handle, path)
     if ros2_failed(h) { ros2_check(0 - 1, "msg_stamp(" + path + ")") } else { t }
 }
 
-pub def msg_set_stamp(m: ROS2Msg, path: str, ns: i64) -> ROS2Msg {
+pub def msg_set_stamp(m: ROS2Msg, path: str, ns: i64) -> ROS2Msg effect alloc, env, ffi, throw {
     ros2_check(ffi_call_i64(ros2_lib(), "iris_ros2_msg_set_stamp", m.handle, path, ns), "msg_set_stamp(" + path + ")");
     m
 }
 
 // The fields of a message type as JSON: {"type", "fields": [{"name", "type", ...}]}.
-pub def msg_schema(msg_type: str) -> str {
+pub def msg_schema(msg_type: str) -> str effect alloc, env, ffi, throw {
     val h = ros2_lib()
     ros2_string(h, ffi_call_i64(h, "iris_ros2_msg_schema", msg_type), "msg_schema(" + msg_type + ")")
 }
 
 // Reads/writes several f64 fields at once through an out-cell of doubles.
-def msg_get_f64_fields(h: i64, m: i64, paths: str, cell: i64, n: i64) -> bool {
+def msg_get_f64_fields(h: i64, m: i64, paths: str, cell: i64, n: i64) -> bool effect ffi {
     ffi_call_i64(h, "iris_ros2_msg_get_f64_fields", m, paths, cell, n) == 0
 }
 
-def msg_set_f64_fields(h: i64, m: i64, paths: str, cell: i64, n: i64) -> bool {
+def msg_set_f64_fields(h: i64, m: i64, paths: str, cell: i64, n: i64) -> bool effect ffi {
     ffi_call_i64(h, "iris_ros2_msg_set_f64_fields", m, paths, cell, n) == 0
 }
 
@@ -581,7 +581,7 @@ pub def qos_best_effort(depth: i64) -> QoSProfile {
 
 // ===== Publishers =====
 
-pub def publisher_create(node: ROS2Node, topic: str, msg_type: str) -> ROS2Publisher {
+pub def publisher_create(node: ROS2Node, topic: str, msg_type: str) -> ROS2Publisher effect alloc, env, ffi {
     publisher_create_qos(node, topic, msg_type, qos_default())
 }
 
@@ -592,7 +592,7 @@ pub def publisher_create_qos(
     topic: str,
     msg_type: str,
     qos: QoSProfile
-) -> ROS2Publisher {
+) -> ROS2Publisher effect alloc, env, ffi {
     val h = ros2_open()
     if h == -1 { return ROS2Publisher { handle: 0, node: 0, msg_type: "" } };
     val pub_h = ffi_call_i64(
@@ -602,34 +602,34 @@ pub def publisher_create_qos(
     ROS2Publisher { handle: pub_h, node: node.handle, msg_type: msg_type }
 }
 
-pub def publisher_destroy(pub_obj: ROS2Publisher) -> bool {
+pub def publisher_destroy(pub_obj: ROS2Publisher) -> bool effect alloc, env, ffi {
     val h = ros2_open()
     if h == -1 { return false };
     ffi_call_i64(h, "iris_ros2_publisher_destroy", pub_obj.handle) == 0
 }
 
 // A new message of the publisher's type (yours: msg_free it).
-pub def publisher_msg(pub_obj: ROS2Publisher) -> ROS2Msg {
+pub def publisher_msg(pub_obj: ROS2Publisher) -> ROS2Msg effect alloc, env, ffi, throw {
     ROS2Msg { handle: ros2_created(ffi_call_i64(ros2_lib(), "iris_ros2_publisher_new_msg", pub_obj.handle), "publisher_msg") }
 }
 
 // Publishes `m`. False when a lifecycle node that is not active dropped it,
 // as rclcpp_lifecycle's managed publishers do.
-pub def publish_msg(pub_obj: ROS2Publisher, m: ROS2Msg) -> bool {
+pub def publish_msg(pub_obj: ROS2Publisher, m: ROS2Msg) -> bool effect alloc, env, ffi, throw {
     ros2_check(ffi_call_i64(ros2_lib(), "iris_ros2_publish", pub_obj.handle, m.handle), "publish_msg") == 0
 }
 
-pub def publish_json(pub_obj: ROS2Publisher, json: str) -> bool {
+pub def publish_json(pub_obj: ROS2Publisher, json: str) -> bool effect alloc, env, ffi, throw {
     ros2_check(ffi_call_i64(ros2_lib(), "iris_ros2_publish_json", pub_obj.handle, json), "publish_json") == 0
 }
 
 // The number of subscriptions matched with this publisher.
-pub def publisher_matches(pub_obj: ROS2Publisher) -> i64 {
+pub def publisher_matches(pub_obj: ROS2Publisher) -> i64 effect alloc, env, ffi, throw {
     ros2_check(ffi_call_i64(ros2_lib(), "iris_ros2_publisher_matches", pub_obj.handle), "publisher_matches")
 }
 
 // Publishes the f64 fields named in `paths` from `cell` and frees the cell.
-def publish_doubles(pub_obj: ROS2Publisher, paths: str, cell: i64, n: i64) -> bool {
+def publish_doubles(pub_obj: ROS2Publisher, paths: str, cell: i64, n: i64) -> bool effect alloc, env, ffi {
     val h = ros2_open()
     if h == -1 || pub_obj.handle == 0 {
         ffi_out_free(cell);
@@ -643,13 +643,13 @@ def publish_doubles(pub_obj: ROS2Publisher, paths: str, cell: i64, n: i64) -> bo
     ok
 }
 
-pub def publish_float64_obj(pub_obj: ROS2Publisher, value: f64) -> bool {
+pub def publish_float64_obj(pub_obj: ROS2Publisher, value: f64) -> bool effect alloc, env, ffi {
     val cell = ffi_out_new(8)
     ffi_out_set_f64(cell, 0, value);
     publish_doubles(pub_obj, "data", cell, 1)
 }
 
-pub def publish_int64(pub_obj: ROS2Publisher, value: i64) -> bool {
+pub def publish_int64(pub_obj: ROS2Publisher, value: i64) -> bool effect alloc, env, ffi {
     val h = ros2_open()
     if h == -1 || pub_obj.handle == 0 { return false };
     val m = ffi_call_i64(h, "iris_ros2_publisher_new_msg", pub_obj.handle)
@@ -659,7 +659,7 @@ pub def publish_int64(pub_obj: ROS2Publisher, value: i64) -> bool {
     ok
 }
 
-pub def publish_string(pub_obj: ROS2Publisher, value: str) -> bool {
+pub def publish_string(pub_obj: ROS2Publisher, value: str) -> bool effect alloc, env, ffi {
     val h = ros2_open()
     if h == -1 || pub_obj.handle == 0 { return false };
     val m = ffi_call_i64(h, "iris_ros2_publisher_new_msg", pub_obj.handle)
@@ -669,7 +669,7 @@ pub def publish_string(pub_obj: ROS2Publisher, value: str) -> bool {
     ok
 }
 
-pub def publish_vector3(pub_obj: ROS2Publisher, v: Vector3) -> bool {
+pub def publish_vector3(pub_obj: ROS2Publisher, v: Vector3) -> bool effect alloc, env, ffi {
     val cell = ffi_out_new(24)
     ffi_out_set_f64(cell, 0, v.x);
     ffi_out_set_f64(cell, 1, v.y);
@@ -677,7 +677,7 @@ pub def publish_vector3(pub_obj: ROS2Publisher, v: Vector3) -> bool {
     publish_doubles(pub_obj, "x,y,z", cell, 3)
 }
 
-pub def publish_twist(pub_obj: ROS2Publisher, t: Twist) -> bool {
+pub def publish_twist(pub_obj: ROS2Publisher, t: Twist) -> bool effect alloc, env, ffi {
     val cell = ffi_out_new(48)
     ffi_out_set_f64(cell, 0, t.linear.x);
     ffi_out_set_f64(cell, 1, t.linear.y);
@@ -688,7 +688,7 @@ pub def publish_twist(pub_obj: ROS2Publisher, t: Twist) -> bool {
     publish_doubles(pub_obj, "linear.x,linear.y,linear.z,angular.x,angular.y,angular.z", cell, 6)
 }
 
-pub def publish_pose(pub_obj: ROS2Publisher, p: Pose) -> bool {
+pub def publish_pose(pub_obj: ROS2Publisher, p: Pose) -> bool effect alloc, env, ffi {
     val cell = ffi_out_new(56)
     ffi_out_set_f64(cell, 0, p.position.x);
     ffi_out_set_f64(cell, 1, p.position.y);
@@ -706,7 +706,7 @@ pub def publish_pose(pub_obj: ROS2Publisher, p: Pose) -> bool {
 
 // ===== Subscriptions =====
 
-pub def subscription_create(node: ROS2Node, topic: str, msg_type: str) -> ROS2Sub {
+pub def subscription_create(node: ROS2Node, topic: str, msg_type: str) -> ROS2Sub effect alloc, env, ffi {
     subscription_create_qos(node, topic, msg_type, qos_default())
 }
 
@@ -718,7 +718,7 @@ pub def subscription_create_qos(
     topic: str,
     msg_type: str,
     qos: QoSProfile
-) -> ROS2Sub {
+) -> ROS2Sub effect alloc, env, ffi {
     val h = ros2_open()
     if h == -1 { return ROS2Sub { handle: 0, node: 0, ctx: 0, msg_type: "" } };
     val sub_h = ffi_call_i64(
@@ -728,14 +728,14 @@ pub def subscription_create_qos(
     ROS2Sub { handle: sub_h, node: node.handle, ctx: node.ctx, msg_type: msg_type }
 }
 
-pub def subscription_destroy(sub: ROS2Sub) -> bool {
+pub def subscription_destroy(sub: ROS2Sub) -> bool effect alloc, env, ffi {
     val h = ros2_open()
     if h == -1 { return false };
     ffi_call_i64(h, "iris_ros2_subscription_destroy", sub.handle) == 0
 }
 
 // Runs the executor until `sub` has a message (true) or `timeout_ms` passes.
-pub def wait_for_message(sub: ROS2Sub, timeout_ms: i64) -> bool {
+pub def wait_for_message(sub: ROS2Sub, timeout_ms: i64) -> bool effect alloc, env, ffi {
     val h = ros2_open()
     if h == -1 || sub.handle == 0 { return false };
     ffi_call_i64(h, "iris_ros2_wait", sub.handle, timeout_ms) == 1
@@ -743,27 +743,27 @@ pub def wait_for_message(sub: ROS2Sub, timeout_ms: i64) -> bool {
 
 // The oldest received message, if any. It lives until the next take on
 // this subscription or the next spin_once.
-pub def take_msg(sub: ROS2Sub) -> option<ROS2Msg> {
+pub def take_msg(sub: ROS2Sub) -> option<ROS2Msg> effect alloc, env, ffi, throw {
     val m = ros2_check(ffi_call_i64(ros2_lib(), "iris_ros2_take", sub.handle), "take_msg")
     if m > 0 { some(ROS2Msg { handle: m }) } else { none() }
 }
 
 // The number of publishers matched with this subscription.
-pub def subscription_matches(sub: ROS2Sub) -> i64 {
+pub def subscription_matches(sub: ROS2Sub) -> i64 effect alloc, env, ffi, throw {
     ros2_check(ffi_call_i64(ros2_lib(), "iris_ros2_subscription_matches", sub.handle), "subscription_matches")
 }
 
 // Takes a message and reads the f64 fields named in `paths` into `cell`.
 // `some` only when a message was taken and has those fields, so "no message"
 // and "a message whose value is zero" stay distinguishable.
-def take_doubles(sub: ROS2Sub, paths: str, cell: i64, n: i64) -> bool {
+def take_doubles(sub: ROS2Sub, paths: str, cell: i64, n: i64) -> bool effect alloc, env, ffi {
     val h = ros2_open()
     if h == -1 || sub.handle == 0 { return false };
     val m = ffi_call_i64(h, "iris_ros2_take", sub.handle)
     m > 0 && msg_get_f64_fields(h, m, paths, cell, n)
 }
 
-pub def take_f64(sub: ROS2Sub) -> option<f64> {
+pub def take_f64(sub: ROS2Sub) -> option<f64> effect alloc, env, ffi {
     val cell = ffi_out_new(8)
     val ok = take_doubles(sub, "data", cell, 1)
     val v = ffi_out_get_f64(cell, 0)
@@ -771,7 +771,7 @@ pub def take_f64(sub: ROS2Sub) -> option<f64> {
     if ok { some(v) } else { none() }
 }
 
-pub def take_i64(sub: ROS2Sub) -> option<i64> {
+pub def take_i64(sub: ROS2Sub) -> option<i64> effect alloc, env, ffi {
     val h = ros2_open()
     if h == -1 || sub.handle == 0 { return none() };
     val m = ffi_call_i64(h, "iris_ros2_take", sub.handle)
@@ -781,7 +781,7 @@ pub def take_i64(sub: ROS2Sub) -> option<i64> {
 }
 
 // The string field "data", truncated to `max_len - 1` bytes.
-pub def take_str(sub: ROS2Sub, max_len: i64) -> option<str> {
+pub def take_str(sub: ROS2Sub, max_len: i64) -> option<str> effect alloc, env, ffi {
     val h = ros2_open()
     if h == -1 || sub.handle == 0 || max_len <= 0 { return none() };
     val m = ffi_call_i64(h, "iris_ros2_take", sub.handle)
@@ -795,7 +795,7 @@ pub def take_str(sub: ROS2Sub, max_len: i64) -> option<str> {
     some(v)
 }
 
-pub def take_vector3(sub: ROS2Sub) -> option<Vector3> {
+pub def take_vector3(sub: ROS2Sub) -> option<Vector3> effect alloc, env, ffi {
     val cell = ffi_out_new(24)
     val ok = take_doubles(sub, "x,y,z", cell, 3)
     val v = make_vector3(ffi_out_get_f64(cell, 0), ffi_out_get_f64(cell, 1), ffi_out_get_f64(cell, 2))
@@ -803,7 +803,7 @@ pub def take_vector3(sub: ROS2Sub) -> option<Vector3> {
     if ok { some(v) } else { none() }
 }
 
-pub def take_twist(sub: ROS2Sub) -> option<Twist> {
+pub def take_twist(sub: ROS2Sub) -> option<Twist> effect alloc, env, ffi {
     val cell = ffi_out_new(48)
     val ok = take_doubles(sub, "linear.x,linear.y,linear.z,angular.x,angular.y,angular.z", cell, 6)
     val t = make_twist(
@@ -814,7 +814,7 @@ pub def take_twist(sub: ROS2Sub) -> option<Twist> {
     if ok { some(t) } else { none() }
 }
 
-pub def take_pose(sub: ROS2Sub) -> option<Pose> {
+pub def take_pose(sub: ROS2Sub) -> option<Pose> effect alloc, env, ffi {
     val cell = ffi_out_new(56)
     val ok = take_doubles(
         sub,
@@ -836,11 +836,11 @@ pub record ROS2Executor {
     cursor: i64
 }
 
-pub def executor_new() -> ROS2Executor {
+pub def executor_new() -> ROS2Executor effect alloc {
     ROS2Executor { subscriptions: list(), cursor: 0 }
 }
 
-pub def executor_add(exec: ROS2Executor, sub: ROS2Sub) -> ROS2Executor {
+pub def executor_add(exec: ROS2Executor, sub: ROS2Sub) -> ROS2Executor effect alloc {
     val subscriptions = exec.subscriptions
     list_push(subscriptions, sub);
     ROS2Executor { subscriptions: subscriptions, cursor: exec.cursor }
@@ -849,7 +849,7 @@ pub def executor_add(exec: ROS2Executor, sub: ROS2Sub) -> ROS2Executor {
 // Runs the executor until one of the subscriptions holds a message, checking
 // them round-robin from the cursor. Returns its index (the message stays
 // queued for take_*) or -1 on timeout.
-pub def executor_spin_once(exec: ROS2Executor, timeout_ms: i64) -> (ROS2Executor, i64) {
+pub def executor_spin_once(exec: ROS2Executor, timeout_ms: i64) -> (ROS2Executor, i64) effect alloc, env, ffi {
     val n = list_len(exec.subscriptions)
     if n == 0 { return (exec, 0 - 1) };
     val h = ros2_open()
@@ -873,16 +873,16 @@ pub def executor_spin_once(exec: ROS2Executor, timeout_ms: i64) -> (ROS2Executor
 
 // Fires every `period_ms` on the node's clock (sim time when use_sim_time is
 // set), as EVENT_TIMER.
-pub def timer_create(node: ROS2Node, period_ms: i64) -> ROS2Timer {
+pub def timer_create(node: ROS2Node, period_ms: i64) -> ROS2Timer effect alloc, env, ffi, throw {
     timer_create_ns(node, period_ms * 1000000, false)
 }
 
 // Fires on the wall clock, whatever the node's time source.
-pub def wall_timer_create(node: ROS2Node, period_ms: i64) -> ROS2Timer {
+pub def wall_timer_create(node: ROS2Node, period_ms: i64) -> ROS2Timer effect alloc, env, ffi, throw {
     timer_create_ns(node, period_ms * 1000000, true)
 }
 
-pub def timer_create_ns(node: ROS2Node, period_ns: i64, wall: bool) -> ROS2Timer {
+pub def timer_create_ns(node: ROS2Node, period_ns: i64, wall: bool) -> ROS2Timer effect alloc, env, ffi, throw {
     val wall_flag = if wall { 1 } else { 0 }
     val t = ros2_created(
         ffi_call_i64(ros2_lib(), "iris_ros2_timer_create", node.handle, period_ns, wall_flag),
@@ -891,15 +891,15 @@ pub def timer_create_ns(node: ROS2Node, period_ns: i64, wall: bool) -> ROS2Timer
     ROS2Timer { handle: t, node: node.handle }
 }
 
-pub def timer_cancel(timer: ROS2Timer) -> bool {
+pub def timer_cancel(timer: ROS2Timer) -> bool effect alloc, env, ffi, throw {
     ros2_check(ffi_call_i64(ros2_lib(), "iris_ros2_timer_cancel", timer.handle), "timer_cancel") == 0
 }
 
-pub def timer_reset(timer: ROS2Timer) -> bool {
+pub def timer_reset(timer: ROS2Timer) -> bool effect alloc, env, ffi, throw {
     ros2_check(ffi_call_i64(ros2_lib(), "iris_ros2_timer_reset", timer.handle), "timer_reset") == 0
 }
 
-pub def timer_destroy(timer: ROS2Timer) -> bool {
+pub def timer_destroy(timer: ROS2Timer) -> bool effect alloc, env, ffi {
     val h = ros2_open()
     if h == -1 { return false };
     ffi_call_i64(h, "iris_ros2_timer_destroy", timer.handle) == 0
@@ -913,14 +913,14 @@ pub def timer_destroy(timer: ROS2Timer) -> bool {
 
 // Declares `name` (unless already declared) and returns its value, which an
 // override may have set.
-pub def param_declare_f64(node: ROS2Node, name: str, default: f64) -> f64 {
+pub def param_declare_f64(node: ROS2Node, name: str, default: f64) -> f64 effect alloc, env, ffi, throw {
     ros2_check(ffi_call_i64(ros2_lib(), "iris_ros2_param_declare", node.handle, name, PARAM_DOUBLE, default, ""), "param_declare(" + name + ")");
     param_f64(node, name)
 }
 
 // A double parameter constrained to [low, high]; `description` is shown by
 // `ros2 param describe`.
-pub def param_declare_f64_range(node: ROS2Node, name: str, default: f64, low: f64, high: f64, description: str) -> f64 {
+pub def param_declare_f64_range(node: ROS2Node, name: str, default: f64, low: f64, high: f64, description: str) -> f64 effect alloc, env, ffi, throw {
     ros2_check(
         ffi_call_i64(ros2_lib(), "iris_ros2_param_declare_range", node.handle, name, PARAM_DOUBLE, default, low, high, 0.0, description, 0),
         "param_declare(" + name + ")"
@@ -928,12 +928,12 @@ pub def param_declare_f64_range(node: ROS2Node, name: str, default: f64, low: f6
     param_f64(node, name)
 }
 
-pub def param_declare_i64(node: ROS2Node, name: str, default: i64) -> i64 {
+pub def param_declare_i64(node: ROS2Node, name: str, default: i64) -> i64 effect alloc, env, ffi, throw {
     ros2_check(ffi_call_i64(ros2_lib(), "iris_ros2_param_declare", node.handle, name, PARAM_INTEGER, default, ""), "param_declare(" + name + ")");
     param_i64(node, name)
 }
 
-pub def param_declare_i64_range(node: ROS2Node, name: str, default: i64, low: i64, high: i64, description: str) -> i64 {
+pub def param_declare_i64_range(node: ROS2Node, name: str, default: i64, low: i64, high: i64, description: str) -> i64 effect alloc, env, ffi, throw {
     ros2_check(
         ffi_call_i64(ros2_lib(), "iris_ros2_param_declare_range", node.handle, name, PARAM_INTEGER, default, low, high, 0, description, 0),
         "param_declare(" + name + ")"
@@ -941,13 +941,13 @@ pub def param_declare_i64_range(node: ROS2Node, name: str, default: i64, low: i6
     param_i64(node, name)
 }
 
-pub def param_declare_bool(node: ROS2Node, name: str, default: bool) -> bool {
+pub def param_declare_bool(node: ROS2Node, name: str, default: bool) -> bool effect alloc, env, ffi, throw {
     val bit = if default { 1 } else { 0 }
     ros2_check(ffi_call_i64(ros2_lib(), "iris_ros2_param_declare", node.handle, name, PARAM_BOOL, bit, ""), "param_declare(" + name + ")");
     param_bool(node, name)
 }
 
-pub def param_declare_str(node: ROS2Node, name: str, default: str) -> str {
+pub def param_declare_str(node: ROS2Node, name: str, default: str) -> str effect alloc, env, ffi, throw {
     ros2_check(ffi_call_i64(ros2_lib(), "iris_ros2_param_declare", node.handle, name, PARAM_STRING, default, ""), "param_declare(" + name + ")");
     param_str(node, name)
 }
@@ -955,12 +955,12 @@ pub def param_declare_str(node: ROS2Node, name: str, default: str) -> str {
 // Any parameter type, as JSON: a value ("[1.0, 2.0]", "[\"a\"]", "true") and
 // a descriptor ("" or {"description", "read_only", "dynamic_typing",
 // "additional_constraints", "min", "max", "step"}). Returns the value as JSON.
-pub def param_declare_json(node: ROS2Node, name: str, value_json: str, descriptor_json: str) -> str {
+pub def param_declare_json(node: ROS2Node, name: str, value_json: str, descriptor_json: str) -> str effect alloc, env, ffi, throw {
     ros2_check(ffi_call_i64(ros2_lib(), "iris_ros2_param_declare", node.handle, name, 0, value_json, descriptor_json), "param_declare(" + name + ")");
     param_json(node, name)
 }
 
-pub def param_f64(node: ROS2Node, name: str) -> f64 {
+pub def param_f64(node: ROS2Node, name: str) -> f64 effect alloc, env, ffi, throw {
     val h = ros2_lib()
     val v = ffi_call_f64(h, "iris_ros2_param_get_f64", node.handle, name)
     if is_nan(v) && ros2_failed(h) {
@@ -971,7 +971,7 @@ pub def param_f64(node: ROS2Node, name: str) -> f64 {
     }
 }
 
-pub def param_i64(node: ROS2Node, name: str) -> i64 {
+pub def param_i64(node: ROS2Node, name: str) -> i64 effect alloc, env, ffi, throw {
     val h = ros2_lib()
     val v = ffi_call_i64(h, "iris_ros2_param_get_i64", node.handle, name)
     if v < 0 - 9223372036854775807 && ros2_failed(h) {
@@ -981,54 +981,54 @@ pub def param_i64(node: ROS2Node, name: str) -> i64 {
     }
 }
 
-pub def param_bool(node: ROS2Node, name: str) -> bool {
+pub def param_bool(node: ROS2Node, name: str) -> bool effect alloc, env, ffi, throw {
     ros2_check(ffi_call_i64(ros2_lib(), "iris_ros2_param_get_bool", node.handle, name), "param_bool(" + name + ")") == 1
 }
 
-pub def param_str(node: ROS2Node, name: str) -> str {
+pub def param_str(node: ROS2Node, name: str) -> str effect alloc, env, ffi, throw {
     val h = ros2_lib()
     ros2_string(h, ffi_call_i64(h, "iris_ros2_param_get_str", node.handle, name), "param_str(" + name + ")")
 }
 
-pub def param_json(node: ROS2Node, name: str) -> str {
+pub def param_json(node: ROS2Node, name: str) -> str effect alloc, env, ffi, throw {
     val h = ros2_lib()
     ros2_string(h, ffi_call_i64(h, "iris_ros2_param_get_json", node.handle, name), "param_json(" + name + ")")
 }
 
 // Setting returns false when rclcpp rejects the value (outside the range,
 // read-only, wrong type); ros2_error() says why.
-pub def param_set_f64(node: ROS2Node, name: str, value: f64) -> bool {
+pub def param_set_f64(node: ROS2Node, name: str, value: f64) -> bool effect alloc, env, ffi, throw {
     ffi_call_i64(ros2_lib(), "iris_ros2_param_set", node.handle, name, PARAM_DOUBLE, value) == 0
 }
 
-pub def param_set_i64(node: ROS2Node, name: str, value: i64) -> bool {
+pub def param_set_i64(node: ROS2Node, name: str, value: i64) -> bool effect alloc, env, ffi, throw {
     ffi_call_i64(ros2_lib(), "iris_ros2_param_set", node.handle, name, PARAM_INTEGER, value) == 0
 }
 
-pub def param_set_bool(node: ROS2Node, name: str, value: bool) -> bool {
+pub def param_set_bool(node: ROS2Node, name: str, value: bool) -> bool effect alloc, env, ffi, throw {
     val bit = if value { 1 } else { 0 }
     ffi_call_i64(ros2_lib(), "iris_ros2_param_set", node.handle, name, PARAM_BOOL, bit) == 0
 }
 
-pub def param_set_str(node: ROS2Node, name: str, value: str) -> bool {
+pub def param_set_str(node: ROS2Node, name: str, value: str) -> bool effect alloc, env, ffi, throw {
     ffi_call_i64(ros2_lib(), "iris_ros2_param_set", node.handle, name, PARAM_STRING, value) == 0
 }
 
-pub def param_set_json(node: ROS2Node, name: str, value_json: str) -> bool {
+pub def param_set_json(node: ROS2Node, name: str, value_json: str) -> bool effect alloc, env, ffi, throw {
     ffi_call_i64(ros2_lib(), "iris_ros2_param_set", node.handle, name, 0, value_json) == 0
 }
 
-pub def param_has(node: ROS2Node, name: str) -> bool {
+pub def param_has(node: ROS2Node, name: str) -> bool effect alloc, env, ffi, throw {
     ros2_check(ffi_call_i64(ros2_lib(), "iris_ros2_param_has", node.handle, name), "param_has") == 1
 }
 
 // The PARAM_* type of `name` (PARAM_NOT_SET if undeclared).
-pub def param_type(node: ROS2Node, name: str) -> i64 {
+pub def param_type(node: ROS2Node, name: str) -> i64 effect alloc, env, ffi, throw {
     ros2_check(ffi_call_i64(ros2_lib(), "iris_ros2_param_type", node.handle, name), "param_type")
 }
 
 // The names of all the node's parameters, as a JSON array.
-pub def param_list(node: ROS2Node) -> str {
+pub def param_list(node: ROS2Node) -> str effect alloc, env, ffi, throw {
     val h = ros2_lib()
     ros2_string(h, ffi_call_i64(h, "iris_ros2_param_list", node.handle), "param_list")
 }
@@ -1039,30 +1039,30 @@ pub def param_list(node: ROS2Node) -> str {
 // Every transition arrives as EVENT_TRANSITION. Publishers on a lifecycle
 // node only publish while it is active.
 
-pub def lifecycle_state(node: ROS2Node) -> i64 {
+pub def lifecycle_state(node: ROS2Node) -> i64 effect alloc, env, ffi, throw {
     ros2_check(ffi_call_i64(ros2_lib(), "iris_ros2_lifecycle_state", node.handle), "lifecycle_state")
 }
 
-pub def lifecycle_state_label(node: ROS2Node) -> str {
+pub def lifecycle_state_label(node: ROS2Node) -> str effect alloc, env, ffi, throw {
     val h = ros2_lib()
     ros2_string(h, ffi_call_i64(h, "iris_ros2_lifecycle_state_label", node.handle), "lifecycle_state_label")
 }
 
-pub def lifecycle_is_active(node: ROS2Node) -> bool { lifecycle_state(node) == LIFECYCLE_ACTIVE }
+pub def lifecycle_is_active(node: ROS2Node) -> bool effect alloc, env, ffi, throw { lifecycle_state(node) == LIFECYCLE_ACTIVE }
 
 // Runs a TRANSITION_* and returns the state the node is in afterwards (an
 // invalid transition leaves it where it was).
-pub def lifecycle_trigger(node: ROS2Node, transition: i64) -> i64 {
+pub def lifecycle_trigger(node: ROS2Node, transition: i64) -> i64 effect alloc, env, ffi, throw {
     ros2_check(ffi_call_i64(ros2_lib(), "iris_ros2_lifecycle_trigger", node.handle, transition), "lifecycle_trigger")
 }
 
-pub def lifecycle_configure(node: ROS2Node) -> i64 { lifecycle_trigger(node, TRANSITION_CONFIGURE) }
-pub def lifecycle_activate(node: ROS2Node) -> i64 { lifecycle_trigger(node, TRANSITION_ACTIVATE) }
-pub def lifecycle_deactivate(node: ROS2Node) -> i64 { lifecycle_trigger(node, TRANSITION_DEACTIVATE) }
-pub def lifecycle_cleanup(node: ROS2Node) -> i64 { lifecycle_trigger(node, TRANSITION_CLEANUP) }
+pub def lifecycle_configure(node: ROS2Node) -> i64 effect alloc, env, ffi, throw { lifecycle_trigger(node, TRANSITION_CONFIGURE) }
+pub def lifecycle_activate(node: ROS2Node) -> i64 effect alloc, env, ffi, throw { lifecycle_trigger(node, TRANSITION_ACTIVATE) }
+pub def lifecycle_deactivate(node: ROS2Node) -> i64 effect alloc, env, ffi, throw { lifecycle_trigger(node, TRANSITION_DEACTIVATE) }
+pub def lifecycle_cleanup(node: ROS2Node) -> i64 effect alloc, env, ffi, throw { lifecycle_trigger(node, TRANSITION_CLEANUP) }
 
 // Shuts down from whichever primary state the node is in.
-pub def lifecycle_shutdown(node: ROS2Node) -> i64 {
+pub def lifecycle_shutdown(node: ROS2Node) -> i64 effect alloc, env, ffi, throw {
     val state = lifecycle_state(node)
     val transition = if state == LIFECYCLE_ACTIVE { TRANSITION_ACTIVE_SHUTDOWN } else {
         if state == LIFECYCLE_INACTIVE { TRANSITION_INACTIVE_SHUTDOWN } else { TRANSITION_UNCONFIGURED_SHUTDOWN }
@@ -1072,7 +1072,7 @@ pub def lifecycle_shutdown(node: ROS2Node) -> i64 {
 
 // What the node's ON_* callback answers from now on: CALLBACK_SUCCESS,
 // CALLBACK_FAILURE (the transition is refused) or CALLBACK_ERROR.
-pub def lifecycle_set_result(node: ROS2Node, callback: i64, result: i64) -> bool {
+pub def lifecycle_set_result(node: ROS2Node, callback: i64, result: i64) -> bool effect alloc, env, ffi, throw {
     ros2_check(ffi_call_i64(ros2_lib(), "iris_ros2_lifecycle_set_result", node.handle, callback, result), "lifecycle_set_result") == 0
 }
 
@@ -1081,12 +1081,12 @@ pub def lifecycle_set_result(node: ROS2Node, callback: i64, result: i64) -> bool
 // A service of any installed type ("example_interfaces/srv/AddTwoInts").
 // Requests arrive as EVENT_REQUEST: read request_of(ev), fill
 // response_of(ev), then service_reply(srv, ev) -- now or on a later spin.
-pub def service_create(node: ROS2Node, name: str, srv_type: str) -> ROS2Service {
+pub def service_create(node: ROS2Node, name: str, srv_type: str) -> ROS2Service effect alloc, env, ffi, throw {
     val s = ros2_created(ffi_call_i64(ros2_lib(), "iris_ros2_service_create", node.handle, name, srv_type), "service_create(" + name + ")")
     ROS2Service { handle: s, node: node.handle, srv_type: srv_type }
 }
 
-pub def service_destroy(srv: ROS2Service) -> bool {
+pub def service_destroy(srv: ROS2Service) -> bool effect alloc, env, ffi {
     val h = ros2_open()
     if h == -1 { return false };
     ffi_call_i64(h, "iris_ros2_service_destroy", srv.handle) == 0
@@ -1096,57 +1096,57 @@ pub def request_of(ev: ROS2Event) -> ROS2Msg { ev.message }
 pub def response_of(ev: ROS2Event) -> ROS2Msg { ROS2Msg { handle: ev.aux } }
 
 // Sends the response for the request `ev` delivered and releases both.
-pub def service_reply(srv: ROS2Service, ev: ROS2Event) -> bool {
+pub def service_reply(srv: ROS2Service, ev: ROS2Event) -> bool effect alloc, env, ffi, throw {
     ros2_check(ffi_call_i64(ros2_lib(), "iris_ros2_service_reply", srv.handle, ev.id), "service_reply") == 0
 }
 
 // ===== Clients =====
 
-pub def client_create(node: ROS2Node, name: str, srv_type: str) -> ROS2Client {
+pub def client_create(node: ROS2Node, name: str, srv_type: str) -> ROS2Client effect alloc, env, ffi, throw {
     val c = ros2_created(ffi_call_i64(ros2_lib(), "iris_ros2_client_create", node.handle, name, srv_type), "client_create(" + name + ")")
     ROS2Client { handle: c, node: node.handle, srv_type: srv_type }
 }
 
-pub def client_destroy(cli: ROS2Client) -> bool {
+pub def client_destroy(cli: ROS2Client) -> bool effect alloc, env, ffi {
     val h = ros2_open()
     if h == -1 { return false };
     ffi_call_i64(h, "iris_ros2_client_destroy", cli.handle) == 0
 }
 
 // A new request message of the client's service type (yours: msg_free it).
-pub def client_request(cli: ROS2Client) -> ROS2Msg {
+pub def client_request(cli: ROS2Client) -> ROS2Msg effect alloc, env, ffi, throw {
     ROS2Msg { handle: ros2_created(ffi_call_i64(ros2_lib(), "iris_ros2_client_new_request", cli.handle), "client_request") }
 }
 
-pub def client_ready(cli: ROS2Client) -> bool {
+pub def client_ready(cli: ROS2Client) -> bool effect alloc, env, ffi, throw {
     ros2_check(ffi_call_i64(ros2_lib(), "iris_ros2_client_ready", cli.handle), "client_ready") == 1
 }
 
-pub def client_wait_service(cli: ROS2Client, timeout_ms: i64) -> bool {
+pub def client_wait_service(cli: ROS2Client, timeout_ms: i64) -> bool effect alloc, env, ffi, throw {
     ros2_check(ffi_call_i64(ros2_lib(), "iris_ros2_client_wait_service", cli.handle, timeout_ms), "client_wait_service") == 1
 }
 
 // Sends `request` and returns its token; the answer arrives as EVENT_RESPONSE
 // with that id, or through client_wait_response.
-pub def client_send(cli: ROS2Client, request: ROS2Msg) -> i64 {
+pub def client_send(cli: ROS2Client, request: ROS2Msg) -> i64 effect alloc, env, ffi, throw {
     ros2_check(ffi_call_i64(ros2_lib(), "iris_ros2_client_send", cli.handle, request.handle), "client_send")
 }
 
 // Runs the executor until the response to `token` arrives (it lives until
 // the next call on this client or the next spin_once).
-pub def client_wait_response(cli: ROS2Client, token: i64, timeout_ms: i64) -> option<ROS2Msg> {
+pub def client_wait_response(cli: ROS2Client, token: i64, timeout_ms: i64) -> option<ROS2Msg> effect alloc, env, ffi, throw {
     val m = ros2_check(ffi_call_i64(ros2_lib(), "iris_ros2_client_wait_response", cli.handle, token, timeout_ms), "client_wait_response")
     if m > 0 { some(ROS2Msg { handle: m }) } else { none() }
 }
 
-pub def client_call(cli: ROS2Client, request: ROS2Msg, timeout_ms: i64) -> option<ROS2Msg> {
+pub def client_call(cli: ROS2Client, request: ROS2Msg, timeout_ms: i64) -> option<ROS2Msg> effect alloc, env, ffi, throw {
     client_wait_response(cli, client_send(cli, request), timeout_ms)
 }
 
 // ===== Action servers =====
 
 // Accepts and executes every goal, and accepts cancel requests.
-pub def action_server_create(node: ROS2Node, name: str, action_type: str) -> ROS2ActionServer {
+pub def action_server_create(node: ROS2Node, name: str, action_type: str) -> ROS2ActionServer effect alloc, env, ffi, throw {
     action_server_create_with(node, name, action_type, false, true, 0)
 }
 
@@ -1162,7 +1162,7 @@ pub def action_server_create_with(
     defer_goals: bool,
     accept_cancel: bool,
     max_goals: i64
-) -> ROS2ActionServer {
+) -> ROS2ActionServer effect alloc, env, ffi, throw {
     val goal_policy = if defer_goals { 1 } else { 0 }
     val cancel_policy = if accept_cancel { 0 } else { 1 }
     val s = ros2_created(
@@ -1172,7 +1172,7 @@ pub def action_server_create_with(
     ROS2ActionServer { handle: s, node: node.handle, action_type: action_type }
 }
 
-pub def action_server_destroy(srv: ROS2ActionServer) -> bool {
+pub def action_server_destroy(srv: ROS2ActionServer) -> bool effect alloc, env, ffi {
     val h = ros2_open()
     if h == -1 { return false };
     ffi_call_i64(h, "iris_ros2_action_server_destroy", srv.handle) == 0
@@ -1181,95 +1181,95 @@ pub def action_server_destroy(srv: ROS2ActionServer) -> bool {
 pub def goal_of(ev: ROS2Event) -> ROS2Goal { ROS2Goal { handle: ev.id } }
 
 // The goal's request (the action's Goal message).
-pub def goal_request(goal: ROS2Goal) -> ROS2Msg {
+pub def goal_request(goal: ROS2Goal) -> ROS2Msg effect alloc, env, ffi, throw {
     ROS2Msg { handle: ros2_created(ffi_call_i64(ros2_lib(), "iris_ros2_goal_message", goal.handle), "goal_request") }
 }
 
 // The goal's feedback message: fill it, then goal_publish_feedback.
-pub def goal_feedback_msg(goal: ROS2Goal) -> ROS2Msg {
+pub def goal_feedback_msg(goal: ROS2Goal) -> ROS2Msg effect alloc, env, ffi, throw {
     ROS2Msg { handle: ros2_created(ffi_call_i64(ros2_lib(), "iris_ros2_goal_feedback", goal.handle), "goal_feedback_msg") }
 }
 
 // The goal's result message: fill it before goal_succeed / abort / canceled.
-pub def goal_result_msg(goal: ROS2Goal) -> ROS2Msg {
+pub def goal_result_msg(goal: ROS2Goal) -> ROS2Msg effect alloc, env, ffi, throw {
     ROS2Msg { handle: ros2_created(ffi_call_i64(ros2_lib(), "iris_ros2_goal_result", goal.handle), "goal_result_msg") }
 }
 
-pub def goal_publish_feedback(goal: ROS2Goal) -> bool {
+pub def goal_publish_feedback(goal: ROS2Goal) -> bool effect alloc, env, ffi, throw {
     ros2_check(ffi_call_i64(ros2_lib(), "iris_ros2_goal_publish_feedback", goal.handle), "goal_publish_feedback") == 0
 }
 
 // Starts a goal accepted by a deferring server.
-pub def goal_execute(goal: ROS2Goal) -> bool {
+pub def goal_execute(goal: ROS2Goal) -> bool effect alloc, env, ffi, throw {
     ros2_check(ffi_call_i64(ros2_lib(), "iris_ros2_goal_execute", goal.handle), "goal_execute") == 0
 }
 
 // Ends the goal with GOAL_SUCCEEDED, GOAL_CANCELED or GOAL_ABORTED and sends
 // its result message. The goal and its messages are released.
-pub def goal_finish(goal: ROS2Goal, status: i64) -> bool {
+pub def goal_finish(goal: ROS2Goal, status: i64) -> bool effect alloc, env, ffi, throw {
     ros2_check(ffi_call_i64(ros2_lib(), "iris_ros2_goal_finish", goal.handle, status), "goal_finish") == 0
 }
 
-pub def goal_succeed(goal: ROS2Goal) -> bool { goal_finish(goal, GOAL_SUCCEEDED) }
-pub def goal_abort(goal: ROS2Goal) -> bool { goal_finish(goal, GOAL_ABORTED) }
-pub def goal_canceled(goal: ROS2Goal) -> bool { goal_finish(goal, GOAL_CANCELED) }
+pub def goal_succeed(goal: ROS2Goal) -> bool effect alloc, env, ffi, throw { goal_finish(goal, GOAL_SUCCEEDED) }
+pub def goal_abort(goal: ROS2Goal) -> bool effect alloc, env, ffi, throw { goal_finish(goal, GOAL_ABORTED) }
+pub def goal_canceled(goal: ROS2Goal) -> bool effect alloc, env, ffi, throw { goal_finish(goal, GOAL_CANCELED) }
 
-pub def goal_status(goal: ROS2Goal) -> i64 {
+pub def goal_status(goal: ROS2Goal) -> i64 effect alloc, env, ffi, throw {
     ros2_check(ffi_call_i64(ros2_lib(), "iris_ros2_goal_status", goal.handle), "goal_status")
 }
 
-pub def goal_is_canceling(goal: ROS2Goal) -> bool { goal_status(goal) == GOAL_CANCELING }
+pub def goal_is_canceling(goal: ROS2Goal) -> bool effect alloc, env, ffi, throw { goal_status(goal) == GOAL_CANCELING }
 
-pub def goal_uuid(goal: ROS2Goal) -> str {
+pub def goal_uuid(goal: ROS2Goal) -> str effect alloc, env, ffi, throw {
     val h = ros2_lib()
     ros2_string(h, ffi_call_i64(h, "iris_ros2_goal_uuid", goal.handle), "goal_uuid")
 }
 
 // ===== Action clients =====
 
-pub def action_client_create(node: ROS2Node, name: str, action_type: str) -> ROS2ActionClient {
+pub def action_client_create(node: ROS2Node, name: str, action_type: str) -> ROS2ActionClient effect alloc, env, ffi, throw {
     val c = ros2_created(ffi_call_i64(ros2_lib(), "iris_ros2_action_client_create", node.handle, name, action_type), "action_client_create(" + name + ")")
     ROS2ActionClient { handle: c, node: node.handle, action_type: action_type }
 }
 
-pub def action_client_destroy(cli: ROS2ActionClient) -> bool {
+pub def action_client_destroy(cli: ROS2ActionClient) -> bool effect alloc, env, ffi {
     val h = ros2_open()
     if h == -1 { return false };
     ffi_call_i64(h, "iris_ros2_action_client_destroy", cli.handle) == 0
 }
 
 // A new Goal message of the client's action type (yours: msg_free it).
-pub def action_goal_msg(cli: ROS2ActionClient) -> ROS2Msg {
+pub def action_goal_msg(cli: ROS2ActionClient) -> ROS2Msg effect alloc, env, ffi, throw {
     ROS2Msg { handle: ros2_created(ffi_call_i64(ros2_lib(), "iris_ros2_action_new_goal", cli.handle), "action_goal_msg") }
 }
 
-pub def action_server_ready(cli: ROS2ActionClient) -> bool {
+pub def action_server_ready(cli: ROS2ActionClient) -> bool effect alloc, env, ffi, throw {
     ros2_check(ffi_call_i64(ros2_lib(), "iris_ros2_action_server_ready", cli.handle), "action_server_ready") == 1
 }
 
-pub def action_wait_server(cli: ROS2ActionClient, timeout_ms: i64) -> bool {
+pub def action_wait_server(cli: ROS2ActionClient, timeout_ms: i64) -> bool effect alloc, env, ffi, throw {
     ros2_check(ffi_call_i64(ros2_lib(), "iris_ros2_action_wait_server", cli.handle, timeout_ms), "action_wait_server") == 1
 }
 
 // Sends a copy of `goal` and returns its token. The server's answer arrives
 // as EVENT_GOAL_RESPONSE, progress as EVENT_FEEDBACK and EVENT_GOAL_STATUS,
 // and the outcome as EVENT_RESULT (the bridge asks for the result itself).
-pub def action_send_goal(cli: ROS2ActionClient, goal: ROS2Msg) -> i64 {
+pub def action_send_goal(cli: ROS2ActionClient, goal: ROS2Msg) -> i64 effect alloc, env, ffi, throw {
     ros2_check(ffi_call_i64(ros2_lib(), "iris_ros2_action_send_goal", cli.handle, goal.handle), "action_send_goal")
 }
 
 // Asks the server to cancel; its answer arrives as EVENT_CANCEL_RESPONSE.
-pub def action_cancel(cli: ROS2ActionClient, token: i64) -> bool {
+pub def action_cancel(cli: ROS2ActionClient, token: i64) -> bool effect alloc, env, ffi, throw {
     ros2_check(ffi_call_i64(ros2_lib(), "iris_ros2_action_cancel", cli.handle, token), "action_cancel") == 0
 }
 
 // The goal's last known GOAL_* status.
-pub def action_status(cli: ROS2ActionClient, token: i64) -> i64 {
+pub def action_status(cli: ROS2ActionClient, token: i64) -> i64 effect alloc, env, ffi, throw {
     ros2_check(ffi_call_i64(ros2_lib(), "iris_ros2_action_status", cli.handle, token), "action_status")
 }
 
 // -1 no answer yet, 0 rejected, 1 accepted.
-pub def action_accepted(cli: ROS2ActionClient, token: i64) -> i64 {
+pub def action_accepted(cli: ROS2ActionClient, token: i64) -> i64 effect alloc, env, ffi, throw {
     val h = ros2_lib()
     val v = ffi_call_i64(h, "iris_ros2_action_accepted", cli.handle, token)
     if v < 0 && ros2_failed(h) { ros2_check(v, "action_accepted") } else { v }
@@ -1278,7 +1278,7 @@ pub def action_accepted(cli: ROS2ActionClient, token: i64) -> i64 {
 // Runs the executor until the goal ends and returns its result (living until
 // the next call on this client or the next spin_once); none on timeout or
 // rejection. The outcome is action_status.
-pub def action_wait_result(cli: ROS2ActionClient, token: i64, timeout_ms: i64) -> option<ROS2Msg> {
+pub def action_wait_result(cli: ROS2ActionClient, token: i64, timeout_ms: i64) -> option<ROS2Msg> effect alloc, env, ffi, throw {
     val m = ros2_check(ffi_call_i64(ros2_lib(), "iris_ros2_action_wait_result", cli.handle, token, timeout_ms), "action_wait_result")
     if m > 0 { some(ROS2Msg { handle: m }) } else { none() }
 }
@@ -1399,7 +1399,7 @@ pub def transform_point(t: Transform, p: Point) -> Point {
 
 // ===== tf2 =====
 
-def tf_cell(t: Transform) -> i64 {
+def tf_cell(t: Transform) -> i64 effect alloc, ffi {
     val cell = ffi_out_new(64)
     ffi_out_set_f64(cell, 0, t.translation.x);
     ffi_out_set_f64(cell, 1, t.translation.y);
@@ -1411,7 +1411,7 @@ def tf_cell(t: Transform) -> i64 {
     cell
 }
 
-def tf_from_cell(cell: i64) -> Transform {
+def tf_from_cell(cell: i64) -> Transform effect ffi {
     Transform {
         translation: Vector3 { x: ffi_out_get_f64(cell, 0), y: ffi_out_get_f64(cell, 1), z: ffi_out_get_f64(cell, 2) },
         rotation: Quaternion {
@@ -1423,30 +1423,30 @@ def tf_from_cell(cell: i64) -> Transform {
 
 // A tf2 buffer with a tf2_ros TransformListener in `node`, filled from /tf
 // and /tf_static as the node's context spins.
-pub def tf_buffer_create(node: ROS2Node) -> TfBuffer {
+pub def tf_buffer_create(node: ROS2Node) -> TfBuffer effect alloc, env, ffi, throw {
     TfBuffer { handle: ros2_created(ffi_call_i64(ros2_lib(), "iris_ros2_tf_buffer_create", node.handle, 0), "tf_buffer_create") }
 }
 
 // A tf2 buffer of the program's own, filled only with tf_set.
-pub def tf_buffer_local() -> TfBuffer {
+pub def tf_buffer_local() -> TfBuffer effect alloc, env, ffi, throw {
     TfBuffer { handle: ros2_created(ffi_call_i64(ros2_lib(), "iris_ros2_tf_buffer_create", 0, 0), "tf_buffer_local") }
 }
 
-pub def tf_buffer_destroy(buffer: TfBuffer) -> bool {
+pub def tf_buffer_destroy(buffer: TfBuffer) -> bool effect alloc, env, ffi {
     val h = ros2_open()
     if h == -1 { return false };
     ffi_call_i64(h, "iris_ros2_tf_buffer_destroy", buffer.handle) == 0
 }
 
 // Inserts parent -> child at `stamp_ns` (tf2 interpolates between stamps).
-pub def tf_set(buffer: TfBuffer, parent: str, child: str, stamp_ns: i64, t: Transform) -> bool {
+pub def tf_set(buffer: TfBuffer, parent: str, child: str, stamp_ns: i64, t: Transform) -> bool effect alloc, env, ffi, throw {
     val cell = tf_cell(t)
     val rc = ffi_call_i64(ros2_lib(), "iris_ros2_tf_set", buffer.handle, parent, child, stamp_ns, cell, 0)
     ffi_out_free(cell);
     rc == 0
 }
 
-pub def tf_set_static(buffer: TfBuffer, parent: str, child: str, t: Transform) -> bool {
+pub def tf_set_static(buffer: TfBuffer, parent: str, child: str, t: Transform) -> bool effect alloc, env, ffi, throw {
     val cell = tf_cell(t)
     val rc = ffi_call_i64(ros2_lib(), "iris_ros2_tf_set", buffer.handle, parent, child, 0, cell, 1)
     ffi_out_free(cell);
@@ -1456,7 +1456,7 @@ pub def tf_set_static(buffer: TfBuffer, parent: str, child: str, t: Transform) -
 // The transform taking points in `source` into `target` at the latest
 // common time, through any chain of frames; none when tf2 cannot answer
 // (ros2_error says why).
-pub def tf_lookup(buffer: TfBuffer, target: str, source: str) -> option<Transform> {
+pub def tf_lookup(buffer: TfBuffer, target: str, source: str) -> option<Transform> effect alloc, env, ffi, throw {
     val cell = ffi_out_new(64)
     val found = ffi_call_i64(ros2_lib(), "iris_ros2_tf_lookup", buffer.handle, target, source, 0, cell)
     val t = tf_from_cell(cell)
@@ -1465,7 +1465,7 @@ pub def tf_lookup(buffer: TfBuffer, target: str, source: str) -> option<Transfor
 }
 
 // As tf_lookup, at `time_ns` (0: latest), with the stamp of the answer.
-pub def tf_lookup_at(buffer: TfBuffer, target: str, source: str, time_ns: i64) -> option<StampedTransform> {
+pub def tf_lookup_at(buffer: TfBuffer, target: str, source: str, time_ns: i64) -> option<StampedTransform> effect alloc, env, ffi, throw {
     val cell = ffi_out_new(64)
     val found = ffi_call_i64(ros2_lib(), "iris_ros2_tf_lookup", buffer.handle, target, source, time_ns, cell)
     val stamped = StampedTransform {
@@ -1478,40 +1478,40 @@ pub def tf_lookup_at(buffer: TfBuffer, target: str, source: str, time_ns: i64) -
     if found == 1 { some(stamped) } else { none() }
 }
 
-pub def tf_can_transform(buffer: TfBuffer, target: str, source: str) -> bool {
+pub def tf_can_transform(buffer: TfBuffer, target: str, source: str) -> bool effect alloc, env, ffi, throw {
     ffi_call_i64(ros2_lib(), "iris_ros2_tf_can_transform", buffer.handle, target, source, 0) == 1
 }
 
 // The frames the buffer knows, as a JSON array.
-pub def tf_frames(buffer: TfBuffer) -> str {
+pub def tf_frames(buffer: TfBuffer) -> str effect alloc, env, ffi, throw {
     val h = ros2_lib()
     ros2_string(h, ffi_call_i64(h, "iris_ros2_tf_frames", buffer.handle), "tf_frames")
 }
 
 // Broadcasts on /tf.
-pub def tf_broadcaster_create(node: ROS2Node) -> TfBroadcaster {
+pub def tf_broadcaster_create(node: ROS2Node) -> TfBroadcaster effect alloc, env, ffi, throw {
     val b = ros2_created(ffi_call_i64(ros2_lib(), "iris_ros2_tf_broadcaster_create", node.handle, 0), "tf_broadcaster_create")
     TfBroadcaster { handle: b, node: node.handle }
 }
 
 // Broadcasts on /tf_static (latched for late joiners).
-pub def tf_static_broadcaster_create(node: ROS2Node) -> TfBroadcaster {
+pub def tf_static_broadcaster_create(node: ROS2Node) -> TfBroadcaster effect alloc, env, ffi, throw {
     val b = ros2_created(ffi_call_i64(ros2_lib(), "iris_ros2_tf_broadcaster_create", node.handle, 1), "tf_static_broadcaster_create")
     TfBroadcaster { handle: b, node: node.handle }
 }
 
-pub def tf_broadcaster_destroy(bc: TfBroadcaster) -> bool {
+pub def tf_broadcaster_destroy(bc: TfBroadcaster) -> bool effect alloc, env, ffi {
     val h = ros2_open()
     if h == -1 { return false };
     ffi_call_i64(h, "iris_ros2_tf_broadcaster_destroy", bc.handle) == 0
 }
 
 // Sends parent -> child stamped with the node's clock.
-pub def tf_send(bc: TfBroadcaster, parent: str, child: str, t: Transform) -> bool {
+pub def tf_send(bc: TfBroadcaster, parent: str, child: str, t: Transform) -> bool effect alloc, env, ffi, throw {
     tf_send_at(bc, parent, child, 0, t)
 }
 
-pub def tf_send_at(bc: TfBroadcaster, parent: str, child: str, stamp_ns: i64, t: Transform) -> bool {
+pub def tf_send_at(bc: TfBroadcaster, parent: str, child: str, stamp_ns: i64, t: Transform) -> bool effect alloc, env, ffi, throw {
     val cell = tf_cell(t)
     val rc = ffi_call_i64(ros2_lib(), "iris_ros2_tf_send", bc.handle, parent, child, stamp_ns, cell)
     ffi_out_free(cell);
@@ -1522,11 +1522,11 @@ pub def tf_send_at(bc: TfBroadcaster, parent: str, child: str, stamp_ns: i64, t:
 // through intermediate frames and interpolate in time.
 pub record TransformBuffer { handle: i64 }
 
-pub def transform_buffer_new() -> TransformBuffer {
+pub def transform_buffer_new() -> TransformBuffer effect alloc, env, ffi, throw {
     TransformBuffer { handle: tf_buffer_local().handle }
 }
 
-pub def transform_buffer_set(buffer: TransformBuffer, transform: StampedTransform) -> TransformBuffer {
+pub def transform_buffer_set(buffer: TransformBuffer, transform: StampedTransform) -> TransformBuffer effect alloc, env, ffi, throw {
     tf_set(TfBuffer { handle: buffer.handle }, transform.parent_frame, transform.child_frame, transform.stamp_ns, transform.transform);
     buffer
 }
@@ -1537,7 +1537,7 @@ pub def transform_buffer_lookup(
     buffer: TransformBuffer,
     parent_frame: str,
     child_frame: str
-) -> option<Transform> {
+) -> option<Transform> effect alloc, env, ffi, throw {
     tf_lookup(TfBuffer { handle: buffer.handle }, parent_frame, child_frame)
 }
 
@@ -1546,25 +1546,25 @@ pub def transform_buffer_lookup(
 // publisher on /orchestrator/actuation. Values cross as 1e8-scaled integers,
 // as they always did; new code should use publisher_create + publish_msg.
 
-pub def init() -> i64 {
+pub def init() -> i64 effect alloc, env, ffi {
     val h = ros2_open()
     if h == -1 { return -1 };
     ffi_call(h, "iris_rcl_init")
 }
 
-pub def legacy_create_node() -> i64 {
+pub def legacy_create_node() -> i64 effect alloc, env, ffi {
     val h = ros2_open()
     if h == -1 { return -1 };
     ffi_call(h, "iris_rcl_get_zero_initialized_node")
 }
 
-pub def legacy_create_publisher() -> i64 {
+pub def legacy_create_publisher() -> i64 effect alloc, env, ffi {
     val h = ros2_open()
     if h == -1 { return -1 };
     ffi_call(h, "iris_rcl_get_zero_initialized_publisher")
 }
 
-pub def legacy_publish(publisher: i64, value: f64) -> bool {
+pub def legacy_publish(publisher: i64, value: f64) -> bool effect alloc, env, ffi {
     val h = ros2_open()
     if h == -1 { return false };
     val scaled = (value * 100000000.0) to i64;
@@ -1572,21 +1572,21 @@ pub def legacy_publish(publisher: i64, value: f64) -> bool {
     status == 0
 }
 
-pub def shutdown() -> bool {
+pub def shutdown() -> bool effect alloc, env, ffi {
     val h = ros2_open()
     if h == -1 { return false };
     val status = ffi_call(h, "iris_rcl_shutdown");
     status == 0
 }
 
-pub def create_node(name: str, namespace: str) -> i64 {
+pub def create_node(name: str, namespace: str) -> i64 effect alloc, env, ffi {
     legacy_create_node()
 }
 
-pub def create_publisher(node: i64, topic: str, msg_type: str) -> i64 {
+pub def create_publisher(node: i64, topic: str, msg_type: str) -> i64 effect alloc, env, ffi {
     legacy_create_publisher()
 }
 
-pub def publish_float64(publisher: i64, value: f64) -> bool {
+pub def publish_float64(publisher: i64, value: f64) -> bool effect alloc, env, ffi {
     legacy_publish(publisher, value)
 }

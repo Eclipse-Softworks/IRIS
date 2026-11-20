@@ -1,0 +1,18 @@
+[package]
+name = "iris_ui_host"
+version = "0.1.0"
+edition = "2021"
+description = "Cross-platform native CPU host (winit + softbuffer + tiny-skia + cosmic-text + accesskit) for IRIS std.ui"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+accesskit = "0.17"
+accesskit_winit = "0.23"
+cosmic-text = "0.14"
+raw-window-handle = "0.6"
+softbuffer = "0.4"
+thiserror = "2"
+tiny-skia = { version = "0.12", features = ["simd", "png-format"] }
+winit = "0.30"

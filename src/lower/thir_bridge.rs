@@ -65,6 +65,7 @@ pub(super) fn synth_marker_thir_expr(arg: &AstExpr) -> Option<crate::thir::ThirE
 #[allow(dead_code)]
 pub(super) fn synth_expr_marker(e: &crate::thir::ThirExpr) -> AstExpr {
     AstExpr::Block(crate::parser::ast::AstBlock {
+        scope_id: 0,
         stmts: Vec::new(),
         tail: None,
         span: synth_marker_span(push_synth_marker(SynthMarker::Expr(e.clone()))),
@@ -74,6 +75,7 @@ pub(super) fn synth_expr_marker(e: &crate::thir::ThirExpr) -> AstExpr {
 #[allow(dead_code)]
 pub(super) fn synth_block_expr_marker(b: &crate::thir::ThirBlock) -> AstExpr {
     AstExpr::Block(crate::parser::ast::AstBlock {
+        scope_id: b.scope_id,
         stmts: Vec::new(),
         tail: None,
         span: synth_marker_span(push_synth_marker(SynthMarker::Block(b.clone()))),
@@ -83,6 +85,7 @@ pub(super) fn synth_block_expr_marker(b: &crate::thir::ThirBlock) -> AstExpr {
 #[allow(dead_code)]
 pub(super) fn synth_block_ast_marker(b: &crate::thir::ThirBlock) -> crate::parser::ast::AstBlock {
     crate::parser::ast::AstBlock {
+        scope_id: b.scope_id,
         stmts: Vec::new(),
         tail: None,
         span: synth_marker_span(push_synth_marker(SynthMarker::Block(b.clone()))),
@@ -1138,6 +1141,7 @@ pub(super) fn thir_stmt_to_ast(s: &crate::thir::ThirStmt) -> AstStmt {
 
 pub(super) fn thir_block_to_ast(b: &crate::thir::ThirBlock) -> AstBlock {
     AstBlock {
+        scope_id: b.scope_id,
         stmts: b.stmts.iter().map(thir_stmt_to_ast).collect(),
         tail: b.tail.as_ref().map(|t| Box::new(thir_to_ast(t))),
         span: b.span,

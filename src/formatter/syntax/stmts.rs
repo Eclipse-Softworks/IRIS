@@ -298,7 +298,6 @@ impl<'a> Formatter<'a> {
 
     fn is_refutable_let_pattern_start(&self) -> bool {
         match self.tok() {
-            Token::Ident(name) if name == "_" => true,
             Token::Ident(name) if name == "none" => !matches!(self.peek(1), Token::Dot),
             Token::Ident(name) if name == "some" || name == "ok" || name == "err" => {
                 matches!(self.peek(1), Token::LParen)

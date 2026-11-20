@@ -302,8 +302,8 @@ impl<'m> Lowerer<'m> {
                         return Some(Ok((result, result_ty)));
                     }
                 }
-                match self.try_lower_thir_expr(base) {
-                    Some(Ok((base_val, base_ty))) => {
+                match self.resolve_thir_place(base) {
+                    Some(Ok((base_val, base_ty, base_place))) => {
                         if let IrType::Grad(inner) = &base_ty {
                             let inner_ty = *inner.clone();
                             let result = self.builder.fresh_value();
@@ -396,6 +396,14 @@ impl<'m> Lowerer<'m> {
                                 },
                             };
                             let result_ty = struct_fields[field_index].1.clone();
+                            if let Some((slot, mut projections)) = base_place {
+                                projections.push(field_index);
+                                self.builder.record_place_event(
+                                    crate::ir::function::PlaceEventKind::Read { slot, projections },
+                                    e.span.start.0,
+                                    e.span.end.0,
+                                );
+                            }
                             let result = self.builder.fresh_value();
                             self.builder.push_instr(
                                 IrInstr::GetField {
@@ -652,7 +660,7 @@ impl<'m> Lowerer<'m> {
                 if !thir_block_migratable(b) {
                     return None;
                 }
-                Some(self.lower_thir_block_with_keep_ref(b, true))
+                Some(self.lower_scoped_thir_block_expr(b, true))
             }
             crate::thir::ThirExprKind::If {
                 cond,
@@ -756,12 +764,9 @@ impl<'m> Lowerer<'m> {
                 }
             }
             crate::thir::ThirExprKind::Move(inner) => match self.resolve_thir_place(inner) {
-                Some(Ok((val, ty, slot_proj))) => Some(Ok(self.emit_move_marker(
-                    val,
-                    ty,
-                    slot_proj.map(|(s, _)| s),
-                    e.span,
-                ))),
+                Some(Ok((val, ty, slot_proj))) => {
+                    Some(Ok(self.emit_move_marker(val, ty, slot_proj, e.span)))
+                }
                 Some(Err(err)) => Some(Err(err)),
                 None => None,
             },
@@ -1610,6 +1615,28 @@ impl<'m> Lowerer<'m> {
         self.lower_thir_block_with_keep_ref(b, false)
     }
 
+    /// Lower a THIR block expression with structured scope markers when it
+    /// came from a real source-level `{ ... }` block.
+    fn lower_scoped_thir_block_expr(
+        &mut self,
+        b: &crate::thir::ThirBlock,
+        keep_ref: bool,
+    ) -> Result<(ValueId, IrType), LowerError> {
+        let scope = (b.scope_id != 0 && !self.builder.is_current_block_terminated())
+            .then(|| self.builder.alloc_drop_scope(None));
+        if let Some(scope) = scope {
+            self.builder.push_instr(IrInstr::EnterBlock { scope }, None);
+        }
+        // Ensure errors still close the scope in the IR we have built so far.
+        let result = self.lower_thir_block_with_keep_ref(b, keep_ref);
+        if let Some(scope) = scope {
+            if !self.builder.is_current_block_terminated() {
+                self.builder.push_instr(IrInstr::ExitBlock { scope }, None);
+            }
+        }
+        result
+    }
+
     pub(super) fn lower_thir_block_with_keep_ref(
         &mut self,
         b: &crate::thir::ThirBlock,
@@ -1790,6 +1817,23 @@ impl<'m> Lowerer<'m> {
                 self.binding_ty = prev_binding_ty;
                 let (val, actual_ty) =
                     self.coerce_to_trait_object(val, actual_ty, field_ty, provided.value.span)?;
+                let (val, actual_ty) = if super::strict_record_ownership()
+                    && matches!(field_ty, IrType::Struct { .. })
+                    && matches!(
+                        provided.value.kind,
+                        crate::thir::ThirExprKind::Value { .. }
+                            | crate::thir::ThirExprKind::Field { .. }
+                            | crate::thir::ThirExprKind::TupleIndex { .. }
+                    ) {
+                    match self.resolve_thir_place(&provided.value) {
+                        Some(Ok((_, _, Some(place)))) => {
+                            self.emit_move_marker(val, actual_ty, Some(place), provided.value.span)
+                        }
+                        _ => (val, actual_ty),
+                    }
+                } else {
+                    (val, actual_ty)
+                };
                 field_vals.push(val);
                 field_actual_tys.push(actual_ty);
             } else if let Some((spread_val_id, spread_ty)) = &spread_val {
@@ -1934,6 +1978,24 @@ impl<'m> Lowerer<'m> {
                         };
                     val = nv;
                     tyval = nt;
+                }
+                // `val b = a` for a record transfers ownership in Rust. Mark the
+                // source place moved so a later use of `a` is E0382.
+                if super::strict_record_ownership()
+                    && matches!(tyval, IrType::Struct { .. })
+                    && matches!(
+                        init.kind,
+                        crate::thir::ThirExprKind::Value { .. }
+                            | crate::thir::ThirExprKind::Field { .. }
+                            | crate::thir::ThirExprKind::TupleIndex { .. }
+                    )
+                {
+                    if let Some(Ok((_, _, Some(place)))) = self.resolve_thir_place(init) {
+                        let (moved, moved_ty) =
+                            self.emit_move_marker(val, tyval, Some(place), init.span);
+                        val = moved;
+                        tyval = moved_ty;
+                    }
                 }
                 if let Some(drop_fn) = self.find_destructor(&tyval) {
                     self.register_drop(name.clone(), val, drop_fn, tyval.clone());

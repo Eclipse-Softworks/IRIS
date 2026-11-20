@@ -1,0 +1,236 @@
+bring std.http
+bring std.json
+bring "domain.iris"
+
+def registry_headers() -> str {
+    return "User-Agent: lattice-audit/0.1 (iris-lang)\r\nAccept: application/json\r\n"
+}
+
+def json_headers() -> str {
+    return "User-Agent: lattice-audit/0.1 (iris-lang)\r\nContent-Type: application/json\r\nAccept: application/json\r\n"
+}
+
+def parse_optional_i64(raw: str) -> i64 {
+    val parsed = parse_uint_digits(raw)
+    return when parsed {
+        ok(n) => n,
+        err(_) => 0,
+    }
+}
+
+/// Parse `GET /api/v1/crates/<name>/<version>` JSON body into validated `RegistryTelemetry`.
+pub def parse_crates_version_json(
+    pkg_name: str,
+    locked_ver: str,
+    body: str,
+) -> result<RegistryTelemetry, AuditError> effect alloc {
+    val ver_num = trim(json_query(body, "version.num"))
+    if len(ver_num) == 0 {
+        return err(
+            AuditError.ParseFailed(concat("missing version.num in crates.io JSON for ", pkg_name)),
+        )
+    }
+    val yanked = trim(json_query(body, "version.yanked")) == "true"
+    val raw_csum = trim(json_query(body, "version.checksum"))
+    val up_csum = if len(raw_csum) > 0 {
+        val checked = parse_sha256(raw_csum)?
+        some(checked)
+    } else {
+        none()
+    }
+    val empty_hits: list<AdvisoryHit> = list()
+    return ok(
+        RegistryTelemetry {
+            pkg_name: pkg_name,
+            locked_ver: locked_ver,
+            yanked: yanked,
+            upstream_checksum: up_csum,
+            max_stable: none(),
+            license: trim(json_query(body, "version.license")),
+            crate_size_bytes: parse_optional_i64(json_query(body, "version.crate_size")),
+            downloads: parse_optional_i64(json_query(body, "version.downloads")),
+            advisories: empty_hits,
+            lookup_ok: true,
+            error_note: "",
+        },
+    )
+}
+
+/// Parse `GET /api/v1/crates/<name>` JSON to extract latest stable `SemVer`.
+pub def parse_crates_max_stable(body: str) -> option<SemVer> effect alloc {
+    val raw_stable = trim(json_query(body, "crate.max_stable_version"))
+    val candidate = if len(raw_stable) > 0 {
+        raw_stable
+    } else {
+        trim(json_query(body, "crate.max_version"))
+    }
+    if len(candidate) == 0 {
+        return none()
+    }
+    val parsed = parse_semver(candidate)
+    return when parsed {
+        ok(v) => some(v),
+        err(_) => none(),
+    }
+}
+
+def extract_osv_at(body: str, idx: i64) -> option<AdvisoryHit> effect alloc {
+    val adv_id = trim(json_query(body, f"vulns.{idx}.id"))
+    if len(adv_id) == 0 {
+        return none()
+    }
+    val alias = trim(json_query(body, f"vulns.{idx}.aliases.0"))
+    val summary = trim(json_query(body, f"vulns.{idx}.summary"))
+    return some(AdvisoryHit { id: adv_id, alias: alias, summary: summary })
+}
+
+/// Parse `POST https://api.osv.dev/v1/query` JSON response into typed `AdvisoryHit` entries.
+pub def parse_osv_vulns(body: str) -> list<AdvisoryHit> effect alloc {
+    val hits: list<AdvisoryHit> = list()
+    for idx in 0..5 {
+        val hit = extract_osv_at(body, idx)
+        when hit {
+            some(h) => {
+                val _ = list_push(hits, h)
+            },
+            none => {},
+        }
+    }
+    return hits
+}
+
+/// Construct explicit unverified telemetry record for offline auditing.
+pub def build_offline_telemetry(pkg: LockedPackage, note: str) -> RegistryTelemetry effect alloc {
+    val hits: list<AdvisoryHit> = list()
+    return RegistryTelemetry {
+        pkg_name: pkg.name.value,
+        locked_ver: pkg.version.raw,
+        yanked: false,
+        upstream_checksum: none(),
+        max_stable: none(),
+        license: "",
+        crate_size_bytes: 0,
+        downloads: 0,
+        advisories: hits,
+        lookup_ok: false,
+        error_note: note,
+    }
+}
+
+def with_osv_and_stable(
+    base: RegistryTelemetry,
+    max_stable: option<SemVer>,
+    hits: list<AdvisoryHit>,
+) -> RegistryTelemetry {
+    return RegistryTelemetry {
+        pkg_name: base.pkg_name,
+        locked_ver: base.locked_ver,
+        yanked: base.yanked,
+        upstream_checksum: base.upstream_checksum,
+        max_stable: max_stable,
+        license: base.license,
+        crate_size_bytes: base.crate_size_bytes,
+        downloads: base.downloads,
+        advisories: hits,
+        lookup_ok: base.lookup_ok,
+        error_note: base.error_note,
+    }
+}
+
+def http_get_json(url: str) -> result<str, str> effect net, alloc {
+    val req = HttpRequest {
+        method: "GET",
+        url: url,
+        headers: registry_headers(),
+        body: "",
+        timeout_ms: 8000,
+    }
+    val res = http_send(req)
+    return when res {
+        ok(r) => {
+            if r.status >= 200 && r.status < 300 {
+                ok(r.body)
+            } else {
+                err(f"HTTP {r.status} for {url}")
+            }
+        },
+        err(msg) => err(msg),
+    }
+}
+
+def fetch_osv_advisories(name: str, ver: str) -> list<AdvisoryHit> effect net, alloc, io {
+    val pkg_keys = list("name", "ecosystem")
+    val pkg_vals = list(json_str(json_escape(name)), json_str("crates.io"))
+    val pkg_json = json_obj(pkg_keys, pkg_vals)
+    val root_keys = list("version", "package")
+    val root_vals = list(json_str(json_escape(ver)), pkg_json)
+    val payload = json_obj(root_keys, root_vals)
+    val req = HttpRequest {
+        method: "POST",
+        url: "https://api.osv.dev/v1/query",
+        headers: json_headers(),
+        body: payload,
+        timeout_ms: 8000,
+    }
+    val res = http_send(req)
+    return when res {
+        ok(r) => if r.status >= 200 && r.status < 300 { parse_osv_vulns(r.body) } else { list() },
+        err(_) => list(),
+    }
+}
+
+/// Query live crates.io and OSV.dev HTTPS telemetry for a locked package.
+pub def fetch_registry_live(pkg: LockedPackage) -> RegistryTelemetry effect net, alloc, io {
+    val is_crates_io = when pkg.origin {
+        PackageOrigin.CratesIo => true,
+        _ => false,
+    }
+    if !is_crates_io {
+        return build_offline_telemetry(pkg, "non-crates.io origin")
+    }
+    val ver_url = f"https://crates.io/api/v1/crates/{pkg.name.value}/{pkg.version.raw}"
+    val ver_body = http_get_json(ver_url)
+    return when ver_body {
+        ok(body) => {
+            val base_res = parse_crates_version_json(pkg.name.value, pkg.version.raw, body)
+            when base_res {
+                ok(base) => {
+                    val crate_url = f"https://crates.io/api/v1/crates/{pkg.name.value}"
+                    val max_st = when http_get_json(crate_url) {
+                        ok(cb) => parse_crates_max_stable(cb),
+                        err(_) => none(),
+                    }
+                    val hits = fetch_osv_advisories(pkg.name.value, pkg.version.raw)
+                    with_osv_and_stable(base, max_st, hits)
+                },
+                err(ae) => build_offline_telemetry(pkg, audit_error_message(ae)),
+            }
+        },
+        err(e) => build_offline_telemetry(pkg, e),
+    }
+}
+
+def test_parse_crates_version_and_stable() -> i64 effect alloc, throw {
+    val ver_json = "{\"version\":{\"num\":\"1.0.228\",\"yanked\":false,\"checksum\":\"9a8e94ea7f378bd32cbbd37198a4a91436180c5bb472411e48b5ec2e2124ae9e\",\"license\":\"MIT OR Apache-2.0\",\"crate_size\":83652,\"downloads\":571916670}}"
+    val parsed = parse_crates_version_json("serde", "1.0.228", ver_json)
+    assert(is_ok(parsed))
+    val tel = unwrap(parsed)
+    assert(!tel.yanked && tel.crate_size_bytes == 83652 && tel.downloads == 571916670)
+    assert(is_some(tel.upstream_checksum))
+    val crate_json = "{\"crate\":{\"id\":\"serde\",\"max_stable_version\":\"1.0.229\",\"max_version\":\"1.0.229\"}}"
+    val st = parse_crates_max_stable(crate_json)
+    assert(is_some(st))
+    assert(unwrap(st).patch == 229)
+    return 0
+}
+
+def test_parse_osv_advisories() -> i64 effect alloc, throw {
+    val empty_osv = "{}"
+    assert(list_len(parse_osv_vulns(empty_osv)) == 0)
+    val hit_osv = "{\"vulns\":[{\"id\":\"GHSA-wcg3-cvx6-7396\",\"summary\":\"Segmentation fault in time\",\"aliases\":[\"CVE-2020-26235\",\"RUSTSEC-2020-0071\"]}]}"
+    val hits = parse_osv_vulns(hit_osv)
+    assert(list_len(hits) == 1)
+    assert(list_get(hits, 0).id == "GHSA-wcg3-cvx6-7396")
+    assert(list_get(hits, 0).alias == "CVE-2020-26235")
+    return 0
+}

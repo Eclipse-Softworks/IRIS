@@ -26,7 +26,7 @@
 // `handler` is called with the raw request string and must return a raw
 // HTTP response string (use http_response() from std.http to build one).
 // This call blocks indefinitely (single-threaded accept loop).
-pub def http_serve(port: i64, handler: |str| -> str) -> i64 effect net {
+pub def http_serve(port: i64, handler: |str| -> str) -> i64 effect net, alloc {
     val listener = tcp_listen(port)
     loop {
         val conn = tcp_accept(listener)
@@ -41,7 +41,7 @@ pub def http_serve(port: i64, handler: |str| -> str) -> i64 effect net {
 // Effect names are ordinary identifiers, so this row cannot say `spawn` — that
 // is a reserved keyword and the effect-list parser rejects it, which broke every
 // program that brought this module.
-pub def http_serve_mt(port: i64, handler: |str| -> str) -> i64 effect net, thread {
+pub def http_serve_mt(port: i64, handler: |str| -> str) -> i64 effect net, thread, alloc {
     val listener = tcp_listen(port)
     loop {
         val conn = tcp_accept(listener)
@@ -57,7 +57,7 @@ pub def http_serve_mt(port: i64, handler: |str| -> str) -> i64 effect net, threa
 // ── Response helpers ─────────────────────────────────────────────────────────
 
 // Build a 200 OK response with a JSON body.
-pub def json_ok(body: str) -> str {
+pub def json_ok(body: str) -> str effect alloc {
     val len_str = to_str(len(body))
     concat(concat(concat(concat(
         "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: ",
@@ -65,7 +65,7 @@ pub def json_ok(body: str) -> str {
 }
 
 // Build a 200 OK response with a plain-text body.
-pub def text_ok(body: str) -> str {
+pub def text_ok(body: str) -> str effect alloc {
     val len_str = to_str(len(body))
     concat(concat(concat(concat(
         "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: ",
@@ -73,7 +73,7 @@ pub def text_ok(body: str) -> str {
 }
 
 // Build a 400 Bad Request response.
-pub def bad_request(body: str) -> str {
+pub def bad_request(body: str) -> str effect alloc {
     val len_str = to_str(len(body))
     concat(concat(concat(concat(
         "HTTP/1.1 400 Bad Request\r\nContent-Type: text/plain\r\nContent-Length: ",
@@ -81,7 +81,7 @@ pub def bad_request(body: str) -> str {
 }
 
 // Build a 500 Internal Server Error response.
-pub def internal_error(body: str) -> str {
+pub def internal_error(body: str) -> str effect alloc {
     val len_str = to_str(len(body))
     concat(concat(concat(concat(
         "HTTP/1.1 500 Internal Server Error\r\nContent-Type: text/plain\r\nContent-Length: ",
@@ -94,13 +94,13 @@ pub def internal_error(body: str) -> str {
 // where tag is an arbitrary string you use to identify the handler.
 // Use router_match(router, method, path) to look up the tag.
 
-pub def router_new() -> list<str> {
+pub def router_new() -> list<str> effect alloc {
     val r: list<str> = list()
     r
 }
 
 // Add a route: method (e.g. "GET"), path (e.g. "/api/predict"), tag.
-pub def router_add(router: list<str>, method: str, path: str, tag: str) -> list<str> {
+pub def router_add(router: list<str>, method: str, path: str, tag: str) -> list<str> effect alloc {
     push(router, method);
     push(router, path);
     push(router, tag);
@@ -108,7 +108,7 @@ pub def router_add(router: list<str>, method: str, path: str, tag: str) -> list<
 }
 
 // Look up a route by method + exact path. Returns tag string or "" if not found.
-pub def router_match(router: list<str>, method: str, path: str) -> str {
+pub def router_match(router: list<str>, method: str, path: str) -> str effect alloc {
     val n = list_len(router)
     var result = ""
     var i = 0

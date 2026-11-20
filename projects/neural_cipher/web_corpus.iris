@@ -1,0 +1,241 @@
+// Concurrent HTTPS dataset harvester for training neural cipher models from scratch.
+
+bring std.http
+bring std.json
+bring std.string
+bring domain
+
+/// Specification of a live public HTTPS plaintext or REST API endpoint.
+pub record WebSourceSpec {
+    name: str,
+    url: str,
+    is_wiki_json: bool,
+    skip_head: i64,
+}
+
+record FetchOutcome {
+    name: str,
+    text: str,
+    err_msg: str,
+    ok_flag: bool,
+}
+
+def make_web_spec(name: str, url: str, is_wiki_json: bool, skip_head: i64) -> WebSourceSpec {
+    WebSourceSpec {
+        name: name,
+        url: url,
+        is_wiki_json: is_wiki_json,
+        skip_head: skip_head,
+    }
+}
+
+/// Return the default live web dataset endpoints used for corpus harvesting.
+pub def default_web_sources() -> list<WebSourceSpec> effect alloc {
+    val specs: list<WebSourceSpec> = list()
+    list_push(
+        specs,
+        make_web_spec("ietf_rfc1149", "https://www.rfc-editor.org/rfc/rfc1149.txt", false, 160),
+    )
+    list_push(
+        specs,
+        make_web_spec("ietf_rfc1925", "https://www.rfc-editor.org/rfc/rfc1925.txt", false, 160),
+    )
+    list_push(
+        specs,
+        make_web_spec(
+            "wiki_cryptography",
+            "https://en.wikipedia.org/api/rest_v1/page/summary/Cryptography",
+            true,
+            0,
+        ),
+    )
+    list_push(
+        specs,
+        make_web_spec(
+            "wiki_aes",
+            "https://en.wikipedia.org/api/rest_v1/page/summary/Advanced_Encryption_Standard",
+            true,
+            0,
+        ),
+    )
+    list_push(
+        specs,
+        make_web_spec(
+            "wiki_caesar",
+            "https://en.wikipedia.org/api/rest_v1/page/summary/Caesar_cipher",
+            true,
+            0,
+        ),
+    )
+    list_push(
+        specs,
+        make_web_spec(
+            "gutenberg_holmes",
+            "https://www.gutenberg.org/cache/epub/1661/pg1661.txt",
+            false,
+            1800,
+        ),
+    )
+    specs
+}
+
+def extract_clean_body(spec: WebSourceSpec, raw_body: str, max_chars: i64) -> str effect alloc {
+    val body_text = if spec.is_wiki_json { json_query(raw_body, "extract") } else { raw_body }
+    val blen = len(body_text)
+    val start = if spec.skip_head > 0 && blen > spec.skip_head + 128 { spec.skip_head } else { 0 }
+    val end_pos = if blen > start + max_chars { start + max_chars } else { blen }
+    val sliced = slice(body_text, start, end_pos)
+    normalize_whitespace(sliced)
+}
+
+def fetch_one_source(spec: WebSourceSpec) -> FetchOutcome effect net, alloc {
+    val hdrs = "User-Agent: IRIS-NeuralCipher/1.0\r\nAccept: text/plain, application/json\r\nAccept-Encoding: identity\r\n"
+    val req = HttpRequest {
+        method: "GET",
+        url: spec.url,
+        headers: hdrs,
+        body: "",
+        timeout_ms: 10000,
+    }
+    when http_send(req) {
+        ok(resp) => {
+            if resp.status < 200 || resp.status >= 300 {
+                return FetchOutcome {
+                    name: spec.name,
+                    text: "",
+                    err_msg: concat(spec.name, " HTTP status != 2xx"),
+                    ok_flag: false,
+                }
+            }
+            val cleaned = extract_clean_body(spec, resp.body, 14000)
+            FetchOutcome {
+                name: spec.name,
+                text: cleaned,
+                err_msg: "",
+                ok_flag: len(cleaned) >= 48,
+            }
+        },
+        err(e) => FetchOutcome {
+            name: spec.name,
+            text: "",
+            err_msg: concat(spec.name, concat(": ", e)),
+            ok_flag: false,
+        },
+    }
+}
+
+def offline_reference_chunks() -> result<list<CorpusChunk>, StageError> effect alloc, throw {
+    val chunks: list<CorpusChunk> = list()
+    val t1 = "A Datagram for the Transmission of IP Datagrams on Avian Carriers describes experimental encapsulation of network packets in environments requiring statistical resilience against passive transposition or substitution analysis."
+    val t2 = "With any coding problem there is a tradeoff between diffusion and latency; repeating key XOR streams leak period autocorrelation under Kasiski examination while block modes conceal patterns."
+    val t3 = "Cryptography studies protocols enabling confidential communication against computationally bounded adversaries, evolving from monoalphabetic Caesar shifts through polyalphabetic Vigenere tableaux to substitution permutation networks and adversarial neural ciphers."
+    list_push(chunks, unwrap(make_corpus_chunk("offline_rfc1149", t1)))
+    list_push(chunks, unwrap(make_corpus_chunk("offline_rfc1925", t2)))
+    list_push(chunks, unwrap(make_corpus_chunk("offline_crypto", t3)))
+    ok(chunks)
+}
+
+def collect_outcomes(
+    ch: chan<FetchOutcome>,
+    count: i64,
+) -> result<list<CorpusChunk>, StageError> effect alloc {
+    val chunks: list<CorpusChunk> = list()
+    var first_err = "no live sources returned usable text"
+    var i = 0
+    while i < count {
+        val msg = recv(ch)
+        if msg.ok_flag {
+            when make_corpus_chunk(msg.name, msg.text) {
+                ok(chunk) => list_push(chunks, chunk),
+                err(e) => {
+                    first_err = stage_error_text(e)
+                },
+            }
+        } else {
+            if len(msg.err_msg) > 0 {
+                first_err = msg.err_msg
+            }
+        }
+        i = i + 1
+    }
+    if list_len(chunks) == 0 {
+        return err(StageError.NetworkFetchError(first_err))
+    }
+    ok(chunks)
+}
+
+/// Harvest live plaintext corpora concurrently across public web APIs using spawn + channel.
+pub def fetch_live_corpus(
+    offline: bool,
+) -> result<list<CorpusChunk>, StageError> effect net, alloc, thread, throw {
+    if offline {
+        return offline_reference_chunks()
+    }
+    val specs = default_web_sources()
+    val ch: chan<FetchOutcome> = channel()
+    val tg = task_group()
+    val n = list_len(specs)
+    var i = 0
+    while i < n {
+        val spec = list_get(specs, i)
+        spawn(tg) {
+            send(ch, fetch_one_source(spec))
+        }
+        i = i + 1
+    }
+    task_group_join(tg)
+    collect_outcomes(ch, n)
+}
+
+def slice_byte_window(bytes: list<i64>, start: i64, width: i64) -> list<i64> effect alloc {
+    val out: list<i64> = list()
+    var j = 0
+    while j < width {
+        list_push(out, list_get(bytes, start + j))
+        j = j + 1
+    }
+    out
+}
+
+/// Slice harvested corpus chunks into non-overlapping train and validation PlainBlock splits.
+pub def split_corpus_blocks(
+    chunks: list<CorpusChunk>,
+    block_len: i64,
+    max_blocks: i64,
+) -> (list<PlainBlock>, list<PlainBlock>) effect alloc {
+    val train: list<PlainBlock> = list()
+    val valid: list<PlainBlock> = list()
+    val step = if block_len < 32 { 32 } else { block_len }
+    var global_idx = 0
+    var c = 0
+    while c < list_len(chunks) && global_idx < max_blocks {
+        val ch = list_get(chunks, c)
+        val raw = str_to_u8(ch.text)
+        var off = 0
+        while off + step <= list_len(raw) && global_idx < max_blocks {
+            val blk = PlainBlock {
+                source: ch.source,
+                bytes: slice_byte_window(raw, off, step),
+            }
+            if (global_idx % 4) == 3 {
+                list_push(valid, blk)
+            } else {
+                list_push(train, blk)
+            }
+            global_idx = global_idx + 1
+            off = off + step
+        }
+        c = c + 1
+    }
+    (train, valid)
+}
+
+def test_offline_corpus_and_split() -> i64 effect net, alloc, thread, throw {
+    val res = fetch_live_corpus(true)
+    assert(is_ok(res))
+    val chunks = unwrap(res)
+    assert(list_len(chunks) == 3)
+    val splits = split_corpus_blocks(chunks, 64, 30)
+    assert(list_len(splits.0) > 0)
+    0
+}

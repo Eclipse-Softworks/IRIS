@@ -24,7 +24,7 @@ pub def json_query(json: str, path: str) -> str effect alloc {
 
 /// Encode a flat-pair list<str> as a JSON object string.
 /// E.g. ["name","Alice","age","30"] → {"name":"Alice","age":"30"}
-pub def json_encode(pairs: list<str>) -> str effect alloc, io {
+pub def json_encode(pairs: list<str>) -> str effect alloc {
     val n = list_len(pairs)
     var parts: list<str> = list()
     var i = 0
@@ -38,17 +38,17 @@ pub def json_encode(pairs: list<str>) -> str effect alloc, io {
 }
 
 /// Wrap a string in JSON double-quotes.
-pub def json_str(s: str) -> str effect alloc, io {
+pub def json_str(s: str) -> str effect alloc {
     concat(concat("\"", s), "\"")
 }
 
 /// Build a JSON array from a list<str> of already-encoded values.
-pub def json_arr(items: list<str>) -> str effect alloc, io {
+pub def json_arr(items: list<str>) -> str effect alloc {
     concat(concat("[", join(items, ",")), "]")
 }
 
 /// Build a JSON object from parallel key/value lists (values already encoded).
-pub def json_obj(keys: list<str>, vals: list<str>) -> str effect alloc, io {
+pub def json_obj(keys: list<str>, vals: list<str>) -> str effect alloc {
     var parts: list<str> = list()
     var i = 0
     val n = list_len(keys)
@@ -81,7 +81,7 @@ pub def json_get(pairs: list<str>, key: str) -> str effect alloc {
 }
 
 /// Adds or updates a key/value pair (string value). Returns new pairs list.
-pub def json_set(pairs: list<str>, key: str, val_str: str) -> list<str> effect alloc, throw {
+pub def json_set(pairs: list<str>, key: str, val_str: str) -> list<str> effect alloc {
     var new_pairs: list<str> = list()
     var found = 0
     var i = 0
@@ -100,7 +100,7 @@ pub def json_set(pairs: list<str>, key: str, val_str: str) -> list<str> effect a
 }
 
 /// Strip surrounding double-quotes from a JSON string token.
-pub def strip_json_quotes(s: str) -> str {
+pub def strip_json_quotes(s: str) -> str effect alloc {
     val n = len(s)
     if n >= 2 {
         slice(s, 1, n - 1)
@@ -110,7 +110,7 @@ pub def strip_json_quotes(s: str) -> str {
 }
 
 /// Escapes a string for safe embedding in JSON according to RFC 8259.
-pub def json_escape(s: str) -> str {
+pub def json_escape(s: str) -> str effect alloc {
     val n = len(s);
     val parts: list<str> = list();
     for i in 0 .. n {
@@ -138,12 +138,12 @@ pub def json_bool(b: bool) -> str {
 }
 
 /// Formats integer as JSON literal.
-pub def json_num_i64(n: i64) -> str {
+pub def json_num_i64(n: i64) -> str effect alloc {
     to_str(n)
 }
 
 /// Formats float as JSON literal.
-pub def json_num_f64(x: f64) -> str {
+pub def json_num_f64(x: f64) -> str effect alloc {
     to_str(x)
 }
 
@@ -153,17 +153,17 @@ pub def json_null() -> str {
 }
 
 /// Adds or updates a boolean field.
-pub def json_set_bool(pairs: list<str>, key: str, val_b: bool) -> list<str> effect alloc, throw {
+pub def json_set_bool(pairs: list<str>, key: str, val_b: bool) -> list<str> effect alloc {
     json_set(pairs, key, json_bool(val_b))
 }
 
 /// Adds or updates an integer field.
-pub def json_set_i64(pairs: list<str>, key: str, val_i: i64) -> list<str> effect alloc, throw {
+pub def json_set_i64(pairs: list<str>, key: str, val_i: i64) -> list<str> effect alloc {
     json_set(pairs, key, to_str(val_i))
 }
 
 /// Adds or updates a float field.
-pub def json_set_f64(pairs: list<str>, key: str, val_f: f64) -> list<str> effect alloc, throw {
+pub def json_set_f64(pairs: list<str>, key: str, val_f: f64) -> list<str> effect alloc {
     json_set(pairs, key, to_str(val_f))
 }
 
@@ -177,7 +177,7 @@ pub def json_get_bool(pairs: list<str>, key: str, default_val: bool) -> bool eff
 
 /// Parse {"k":"v",...} into flat pairs list<str>.
 /// Supports simple flat JSON objects with string keys and values.
-pub def json_parse(text: str) -> list<str> effect alloc, throw {
+pub def json_parse(text: str) -> list<str> effect alloc {
     val n = len(text)
     // Remove outer braces: { ... }
     val inner = if n >= 2 { slice(text, 1, n - 1) } else { text }

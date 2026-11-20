@@ -430,6 +430,14 @@ fn emit_instr(out: &mut String, instr: &IrInstr) -> Result<(), CodegenError> {
             write!(out, "{} = move {}", result, place)?;
         }
 
+        IrInstr::EnterBlock { scope } => {
+            write!(out, "enter_block s{}", scope.0)?;
+        }
+
+        IrInstr::ExitBlock { scope } => {
+            write!(out, "exit_block s{}", scope.0)?;
+        }
+
         IrInstr::EnterScope { scope } => {
             write!(out, "enter_scope s{}", scope.0)?;
         }

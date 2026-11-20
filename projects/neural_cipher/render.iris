@@ -1,0 +1,253 @@
+// Terminal telemetry formatting and deterministic RFC-8259 JSON report writer.
+
+bring std.json
+bring std.fs
+bring std.math
+bring domain
+bring classifier_net
+bring forge_net
+
+/// Aggregated report payload passed to terminal and JSON renderers.
+pub record PipelineReport {
+    mode: str,
+    offline: bool,
+    source_names: list<str>,
+    n_train: i64,
+    n_val: i64,
+    winner: TrainedClassifier,
+    candidates: list<TrainedClassifier>,
+    simd_rms: f64,
+    forge: NeuralForgeArtifact,
+    demo_plain: str,
+    demo_ct_hex: str,
+    demo_dec: str,
+    demo_ok: bool,
+    hkt_summary: str,
+}
+
+/// Format a ratio in [0, 1] as a human-friendly percentage string with 1 decimal.
+pub def fmt_pct(r: f64) -> str effect alloc {
+    val scaled = round(r * 1000.0) to i64
+    val whole = scaled / 10
+    val frac = if (scaled % 10) < 0 { -(scaled % 10) } else { scaled % 10 }
+    f"{whole}.{frac}%"
+}
+
+/// Format a scalar float with 4 decimal places.
+pub def fmt_f4(v: f64) -> str effect alloc {
+    val sign = if v < 0.0 { "-" } else { "" }
+    val av = if v < 0.0 { 0.0 - v } else { v }
+    val scaled = round(av * 10000.0) to i64
+    val whole = scaled / 10000
+    val frac = scaled % 10000
+    val pad = pad_4digits(frac)
+    f"{sign}{whole}.{pad}"
+}
+
+def pad_4digits(frac: i64) -> str effect alloc {
+    val s = to_str(frac)
+    val l = len(s)
+    if l == 1 {
+        return concat("000", s)
+    }
+    if l == 2 {
+        return concat("00", s)
+    }
+    if l == 3 {
+        return concat("0", s)
+    }
+    s
+}
+pub def print_pipeline_report(r: PipelineReport) -> i64 effect io, alloc {
+    println("=== IRIS NEURAL CIPHER ENGINE ===")
+    val src_mode = if r.offline { "offline-reference" } else { "live-https" }
+    println(
+        f"mode={r.mode} corpus={src_mode} sources={list_len(r.source_names)} train={r.n_train} val={r.n_val}",
+    )
+    print_classifier_section(r)
+    print_forge_section(r)
+    println(f"[type-safety/hkt] {r.hkt_summary}")
+    println("=================================")
+    0
+}
+
+def print_classifier_section(r: PipelineReport) -> i64 effect io, alloc {
+    println(
+        f"[part-a: classifier] winner={r.winner.arch_name} val_acc={fmt_pct(r.winner.val_acc)} val_loss={fmt_f4(r.winner.val_loss)} simd_rms={fmt_f4(r.simd_rms)}",
+    )
+    var i = 0
+    while i < list_len(r.candidates) {
+        val c = list_get(r.candidates, i)
+        println(
+            f"  worker#{c.worker_id} {c.arch_name} val_acc={fmt_pct(c.val_acc)} tr_loss={fmt_f4(c.train_loss)} val_loss={fmt_f4(c.val_loss)}",
+        )
+        i = i + 1
+    }
+    val fams = known_cipher_families()
+    var f = 0
+    while f < list_len(fams) && f < list_len(r.winner.per_class_acc) {
+        val name = family_name(list_get(fams, f))
+        val acc = list_get(r.winner.per_class_acc, f)
+        println(f"  class[{f}] {name}: {fmt_pct(acc)}")
+        f = f + 1
+    }
+    0
+}
+
+def print_forge_section(r: PipelineReport) -> i64 effect io, alloc {
+    println(
+        f"[part-b: adversarial neural forge] bob={fmt_pct(r.forge.bob_init_acc)}->{fmt_pct(r.forge.bob_final_acc)} eve={fmt_pct(r.forge.eve_init_acc)}->{fmt_pct(r.forge.eve_final_acc)}",
+    )
+    println(
+        f"  invented_cipher=NeuralFeistel-6R-CBC roundtrip={r.forge.roundtrip_passed}/{r.forge.roundtrip_total} sac={fmt_f4(r.forge.sac_score)} entropy={fmt_f4(r.forge.entropy_norm * 8.0)}b/B",
+    )
+    println(
+        f"  ai_attack_verdict={r.forge.classifier_label} conf={fmt_pct(r.forge.classifier_conf)}",
+    )
+    if len(r.demo_plain) > 0 {
+        println(
+            f"  demo_in=\"{r.demo_plain}\" hex={r.demo_ct_hex} dec=\"{r.demo_dec}\" exact={r.demo_ok}",
+        )
+    }
+    0
+}
+
+def encode_candidates_json(cands: list<TrainedClassifier>) -> str effect alloc {
+    val items: list<str> = list()
+    var i = 0
+    while i < list_len(cands) {
+        val c = list_get(cands, i)
+        val keys = list("worker_id", "arch_name", "val_acc", "val_loss", "train_loss")
+        val vals = list(
+            json_num_i64(c.worker_id),
+            json_str(c.arch_name),
+            json_num_f64(c.val_acc),
+            json_num_f64(c.val_loss),
+            json_num_f64(c.train_loss),
+        )
+        list_push(items, json_obj(keys, vals))
+        i = i + 1
+    }
+    json_arr(items)
+}
+
+def encode_str_array(xs: list<str>) -> str effect alloc {
+    val items: list<str> = list()
+    var i = 0
+    while i < list_len(xs) {
+        list_push(items, json_str(list_get(xs, i)))
+        i = i + 1
+    }
+    json_arr(items)
+}
+
+def encode_f64_array(xs: list<f64>) -> str effect alloc {
+    val items: list<str> = list()
+    var i = 0
+    while i < list_len(xs) {
+        list_push(items, json_num_f64(list_get(xs, i)))
+        i = i + 1
+    }
+    json_arr(items)
+}
+
+def encode_forge_json(r: PipelineReport) -> str effect alloc {
+    val keys = list(
+        "cipher_name",
+        "bob_init_acc",
+        "bob_final_acc",
+        "eve_init_acc",
+        "eve_final_acc",
+        "sac_score",
+        "entropy_norm",
+        "roundtrip_passed",
+        "roundtrip_total",
+        "classifier_attack_label",
+        "classifier_attack_conf",
+        "epoch_bob_acc",
+        "epoch_eve_acc",
+    )
+    val vals = list(
+        json_str("NeuralFeistel-6R-CBC"),
+        json_num_f64(r.forge.bob_init_acc),
+        json_num_f64(r.forge.bob_final_acc),
+        json_num_f64(r.forge.eve_init_acc),
+        json_num_f64(r.forge.eve_final_acc),
+        json_num_f64(r.forge.sac_score),
+        json_num_f64(r.forge.entropy_norm),
+        json_num_i64(r.forge.roundtrip_passed),
+        json_num_i64(r.forge.roundtrip_total),
+        json_str(r.forge.classifier_label),
+        json_num_f64(r.forge.classifier_conf),
+        encode_f64_array(r.forge.epoch_bob_acc),
+        encode_f64_array(r.forge.epoch_eve_acc),
+    )
+    json_obj(keys, vals)
+}
+
+def encode_demo_json(r: PipelineReport) -> str effect alloc {
+    val keys = list("plaintext", "ciphertext_hex", "decrypted", "exact_roundtrip")
+    val vals = list(
+        json_str(r.demo_plain),
+        json_str(r.demo_ct_hex),
+        json_str(r.demo_dec),
+        json_bool(r.demo_ok),
+    )
+    json_obj(keys, vals)
+}
+
+/// Build and write deterministic RFC-8259 JSON pipeline telemetry to a file path.
+pub def write_report_json(
+    path: str,
+    r: PipelineReport,
+) -> result<str, StageError> effect fs, alloc {
+    val clf_keys = list(
+        "winner_arch",
+        "val_acc",
+        "val_loss",
+        "simd_rms",
+        "per_class_acc",
+        "candidates",
+    )
+    val clf_vals = list(
+        json_str(r.winner.arch_name),
+        json_num_f64(r.winner.val_acc),
+        json_num_f64(r.winner.val_loss),
+        json_num_f64(r.simd_rms),
+        encode_f64_array(r.winner.per_class_acc),
+        encode_candidates_json(r.candidates),
+    )
+    val keys = list(
+        "mode",
+        "offline",
+        "sources",
+        "n_train",
+        "n_val",
+        "classifier",
+        "neural_forge",
+        "message_demo",
+        "hkt_summary",
+    )
+    val vals = list(
+        json_str(r.mode),
+        json_bool(r.offline),
+        encode_str_array(r.source_names),
+        json_num_i64(r.n_train),
+        json_num_i64(r.n_val),
+        json_obj(clf_keys, clf_vals),
+        encode_forge_json(r),
+        encode_demo_json(r),
+        json_str(r.hkt_summary),
+    )
+    val doc = json_obj(keys, vals)
+    when write_text(path, doc) {
+        ok(_) => ok(doc),
+        err(e) => err(StageError.IoFailure(e)),
+    }
+}
+
+def test_render_formatting() -> i64 effect alloc, throw {
+    assert(fmt_pct(0.875) == "87.5%")
+    assert(fmt_f4(0.5) == "0.5000")
+    0
+}

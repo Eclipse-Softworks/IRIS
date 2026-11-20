@@ -162,22 +162,26 @@ impl EffectRegistry {
                 "std.term.read_key",
                 "std.term.term_rows",
                 "std.term.term_cols",
+                "read_key",
+                "term_clear",
+                "term_cursor",
+                "term_show_cursor",
+                "term_set_color",
+                "term_reset",
+                "term_rows",
+                "term_cols",
             ],
             EffectRow::from_strs(&["io"]),
         );
 
-        // === io + alloc (formatted printing allocates) ===
+        // === io + alloc (terminal I/O that allocates strings) ===
         self.reg(
             &[
-                "std.fmt.sprintf",
                 "std.fmt.printf",
-                "std.fmt.format",
                 "std.io.putline",
-                "std.string.concat",
-                "sprintf",
-                "format",
-                "concat",
-                "to_str",
+                "read_password",
+                "read_line",
+                "getline",
             ],
             EffectRow::from_strs(&["io", "alloc"]),
         );
@@ -191,6 +195,40 @@ impl EffectRegistry {
         // common allocation in any IRIS program invisible to the checker.
         self.reg(
             &[
+                // Pure in-memory string formatting / conversion / slicing / joining.
+                "std.fmt.sprintf",
+                "std.fmt.format",
+                "std.string.concat",
+                "sprintf",
+                "format",
+                "concat",
+                "to_str",
+                "string_concat",
+                "join",
+                "slice",
+                "split",
+                "repeat",
+                "trim",
+                "to_upper",
+                "to_lower",
+                "replace",
+                "char_at",
+                "str_reverse",
+                "str_chars",
+                "str_bytes",
+                "str_pad_left",
+                "str_pad_right",
+                "json_stringify",
+                "base64_encode",
+                "base64_decode",
+                "hex_encode",
+                "hex_decode",
+                "sha256",
+                "regex_find_all",
+                "regex_replace",
+                "regex_replace_all",
+                "type_of",
+                "path_join",
                 // Surface spellings (what the effect checker actually matches).
                 "list",
                 "push",
@@ -205,18 +243,58 @@ impl EffectRegistry {
                 "list_pop",
                 "list_insert",
                 "list_remove",
+                "list_contains",
+                "list_index_of",
+                "list_count",
+                "list_map",
+                "list_filter",
+                "list_reduce",
+                "list_any",
+                "list_all",
+                "list_zip",
+                "list_enumerate",
+                "list_flatten",
+                "list_unique",
+                "list_reverse",
+                "list_sorted",
+                "list_sum",
+                "list_min",
+                "list_max",
+                "list_take",
+                "list_drop",
                 "map_new",
                 "map_with_capacity",
                 "map_insert",
+                "map_set",
                 "map_get",
                 "map_remove",
                 "map_contains",
                 "map_len",
                 "map_keys",
                 "map_values",
+                "map_entries",
+                "sorted_keys",
+                "deque_new",
+                "deque_push_front",
+                "deque_push_back",
+                "deque_pop_front",
+                "deque_pop_back",
+                "deque_len",
+                "deque_front",
+                "deque_back",
+                "bitset_new",
+                "bitset_set",
+                "bitset_get",
+                "bitset_count",
+                "bitset_clear",
+                "channel",
                 "chan_new",
+                "task_group",
                 "task_group_new",
-                "string_concat",
+                "gc_collect",
+                "gc_collect_call",
+                "gc_stats",
+                "gc_stats_map",
                 "vec_new",
                 "vec_with_capacity",
                 "option_new",
@@ -239,10 +317,6 @@ impl EffectRegistry {
                 "dtensor_backward",
                 "dtensor_grad",
                 "dtensor_to_list",
-                // Collection/string joining allocates its result.  Keep this
-                // separate from task_group_join below: the surface spelling
-                // `join(parts, separator)` is the string/list intrinsic.
-                "join",
             ],
             EffectRow::from_strs(&["alloc"]),
         );
@@ -253,6 +327,7 @@ impl EffectRegistry {
                 "file_read",
                 "file_read_all",
                 "file_read_lines",
+                "file_lines",
                 "file_read_bytes",
                 "file_write",
                 "file_write_all",
@@ -261,11 +336,17 @@ impl EffectRegistry {
                 "file_open",
                 "file_close",
                 "file_exists",
+                "path_exists",
                 "file_size",
                 "file_delete",
+                "remove_file",
                 "file_rename",
                 "dir_create",
+                "mkdir",
                 "dir_list",
+                "list_dir",
+                "listdir",
+                "cwd",
                 "dir_delete",
                 "std.fs.read_file",
                 "std.fs.write_file",
@@ -286,19 +367,27 @@ impl EffectRegistry {
             &[
                 "tcp_listen",
                 "tcp_connect",
+                "tcp_connect_async",
                 "tcp_send",
                 "tcp_recv",
+                "tcp_read",
+                "tcp_write",
+                "tcp_write_async",
                 "tcp_close",
                 "tcp_accept",
-                // A task that completes when a socket can be read.
+                // Tasks that complete when a socket is ready.
                 "async_readable",
+                "async_writable",
                 "tcp_set_timeout",
+                "udp_open",
                 "udp_bind",
                 "udp_send",
                 "udp_recv",
                 "udp_close",
                 "http_get",
+                "http_get_async",
                 "http_post",
+                "http_post_json",
                 "http_request",
                 "std.net.tcp_listen",
                 "std.net.tcp_connect",
@@ -327,9 +416,12 @@ impl EffectRegistry {
                 "spawn_async",
                 "chan_send",
                 "chan_recv",
-                // A task that completes with the channel's next value.
+                "recv_timeout",
+                // A task that completes with the channel's next value or races tasks.
                 "async_recv",
-                "task_cancel",
+                "async_any",
+                "async_yield",
+                "task_group_cancelled",
                 "chan_close",
                 "chan_try_recv",
                 "chan_len",
@@ -346,8 +438,25 @@ impl EffectRegistry {
                 "std.async.task_group_join",
                 "std.async.task_group_cancel",
                 "cancel",
+                "atomic",
             ],
             EffectRow::from_strs(&["thread", "alloc"]),
+        );
+
+        // Non-allocating task/atomic synchronization checks.
+        self.reg(
+            &[
+                "task_done",
+                "async_is_done",
+                "task_cancelled",
+                "async_is_cancelled",
+                "task_cancel",
+                "async_cancel",
+                "atomic_add",
+                "atomic_load",
+                "cancellation_requested",
+            ],
+            EffectRow::from_strs(&["thread"]),
         );
 
         // === throw (exceptions/panics) ===
@@ -372,7 +481,7 @@ impl EffectRegistry {
             EffectRow::from_strs(&["throw"]),
         );
 
-        // === ffi (foreign function interface) ===
+        // === ffi (foreign function interface & DB bindings) ===
         self.reg(
             &[
                 "py_eval",
@@ -389,8 +498,54 @@ impl EffectRegistry {
                 "std.ffi.dlsym",
                 "std.ffi.dlclose",
                 "iris_ffi_call",
+                "ffi_call_str",
+                "ffi_out_new",
+                "ffi_out_get_str",
+                "ffi_out_get_str_range",
+                "python_eval",
+                "python_exec",
+                "python_call",
+                "python_version",
+                "db_query",
+                "db_query_params",
+                "db_exec_params",
             ],
             EffectRow::from_strs(&["ffi", "alloc"]),
+        );
+
+        // Scalar FFI / handle calls that do not allocate IRIS heap objects.
+        self.reg(
+            &[
+                "ffi_open",
+                "ffi_close",
+                "ffi_call",
+                "ffi_call_args",
+                "ffi_call_i64",
+                "ffi_call_f64",
+                "ffi_call_void",
+                "ffi_out_free",
+                "ffi_out_len",
+                "ffi_out_get_f64",
+                "ffi_out_get_i64",
+                "ffi_out_get_i32",
+                "ffi_out_get_i32_i64",
+                "ffi_out_get_f32",
+                "ffi_out_get_u8",
+                "ffi_out_set_f64",
+                "ffi_out_set_i64",
+                "ffi_out_set_i32",
+                "ffi_out_set_f32",
+                "ffi_out_set_u8",
+                "ffi_out_write_bytes",
+                "rust_lib_open",
+                "rust_call_i64",
+                "rust_call_f64",
+                "rust_call_void",
+                "db_open",
+                "db_exec",
+                "db_close",
+            ],
+            EffectRow::from_strs(&["ffi"]),
         );
 
         // === time (clock) ===
@@ -399,10 +554,13 @@ impl EffectRegistry {
                 "now",
                 "now_ms",
                 "now_us",
+                "time_now_ms",
+                "datetime_timestamp",
                 "monotonic",
                 "sleep",
                 "sleep_ms",
                 "sleep_us",
+                "timeout",
                 // A task that completes after the given milliseconds.
                 "async_sleep",
                 "std.time.now",
@@ -415,11 +573,17 @@ impl EffectRegistry {
             EffectRow::from_strs(&["time"]),
         );
 
+        self.reg(
+            &["datetime_now", "datetime_format"],
+            EffectRow::from_strs(&["time", "alloc"]),
+        );
+
         // === random (random numbers) ===
         self.reg(
             &[
                 "random",
                 "random_int",
+                "random_range",
                 "random_float",
                 "random_seed",
                 "std.random.random",
@@ -430,10 +594,17 @@ impl EffectRegistry {
             EffectRow::from_strs(&["random", "time"]),
         );
 
+        self.reg(&["seed"], EffectRow::from_strs(&["random"]));
+        self.reg(
+            &["uuid"],
+            EffectRow::from_strs(&["random", "time", "alloc"]),
+        );
+
         // === env (environment) ===
         self.reg(
             &[
                 "getenv",
+                "env_get",
                 "setenv",
                 "args",
                 "argc",
@@ -449,10 +620,16 @@ impl EffectRegistry {
             EffectRow::from_strs(&["env", "alloc"]),
         );
 
+        self.reg(
+            &["env_set", "pid", "exit_code", "thread_count"],
+            EffectRow::from_strs(&["env"]),
+        );
+
         // === sys (system calls) ===
         self.reg(
             &[
                 "system",
+                "exec_cmd",
                 "popen",
                 "pclose",
                 "exit",
@@ -479,10 +656,13 @@ impl EffectRegistry {
             &[
                 "iris_validate",
                 "reflect_validate",
+                "validate",
                 "iris_eval",
                 "reflect_eval",
+                "eval",
                 "iris_eval_i64",
                 "reflect_eval_i64",
+                "eval_i64",
             ],
             EffectRow::from_strs(&["reflect", "alloc"]),
         );
@@ -531,5 +711,31 @@ mod tests {
             .expect("task_group_join must be registered");
         assert!(join.contains("thread"));
         assert!(!join.contains("spawn"));
+    }
+
+    #[test]
+    fn in_memory_formatting_allocates_without_terminal_io() {
+        let registry = EffectRegistry::new();
+        for name in ["concat", "to_str", "format", "sprintf", "slice", "split"] {
+            let row = registry
+                .lookup(name)
+                .unwrap_or_else(|| panic!("{name} must be registered"));
+            assert!(row.contains("alloc"), "{name} should require alloc");
+            assert!(!row.contains("io"), "{name} must not require terminal io");
+        }
+    }
+
+    #[test]
+    fn host_os_fs_ffi_and_time_builtins_have_contracts() {
+        let registry = EffectRegistry::new();
+        assert!(registry.lookup("env_get").unwrap().contains("env"));
+        assert!(registry.lookup("exec_cmd").unwrap().contains("sys"));
+        assert!(registry.lookup("file_lines").unwrap().contains("fs"));
+        assert!(registry.lookup("ffi_call_i64").unwrap().contains("ffi"));
+        assert!(registry.lookup("time_now_ms").unwrap().contains("time"));
+        assert!(registry
+            .lookup("datetime_timestamp")
+            .unwrap()
+            .contains("time"));
     }
 }

@@ -1,0 +1,813 @@
+bring std.fs
+bring std.json
+bring std.math
+bring std.net
+bring std.svg
+bring "domain.iris"
+bring "store.iris"
+
+/// Escape XML reserved characters for safe embedding inside SVG `<text>` elements.
+pub def xml_escape(s: str) -> str effect io, alloc {
+    val n = len(s)
+    val parts: list<str> = list()
+    for i in 0..n {
+        val b = str_index(s, i)
+        if b == 38 {
+            val _ = list_push(parts, "&amp;")
+        } else if b == 60 {
+            val _ = list_push(parts, "&lt;")
+        } else if b == 62 {
+            val _ = list_push(parts, "&gt;")
+        } else if b == 34 {
+            val _ = list_push(parts, "&quot;")
+        } else if b == 39 {
+            val _ = list_push(parts, "&apos;")
+        } else {
+            val _ = list_push(parts, slice(s, i, i + 1))
+        }
+    }
+    return join(parts, "")
+}
+
+/// Project WGS-84 longitude `[-180..180]` onto equirectangular SVG map X coordinate.
+pub def map_proj_x(lon_deg: f64) -> f64 {
+    val clamped = clamp_f64(lon_deg, -180.0, 180.0)
+    return 40.0 + ((clamped + 180.0) / 360.0) * 1200.0
+}
+
+/// Project WGS-84 latitude `[-90..90]` onto equirectangular SVG map Y coordinate.
+pub def map_proj_y(lat_deg: f64) -> f64 {
+    val clamped = clamp_f64(lat_deg, -90.0, 90.0)
+    return 70.0 + ((90.0 - clamped) / 180.0) * 490.0
+}
+
+/// Draw a sequence of connected `(lon, lat)` vertices as geographic coastline line segments.
+def draw_geo_polyline(
+    ctx: SVGContext,
+    coords: list<f64>,
+    color: str,
+    width: f64,
+) -> SVGContext effect io, alloc {
+    var cur = ctx
+    val n = list_len(coords)
+    var i = 0
+    while (i + 3) < n {
+        val lon0 = list_get(coords, i)
+        val lat0 = list_get(coords, i + 1)
+        val lon1 = list_get(coords, i + 2)
+        val lat1 = list_get(coords, i + 3)
+        cur = svg_line(
+            cur,
+            map_proj_x(lon0),
+            map_proj_y(lat0),
+            map_proj_x(lon1),
+            map_proj_y(lat1),
+            color,
+            width,
+        )
+        i = i + 2
+    }
+    return cur
+}
+
+def north_america_ring() -> list<f64> effect alloc {
+    return list(
+        -166.0,
+        65.0,
+        -140.0,
+        70.0,
+        -95.0,
+        70.0,
+        -60.0,
+        52.0,
+        -70.0,
+        42.0,
+        -81.0,
+        25.0,
+        -90.0,
+        29.0,
+        -97.0,
+        22.0,
+        -84.0,
+        10.0,
+        -78.0,
+        8.0,
+        -92.0,
+        15.0,
+        -105.0,
+        20.0,
+        -117.0,
+        32.0,
+        -125.0,
+        48.0,
+        -135.0,
+        58.0,
+        -166.0,
+        65.0,
+    )
+}
+
+def south_america_ring() -> list<f64> effect alloc {
+    return list(
+        -78.0,
+        9.0,
+        -62.0,
+        10.0,
+        -50.0,
+        1.0,
+        -35.0,
+        -6.0,
+        -40.0,
+        -22.0,
+        -55.0,
+        -35.0,
+        -68.0,
+        -54.0,
+        -74.0,
+        -46.0,
+        -71.0,
+        -30.0,
+        -70.0,
+        -18.0,
+        -81.0,
+        -5.0,
+        -78.0,
+        9.0,
+    )
+}
+
+def europe_ring() -> list<f64> effect alloc {
+    return list(
+        -9.0,
+        37.0,
+        -5.0,
+        43.0,
+        2.0,
+        51.0,
+        10.0,
+        55.0,
+        20.0,
+        68.0,
+        30.0,
+        70.0,
+        40.0,
+        66.0,
+        28.0,
+        41.0,
+        35.0,
+        36.0,
+    )
+}
+
+def africa_ring() -> list<f64> effect alloc {
+    return list(
+        35.0,
+        36.0,
+        33.0,
+        31.0,
+        43.0,
+        12.0,
+        51.0,
+        12.0,
+        40.0,
+        -5.0,
+        35.0,
+        -25.0,
+        20.0,
+        -35.0,
+        15.0,
+        -26.0,
+        12.0,
+        -6.0,
+        2.0,
+        6.0,
+        -17.0,
+        15.0,
+        -10.0,
+        35.0,
+        -9.0,
+        37.0,
+    )
+}
+
+def asia_north_ring() -> list<f64> effect alloc {
+    return list(
+        35.0,
+        36.0,
+        40.0,
+        66.0,
+        70.0,
+        72.0,
+        105.0,
+        75.0,
+        140.0,
+        72.0,
+        175.0,
+        66.0,
+        162.0,
+        54.0,
+        140.0,
+        52.0,
+        130.0,
+        40.0,
+    )
+}
+
+def asia_south_ring() -> list<f64> effect alloc {
+    return list(
+        130.0,
+        40.0,
+        122.0,
+        30.0,
+        108.0,
+        20.0,
+        104.0,
+        2.0,
+        96.0,
+        16.0,
+        80.0,
+        8.0,
+        72.0,
+        20.0,
+        62.0,
+        25.0,
+        48.0,
+        30.0,
+        43.0,
+        12.0,
+        35.0,
+        36.0,
+    )
+}
+
+def australia_ring() -> list<f64> effect alloc {
+    return list(
+        114.0,
+        -22.0,
+        130.0,
+        -12.0,
+        142.0,
+        -11.0,
+        153.0,
+        -26.0,
+        148.0,
+        -38.0,
+        135.0,
+        -34.0,
+        115.0,
+        -34.0,
+        114.0,
+        -22.0,
+    )
+}
+
+/// Return global continental boundary polylines in flattened `[lon0, lat0, lon1, lat1, ...]` pairs.
+pub def world_coastline_polylines() -> list<list<f64>> effect alloc {
+    return list(
+        north_america_ring(),
+        south_america_ring(),
+        europe_ring(),
+        africa_ring(),
+        asia_north_ring(),
+        asia_south_ring(),
+        australia_ring(),
+    )
+}
+
+/// Return Western Pacific subduction arc polylines in flattened `[lon0, lat0, ...]` pairs.
+pub def pacific_arc_polylines() -> list<list<f64>> effect alloc {
+    val japan: list<f64> = list(130.0, 31.0, 136.0, 34.0, 141.0, 38.0, 145.0, 44.0)
+    val indo: list<f64> = list(96.0, 5.0, 106.0, -6.0, 120.0, -8.0, 135.0, -4.0, 148.0, -9.0)
+    return list(japan, indo)
+}
+
+/// Render simplified global continental geographic outlines onto the equirectangular map frame.
+def draw_world_outlines(ctx: SVGContext) -> SVGContext effect io, alloc {
+    var cur = ctx
+    val continents = world_coastline_polylines()
+    for i in 0..list_len(continents) {
+        cur = draw_geo_polyline(cur, list_get(continents, i), "#2b425b", 1.2)
+    }
+    val arcs = pacific_arc_polylines()
+    for j in 0..list_len(arcs) {
+        cur = draw_geo_polyline(cur, list_get(arcs, j), "#345474", 1.4)
+    }
+    return cur
+}
+
+def svg_text_escaped(
+    ctx: SVGContext,
+    pos: (f64, f64),
+    text: str,
+    style: (str, i64),
+) -> SVGContext effect io, alloc {
+    return svg_text(ctx, pos.0, pos.1, xml_escape(text), style.0, style.1)
+}
+
+def draw_svg_map_canvas(snap: ObservatorySnapshot) -> SVGContext effect io, alloc {
+    val a = snap.analytics
+    var ctx = svg_new(1280, 760)
+    ctx = svg_rect(ctx, 0.0, 0.0, 1280.0, 760.0, "#070d16")
+    ctx = svg_rect(ctx, 40.0, 70.0, 1200.0, 490.0, "#0c1624")
+    val alert_s = alert_severity_label(a.overall_alert)
+    ctx = svg_text_escaped(
+        ctx,
+        (40.0, 36.0),
+        concat("TERRA PULSE LIVE PLANETARY OBSERVATORY | ALERT: ", alert_s),
+        ("#e2e8f0", 19),
+    )
+    val sub_s = f"USGS M={format_fixed_2(a.max_magnitude)} peak ({a.total_quakes} quakes) | NOAA Kp={format_fixed_2(a.kp_latest)} | ISS alt={format_fixed_1(snap.iss.altitude_km)} km"
+    ctx = svg_text_escaped(ctx, (40.0, 56.0), sub_s, ("#94a3b8", 13))
+    var lon_g = -150.0
+    while lon_g <= 150.0 {
+        val x = map_proj_x(lon_g)
+        ctx = svg_line(ctx, x, 70.0, x, 560.0, "#152232", 1.0)
+        lon_g = lon_g + 30.0
+    }
+    var lat_g = -60.0
+    while lat_g <= 60.0 {
+        val y = map_proj_y(lat_g)
+        val c = if lat_g == 0.0 { "#223850" } else { "#152232" }
+        ctx = svg_line(ctx, 40.0, y, 1240.0, y, c, 1.0)
+        lat_g = lat_g + 30.0
+    }
+    return draw_world_outlines(ctx)
+}
+
+def draw_svg_seismic_markers(
+    ctx: SVGContext,
+    events: list<SeismicEvent>,
+    analytics: RunAnalytics,
+) -> SVGContext effect io, alloc {
+    var cur = ctx
+    for i in 0..list_len(events) {
+        val ev = list_get(events, i)
+        val rad = max_f64(2.8, (ev.magnitude - 1.5) * 3.6)
+        val col = when depth_regime(ev.coord.depth_km) {
+            DepthRegime.Shallow => "#f43f5e",
+            DepthRegime.Intermediate => "#f59e0b",
+            DepthRegime.Deep => "#22d3ee",
+        }
+        cur = svg_circle(cur, map_proj_x(ev.coord.lon_deg), map_proj_y(ev.coord.lat_deg), rad, col)
+    }
+    if list_len(events) > 0 {
+        val top_ev = list_get(events, analytics.strongest_idx)
+        val tx = map_proj_x(top_ev.coord.lon_deg)
+        val ty = map_proj_y(top_ev.coord.lat_deg)
+        cur = svg_circle(cur, tx, ty, 3.5, "#ffffff")
+        val eq_lbl = f"M{format_fixed_1(top_ev.magnitude)} {top_ev.place}"
+        val pos = (clamp_f64(tx + 12.0, 50.0, 950.0), clamp_f64(ty - 10.0, 88.0, 548.0))
+        cur = svg_text_escaped(cur, pos, eq_lbl, ("#fda4af", 12))
+    }
+    return cur
+}
+
+def draw_svg_orbital_weather(
+    ctx: SVGContext,
+    iss: OrbitalState,
+    weather: list<SurfaceWeather>,
+) -> SVGContext effect io, alloc {
+    val iss_x = map_proj_x(iss.longitude)
+    val iss_y = map_proj_y(iss.latitude)
+    var cur = svg_circle(ctx, iss_x, iss_y, 7.0, "#38bdf8")
+    cur = svg_circle(cur, map_proj_x(iss.solar_lon), map_proj_y(iss.solar_lat), 5.0, "#fde047")
+    val iss_lbl = f"ISS ({format_fixed_1(iss.latitude)}, {format_fixed_1(iss.longitude)})"
+    val pos = (clamp_f64(iss_x + 10.0, 50.0, 1080.0), clamp_f64(iss_y + 14.0, 90.0, 548.0))
+    cur = svg_text_escaped(cur, pos, iss_lbl, ("#7dd3fc", 12))
+    for i in 0..list_len(weather) {
+        val wx = list_get(weather, i)
+        cur = svg_rect(cur, map_proj_x(wx.lon) - 4.0, map_proj_y(wx.lat) - 4.0, 8.0, 8.0, "#34d399")
+    }
+    return cur
+}
+
+def draw_svg_kp_panel(
+    ctx: SVGContext,
+    kps: list<GeomagneticSample>,
+) -> SVGContext effect io, alloc {
+    var cur = svg_rect(ctx, 40.0, 585.0, 680.0, 150.0, "#0c1624")
+    cur = svg_text_escaped(
+        cur,
+        (56.0, 608.0),
+        "NOAA SWPC Planetary Kp Index (Recent 3h Intervals)",
+        ("#e2e8f0", 13),
+    )
+    val storm_y = 718.0 - ((5.0 / 9.0) * 92.0)
+    cur = svg_line(cur, 56.0, storm_y, 700.0, storm_y, "#ef4444", 1.0)
+    cur = svg_text_escaped(cur, (646.0, storm_y - 4.0), "G1 Kp=5", ("#f87171", 10))
+    val n_kp = list_len(kps)
+    val start_kp = if n_kp > 24 { n_kp - 24 } else { 0 }
+    val show_n = n_kp - start_kp
+    if show_n > 0 {
+        val bar_w = 620.0 / to_f64(show_n)
+        for j in 0..show_n {
+            val s = list_get(kps, start_kp + j)
+            val bh = clamp_f64((s.kp_index / 9.0) * 92.0, 2.0, 92.0)
+            val bcol = if s.kp_index >= 5.0 {
+                "#ef4444"
+            } else if s.kp_index >= 4.0 {
+                "#f59e0b"
+            } else {
+                "#22c55e"
+            }
+            cur = svg_rect(
+                cur,
+                57.0 + (to_f64(j) * bar_w),
+                718.0 - bh,
+                max_f64(3.0, bar_w - 3.0),
+                bh,
+                bcol,
+            )
+        }
+    }
+    return cur
+}
+
+def format_ci_line(prefix: str, val_s: str, lo: f64, hi: f64) -> str effect io, alloc {
+    return f"{prefix}{val_s}  95% CI [{format_fixed_2(lo)}, {format_fixed_2(hi)}]"
+}
+
+def draw_svg_ad_panel(ctx: SVGContext, a: RunAnalytics) -> SVGContext effect io, alloc {
+    var cur = svg_rect(ctx, 745.0, 585.0, 495.0, 150.0, "#0c1624")
+    cur = svg_text_escaped(
+        cur,
+        (762.0, 608.0),
+        "IRIS AD Gutenberg-Richter & Bayesian Credible Bounds",
+        ("#e2e8f0", 13),
+    )
+    val gr_line = f"AD Fit log10(N>=M) = {format_fixed_2(a.gr_fit.a_value)} - {format_fixed_2(a.gr_fit.b_value)} * M   (R^2={format_fixed_2(a.gr_fit.r2_score)})"
+    cur = svg_text_escaped(cur, (762.0, 636.0), gr_line, ("#38bdf8", 12))
+    val depth_line = f"Depth Regimes: Shallow={a.shallow_count} | Mid={a.intermediate_count} | Deep={a.deep_count}"
+    cur = svg_text_escaped(cur, (762.0, 662.0), depth_line, ("#cbd5e1", 12))
+    val mag_s = format_ci_line(
+        "Magnitude Mean=",
+        format_fixed_2(a.mag_mean),
+        a.mag_ci_low,
+        a.mag_ci_high,
+    )
+    cur = svg_text_escaped(cur, (762.0, 688.0), mag_s, ("#cbd5e1", 12))
+    val kp_s = format_ci_line(
+        "Planetary Kp Peak=",
+        format_fixed_2(a.kp_peak),
+        a.kp_ci_low,
+        a.kp_ci_high,
+    )
+    cur = svg_text_escaped(cur, (762.0, 714.0), kp_s, ("#34d399", 12))
+    return cur
+}
+
+/// Build complete global live SVG observatory chart (`1280x760`) as an SVG XML string.
+pub def build_observatory_svg(snap: ObservatorySnapshot) -> str effect io, alloc {
+    var ctx = draw_svg_map_canvas(snap)
+    ctx = draw_svg_seismic_markers(ctx, snap.events, snap.analytics)
+    ctx = draw_svg_orbital_weather(ctx, snap.iss, snap.weather)
+    ctx = draw_svg_kp_panel(ctx, snap.kps)
+    ctx = draw_svg_ad_panel(ctx, snap.analytics)
+    return concat(ctx.content, "</svg>\n")
+}
+
+/// Write UTF-8 text output cleanly to `path`, returning byte count on success.
+pub def write_text_checked(
+    path: str,
+    contents: str,
+) -> result<i64, TelemetryError> effect fs, io, alloc {
+    return when write_text(path, contents) {
+        ok(written) => if written {
+            ok(len(contents))
+        } else {
+            err(TelemetryError.Storage(concat("failed writing file ", path)))
+        },
+        err(msg) => err(TelemetryError.Storage(concat(path, concat(": ", msg)))),
+    }
+}
+
+def push_kv(keys: list<str>, vals: list<str>, k: str, v: str) -> i64 effect io, alloc {
+    val _ = list_push(keys, k)
+    val _ = list_push(vals, v)
+    return 0
+}
+
+def build_weather_json_items(weather: list<SurfaceWeather>) -> str effect io, alloc {
+    val wx_items: list<str> = list()
+    for i in 0..list_len(weather) {
+        val wx = list_get(weather, i)
+        val keys: list<str> = list("label", "lat", "lon", "temp_c", "pressure_hpa", "wind_kmh")
+        val vals: list<
+            str
+        > = list(
+            json_str(json_escape(wx.label)),
+            json_num_f64(wx.lat),
+            json_num_f64(wx.lon),
+            json_num_f64(wx.temp_c),
+            json_num_f64(wx.pressure_hpa),
+            json_num_f64(wx.wind_kmh),
+        )
+        val _ = list_push(wx_items, json_obj(keys, vals))
+    }
+    return json_arr(wx_items)
+}
+
+def append_seismic_json_fields(
+    keys: list<str>,
+    vals: list<str>,
+    snap: ObservatorySnapshot,
+) -> i64 effect io, alloc {
+    val a = snap.analytics
+    val strongest = if list_len(snap.events) > 0 {
+        list_get(snap.events, a.strongest_idx).place
+    } else {
+        "none"
+    }
+    val _ = push_kv(keys, vals, "alert_tier", json_str(alert_severity_label(a.overall_alert)))
+    val _ = push_kv(keys, vals, "quake_count", json_num_i64(a.total_quakes))
+    val _ = push_kv(keys, vals, "max_magnitude", json_num_f64(a.max_magnitude))
+    val _ = push_kv(keys, vals, "strongest_place", json_str(json_escape(strongest)))
+    val _ = push_kv(keys, vals, "shallow_count", json_num_i64(a.shallow_count))
+    val _ = push_kv(keys, vals, "intermediate_count", json_num_i64(a.intermediate_count))
+    val _ = push_kv(keys, vals, "deep_count", json_num_i64(a.deep_count))
+    val _ = push_kv(keys, vals, "total_energy_log10_j", json_num_f64(a.total_energy_log10_j))
+    val _ = push_kv(keys, vals, "closest_iss_km", json_num_f64(a.closest_iss_km))
+    val _ = push_kv(keys, vals, "gr_a", json_num_f64(a.gr_fit.a_value))
+    val _ = push_kv(keys, vals, "gr_b", json_num_f64(a.gr_fit.b_value))
+    val _ = push_kv(keys, vals, "gr_r2", json_num_f64(a.gr_fit.r2_score))
+    return 0
+}
+
+def append_orbital_history_json_fields(
+    keys: list<str>,
+    vals: list<str>,
+    snap: ObservatorySnapshot,
+    delta: HistoryDelta,
+) -> i64 effect io, alloc {
+    val a = snap.analytics
+    val kp_time = if list_len(snap.kps) > 0 {
+        list_get(snap.kps, list_len(snap.kps) - 1).time_tag
+    } else {
+        "none"
+    }
+    val _ = push_kv(keys, vals, "kp_latest", json_num_f64(a.kp_latest))
+    val _ = push_kv(keys, vals, "kp_peak", json_num_f64(a.kp_peak))
+    val _ = push_kv(keys, vals, "kp_time_tag", json_str(json_escape(kp_time)))
+    val _ = push_kv(keys, vals, "iss_lat", json_num_f64(snap.iss.latitude))
+    val _ = push_kv(keys, vals, "iss_lon", json_num_f64(snap.iss.longitude))
+    val _ = push_kv(keys, vals, "iss_alt_km", json_num_f64(snap.iss.altitude_km))
+    val _ = push_kv(keys, vals, "iss_vel_kmh", json_num_f64(snap.iss.velocity_kmh))
+    val _ = push_kv(keys, vals, "iss_visibility", json_str(json_escape(snap.iss.visibility)))
+    val _ = push_kv(keys, vals, "prior_runs", json_num_i64(delta.prior_runs))
+    val _ = push_kv(keys, vals, "new_quakes_since_last_run", json_num_i64(delta.new_events_count))
+    val _ = push_kv(keys, vals, "stored_quakes_total", json_num_i64(delta.stored_events_total))
+    val _ = push_kv(keys, vals, "correlated_weather", build_weather_json_items(snap.weather))
+    return 0
+}
+
+/// Serialize analytics, telemetry feeds, and history delta into RFC-8259 JSON.
+pub def build_summary_json(snap: ObservatorySnapshot, delta: HistoryDelta) -> str effect io, alloc {
+    val keys: list<str> = list()
+    val vals: list<str> = list()
+    val _ = append_seismic_json_fields(keys, vals, snap)
+    val _ = append_orbital_history_json_fields(keys, vals, snap, delta)
+    return json_obj(keys, vals)
+}
+
+def render_runs_table_rows(recent_runs: list<StoredRunSummary>) -> str effect io, alloc {
+    val rows: list<str> = list()
+    for i in 0..list_len(recent_runs) {
+        val r = list_get(recent_runs, i)
+        val row = f"<tr><td>#{r.run_id}</td><td>{r.quake_count}</td><td>M{format_fixed_2(r.max_mag)}</td><td>{format_fixed_2(r.kp_latest)}</td><td>{format_fixed_2(r.gr_b)}</td><td>{xml_escape(r.alert_tier)}</td></tr>"
+        val _ = list_push(rows, row)
+    }
+    return join(rows, "")
+}
+
+def render_dashboard_head_banner(
+    snap: ObservatorySnapshot,
+    delta: HistoryDelta,
+) -> str effect io, alloc {
+    val a = snap.analytics
+    val p1 = concat(
+        "<!doctype html><html><head><meta charset='utf-8'><title>TerraPulse IRIS Observatory</title>",
+        "<style>body{background:#070d16;color:#e2e8f0;font-family:system-ui,sans-serif;margin:24px;}h1{color:#38bdf8;}.card{background:#0c1624;border:1px solid #1e293b;border-radius:10px;padding:16px;margin-bottom:16px;}table{width:100%;border-collapse:collapse;}th,td{padding:8px;border-bottom:1px solid #1e293b;text-align:left;}</style></head><body>",
+    )
+    val p2 = f"<h1>TerraPulse Live Planetary Observatory (IRIS Native)</h1><div class='card'><strong>Alert:</strong> {alert_severity_label(a.overall_alert)} | <strong>Quakes:</strong> {a.total_quakes} (new in SQLite: {delta.new_events_count}) | <strong>AD b-value:</strong> {format_fixed_2(a.gr_fit.b_value)} | <strong>ISS Alt:</strong> {format_fixed_1(snap.iss.altitude_km)} km</div>"
+    return concat(p1, p2)
+}
+
+/// Build HTML5 live observatory dashboard embedding the real generated SVG map
+/// and tabular SQLite history runs.
+pub def build_dashboard_html(
+    snap: ObservatorySnapshot,
+    delta: HistoryDelta,
+    recent_runs: list<StoredRunSummary>,
+    summary_json: str,
+) -> str effect io, alloc {
+    val head = render_dashboard_head_banner(snap, delta)
+    val mid = concat(
+        "<div class='card'><img src='/map.svg' style='width:100%;height:auto;border-radius:8px;'/></div>",
+        "<div class='card'><h2>SQLite Historical Runs</h2><table><thead><tr><th>Run</th><th>Quakes</th><th>Max Mag</th><th>Kp</th><th>GR b-value</th><th>Tier</th></tr></thead><tbody>",
+    )
+    val tail = concat(
+        render_runs_table_rows(recent_runs),
+        concat(
+            "</tbody></table></div><div class='card'><h3>JSON Telemetry</h3><pre>",
+            concat(xml_escape(summary_json), "</pre></div></body></html>"),
+        ),
+    )
+    return concat(head, concat(mid, tail))
+}
+
+/// Format HTTP/1.1 response with explicit `Content-Type` and `Content-Length`.
+pub def format_http_response(
+    status: i64,
+    status_text: str,
+    content_type: str,
+    body: str,
+) -> str effect io, alloc {
+    val line1 = concat(
+        "HTTP/1.1 ",
+        concat(to_str(status), concat(" ", concat(status_text, "\r\n"))),
+    )
+    val hdrs = concat(
+        "Content-Type: ",
+        concat(
+            content_type,
+            concat(
+                "\r\nContent-Length: ",
+                concat(to_str(len(body)), "\r\nConnection: close\r\n\r\n"),
+            ),
+        ),
+    )
+    return concat(line1, concat(hdrs, body))
+}
+
+/// Extract HTTP request target path cleanly from raw HTTP/1.1 request bytes.
+pub def extract_http_path(raw_req: str) -> str effect alloc, throw {
+    val first_sp = find(raw_req, " ")
+    if !is_some(first_sp) {
+        return "/"
+    }
+    val after_m = slice(raw_req, unwrap(first_sp) + 1, len(raw_req))
+    val second_sp = find(after_m, " ")
+    val raw_path = if is_some(second_sp) {
+        slice(after_m, 0, unwrap(second_sp))
+    } else {
+        "/"
+    }
+    val q = find(raw_path, "?")
+    return if is_some(q) { slice(raw_path, 0, unwrap(q)) } else { raw_path }
+}
+
+def route_http_response(
+    path: str,
+    svg_xml: str,
+    summary_json: str,
+    dashboard_html: str,
+) -> str effect io, alloc {
+    if path == "/" {
+        return format_http_response(200, "OK", "text/html; charset=utf-8", dashboard_html)
+    }
+    if path == "/map.svg" {
+        return format_http_response(200, "OK", "image/svg+xml; charset=utf-8", svg_xml)
+    }
+    if path == "/api/summary" {
+        return format_http_response(200, "OK", "application/json; charset=utf-8", summary_json)
+    }
+    if path == "/health" {
+        return format_http_response(
+            200,
+            "OK",
+            "application/json; charset=utf-8",
+            "{\"status\":\"ok\"}",
+        )
+    }
+    if path == "/shutdown" {
+        return format_http_response(200, "OK", "text/plain; charset=utf-8", "shutting down\n")
+    }
+    return format_http_response(404, "Not Found", "text/plain; charset=utf-8", "not found\n")
+}
+
+/// Serve the live observatory dashboard (`/`, `/map.svg`, `/api/summary`, `/health`) over TCP.
+pub def serve_observatory_http(
+    port: i64,
+    svg_xml: str,
+    summary_json: str,
+    dashboard_html: str,
+) -> i64 effect net, io, alloc, throw {
+    val listener = when tcp_listen_local_checked(port) {
+        ok(l) => l,
+        err(msg) => {
+            println(f"Failed to bind HTTP dashboard on port {port}: {msg}")
+            return 1
+        },
+    }
+    defer {
+        val _ = tcp_close(listener.handle)
+    }
+    println(f"[SERVE] Live TerraPulse Dashboard listening at http://127.0.0.1:{port}/")
+    println(f"[SERVE] Endpoints: /  |  /map.svg  |  /api/summary  |  /health  |  /shutdown")
+    loop {
+        when tcp_accept_checked(listener, 5000, 5000) {
+            err(_) => {
+                break
+            }
+            ok(conn) => {
+                defer {
+                    val _ = tcp_close(conn.handle)
+                }
+                val path = extract_http_path(tcp_read_bounded(conn, 16384) ?? "")
+                val resp = route_http_response(path, svg_xml, summary_json, dashboard_html)
+                val _ = tcp_write_all_checked(conn, resp)
+                if path == "/shutdown" {
+                    break
+                }
+            }
+        }
+    }
+    return 0
+}
+
+def sample_render_analytics() -> RunAnalytics {
+    return RunAnalytics {
+        total_quakes: 1,
+        shallow_count: 1,
+        intermediate_count: 0,
+        deep_count: 0,
+        max_magnitude: 5.1,
+        strongest_idx: 0,
+        secondary_idx: 0,
+        total_energy_log10_j: 12.45,
+        closest_iss_km: 8200.0,
+        closest_iss_idx: 0,
+        watch_plus_count: 1,
+        mag_mean: 5.1,
+        mag_ci_low: 4.6,
+        mag_ci_high: 5.6,
+        kp_latest: 4.33,
+        kp_peak: 4.33,
+        kp_ci_low: 3.9,
+        kp_ci_high: 4.7,
+        gr_fit: GutenbergRichterFit {
+            a_value: 5.1,
+            b_value: 0.98,
+            r2_score: 0.96,
+            bin_count: 5,
+            expected_daily_m5: 1.58,
+            expected_daily_m6: 0.16,
+        },
+        overall_alert: AlertSeverity.Elevated,
+    }
+}
+
+def sample_render_snapshot() -> ObservatorySnapshot effect io, alloc {
+    val ev = SeismicEvent {
+        event_id: "eq-svg-1",
+        time_utc: "2026-11-14T20:00:00Z",
+        coord: GeoCoord { lat_deg: 24.0, lon_deg: 121.6, depth_km: 15.0 },
+        magnitude: 5.1,
+        mag_type: "mww",
+        place: "Hualien & East",
+        station_count: 30,
+        gap_deg: 35.0,
+        rms_sec: 0.3,
+    }
+    val kp = GeomagneticSample {
+        time_tag: "2026-11-14T18:00:00",
+        kp_index: 4.33,
+        a_running: 28.0,
+        station_count: 8,
+    }
+    val iss = OrbitalState {
+        name: "iss",
+        latitude: 12.0,
+        longitude: 45.0,
+        altitude_km: 416.0,
+        velocity_kmh: 27590.0,
+        footprint_km: 4480.0,
+        visibility: "daylight",
+        timestamp_s: 1794690639,
+        solar_lat: -18.0,
+        solar_lon: 110.0,
+    }
+    return ObservatorySnapshot {
+        events: list(ev),
+        kps: list(kp),
+        iss: iss,
+        weather: list(),
+        analytics: sample_render_analytics(),
+    }
+}
+
+def test_render_svg_projection_and_escape() -> i64 effect io, alloc, throw {
+    assert(xml_escape("Hualien & <Taiwan> '1'") == "Hualien &amp; &lt;Taiwan&gt; &apos;1&apos;")
+    assert(abs_f64(map_proj_x(0.0) - 640.0) < 0.01)
+    assert(abs_f64(map_proj_y(0.0) - 315.0) < 0.01)
+
+    val svg = build_observatory_svg(sample_render_snapshot())
+    assert(contains(svg, "<svg width=\"1280\" height=\"760\""))
+    assert(contains(svg, "Hualien &amp; East"))
+    assert(contains(svg, "Gutenberg-Richter &amp; Bayesian"))
+    assert(contains(svg, "log10(N&gt;=M)"))
+    assert(!contains(svg, " & "))
+    assert(contains(svg, "</svg>"))
+    assert(extract_http_path("GET /api/summary?v=1 HTTP/1.1\r\n") == "/api/summary")
+    return 0
+}

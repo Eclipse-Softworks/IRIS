@@ -1,0 +1,227 @@
+bring "domain.iris"
+
+def ais_armor_alphabet() -> str {
+    return "0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVW`abcdefghijklmnopqrstuvw"
+}
+
+def hex_upper_table() -> str {
+    return "0123456789ABCDEF"
+}
+
+def xor_u8(a: i64, b: i64) -> i64 {
+    var res = 0
+    var pow2 = 1
+    for _bit in 0..8 {
+        val ba = (a / pow2) % 2
+        val bb = (b / pow2) % 2
+        val add = if ba != bb { pow2 } else { 0 }
+        res = res + add
+        pow2 = pow2 * 2
+    }
+    return res
+}
+
+/// Compute standard 2-character uppercase hex NMEA-0183 XOR checksum for payload `body`.
+pub def compute_nmea_checksum(body: str) -> str {
+    var acc = 0
+    for i in 0..len(body) {
+        acc = xor_u8(acc, str_index(body, i))
+    }
+    val hi = (acc / 16) % 16
+    val lo = acc % 16
+    val tbl = hex_upper_table()
+    return concat(slice(tbl, hi, hi + 1), slice(tbl, lo, lo + 1))
+}
+
+def armor_code_value(code: i64) -> result<i64, AisError> {
+    val raw = code - 48
+    val six = if raw > 40 { raw - 8 } else { raw }
+    if six < 0 || six > 63 {
+        return err(AisError.ParseFailed(f"invalid 6-bit AIS armor byte: {code}"))
+    }
+    return ok(six)
+}
+
+def decode_payload_bits(payload: str) -> result<list<i64>, AisError> effect alloc {
+    val bits: list<i64> = list()
+    for i in 0..len(payload) {
+        val six = armor_code_value(str_index(payload, i))?
+        var div = 32
+        for _b in 0..6 {
+            val bit = (six / div) % 2
+            val _ = list_push(bits, bit)
+            div = div / 2
+        }
+    }
+    return ok(bits)
+}
+
+def read_uint_bits(bits: list<i64>, start: i64, width: i64) -> i64 effect alloc {
+    var acc = 0
+    for i in 0..width {
+        acc = (acc * 2) + list_get(bits, start + i)
+    }
+    return acc
+}
+
+def read_sint_bits(bits: list<i64>, start: i64, width: i64) -> i64 effect alloc {
+    val unsigned_v = read_uint_bits(bits, start, width)
+    if list_get(bits, start) == 0 {
+        return unsigned_v
+    }
+    var span = 1
+    for _i in 0..width {
+        span = span * 2
+    }
+    return unsigned_v - span
+}
+
+def push_uint_bits(bits: list<i64>, value: i64, width: i64) -> i64 effect alloc {
+    var span = 1
+    for _i in 0..width {
+        span = span * 2
+    }
+    val norm = if value < 0 { span + value } else { value }
+    var div = span / 2
+    for _b in 0..width {
+        val _ = list_push(bits, (norm / div) % 2)
+        div = if div > 1 { div / 2 } else { 1 }
+    }
+    return 0
+}
+
+def validate_nmea_frame(raw_line: str) -> result<CheckedNmeaFrame, AisError> effect alloc {
+    val line = trim(raw_line)
+    if !starts_with(line, "!AIVDM,") && !starts_with(line, "!AIVDO,") {
+        return err(AisError.ParseFailed("NMEA line must start with !AIVDM or !AIVDO"))
+    }
+    val star_parts = split(line, "*")
+    if list_len(star_parts) != 2 {
+        return err(AisError.NmeaChecksumFailed("missing '*' checksum delimiter"))
+    }
+    val body_with_bang = list_get(star_parts, 0)
+    val given_cs = trim(list_get(star_parts, 1))
+    val body = slice(body_with_bang, 1, len(body_with_bang))
+    val expected_cs = compute_nmea_checksum(body)
+    if given_cs != expected_cs {
+        return err(AisError.NmeaChecksumFailed(f"expected *{expected_cs}, got *{given_cs}"))
+    }
+    val fields = split(body, ",")
+    if list_len(fields) != 7 {
+        return err(AisError.ParseFailed("expected 7 comma-separated NMEA fields"))
+    }
+    val ch = list_get(fields, 4)
+    val payload = list_get(fields, 5)
+    val fill = list_get(fields, 6)
+    val fill_bits = if fill == "0" { 0 } else { 2 }
+    return ok(
+        CheckedNmeaFrame {
+            raw: line,
+            channel: ch,
+            payload: payload,
+            fill_bits: fill_bits,
+            checksum_hex: expected_cs,
+        },
+    )
+}
+
+/// Decode and verify an ITU-R M.1371 Type 1/2/3 `!AIVDM` / `!AIVDO` NMEA sentence.
+pub def decode_nmea_aivdm(
+    raw_line: str,
+    label: str,
+) -> result<(CheckedNmeaFrame, VesselContact), AisError> effect alloc {
+    val frame = validate_nmea_frame(raw_line)?
+    val bits = decode_payload_bits(frame.payload)?
+    if list_len(bits) < 168 {
+        return err(AisError.ParseFailed("AIVDM Class A position message requires >= 168 bits"))
+    }
+    val msg_type = read_uint_bits(bits, 0, 6)
+    if msg_type < 1 || msg_type > 3 {
+        return err(AisError.ParseFailed(f"unsupported AIS message type {msg_type}; expected 1..3"))
+    }
+    val mmsi = parse_mmsi(read_uint_bits(bits, 8, 30))?
+    val nav = nav_status_from_code(read_uint_bits(bits, 38, 4))
+    val sog_raw = read_uint_bits(bits, 50, 10)
+    val sog_val = if sog_raw >= 1023 { 0.0 } else { to_f64(sog_raw) / 10.0 }
+    val lon_deg = to_f64(read_sint_bits(bits, 61, 28)) / 600000.0
+    val lat_deg = to_f64(read_sint_bits(bits, 89, 27)) / 600000.0
+    val cog_raw = read_uint_bits(bits, 116, 12)
+    val cog_deg = if cog_raw >= 3600 { 0.0 } else { to_f64(cog_raw) / 10.0 }
+    val hdg = read_uint_bits(bits, 128, 9)
+    val contact = VesselContact {
+        label: label,
+        mmsi: mmsi,
+        msg_type: msg_type,
+        lat: parse_geo_lat(lat_deg)?,
+        lon: parse_geo_lon(lon_deg)?,
+        sog: parse_knots(sog_val)?,
+        cog_deg: cog_deg,
+        heading_deg: if hdg >= 360 { 0 } else { hdg },
+        nav_status: nav,
+    }
+    return ok((frame, contact))
+}
+
+/// Encode a `VesselContact` into a valid checksummed ITU-R M.1371 Type 1 `!AIVDM` sentence.
+pub def encode_type1_aivdm(contact: VesselContact) -> str effect alloc {
+    val bits: list<i64> = list()
+    val _1 = push_uint_bits(bits, 1, 6)
+    val _2 = push_uint_bits(bits, 0, 2)
+    val _3 = push_uint_bits(bits, contact.mmsi.raw, 30)
+    val _4 = push_uint_bits(bits, nav_status_code(contact.nav_status), 4)
+    val _5 = push_uint_bits(bits, 128, 8)
+    val _6 = push_uint_bits(bits, (contact.sog.value * 10.0) to i64, 10)
+    val _7 = push_uint_bits(bits, 1, 1)
+    val _8 = push_uint_bits(bits, (contact.lon.deg * 600000.0) to i64, 28)
+    val _9 = push_uint_bits(bits, (contact.lat.deg * 600000.0) to i64, 27)
+    val _10 = push_uint_bits(bits, (contact.cog_deg * 10.0) to i64, 12)
+    val _11 = push_uint_bits(bits, contact.heading_deg, 9)
+    val _12 = push_uint_bits(bits, 15, 6)
+    val _13 = push_uint_bits(bits, 0, 25)
+    val chars: list<str> = list()
+    val tbl = ais_armor_alphabet()
+    for i in 0..28 {
+        val v = read_uint_bits(bits, i * 6, 6)
+        val _p = list_push(chars, slice(tbl, v, v + 1))
+    }
+    val payload = join(chars, "")
+    val body = f"AIVDM,1,1,,A,{payload},0"
+    val cs = compute_nmea_checksum(body)
+    return f"!{body}*{cs}"
+}
+
+def test_nmea_reference_decode_and_checksum() -> i64 effect alloc, throw {
+    val real_vec = "!AIVDM,1,1,,B,177KQJ5000G?tO`K>RA1wUbN0TKH,0*5C"
+    val decoded = decode_nmea_aivdm(real_vec, "MV_SEATTLE")
+    assert(is_ok(decoded))
+    val pair = unwrap(decoded)
+    assert(pair.0.checksum_hex == "5C")
+    assert(pair.1.mmsi.raw == 477553000)
+    assert(pair.1.mmsi.flag_country == "Hong Kong")
+    assert(pair.1.lat.deg > 47.58 && pair.1.lat.deg < 47.59)
+    assert(pair.1.lon.deg < -122.34 && pair.1.lon.deg > -122.35)
+    assert(is_err(decode_nmea_aivdm("!AIVDM,1,1,,B,177KQJ5000G?tO`K>RA1wUbN0TKH,0*FF", "BAD")))
+    return 0
+}
+
+def test_nmea_encode_roundtrip() -> i64 effect alloc, throw {
+    val orig = VesselContact {
+        label: "FINN_SENTINEL",
+        mmsi: unwrap(parse_mmsi(230111190)),
+        msg_type: 1,
+        lat: unwrap(parse_geo_lat(60.15)),
+        lon: unwrap(parse_geo_lon(24.95)),
+        sog: unwrap(parse_knots(14.5)),
+        cog_deg: 245.5,
+        heading_deg: 244,
+        nav_status: NavStatus.UnderWayEngine,
+    }
+    val frame = encode_type1_aivdm(orig)
+    val rt = decode_nmea_aivdm(frame, "FINN_SENTINEL")
+    assert(is_ok(rt))
+    val v = unwrap(rt).1
+    assert(v.mmsi.raw == 230111190 && v.sog.value > 14.4 && v.sog.value < 14.6)
+    assert(v.lat.deg > 60.149 && v.lat.deg < 60.151)
+    assert(v.lon.deg > 24.949 && v.lon.deg < 24.951)
+    return 0
+}

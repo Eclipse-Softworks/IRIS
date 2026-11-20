@@ -1,0 +1,827 @@
+// std.ui -- High-level declarative + immediate-mode native GUI toolkit for IRIS.
+
+bring std.ffi
+bring std.tensor
+pub bring std.ui_theme
+pub bring std.ui_protocol
+pub bring std.ui_layout
+
+/// Result of one frame pump against `iris_ui_host`.
+pub record UiFrameStep {
+    state: UiState,
+    buf: DrawBuffer,
+    metrics: WindowMetrics,
+    events: list<HostEvent>,
+}
+
+/// Create a new `UiTree` styled with the canonical IRIS Obsidian & Signal theme.
+pub def ui_new() -> UiTree effect alloc {
+    return ui_tree_new(obsidian_theme())
+}
+
+/// Create a new `UiTree` styled with an explicit `UiTheme`.
+pub def ui_with_theme(theme: UiTheme) -> UiTree effect alloc {
+    return ui_tree_new(theme)
+}
+
+/// Construct a default interaction `UiState`.
+pub def ui_state_new() -> UiState {
+    return UiState {}
+}
+
+/// Append a vertical flex/stack container (`Col`) owning `children`.
+pub def ui_col(tree: UiTree, key: str, style: UiStyle, children: list<i64>) -> i64 effect alloc {
+    return ui_add_node(
+        tree,
+        UiNode {
+            key: key,
+            kind: WidgetKind.Col,
+            style: style,
+            children: children,
+        },
+    )
+}
+
+/// Append a horizontal flex container (`Row`) owning `children`.
+pub def ui_row(tree: UiTree, key: str, style: UiStyle, children: list<i64>) -> i64 effect alloc {
+    return ui_add_node(
+        tree,
+        UiNode {
+            key: key,
+            kind: WidgetKind.Row,
+            style: style,
+            children: children,
+        },
+    )
+}
+
+/// Append an overlay container (`Stack`) positioning `children` inside shared bounds.
+pub def ui_stack(tree: UiTree, key: str, style: UiStyle, children: list<i64>) -> i64 effect alloc {
+    return ui_add_node(
+        tree,
+        UiNode {
+            key: key,
+            kind: WidgetKind.Stack,
+            style: style,
+            children: children,
+        },
+    )
+}
+
+/// Append an elevated bordered surface container (`Card`) owning `children`.
+pub def ui_card(tree: UiTree, key: str, style: UiStyle, children: list<i64>) -> i64 effect alloc {
+    val card_style = UiStyle {
+        bg: if style.bg.a > 0 { style.bg } else { tree.theme.panel },
+        fg: style.fg,
+        border: if style.border.a > 0 { style.border } else { tree.theme.border },
+        border_width: if style.border_width > 0.0 { style.border_width } else { 1.0 },
+        radius: if style.radius > 0.0 { style.radius } else { tree.theme.radius },
+        padding: if style.padding > 0.0 { style.padding } else { 12.0 },
+        gap: style.gap,
+        align: UiAlign.Stretch,
+        flex: style.flex,
+        min_w: style.min_w,
+        min_h: style.min_h,
+        max_w: style.max_w,
+        max_h: style.max_h,
+    }
+    return ui_add_node(
+        tree,
+        UiNode {
+            key: key,
+            kind: WidgetKind.Card,
+            style: card_style,
+            children: children,
+        },
+    )
+}
+
+/// Append a flexible spacer leaf.
+pub def ui_spacer(tree: UiTree, flex: f64, min_w: f64, min_h: f64) -> i64 effect alloc {
+    val empty: list<i64> = list()
+    return ui_add_node(
+        tree,
+        UiNode {
+            kind: WidgetKind.Spacer,
+            style: UiStyle { flex: flex, min_w: min_w, min_h: min_h },
+            children: empty,
+        },
+    )
+}
+
+/// Append a bold section heading styled with `tone`.
+pub def ui_heading(tree: UiTree, key: str, text: str, tone: UiTone) -> i64 effect alloc {
+    val empty: list<i64> = list()
+    return ui_add_node(
+        tree,
+        UiNode {
+            key: key,
+            kind: WidgetKind.Label,
+            text: text,
+            tone: tone,
+            style: UiStyle { fg: tone_color(tree.theme, tone), font_size: 17.0, bold: true },
+            children: empty,
+        },
+    )
+}
+
+/// Append a text label widget.
+pub def ui_label(tree: UiTree, key: str, text: str, style: UiStyle) -> i64 effect alloc {
+    val empty: list<i64> = list()
+    return ui_add_node(
+        tree,
+        UiNode {
+            key: key,
+            kind: WidgetKind.Label,
+            text: text,
+            style: style,
+            children: empty,
+        },
+    )
+}
+
+/// Append a semantic pill badge (`Badge`).
+pub def ui_badge(tree: UiTree, key: str, text: str, tone: UiTone) -> i64 effect alloc {
+    val empty: list<i64> = list()
+    return ui_add_node(
+        tree,
+        UiNode {
+            key: key,
+            kind: WidgetKind.Badge,
+            text: text,
+            tone: tone,
+            children: empty,
+        },
+    )
+}
+
+/// Append a primary push button dispatching `action` on click.
+pub def ui_button(tree: UiTree, key: str, text: str, action: str) -> i64 effect alloc {
+    return ui_button_tone(tree, key, text, action, UiTone.Primary)
+}
+
+/// Append a semantic-toned push button dispatching `action` on click.
+pub def ui_button_tone(
+    tree: UiTree,
+    key: str,
+    text: str,
+    action: str,
+    tone: UiTone,
+) -> i64 effect alloc {
+    val empty: list<i64> = list()
+    return ui_add_node(
+        tree,
+        UiNode {
+            key: key,
+            kind: WidgetKind.Button,
+            text: text,
+            action: action,
+            tone: tone,
+            children: empty,
+        },
+    )
+}
+
+/// Append a boolean checkbox widget.
+pub def ui_checkbox(
+    tree: UiTree,
+    key: str,
+    text: str,
+    checked: bool,
+    tone: UiTone,
+) -> i64 effect alloc {
+    val empty: list<i64> = list()
+    return ui_add_node(
+        tree,
+        UiNode {
+            key: key,
+            kind: WidgetKind.Checkbox,
+            text: text,
+            tone: tone,
+            checked: checked,
+            children: empty,
+        },
+    )
+}
+
+/// Append a pill switch toggle widget.
+pub def ui_toggle(
+    tree: UiTree,
+    key: str,
+    text: str,
+    checked: bool,
+    tone: UiTone,
+) -> i64 effect alloc {
+    val empty: list<i64> = list()
+    return ui_add_node(
+        tree,
+        UiNode {
+            key: key,
+            kind: WidgetKind.Toggle,
+            text: text,
+            tone: tone,
+            checked: checked,
+            children: empty,
+        },
+    )
+}
+
+/// Append a `[0.0, max_val]` horizontal slider widget.
+pub def ui_slider(
+    tree: UiTree,
+    key: str,
+    label: str,
+    value: f64,
+    max_val: f64,
+) -> i64 effect alloc {
+    return ui_slider_range(tree, key, label, value, UiSize { w: 0.0, h: max_val })
+}
+
+/// Append a bounded horizontal slider using `bounds.w` (`min`) and `bounds.h` (`max`).
+pub def ui_slider_range(
+    tree: UiTree,
+    key: str,
+    label: str,
+    value: f64,
+    bounds: UiSize,
+) -> i64 effect alloc {
+    val empty: list<i64> = list()
+    return ui_add_node(
+        tree,
+        UiNode {
+            key: key,
+            kind: WidgetKind.Slider,
+            text: label,
+            tone: UiTone.Accent,
+            style: UiStyle { align: UiAlign.Stretch },
+            value: value,
+            min_val: bounds.w,
+            max_val: bounds.h,
+            children: empty,
+        },
+    )
+}
+
+/// Append a single-line editable text input box.
+pub def ui_text_input(
+    tree: UiTree,
+    key: str,
+    text: str,
+    placeholder: str,
+    style: UiStyle,
+) -> i64 effect alloc {
+    val empty: list<i64> = list()
+    val merged = UiStyle {
+        align: UiAlign.Stretch,
+        flex: style.flex,
+        min_w: style.min_w,
+        min_h: style.min_h,
+        max_w: style.max_w,
+        max_h: style.max_h,
+    }
+    return ui_add_node(
+        tree,
+        UiNode {
+            key: key,
+            kind: WidgetKind.TextInput,
+            text: text,
+            placeholder: placeholder,
+            style: merged,
+            children: empty,
+        },
+    )
+}
+
+/// Append a compact sparkline time-series chart widget.
+pub def ui_sparkline(
+    tree: UiTree,
+    key: str,
+    series: ChartSeries,
+    style: UiStyle,
+) -> i64 effect alloc {
+    val empty: list<i64> = list()
+    val cidx = ui_push_chart(tree, series)
+    return ui_add_node(
+        tree,
+        UiNode {
+            key: key,
+            kind: WidgetKind.Sparkline,
+            text: series.label,
+            tone: series.tone,
+            style: style,
+            data_idx: cidx,
+            children: empty,
+        },
+    )
+}
+
+/// Append a titled time-series line chart widget.
+pub def ui_line_chart(
+    tree: UiTree,
+    key: str,
+    series: ChartSeries,
+    style: UiStyle,
+) -> i64 effect alloc {
+    val empty: list<i64> = list()
+    val cidx = ui_push_chart(tree, series)
+    val merged = UiStyle {
+        align: UiAlign.Stretch,
+        flex: style.flex,
+        min_w: style.min_w,
+        min_h: style.min_h,
+        max_w: style.max_w,
+        max_h: style.max_h,
+    }
+    return ui_add_node(
+        tree,
+        UiNode {
+            key: key,
+            kind: WidgetKind.LineChart,
+            text: series.label,
+            tone: series.tone,
+            style: merged,
+            data_idx: cidx,
+            children: empty,
+        },
+    )
+}
+
+/// Append a selectable interactive polar radar scope with highlighted `selected_label` blip.
+pub def ui_radar_scope_interactive(
+    tree: UiTree,
+    key: str,
+    spec: RadarSpec,
+    selected_label: str,
+    style: UiStyle,
+) -> i64 effect alloc {
+    val empty: list<i64> = list()
+    val ridx = ui_push_radar(tree, spec)
+    val merged = UiStyle {
+        align: UiAlign.Stretch,
+        flex: style.flex,
+        min_w: style.min_w,
+        min_h: style.min_h,
+        max_w: style.max_w,
+        max_h: style.max_h,
+    }
+    return ui_add_node(
+        tree,
+        UiNode {
+            key: key,
+            kind: WidgetKind.RadarScope,
+            text: spec.title,
+            placeholder: selected_label,
+            action: key,
+            tone: UiTone.Success,
+            style: merged,
+            data_idx: ridx,
+            children: empty,
+        },
+    )
+}
+
+/// Append a polar radar scope widget backed by `spec`.
+pub def ui_radar_scope(
+    tree: UiTree,
+    key: str,
+    spec: RadarSpec,
+    style: UiStyle,
+) -> i64 effect alloc {
+    return ui_radar_scope_action(tree, key, spec, "", style)
+}
+
+/// Append an interactive polar radar scope dispatching `action` on click.
+pub def ui_radar_scope_action(
+    tree: UiTree,
+    key: str,
+    spec: RadarSpec,
+    action: str,
+    style: UiStyle,
+) -> i64 effect alloc {
+    val empty: list<i64> = list()
+    val ridx = ui_push_radar(tree, spec)
+    val merged = UiStyle {
+        align: UiAlign.Stretch,
+        flex: style.flex,
+        min_w: style.min_w,
+        min_h: style.min_h,
+        max_w: style.max_w,
+        max_h: style.max_h,
+    }
+    return ui_add_node(
+        tree,
+        UiNode {
+            key: key,
+            kind: WidgetKind.RadarScope,
+            text: spec.title,
+            action: action,
+            tone: UiTone.Success,
+            style: merged,
+            data_idx: ridx,
+            children: empty,
+        },
+    )
+}
+
+/// Append a CPU-rasterized heatmap surface widget from a `TensorSpec`.
+pub def ui_tensor_from_grid(
+    tree: UiTree,
+    key: str,
+    spec: TensorSpec,
+    style: UiStyle,
+) -> i64 effect alloc {
+    val empty: list<i64> = list()
+    val tidx = ui_push_tensor(tree, spec)
+    val merged = UiStyle {
+        align: UiAlign.Stretch,
+        flex: style.flex,
+        min_w: style.min_w,
+        min_h: style.min_h,
+        max_w: style.max_w,
+        max_h: style.max_h,
+    }
+    return ui_add_node(
+        tree,
+        UiNode {
+            key: key,
+            kind: WidgetKind.TensorView,
+            text: spec.title,
+            style: merged,
+            data_idx: tidx,
+            children: empty,
+        },
+    )
+}
+
+/// Append a CPU-rasterized heatmap directly from a `std.tensor.Tensor` (`1D` or `2D`).
+pub def ui_tensor_surface(
+    tree: UiTree,
+    key: str,
+    t: Tensor,
+    title: str,
+    style: UiStyle,
+) -> i64 effect alloc {
+    val data = tensor_data(t)
+    val shape = tensor_shape(t)
+    val ndims = list_len(shape)
+    val h = if ndims >= 2 { list_get(shape, 0) } else { 1 }
+    val w = if ndims >= 2 {
+        list_get(shape, 1)
+    } else {
+        if ndims == 1 { list_get(shape, 0) } else { list_len(data) }
+    }
+    val n = list_len(data)
+    var vmin = 0.0
+    var vmax = 1.0
+    if n > 0 {
+        vmin = list_get(data, 0)
+        vmax = vmin
+        for i in 1..n {
+            val v = list_get(data, i)
+            if v < vmin {
+                vmin = v
+            }
+            if v > vmax {
+                vmax = v
+            }
+        }
+        if vmax - vmin < 0.0001 {
+            vmax = vmin + 1.0
+        }
+    }
+    val spec = TensorSpec { width: w, height: h, cells: data, vmin: vmin, vmax: vmax, title: title }
+    return ui_tensor_from_grid(tree, key, spec, style)
+}
+
+/// Append a styled table column header strip.
+pub def ui_table_header(tree: UiTree, key: str, text: str, style: UiStyle) -> i64 effect alloc {
+    val empty: list<i64> = list()
+    return ui_add_node(
+        tree,
+        UiNode {
+            key: key,
+            kind: WidgetKind.TableHeader,
+            text: text,
+            style: style,
+            children: empty,
+        },
+    )
+}
+
+/// Append a selectable monospace telemetry table row highlighted with `tone`.
+pub def ui_table_row_selectable(
+    tree: UiTree,
+    key: str,
+    text: str,
+    checked: bool,
+    tone: UiTone,
+) -> i64 effect alloc {
+    val empty: list<i64> = list()
+    return ui_add_node(
+        tree,
+        UiNode {
+            key: key,
+            kind: WidgetKind.TableRow,
+            text: text,
+            action: key,
+            tone: tone,
+            checked: checked,
+            style: UiStyle {},
+            children: empty,
+        },
+    )
+}
+
+/// Append a monospace telemetry table row band highlighted with `tone`.
+pub def ui_table_row(
+    tree: UiTree,
+    key: str,
+    text: str,
+    tone: UiTone,
+    style: UiStyle,
+) -> i64 effect alloc {
+    val empty: list<i64> = list()
+    return ui_add_node(
+        tree,
+        UiNode {
+            key: key,
+            kind: WidgetKind.TableRow,
+            text: text,
+            tone: tone,
+            style: style,
+            children: empty,
+        },
+    )
+}
+
+/// Fold a batch of `HostEvent` values into `state` against a laid-out `tree`.
+pub def ui_process_events(
+    tree: UiTree,
+    state: UiState,
+    events: list<HostEvent>,
+) -> UiState effect alloc {
+    var next = state
+    for i in 0..list_len(events) {
+        next = ui_apply_event(tree, next, list_get(events, i))
+    }
+    return next
+}
+
+/// Lay out `tree`, paint to `buf`, submit to `iris_ui_host`, poll events, and update `state`.
+pub def ui_native_pump_once(
+    lib: NativeUiLib,
+    tree: UiTree,
+    state: UiState,
+    buf: DrawBuffer,
+) -> UiFrameStep effect ffi, alloc {
+    val metrics = ui_native_metrics(lib)
+    val lw = if metrics.width > 0.0 { metrics.width } else { tree.width }
+    val lh = if metrics.height > 0.0 { metrics.height } else { tree.height }
+    val laid_out = ui_layout(tree, lw, lh)
+    val ticked = ui_state_tick_next(state)
+    val painted = ui_paint(laid_out, ticked, buf)
+    val _sub = ui_native_submit(lib, painted)
+    val events = ui_native_poll(lib, 16)
+    val next_state = ui_process_events(laid_out, ui_clear_events(ticked), events)
+    return UiFrameStep {
+        state: next_state,
+        buf: painted,
+        metrics: metrics,
+        events: events,
+    }
+}
+
+record UiLoopState {
+    state: UiState,
+    buf: DrawBuffer,
+    last_tree: UiTree,
+    has_tree: bool = false,
+    last_w: f64 = -1.0,
+    last_h: f64 = -1.0,
+    frame: i64 = 0,
+    running: bool = true,
+}
+
+def ui_loop_stop(ctx: UiLoopState) -> UiLoopState {
+    return UiLoopState {
+        state: ctx.state,
+        buf: ctx.buf,
+        last_tree: ctx.last_tree,
+        has_tree: ctx.has_tree,
+        last_w: ctx.last_w,
+        last_h: ctx.last_h,
+        frame: ctx.frame,
+        running: false,
+    }
+}
+
+def ui_fold_loop_events(
+    tree: UiTree,
+    state: UiState,
+    events: list<HostEvent>,
+) -> UiState effect alloc {
+    val has_edge = len(state.dispatched_action) > 0
+        || state.has_toggle_change
+        || state.has_slider_change
+    if list_len(events) == 0 && !has_edge {
+        return state
+    }
+    return ui_process_events(tree, ui_clear_events(state), events)
+}
+
+def ui_run_loop_step(
+    lib: NativeUiLib,
+    max_frames: i64,
+    ctx: UiLoopState,
+    render: |UiState, UiTree| -> i64,
+) -> UiLoopState effect ffi, alloc {
+    if max_frames > 0 && ctx.frame >= max_frames {
+        return ui_loop_stop(ctx)
+    }
+    val metrics = ui_native_metrics(lib)
+    if !metrics.is_open {
+        return ui_loop_stop(ctx)
+    }
+    val vw = if metrics.width > 0.0 { metrics.width } else { ctx.last_tree.width }
+    val vh = if metrics.height > 0.0 { metrics.height } else { ctx.last_tree.height }
+    val need_draw = max_frames > 0
+        || !ctx.has_tree
+        || ctx.state.dirty
+        || ui_state_has_active_transitions(ctx.state)
+        || vw != ctx.last_w
+        || vh != ctx.last_h
+    var active_tree = ctx.last_tree
+    var cur_state = ui_state_tick_next(ctx.state)
+    var cur_buf = ctx.buf
+    if need_draw {
+        var next_tree = ui_new()
+        val root_id = render(cur_state, next_tree)
+        next_tree = ui_layout(ui_set_root(next_tree, root_id), vw, vh)
+        cur_buf = ui_paint(next_tree, cur_state, cur_buf)
+        val _sub = ui_native_submit(lib, cur_buf)
+        active_tree = next_tree
+        cur_state = ui_state_mark_clean(cur_state)
+    }
+    val poll_ms = if max_frames > 0 { 16 } else { 33 }
+    val events = ui_native_poll(lib, poll_ms)
+    val next_state = ui_fold_loop_events(active_tree, cur_state, events)
+    return UiLoopState {
+        state: next_state,
+        buf: cur_buf,
+        last_tree: active_tree,
+        has_tree: true,
+        last_w: vw,
+        last_h: vh,
+        frame: ctx.frame + 1,
+        running: !next_state.close_requested,
+    }
+}
+
+/// Drive a declarative reactive loop over an open `NativeUiLib` for up to `max_frames` (or until closed).
+pub def ui_run_loop(
+    lib: NativeUiLib,
+    max_frames: i64,
+    initial: UiState,
+    render: |UiState, UiTree| -> i64,
+) -> UiState effect ffi, alloc {
+    var ctx = UiLoopState {
+        state: initial,
+        buf: draw_buf_new(16384),
+        last_tree: ui_new(),
+    }
+    while ctx.running {
+        ctx = ui_run_loop_step(lib, max_frames, ctx, render)
+    }
+    val _f = draw_buf_free(ctx.buf)
+    return ctx.state
+}
+
+/// Lay out and rasterize a single headless CPU frame, sampling its center pixel and optionally writing a PNG.
+pub def ui_render_headless(
+    tree: UiTree,
+    state: UiState,
+    size: UiSize,
+    png_path: str,
+) -> result<UiColor, str> effect ffi, alloc {
+    val w = if size.w > 1.0 { size.w to i64 } else { 800 }
+    val h = if size.h > 1.0 { size.h to i64 } else { 600 }
+    val opened = ui_open_native_host(UiHostMode.Headless, "IRIS Headless", w, h, "")
+    val lib = when opened {
+        ok(l) => l,
+        err(msg) => {
+            return err(msg)
+        },
+    }
+    val laid_out = ui_layout(tree, to_f64(w), to_f64(h))
+    val buf = ui_paint(laid_out, state, draw_buf_new(16384))
+    val _sub = ui_native_submit(lib, buf)
+    val px = ui_native_sample_pixel(lib, w / 2, h / 2)
+    var save_rc = 0
+    if len(png_path) > 0 {
+        save_rc = ui_native_save_png(lib, png_path)
+    }
+    val _fb = draw_buf_free(buf)
+    val _cl = ui_close_native_host(lib)
+    if save_rc != 0 {
+        return err(f"failed to save PNG snapshot to '{png_path}' (rc={to_str(save_rc)})")
+    }
+    return ok(px)
+}
+
+def svg_text_node(
+    r: UiRect,
+    text: str,
+    fg: UiColor,
+    sz: f64,
+    dx: f64,
+    dy: f64,
+) -> str effect alloc {
+    val fill = color_css(fg)
+    return f"<text x=\"{r.x + dx}\" y=\"{r.y + dy}\" fill=\"{fill}\" font-size=\"{sz}\" font-family=\"monospace\">{text}</text>"
+}
+
+def svg_table_row_node(th: UiTheme, r: UiRect, node: UiNode) -> str effect alloc {
+    val accent = tone_color(th, node.tone)
+    val tint = if node.checked { 0.24 } else { 0.10 }
+    val fill_css = color_css(mix_color(th.surface, accent, tint))
+    val stroke_css = color_css(if node.checked { accent } else { th.border })
+    return f"<rect x=\"{r.x}\" y=\"{r.y}\" width=\"{r.w}\" height=\"{r.h}\" fill=\"{fill_css}\" stroke=\"{stroke_css}\"/>"
+        + svg_text_node(r, node.text, mix_color(th.fg, accent, 0.35), 12.0, 10.0, 17.0)
+}
+
+def svg_render_node(tree: UiTree, node: UiNode) -> str effect alloc {
+    val r = node.layout
+    val th = tree.theme
+    return when node.kind {
+        WidgetKind.Card => f"<rect x=\"{r.x}\" y=\"{r.y}\" width=\"{r.w}\" height=\"{r.h}\" rx=\"8\" fill=\"{color_css(th.panel)}\" stroke=\"{color_css(th.border)}\"/>",
+        WidgetKind.Badge => f"<rect x=\"{r.x}\" y=\"{r.y}\" width=\"{r.w}\" height=\"{r.h}\" rx=\"10\" fill=\"{color_css(th.panel_alt)}\" stroke=\"{color_css(tone_color(th, node.tone))}\"/>"
+            + svg_text_node(r, node.text, tone_color(th, node.tone), 12.0, 9.0, 15.0),
+        WidgetKind.Button => f"<rect x=\"{r.x}\" y=\"{r.y}\" width=\"{r.w}\" height=\"{r.h}\" rx=\"6\" fill=\"{color_css(mix_color(th.panel_alt, tone_color(th, node.tone), 0.25))}\" stroke=\"{color_css(tone_color(th, node.tone))}\"/>"
+            + svg_text_node(r, node.text, th.fg, 13.0, 12.0, 21.0),
+        WidgetKind.Label => svg_text_node(
+            r,
+            node.text,
+            node.style.fg,
+            node.style.font_size,
+            0.0,
+            15.0,
+        ),
+        WidgetKind.TextInput => f"<rect x=\"{r.x}\" y=\"{r.y}\" width=\"{r.w}\" height=\"{r.h}\" rx=\"6\" fill=\"{color_css(th.surface)}\" stroke=\"{color_css(th.border)}\"/>"
+            + svg_text_node(
+                r,
+                if len(node.text) > 0 { node.text } else { node.placeholder },
+                th.fg,
+                13.0,
+                10.0,
+                22.0,
+            ),
+        WidgetKind.RadarScope => f"<rect x=\"{r.x}\" y=\"{r.y}\" width=\"{r.w}\" height=\"{r.h}\" rx=\"10\" fill=\"{color_css(mix_color(th.bg, th.surface, 0.35))}\" stroke=\"{color_css(th.border)}\"/><circle cx=\"{r.x + r.w * 0.5}\" cy=\"{r.y + r.h * 0.5}\" r=\"{r.w * 0.36}\" fill=\"none\" stroke=\"{color_css(th.teal)}\"/>"
+            + svg_text_node(r, node.text, th.teal, 12.0, 12.0, 18.0),
+        WidgetKind.TableHeader => f"<rect x=\"{r.x}\" y=\"{r.y}\" width=\"{r.w}\" height=\"{r.h}\" fill=\"{color_css(th.panel_alt)}\"/>"
+            + svg_text_node(r, node.text, th.cyan, 12.0, 10.0, 18.0),
+        WidgetKind.TableRow => svg_table_row_node(th, r, node),
+        _ => if node.style.bg.a > 0 {
+            f"<rect x=\"{r.x}\" y=\"{r.y}\" width=\"{r.w}\" height=\"{r.h}\" fill=\"{color_css(node.style.bg)}\"/>"
+        } else {
+            ""
+        },
+    }
+}
+
+/// Serialize a laid-out `UiTree` into a standalone `<svg>` document string.
+pub def ui_render_svg(tree: UiTree) -> str effect alloc {
+    var body = f"<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{tree.width}\" height=\"{tree.height}\" viewBox=\"0 0 {tree.width} {tree.height}\">"
+    body = concat(
+        body,
+        f"<rect width=\"100%\" height=\"100%\" fill=\"{color_css(tree.theme.bg)}\"/>",
+    )
+    val stack: list<i64> = list()
+    if tree.root >= 0 && tree.root < list_len(tree.nodes) {
+        list_push(stack, tree.root)
+    }
+    while list_len(stack) > 0 {
+        val cur = list_pop(stack)
+        val node = list_get(tree.nodes, cur)
+        body = concat(body, svg_render_node(tree, node))
+        var k = list_len(node.children) - 1
+        while k >= 0 {
+            list_push(stack, list_get(node.children, k))
+            k = k - 1
+        }
+    }
+    return concat(body, "</svg>")
+}
+
+/// Wrap `ui_render_svg(tree)` inside an Obsidian-styled HTML5 live-mirror document.
+pub def ui_render_mirror_html(tree: UiTree, title: str) -> str effect alloc {
+    val svg = ui_render_svg(tree)
+    val bg = color_css(tree.theme.bg)
+    val fg = color_css(tree.theme.fg)
+    return f"<!doctype html><html><head><meta charset=\"utf-8\"><meta http-equiv=\"refresh\" content=\"1\"><title>{title}</title></head><body style=\"margin:0;background:{bg};color:{fg};display:flex;justify-content:center;align-items:center;min-height:100vh;\">{svg}</body></html>"
+}
+
+/// Build an HTTP/1.1 `200 OK` HTML mirror response suitable for `std.http_server` handlers.
+pub def ui_http_mirror_response(tree: UiTree, title: str) -> str effect alloc {
+    val html = ui_render_mirror_html(tree, title)
+    return f"HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {len(html)}\r\nConnection: close\r\n\r\n{html}"
+}

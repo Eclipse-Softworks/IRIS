@@ -592,6 +592,27 @@ impl IrFunctionBuilder {
             });
     }
 
+    /// True when `val` has been moved out of its source binding anywhere in
+    /// this function. Lowering uses this to avoid emitting a destructor for a
+    /// value whose owner has changed.
+    pub fn value_is_moved(&self, val: ValueId) -> bool {
+        let Some(slot) = self.func.place_meta.value_slots.get(&val).copied() else {
+            return false;
+        };
+        self.func
+            .place_meta
+            .events
+            .values()
+            .flatten()
+            .any(|event| match &event.kind {
+                PlaceEventKind::Move {
+                    slot: moved_slot,
+                    projections,
+                } => *moved_slot == slot && projections.is_empty(),
+                _ => false,
+            })
+    }
+
     /// Sets only the sticky line position (see `SpanTable::line_spans`), for
     /// code such as a block's tail expression that is not a statement and so
     /// does not create an interpreter stepping point.

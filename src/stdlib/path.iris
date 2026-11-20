@@ -1,12 +1,12 @@
 // src/stdlib/path.iris -- IRIS standard path manipulation (pure IRIS, no OS calls)
 
 // Joins two path components with "/" separator.
-pub def join_path(a: str, b: str) -> str {
+pub def join_path(a: str, b: str) -> str effect alloc {
     concat(concat(a, "/"), b)
 }
 
 // Returns the final component of a path (after the last "/").
-pub def basename(p: str) -> str {
+pub def basename(p: str) -> str effect alloc {
     val n = len(p)
     var last_slash = -1
     var i = 0
@@ -23,7 +23,7 @@ pub def basename(p: str) -> str {
 }
 
 // Returns the directory part of a path (everything before the last "/").
-pub def dirname(p: str) -> str {
+pub def dirname(p: str) -> str effect alloc {
     val n = len(p)
     var last_slash = -1
     var i = 0
@@ -40,7 +40,7 @@ pub def dirname(p: str) -> str {
 }
 
 // Returns the file extension (part after the last "."), or "" if none.
-pub def extension(p: str) -> str {
+pub def extension(p: str) -> str effect alloc {
     val b = basename(p)
     val n = len(b)
     var last_dot = -1
@@ -54,7 +54,7 @@ pub def extension(p: str) -> str {
 }
 
 // Returns the basename without its extension.
-pub def stem(p: str) -> str {
+pub def stem(p: str) -> str effect alloc {
     val b = basename(p)
     val n = len(b)
     var last_dot = -1
@@ -73,7 +73,7 @@ pub def path_is_absolute(p: str) -> bool {
 }
 
 // Nonempty components, retaining '.' and '..' for callers to interpret.
-pub def path_components(p: str) -> list<str> {
+pub def path_components(p: str) -> list<str> effect alloc {
     val out: list<str> = list()
     val parts = split(p, "/")
     var i = 0
@@ -88,7 +88,7 @@ pub def path_components(p: str) -> list<str> {
 // Collapse repeated slashes, '.' and cancellable '..' components.
 // Relative leading '..' are retained; absolute paths cannot climb above '/'.
 // Empty relative results become '.'. Does not resolve symlinks.
-pub def normalize_path(p: str) -> str {
+pub def normalize_path(p: str) -> str effect alloc {
     val rooted = path_is_absolute(p)
     val parts = path_components(p)
     val stack: list<str> = list()
@@ -119,7 +119,7 @@ pub def normalize_path(p: str) -> str {
 // Replace the final filename extension; empty ext removes it.
 // ext is supplied without a leading dot. A leading filename dot is preserved.
 // Empty paths, directory paths, '.' and '..' are returned unchanged.
-pub def with_extension(p: str, ext: str) -> str {
+pub def with_extension(p: str, ext: str) -> str effect alloc {
     val b = basename(p)
     if len(b) == 0 || b == "." || b == ".." { return p }
     var dot = -1
@@ -134,7 +134,7 @@ pub def with_extension(p: str, ext: str) -> str {
 }
 
 // Convert backslashes to forward slashes for cross-platform POSIX path consistency.
-pub def path_to_posix(p: str) -> str {
+pub def path_to_posix(p: str) -> str effect alloc {
     val n = len(p)
     var out = ""
     var i = 0
@@ -147,7 +147,7 @@ pub def path_to_posix(p: str) -> str {
 }
 
 // Join a list of path segments together sequentially.
-pub def path_join_all(parts: list<str>) -> str {
+pub def path_join_all(parts: list<str>) -> str effect alloc {
     val n = list_len(parts)
     if n == 0 { return "" }
     var res = list_get(parts, 0)
@@ -167,18 +167,18 @@ pub def path_join_all(parts: list<str>) -> str {
 }
 
 // Test whether a path has the specified file extension (with or without leading dot).
-pub def path_has_extension(p: str, ext: str) -> bool {
+pub def path_has_extension(p: str, ext: str) -> bool effect alloc {
     val clean_ext = if starts_with(ext, ".") { slice(ext, 1, len(ext)) } else { ext }
     extension(p) == clean_ext
 }
 
 // Return the parent directory of a path (alias for dirname).
-pub def path_parent(p: str) -> str {
+pub def path_parent(p: str) -> str effect alloc {
     dirname(p)
 }
 
 // Find first offset of a character in string or -1 if not found.
-pub def path_find_char(s: str, target: str) -> i64 {
+pub def path_find_char(s: str, target: str) -> i64 effect alloc {
     val n = len(s)
     var i = 0
     while i < n {
@@ -191,7 +191,7 @@ pub def path_find_char(s: str, target: str) -> i64 {
 }
 
 // Match a filename or path against a wildcard glob pattern containing '*'.
-pub def path_matches_glob(p: str, pattern: str) -> bool {
+pub def path_matches_glob(p: str, pattern: str) -> bool effect alloc {
     if pattern == "*" { return true }
     val star_idx = path_find_char(pattern, "*")
     if star_idx < 0 { return p == pattern }

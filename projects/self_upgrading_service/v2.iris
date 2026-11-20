@@ -13,7 +13,7 @@ var reserved: i64 = 0
 var refused: i64 = 0
 
 // The value of `key` in a flat JSON object, without quotes; "" if absent.
-def field(json: str, key: str) -> str effect throw {
+def field(json: str, key: str) -> str effect alloc, throw {
     val marker = "\"" + key + "\":";
     val at = find(json, marker);
     if is_some(at) == false {
@@ -33,7 +33,7 @@ def field(json: str, key: str) -> str effect throw {
     }
 }
 
-def number(json: str, key: str) -> i64 effect throw {
+def number(json: str, key: str) -> i64 effect alloc, throw {
     val parsed = parse_i64(field(json, key));
     if is_some(parsed) { unwrap(parsed) } else { 0 }
 }
@@ -55,7 +55,7 @@ def refusal(reason: str) -> str {
     "{\"ok\":false,\"error\":\"" + reason + "\"}"
 }
 
-def restock(request: str) -> str effect alloc, io, throw {
+def restock(request: str) -> str effect alloc, throw {
     served = served + 1;
     val sku = field(request, "sku");
     val qty = number(request, "qty");
@@ -75,7 +75,7 @@ def restock(request: str) -> str effect alloc, io, throw {
     "{\"ok\":true,\"stock\":" + to_str(list_get(stock, at)) + "}"
 }
 
-def reserve(request: str) -> str effect alloc, io, throw {
+def reserve(request: str) -> str effect alloc, throw {
     served = served + 1;
     val at = slot(field(request, "sku"));
     val qty = number(request, "qty");
@@ -95,7 +95,7 @@ def reserve(request: str) -> str effect alloc, io, throw {
     "{\"ok\":true,\"stock\":" + to_str(list_get(stock, at)) + "}"
 }
 
-def stats(request: str) -> str effect alloc, io {
+def stats(request: str) -> str effect alloc {
     var units = 0;
     var i = 0;
     while i < len(stock) {
@@ -106,7 +106,7 @@ def stats(request: str) -> str effect alloc, io {
     counters + ",\"skus\":" + to_str(len(skus)) + ",\"units\":" + to_str(units) + "}"
 }
 
-def test_program() -> i64 effect alloc, io, throw {
+def test_program() -> i64 effect alloc, throw {
     assert(field("{\"qty\":3,\"sku\":\"bolt\"}", "sku") == "bolt");
     assert(number("{\"qty\":3,\"sku\":\"bolt\"}", "qty") == 3);
     assert(field("{\"sku\":\"bolt\"}", "qty") == "");

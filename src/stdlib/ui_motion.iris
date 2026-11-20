@@ -1,0 +1,254 @@
+// std.ui_motion -- time-based easing, tweens and transitions for IRIS native UI.
+//
+// The host supplies a monotonically increasing `now` (seconds) every frame.
+// Widgets stay declarative: call `ui_motion_value` with a stable key and the
+// library interpolates between the old and new value. No timers, no threads,
+// no per-frame allocation beyond the small transition records.
+
+pub bring std.ui_theme
+
+/// Frame clock. `now` is seconds since an arbitrary epoch; `dt` is the delta.
+pub record UiClock {
+    now: f64 = 0.0,
+    dt: f64 = 0.016,
+}
+
+pub choice UiEase {
+    Linear,
+    InQuad,
+    OutQuad,
+    InOutQuad,
+    InOutCubic,
+    OutCubic,
+    OutBack,
+    OutElastic,
+    InOutSine,
+    OutBounce,
+}
+
+/// One named interpolation in flight.
+pub record UiTween {
+    key: str = "",
+    from: f64 = 0.0,
+    to: f64 = 0.0,
+    started: f64 = 0.0,
+    duration: f64 = 0.0,
+    ease: UiEase = UiEase.OutCubic,
+}
+
+/// Collection of live tweens plus the last known values of finished tweens.
+pub record UiMotion {
+    clock: UiClock = UiClock {},
+    tweens: list<UiTween> = list(),
+    settled: list<f64> = list(),
+    keys: list<str> = list(),
+}
+
+pub def ui_motion_new() -> UiMotion effect alloc {
+    return UiMotion {}
+}
+
+def m_clamp(t: f64) -> f64 {
+    if t < 0.0 { return 0.0 }
+    if t > 1.0 { return 1.0 }
+    return t
+}
+
+pub def motion_clamp01(t: f64) -> f64 {
+    return m_clamp(t)
+}
+
+pub def motion_lerp(a: f64, b: f64, t: f64) -> f64 {
+    return a + (b - a) * m_clamp(t)
+}
+
+pub def motion_lerp_color(a: UiColor, b: UiColor, t: f64) -> UiColor {
+    val k = m_clamp(t)
+    return UiColor {
+        r: (to_f64(a.r) + (to_f64(b.r) - to_f64(a.r)) * k) to i64,
+        g: (to_f64(a.g) + (to_f64(b.g) - to_f64(a.g)) * k) to i64,
+        b: (to_f64(a.b) + (to_f64(b.b) - to_f64(a.b)) * k) to i64,
+        a: (to_f64(a.a) + (to_f64(b.a) - to_f64(a.a)) * k) to i64,
+    }
+}
+
+/// Evaluate an easing curve at normalised time `t` (0..1).
+pub def motion_ease(t: f64, kind: UiEase) -> f64 {
+    val x = m_clamp(t)
+    return when kind {
+        UiEase.Linear => x,
+        UiEase.InQuad => x * x,
+        UiEase.OutQuad => 1.0 - (1.0 - x) * (1.0 - x),
+        UiEase.InOutQuad => if x < 0.5 { 2.0 * x * x } else { 1.0 - ((-2.0 * x + 2.0) * (-2.0 * x + 2.0)) / 2.0 },
+        UiEase.InOutCubic => if x < 0.5 {
+            4.0 * x * x * x
+        } else {
+            1.0 - (((-2.0 * x + 2.0) * (-2.0 * x + 2.0) * (-2.0 * x + 2.0)) / 2.0)
+        },
+        UiEase.OutCubic => {
+            val u = x - 1.0
+            1.0 + u * u * u
+        },
+        UiEase.OutBack => {
+            val c1 = 1.70158
+            val c3 = c1 + 1.0
+            val u = x - 1.0
+            1.0 + c3 * u * u * u + c1 * u * u
+        },
+        UiEase.OutElastic => {
+            if x <= 0.0 {
+                0.0
+            } else if x >= 1.0 {
+                1.0
+            } else {
+                val c4 = 6.283185307179586 / 3.0
+                pow(2.0, -10.0 * x) * sin((x * 10.0 - 0.75) * c4) + 1.0
+            }
+        },
+        UiEase.InOutSine => -(cos(3.141592653589793 * x) - 1.0) / 2.0,
+        UiEase.OutBounce => {
+            val n1 = 7.5625
+            val d1 = 2.75
+            if x < 1.0 / d1 {
+                n1 * x * x
+            } else if x < 2.0 / d1 {
+                val y = x - 1.5 / d1
+                n1 * y * y + 0.75
+            } else if x < 2.5 / d1 {
+                val y = x - 2.25 / d1
+                n1 * y * y + 0.9375
+            } else {
+                val y = x - 2.625 / d1
+                n1 * y * y + 0.984375
+            }
+        },
+    }
+}
+
+/// Advance the clock and drop finished tweens, keeping their final value.
+pub def ui_motion_tick(m: UiMotion, now: f64) -> UiMotion effect alloc {
+    var live: list<UiTween> = list()
+    var vals: list<f64> = list()
+    var keys: list<str> = list()
+    var i = 0
+    while i < list_len(m.tweens) {
+        val tw = list_get(m.tweens, i)
+        if now - tw.started >= tw.duration {
+            list_push(keys, tw.key)
+            list_push(vals, tw.to)
+        } else {
+            list_push(live, tw)
+        }
+        i = i + 1
+    }
+    var kept_keys: list<str> = list()
+    var kept_vals: list<f64> = list()
+    var j = 0
+    while j < list_len(m.keys) {
+        val k = list_get(m.keys, j)
+        var replaced = false
+        var q = 0
+        while q < list_len(keys) {
+            if list_get(keys, q) == k {
+                replaced = true
+            }
+            q = q + 1
+        }
+        if !replaced {
+            list_push(kept_keys, k)
+            list_push(kept_vals, list_get(m.settled, j))
+        }
+        j = j + 1
+    }
+    var n = 0
+    while n < list_len(keys) {
+        list_push(kept_keys, list_get(keys, n))
+        list_push(kept_vals, list_get(vals, n))
+        n = n + 1
+    }
+    return UiMotion {
+        clock: UiClock { now: now, dt: if now > m.clock.now { now - m.clock.now } else { m.clock.dt } },
+        tweens: live,
+        settled: kept_vals,
+        keys: kept_keys,
+    }
+}
+
+/// Start or retarget a named tween. `now` should be `motion.clock.now`.
+pub def ui_motion_to(
+    m: UiMotion,
+    key: str,
+    target: f64,
+    duration: f64,
+    curve: UiEase,
+    now: f64,
+) -> UiMotion effect alloc {
+    var live: list<UiTween> = list()
+    var i = 0
+    while i < list_len(m.tweens) {
+        val tw = list_get(m.tweens, i)
+        if tw.key != key {
+            list_push(live, tw)
+        }
+        i = i + 1
+    }
+    list_push(
+        live,
+        UiTween {
+            key: key,
+            from: ui_motion_value(m, key, 0.0),
+            to: target,
+            started: now,
+            duration: if duration > 0.0 { duration } else { 0.001 },
+            ease: curve,
+        },
+    )
+    return UiMotion {
+        clock: m.clock,
+        tweens: live,
+        settled: m.settled,
+        keys: m.keys,
+    }
+}
+
+/// Current interpolated value of `key`, or `fallback` if no tween exists.
+pub def ui_motion_value(m: UiMotion, key: str, fallback: f64) -> f64 {
+    var i = 0
+    while i < list_len(m.tweens) {
+        val tw = list_get(m.tweens, i)
+        if tw.key == key {
+            val raw = (m.clock.now - tw.started) / tw.duration
+            return motion_lerp(tw.from, tw.to, motion_ease(raw, tw.ease))
+        }
+        i = i + 1
+    }
+    i = 0
+    while i < list_len(m.keys) {
+        if list_get(m.keys, i) == key {
+            return list_get(m.settled, i)
+        }
+        i = i + 1
+    }
+    return fallback
+}
+
+pub def ui_motion_is_active(m: UiMotion, key: str) -> bool {
+    var i = 0
+    while i < list_len(m.tweens) {
+        if list_get(m.tweens, i).key == key {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+/// Continuous 0..1 breathing signal, useful for glows and idle motion.
+pub def motion_pulse(clock: UiClock, speed: f64, phase: f64) -> f64 {
+    return 0.5 + 0.5 * sin(clock.now * speed + phase)
+}
+
+/// Continuous -1..1 signal, useful for oscillation and drifting particles.
+pub def motion_wave(clock: UiClock, speed: f64, phase: f64) -> f64 {
+    return sin(clock.now * speed + phase)
+}

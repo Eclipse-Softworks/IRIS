@@ -1,0 +1,1098 @@
+// std.ui_protocol -- Binary DrawPacket encoder, HostEvent decoder, and native `iris_ui_host` FFI bridge.
+
+bring std.ffi
+pub bring std.ui_theme
+
+/// Execution target for `iris_ui_host`.
+pub choice UiHostMode {
+    Desktop,
+    Headless,
+}
+
+/// Native window and input events polled from `iris_ui_host`.
+pub choice UiEventKind {
+    Resized,
+    CloseRequested,
+    PointerMove,
+    PointerDown,
+    PointerUp,
+    Wheel,
+    KeyDown,
+    KeyUp,
+    TextInput,
+    FocusChanged,
+    RedrawRequested,
+    ScaleChanged,
+    Unknown,
+}
+
+/// Decoded event payload delivered by the UI host loop.
+pub record HostEvent {
+    // 1-based id of the window that produced the event (1 = primary).
+    window_id: i64 = 1,
+    kind: UiEventKind = UiEventKind.Unknown,
+    button: i64 = 0,
+    modifiers: i64 = 0,
+    key_code: i64 = 0,
+    x: f64 = 0.0,
+    y: f64 = 0.0,
+    text: str = "",
+}
+
+/// Current host surface metrics in logical pixels and display scale.
+pub record WindowMetrics {
+    width: f64 = 800.0,
+    height: f64 = 600.0,
+    scale: f64 = 1.0,
+    is_open: bool = true,
+}
+
+/// Measured bounding extent of shaped text from `cosmic-text`.
+pub record TextMetrics {
+    width: f64 = 0.0,
+    height: f64 = 18.0,
+    lines: i64 = 1,
+}
+
+/// Four independent corner radii, ordered top-left, top-right, bottom-right, bottom-left.
+pub record UiRadii {
+    tl: f64 = 0.0,
+    tr: f64 = 0.0,
+    br: f64 = 0.0,
+    bl: f64 = 0.0,
+}
+
+/// Row-major affine transform: `(x', y') = (a*x + c*y + e, b*x + d*y + f)`.
+pub record UiTransform {
+    a: f64 = 1.0,
+    b: f64 = 0.0,
+    c: f64 = 0.0,
+    d: f64 = 1.0,
+    e: f64 = 0.0,
+    f: f64 = 0.0,
+}
+
+/// One colour stop in a linear or radial gradient (`offset` is 0..1).
+pub record UiGradientStop {
+    offset: f64 = 0.0,
+    color: UiColor = UiColor {},
+}
+
+/// One verb of an arbitrary vector path: 1=move, 2=line, 3=quad, 4=cubic, 5=close.
+pub record UiPathVerb {
+    kind: i64 = 0,
+    x1: f64 = 0.0,
+    y1: f64 = 0.0,
+    x2: f64 = 0.0,
+    y2: f64 = 0.0,
+    x3: f64 = 0.0,
+    y3: f64 = 0.0,
+}
+
+/// Reusable 4-byte-word-aligned command buffer backed by `std.ffi` out cells.
+pub record DrawBuffer {
+    cell: i64 = 0,
+    byte_cap: i64 = 0,
+    word_len: i64 = 4,
+    cmd_count: i64 = 0,
+    meta: i64 = 0,
+}
+
+/// Handle bundle owning an open `iris_ui_host` session and preallocated scratch cells.
+pub record NativeUiLib {
+    dll: i64 = 0,
+    host: i64 = 0,
+    scratch_in: i64 = 0,
+    scratch_out: i64 = 0,
+    scratch_ev: i64 = 0,
+}
+
+def host_mode_code(mode: UiHostMode) -> i64 {
+    return when mode {
+        UiHostMode.Desktop => 0,
+        UiHostMode.Headless => 1,
+    }
+}
+
+def text_style_flags(style: UiStyle) -> i64 {
+    var flags = 0
+    if style.bold {
+        flags = flags + 1
+    }
+    if style.monospace {
+        flags = flags + 2
+    }
+    if style.italic {
+        flags = flags + 4
+    }
+    return flags
+}
+
+def calc_next_cap(old_cap: i64, needed: i64) -> i64 {
+    val doubled = if old_cap > 0 { old_cap * 2 } else { 4096 }
+    return if doubled > needed + 512 { doubled } else { needed + 512 }
+}
+
+def alloc_resized_cell(old_cell: i64, word_len: i64, next_cap: i64) -> i64 effect ffi, alloc {
+    // A DrawBuffer outlives individual frames. Growing it while a frame pool
+    // is active would allocate the new cell inside the pool, which destroys it
+    // at the end of the frame and leaves the buffer pointing at freed memory.
+    // Temporarily suspend the pool for the reallocation.
+    val paused = ui_frame_pool_pause()
+    val next_cell = out_new(next_cap)
+    if next_cell == 0 {
+        if paused != 0 {
+            val _r = ui_frame_pool_resume(paused)
+        }
+        return 0
+    }
+    for i in 0..word_len {
+        val _w = out_set_i32(next_cell, i, out_i32(old_cell, i))
+    }
+    if old_cell != 0 {
+        val _f = out_free(old_cell)
+    }
+    if paused != 0 {
+        val _r = ui_frame_pool_resume(paused)
+    }
+    return next_cell
+}
+
+def draw_buf_ensure(buf: DrawBuffer, extra_words: i64) -> DrawBuffer effect ffi, alloc {
+    if buf.meta != 0 {
+        val cell = out_i64(buf.meta, 0)
+        val cap = out_i64(buf.meta, 1)
+        val wlen = out_i64(buf.meta, 2)
+        val needed = (wlen + extra_words) * 4
+        if cell != 0 && cap >= needed {
+            return buf
+        }
+        val next_cap = calc_next_cap(cap, needed)
+        val next_cell = alloc_resized_cell(cell, wlen, next_cap)
+        if next_cell != 0 {
+            val _s0 = out_set_i64(buf.meta, 0, next_cell)
+            val _s1 = out_set_i64(buf.meta, 1, next_cap)
+        }
+        return buf
+    }
+    val needed_bytes = (buf.word_len + extra_words) * 4
+    if buf.cell != 0 && buf.byte_cap >= needed_bytes {
+        return buf
+    }
+    val next_cap = calc_next_cap(buf.byte_cap, needed_bytes)
+    val next_cell = alloc_resized_cell(buf.cell, buf.word_len, next_cap)
+    if next_cell == 0 {
+        return buf
+    }
+    return DrawBuffer {
+        cell: next_cell,
+        byte_cap: next_cap,
+        word_len: buf.word_len,
+        cmd_count: buf.cmd_count,
+    }
+}
+
+def push_i32(buf: DrawBuffer, v: i64) -> DrawBuffer effect ffi, alloc {
+    val b = draw_buf_ensure(buf, 1)
+    if b.meta != 0 {
+        val cell = out_i64(b.meta, 0)
+        val wlen = out_i64(b.meta, 2)
+        val _w = out_set_i32(cell, wlen, v)
+        val _s = out_set_i64(b.meta, 2, wlen + 1)
+        return b
+    }
+    val _w = out_set_i32(b.cell, b.word_len, v)
+    return DrawBuffer {
+        cell: b.cell,
+        byte_cap: b.byte_cap,
+        word_len: b.word_len + 1,
+        cmd_count: b.cmd_count,
+    }
+}
+
+def push_f32(buf: DrawBuffer, v: f64) -> DrawBuffer effect ffi, alloc {
+    val b = draw_buf_ensure(buf, 1)
+    if b.meta != 0 {
+        val cell = out_i64(b.meta, 0)
+        val wlen = out_i64(b.meta, 2)
+        val _w = out_set_f32(cell, wlen, v)
+        val _s = out_set_i64(b.meta, 2, wlen + 1)
+        return b
+    }
+    val _w = out_set_f32(b.cell, b.word_len, v)
+    return DrawBuffer {
+        cell: b.cell,
+        byte_cap: b.byte_cap,
+        word_len: b.word_len + 1,
+        cmd_count: b.cmd_count,
+    }
+}
+
+def push_padded_str(buf: DrawBuffer, text: str) -> DrawBuffer effect ffi, alloc {
+    val worst_bytes = len(text) * 4 + 4
+    val b = draw_buf_ensure(buf, 1 + (worst_bytes + 3) / 4)
+    val cell = if b.meta != 0 { out_i64(b.meta, 0) } else { b.cell }
+    val len_word = if b.meta != 0 { out_i64(b.meta, 2) } else { b.word_len }
+    val byte_off = (len_word + 1) * 4
+    val actual = out_write_bytes(cell, byte_off, text)
+    val pad_words = if actual <= 0 { 0 } else { (actual + 3) / 4 }
+    val tail_off = byte_off + actual
+    val tail_end = byte_off + pad_words * 4
+    var z = tail_off
+    while z < tail_end {
+        val _z = out_set_u8(cell, z, 0)
+        z = z + 1
+    }
+    val _lw = out_set_i32(cell, len_word, actual)
+    val next_wlen = len_word + 1 + pad_words
+    if b.meta != 0 {
+        val _s = out_set_i64(b.meta, 2, next_wlen)
+        return b
+    }
+    return DrawBuffer {
+        cell: cell,
+        byte_cap: b.byte_cap,
+        word_len: next_wlen,
+        cmd_count: b.cmd_count,
+    }
+}
+
+def bump_cmd(buf: DrawBuffer) -> DrawBuffer effect ffi {
+    if buf.meta != 0 {
+        val cmds = out_i64(buf.meta, 3)
+        val _s = out_set_i64(buf.meta, 3, cmds + 1)
+        return buf
+    }
+    return DrawBuffer {
+        cell: buf.cell,
+        byte_cap: buf.byte_cap,
+        word_len: buf.word_len,
+        cmd_count: buf.cmd_count + 1,
+    }
+}
+
+/// Allocate a reusable `DrawBuffer` with at least `init_bytes` capacity.
+pub def draw_buf_new(init_bytes: i64) -> DrawBuffer effect ffi, alloc {
+    val cap = if init_bytes < 256 { 256 } else { init_bytes }
+    val cell = out_new(cap)
+    val meta = out_new(32)
+    if meta != 0 {
+        val _m0 = out_set_i64(meta, 0, cell)
+        val _m1 = out_set_i64(meta, 1, cap)
+        val _m2 = out_set_i64(meta, 2, 4)
+        val _m3 = out_set_i64(meta, 3, 0)
+    }
+    return DrawBuffer { cell: cell, byte_cap: cap, word_len: 4, cmd_count: 0, meta: meta }
+}
+
+/// Release the underlying `ffi_out_*` cells owned by `buf`.
+pub def draw_buf_free(buf: DrawBuffer) -> i64 effect ffi {
+    var cell = buf.cell
+    if buf.meta != 0 {
+        if out_len(buf.meta) > 0 {
+            cell = out_i64(buf.meta, 0)
+        }
+        val _mf = out_free(buf.meta)
+    }
+    return out_free(cell)
+}
+
+/// Reset `buf` for a new frame with clear color `clear` (magic `0x49525549`, version `1`).
+pub def draw_buf_begin(buf: DrawBuffer, clear: UiColor) -> DrawBuffer effect ffi, alloc {
+    if buf.meta != 0 {
+        val _s2 = out_set_i64(buf.meta, 2, 4)
+        val _s3 = out_set_i64(buf.meta, 3, 0)
+        val b = draw_buf_ensure(buf, 4)
+        val cell = out_i64(b.meta, 0)
+        val _m = out_set_i32(cell, 0, 1230132553)
+        val _v = out_set_i32(cell, 1, 1)
+        val _c = out_set_i32(cell, 2, pack_rgba(clear))
+        val _n = out_set_i32(cell, 3, 0)
+        return b
+    }
+    val b = draw_buf_ensure(buf, 4)
+    val _m = out_set_i32(b.cell, 0, 1230132553)
+    val _v = out_set_i32(b.cell, 1, 1)
+    val _c = out_set_i32(b.cell, 2, pack_rgba(clear))
+    val _n = out_set_i32(b.cell, 3, 0)
+    return DrawBuffer { cell: b.cell, byte_cap: b.byte_cap, word_len: 4, cmd_count: 0 }
+}
+
+/// Finalize command count header in word `3`.
+pub def draw_buf_finish(buf: DrawBuffer) -> DrawBuffer effect ffi {
+    if buf.meta != 0 {
+        val cell = out_i64(buf.meta, 0)
+        val cap = out_i64(buf.meta, 1)
+        val wlen = out_i64(buf.meta, 2)
+        val cmds = out_i64(buf.meta, 3)
+        val _n = out_set_i32(cell, 3, cmds)
+        return DrawBuffer {
+            cell: cell,
+            byte_cap: cap,
+            word_len: wlen,
+            cmd_count: cmds,
+            meta: buf.meta,
+        }
+    }
+    val _n = out_set_i32(buf.cell, 3, buf.cmd_count)
+    return buf
+}
+
+/// Append a filled/stroked rounded rectangle command.
+pub def draw_cmd_round_rect(
+    buf: DrawBuffer,
+    r: UiRect,
+    radius: f64,
+    style: UiStyle,
+) -> DrawBuffer effect ffi, alloc {
+    var b = push_i32(buf, 1)
+    b = push_f32(b, r.x)
+    b = push_f32(b, r.y)
+    b = push_f32(b, r.w)
+    b = push_f32(b, r.h)
+    b = push_f32(b, radius)
+    b = push_i32(b, pack_rgba(style.bg))
+    b = push_i32(b, pack_rgba(style.border))
+    b = push_f32(b, style.border_width)
+    return bump_cmd(b)
+}
+
+/// Append a line segment command encoding `(x1, y1)` -> `(w, h)` from `seg`.
+pub def draw_cmd_line(
+    buf: DrawBuffer,
+    seg: UiRect,
+    color: UiColor,
+    width: f64,
+    dashed: bool,
+) -> DrawBuffer effect ffi, alloc {
+    var b = push_i32(buf, 2)
+    b = push_f32(b, seg.x)
+    b = push_f32(b, seg.y)
+    b = push_f32(b, seg.w)
+    b = push_f32(b, seg.h)
+    b = push_i32(b, pack_rgba(color))
+    b = push_f32(b, width)
+    b = push_i32(b, if dashed { 1 } else { 0 })
+    return bump_cmd(b)
+}
+
+/// Append a filled/stroked circle command.
+pub def draw_cmd_circle(
+    buf: DrawBuffer,
+    cx: f64,
+    cy: f64,
+    radius: f64,
+    style: UiStyle,
+) -> DrawBuffer effect ffi, alloc {
+    var b = push_i32(buf, 3)
+    b = push_f32(b, cx)
+    b = push_f32(b, cy)
+    b = push_f32(b, radius)
+    b = push_i32(b, pack_rgba(style.bg))
+    b = push_i32(b, pack_rgba(style.border))
+    b = push_f32(b, style.border_width)
+    return bump_cmd(b)
+}
+
+/// Append a multi-point polyline command with optional translucent fill under the curve.
+pub def draw_cmd_polyline(
+    buf: DrawBuffer,
+    xs: list<f64>,
+    ys: list<f64>,
+    stroke: UiColor,
+    fill_under: UiColor,
+) -> DrawBuffer effect ffi, alloc {
+    val nx = list_len(xs)
+    val ny = list_len(ys)
+    val n = if nx < ny { nx } else { ny }
+    var b = push_i32(buf, 4)
+    b = push_i32(b, n)
+    b = push_i32(b, pack_rgba(stroke))
+    b = push_f32(b, 2.0)
+    b = push_i32(b, pack_rgba(fill_under))
+    b = draw_buf_ensure(b, n * 2)
+    for i in 0..n {
+        b = push_f32(b, list_get(xs, i))
+        b = push_f32(b, list_get(ys, i))
+    }
+    return bump_cmd(b)
+}
+
+/// Push a scissor clip rectangle onto the renderer clip stack.
+pub def draw_cmd_push_clip(buf: DrawBuffer, r: UiRect) -> DrawBuffer effect ffi, alloc {
+    var b = push_i32(buf, 5)
+    b = push_f32(b, r.x)
+    b = push_f32(b, r.y)
+    b = push_f32(b, r.w)
+    b = push_f32(b, r.h)
+    return bump_cmd(b)
+}
+
+/// Pop the top scissor clip rectangle.
+pub def draw_cmd_pop_clip(buf: DrawBuffer) -> DrawBuffer effect ffi, alloc {
+    return bump_cmd(push_i32(buf, 6))
+}
+
+/// Append a shaped text command rendered via `cosmic-text`.
+pub def draw_cmd_text(
+    buf: DrawBuffer,
+    r: UiRect,
+    text: str,
+    style: UiStyle,
+) -> DrawBuffer effect ffi, alloc {
+    val lh = if style.line_height > 0.0 { style.line_height } else { style.font_size * 1.35 }
+    var b = push_i32(buf, 7)
+    b = push_f32(b, r.x)
+    b = push_f32(b, r.y)
+    b = push_f32(b, r.w)
+    b = push_f32(b, style.font_size)
+    b = push_f32(b, lh)
+    b = push_i32(b, pack_rgba(style.fg))
+    b = push_i32(b, text_style_flags(style))
+    b = push_padded_str(b, text)
+    return bump_cmd(b)
+}
+
+/// Append a packed RGBA8 texture image command (`pixels` has `img_w * img_h` packed RGBA i32s).
+pub def draw_cmd_image_rgba(
+    buf: DrawBuffer,
+    dest: UiRect,
+    img_w: i64,
+    img_h: i64,
+    pixels: list<i64>,
+) -> DrawBuffer effect ffi, alloc {
+    val total = img_w * img_h
+    val avail = list_len(pixels)
+    val count = if total < avail { total } else { avail }
+    var b = push_i32(buf, 8)
+    b = push_f32(b, dest.x)
+    b = push_f32(b, dest.y)
+    b = push_f32(b, dest.w)
+    b = push_f32(b, dest.h)
+    b = push_i32(b, img_w)
+    b = push_i32(b, img_h)
+    b = draw_buf_ensure(b, total)
+    for i in 0..total {
+        val px = if i < count { list_get(pixels, i) } else { 0 }
+        b = push_i32(b, px)
+    }
+    return bump_cmd(b)
+}
+
+/// Append an `AccessKit` accessibility node descriptor (`state_flags`: 1=disabled, 2=checked, 4=focused).
+pub def draw_cmd_a11y(
+    buf: DrawBuffer,
+    id: i64,
+    role: i64,
+    r: UiRect,
+    label: str,
+) -> DrawBuffer effect ffi, alloc {
+    var b = push_i32(buf, 9)
+    b = push_i32(b, id)
+    b = push_i32(b, 0)
+    b = push_i32(b, role)
+    b = push_f32(b, r.x)
+    b = push_f32(b, r.y)
+    b = push_f32(b, r.w)
+    b = push_f32(b, r.h)
+    b = push_i32(b, 0)
+    b = push_padded_str(b, label)
+    return bump_cmd(b)
+}
+
+def push_radii(buf: DrawBuffer, r: UiRadii) -> DrawBuffer effect ffi, alloc {
+    var b = push_f32(buf, r.tl)
+    b = push_f32(b, r.tr)
+    b = push_f32(b, r.br)
+    b = push_f32(b, r.bl)
+    return b
+}
+
+def push_transform(buf: DrawBuffer, t: UiTransform) -> DrawBuffer effect ffi, alloc {
+    var b = push_f32(buf, t.a)
+    b = push_f32(b, t.b)
+    b = push_f32(b, t.c)
+    b = push_f32(b, t.d)
+    b = push_f32(b, t.e)
+    b = push_f32(b, t.f)
+    return b
+}
+
+def push_stops(buf: DrawBuffer, stops: list<UiGradientStop>) -> DrawBuffer effect ffi, alloc {
+    var b = push_i32(buf, list_len(stops))
+    for i in 0..list_len(stops) {
+        val s = list_get(stops, i)
+        b = push_f32(b, s.offset)
+        b = push_i32(b, pack_rgba(s.color))
+    }
+    return b
+}
+
+/// Append a rounded rectangle with four independent corner radii.
+pub def draw_cmd_round_rect_corners(
+    buf: DrawBuffer,
+    r: UiRect,
+    radii: UiRadii,
+    style: UiStyle,
+) -> DrawBuffer effect ffi, alloc {
+    var b = push_i32(buf, 10)
+    b = push_f32(b, r.x)
+    b = push_f32(b, r.y)
+    b = push_f32(b, r.w)
+    b = push_f32(b, r.h)
+    b = push_radii(b, radii)
+    b = push_i32(b, pack_rgba(style.bg))
+    b = push_i32(b, pack_rgba(style.border))
+    b = push_f32(b, style.border_width)
+    return bump_cmd(b)
+}
+
+/// Append a linear gradient painted over a rounded rectangle (`spread`: 0 pad, 1 reflect, 2 repeat).
+pub def draw_cmd_linear_gradient(
+    buf: DrawBuffer,
+    r: UiRect,
+    radii: UiRadii,
+    x0: f64,
+    y0: f64,
+    x1: f64,
+    y1: f64,
+    spread: i64,
+    stops: list<UiGradientStop>,
+) -> DrawBuffer effect ffi, alloc {
+    var b = push_i32(buf, 11)
+    b = push_f32(b, r.x)
+    b = push_f32(b, r.y)
+    b = push_f32(b, r.w)
+    b = push_f32(b, r.h)
+    b = push_radii(b, radii)
+    b = push_f32(b, x0)
+    b = push_f32(b, y0)
+    b = push_f32(b, x1)
+    b = push_f32(b, y1)
+    b = push_i32(b, spread)
+    b = push_stops(b, stops)
+    return bump_cmd(b)
+}
+
+/// Append a radial gradient painted over a rounded rectangle.
+pub def draw_cmd_radial_gradient(
+    buf: DrawBuffer,
+    r: UiRect,
+    radii: UiRadii,
+    cx: f64,
+    cy: f64,
+    radius: f64,
+    spread: i64,
+    stops: list<UiGradientStop>,
+) -> DrawBuffer effect ffi, alloc {
+    var b = push_i32(buf, 12)
+    b = push_f32(b, r.x)
+    b = push_f32(b, r.y)
+    b = push_f32(b, r.w)
+    b = push_f32(b, r.h)
+    b = push_radii(b, radii)
+    b = push_f32(b, cx)
+    b = push_f32(b, cy)
+    b = push_f32(b, radius)
+    b = push_i32(b, spread)
+    b = push_stops(b, stops)
+    return bump_cmd(b)
+}
+
+/// Append a blurred offset shadow painted behind subsequent commands.
+pub def draw_cmd_box_shadow(
+    buf: DrawBuffer,
+    r: UiRect,
+    radii: UiRadii,
+    offset_x: f64,
+    offset_y: f64,
+    blur: f64,
+    spread: f64,
+    color: UiColor,
+) -> DrawBuffer effect ffi, alloc {
+    var b = push_i32(buf, 13)
+    b = push_f32(b, r.x)
+    b = push_f32(b, r.y)
+    b = push_f32(b, r.w)
+    b = push_f32(b, r.h)
+    b = push_radii(b, radii)
+    b = push_f32(b, offset_x)
+    b = push_f32(b, offset_y)
+    b = push_f32(b, blur)
+    b = push_f32(b, spread)
+    b = push_i32(b, pack_rgba(color))
+    return bump_cmd(b)
+}
+
+/// Append an arbitrary vector path with optional fill and stroke.
+pub def draw_cmd_path(
+    buf: DrawBuffer,
+    transform: UiTransform,
+    verbs: list<UiPathVerb>,
+    fill: UiColor,
+    stroke: UiColor,
+    stroke_width: f64,
+    fill_rule: i64,
+) -> DrawBuffer effect ffi, alloc {
+    var b = push_i32(buf, 14)
+    b = push_transform(b, transform)
+    b = push_i32(b, list_len(verbs))
+    for i in 0..list_len(verbs) {
+        val v = list_get(verbs, i)
+        b = push_i32(b, v.kind)
+        if v.kind == 1 || v.kind == 2 {
+            b = push_f32(b, v.x1)
+            b = push_f32(b, v.y1)
+        } else if v.kind == 3 {
+            b = push_f32(b, v.x1)
+            b = push_f32(b, v.y1)
+            b = push_f32(b, v.x2)
+            b = push_f32(b, v.y2)
+        } else if v.kind == 4 {
+            b = push_f32(b, v.x1)
+            b = push_f32(b, v.y1)
+            b = push_f32(b, v.x2)
+            b = push_f32(b, v.y2)
+            b = push_f32(b, v.x3)
+            b = push_f32(b, v.y3)
+        }
+    }
+    b = push_i32(b, pack_rgba(fill))
+    b = push_i32(b, pack_rgba(stroke))
+    b = push_f32(b, stroke_width)
+    b = push_i32(b, fill_rule)
+    return bump_cmd(b)
+}
+
+/// Push an affine transform applied to subsequent vector commands.
+pub def draw_cmd_push_transform(buf: DrawBuffer, transform: UiTransform) -> DrawBuffer effect ffi, alloc {
+    return bump_cmd(push_transform(push_i32(buf, 15), transform))
+}
+
+/// Pop the most recently pushed affine transform.
+pub def draw_cmd_pop_transform(buf: DrawBuffer) -> DrawBuffer effect ffi, alloc {
+    return bump_cmd(push_i32(buf, 16))
+}
+
+/// Rasterise an SVG path-data `d` string into `r`, scaled from `view_size`.
+pub def draw_cmd_svg_path(
+    buf: DrawBuffer,
+    r: UiRect,
+    view_size: UiSize,
+    transform: UiTransform,
+    path_data: str,
+    fill: UiColor,
+    stroke: UiColor,
+    stroke_width: f64,
+) -> DrawBuffer effect ffi, alloc {
+    var b = push_i32(buf, 17)
+    b = push_f32(b, r.x)
+    b = push_f32(b, r.y)
+    b = push_f32(b, r.w)
+    b = push_f32(b, r.h)
+    b = push_f32(b, view_size.w)
+    b = push_f32(b, view_size.h)
+    b = push_transform(b, transform)
+    b = push_padded_str(b, path_data)
+    b = push_i32(b, pack_rgba(fill))
+    b = push_i32(b, pack_rgba(stroke))
+    b = push_f32(b, stroke_width)
+    return bump_cmd(b)
+}
+
+def candidate_host_paths(dll_override: str) -> list<str> effect alloc {
+    val paths: list<str> = list()
+    if len(dll_override) > 0 {
+        list_push(paths, dll_override)
+    }
+    list_push(paths, "iris_ui_host.dll")
+    list_push(paths, "./iris_ui_host.dll")
+    list_push(paths, "./target/debug/iris_ui_host.dll")
+    list_push(paths, "./target/release/iris_ui_host.dll")
+    list_push(paths, "./debug/iris_ui_host.dll")
+    list_push(paths, "./release/iris_ui_host.dll")
+    list_push(paths, "../target/debug/iris_ui_host.dll")
+    list_push(paths, "../target/release/iris_ui_host.dll")
+    list_push(paths, "../../target/debug/iris_ui_host.dll")
+    list_push(paths, "../../target/release/iris_ui_host.dll")
+    list_push(paths, "libiris_ui_host.so")
+    list_push(paths, "./target/debug/libiris_ui_host.so")
+    list_push(paths, "./target/release/libiris_ui_host.so")
+    list_push(paths, "./debug/libiris_ui_host.so")
+    list_push(paths, "./release/libiris_ui_host.so")
+    list_push(paths, "../target/debug/libiris_ui_host.so")
+    list_push(paths, "../../target/debug/libiris_ui_host.so")
+    list_push(paths, "libiris_ui_host.dylib")
+    list_push(paths, "./target/debug/libiris_ui_host.dylib")
+    list_push(paths, "./debug/libiris_ui_host.dylib")
+    return paths
+}
+
+def probe_ui_host_dll(dll_override: str) -> i64 effect ffi, alloc {
+    val paths = candidate_host_paths(dll_override)
+    val n = list_len(paths)
+    for i in 0..n {
+        val h = lib_open(list_get(paths, i))
+        if h != 0 && h != -1 {
+            if ffi_call_i64(h, "iris_ui_version") == 65536 {
+                return h
+            }
+            val _c = lib_close(h)
+        }
+    }
+    return 0
+}
+
+def decode_event_kind(code: i64) -> UiEventKind {
+    if code == 1 {
+        return UiEventKind.Resized
+    }
+    if code == 2 {
+        return UiEventKind.CloseRequested
+    }
+    if code == 3 {
+        return UiEventKind.PointerMove
+    }
+    if code == 4 {
+        return UiEventKind.PointerDown
+    }
+    if code == 5 {
+        return UiEventKind.PointerUp
+    }
+    if code == 6 {
+        return UiEventKind.Wheel
+    }
+    if code == 7 {
+        return UiEventKind.KeyDown
+    }
+    if code == 8 {
+        return UiEventKind.KeyUp
+    }
+    if code == 9 {
+        return UiEventKind.TextInput
+    }
+    if code == 10 {
+        return UiEventKind.FocusChanged
+    }
+    if code == 11 {
+        return UiEventKind.RedrawRequested
+    }
+    if code == 12 {
+        return UiEventKind.ScaleChanged
+    }
+    return UiEventKind.Unknown
+}
+
+def encode_event_kind(kind: UiEventKind) -> i64 {
+    return when kind {
+        UiEventKind.Resized => 1,
+        UiEventKind.CloseRequested => 2,
+        UiEventKind.PointerMove => 3,
+        UiEventKind.PointerDown => 4,
+        UiEventKind.PointerUp => 5,
+        UiEventKind.Wheel => 6,
+        UiEventKind.KeyDown => 7,
+        UiEventKind.KeyUp => 8,
+        UiEventKind.TextInput => 9,
+        UiEventKind.FocusChanged => 10,
+        UiEventKind.RedrawRequested => 11,
+        UiEventKind.ScaleChanged => 12,
+        UiEventKind.Unknown => 0,
+    }
+}
+
+/// Open a native or headless `iris_ui_host` shared-library session.
+pub def ui_open_native_host(
+    mode: UiHostMode,
+    title: str,
+    w: i64,
+    h: i64,
+    dll_override: str,
+) -> result<NativeUiLib, str> effect ffi, alloc {
+    val dll = probe_ui_host_dll(dll_override)
+    if dll == 0 {
+        return err("iris_ui_host shared library not found; run `cargo build -p iris_ui_host`")
+    }
+    val host = ffi_call_i64(dll, "iris_ui_host_create", host_mode_code(mode), title, w, h, 0)
+    if host == 0 {
+        val err_cell = out_new(256)
+        val n = ffi_call_i64(dll, "iris_ui_last_error", 0, err_cell, 256)
+        val msg = if n > 0 { out_str_range(err_cell, 0, n) } else { "host creation failed" }
+        val _f = out_free(err_cell)
+        val _c = lib_close(dll)
+        return err(msg)
+    }
+    return ok(
+        NativeUiLib {
+            dll: dll,
+            host: host,
+            scratch_in: out_new(1024),
+            scratch_out: out_new(64),
+            scratch_ev: out_new(2048),
+        },
+    )
+}
+
+/// Destroy the native host instance, free scratch cells, and close the shared library.
+pub def ui_close_native_host(lib: NativeUiLib) -> i64 effect ffi {
+    if lib.dll != 0 && lib.host != 0 {
+        val _d = ffi_call_i64(lib.dll, "iris_ui_host_destroy", lib.host)
+    }
+    val _a = out_free(lib.scratch_in)
+    val _b = out_free(lib.scratch_out)
+    val _c = out_free(lib.scratch_ev)
+    if lib.dll != 0 {
+        val _l = lib_close(lib.dll)
+    }
+    return 0
+}
+
+/// Measure text layout size via `cosmic-text` inside `iris_ui_host`.
+pub def ui_native_measure_text(
+    lib: NativeUiLib,
+    text: str,
+    font_size: f64,
+    max_w: f64,
+    flags: i64,
+) -> TextMetrics effect ffi {
+    val lh = font_size * 1.35
+    val _w0 = out_set_f32(lib.scratch_in, 0, font_size)
+    val _w1 = out_set_f32(lib.scratch_in, 1, lh)
+    val _w2 = out_set_f32(lib.scratch_in, 2, max_w)
+    val _w3 = out_set_i32(lib.scratch_in, 3, flags)
+    val byte_len = out_write_bytes(lib.scratch_in, 20, text)
+    val _w4 = out_set_i32(lib.scratch_in, 4, byte_len)
+    val rc = ffi_call_i64(
+        lib.dll,
+        "iris_ui_measure_text",
+        lib.host,
+        lib.scratch_in,
+        20 + byte_len,
+        lib.scratch_out,
+        12,
+    )
+    if rc != 0 {
+        return TextMetrics {
+            width: to_f64(byte_len) * font_size * 0.56,
+            height: lh,
+            lines: 1,
+        }
+    }
+    return TextMetrics {
+        width: out_f32(lib.scratch_out, 0),
+        height: out_f32(lib.scratch_out, 1),
+        lines: out_i32(lib.scratch_out, 2),
+    }
+}
+
+/// Submit a finalized `DrawBuffer` frame to the host for CPU rasterization and presentation.
+pub def ui_native_submit(lib: NativeUiLib, buf: DrawBuffer) -> i64 effect ffi {
+    // Re-finish so overlay commands appended after ui_paint are counted too.
+    val done = draw_buf_finish(buf)
+    val cell = if done.meta != 0 { out_i64(done.meta, 0) } else { done.cell }
+    val wlen = if done.meta != 0 { out_i64(done.meta, 2) } else { done.word_len }
+    return ffi_call_i64(lib.dll, "iris_ui_submit_frame", lib.host, cell, wlen * 4)
+}
+
+/// Poll up to 32 queued `HostEvent`s from the native or headless host.
+pub def ui_native_poll(lib: NativeUiLib, timeout_ms: i64) -> list<HostEvent> effect ffi, alloc {
+    val out: list<HostEvent> = list()
+    val cap = out_len(lib.scratch_ev)
+    val n = ffi_call_i64(lib.dll, "iris_ui_poll_events", lib.host, timeout_ms, lib.scratch_ev, cap)
+    if n <= 0 {
+        return out
+    }
+    for i in 0..n {
+        val base = i * 16
+        val raw_kind = out_i32(lib.scratch_ev, base)
+        val kind = decode_event_kind(raw_kind)
+        val mods_or_len = out_i32(lib.scratch_ev, base + 2)
+        val is_text = raw_kind == 9
+        val txt = if is_text {
+            out_str_range(lib.scratch_ev, (base + 6) * 4, mods_or_len)
+        } else {
+            ""
+        }
+        val mods = if is_text { 0 } else { mods_or_len }
+        val raw_wid = out_i32(lib.scratch_ev, base + 14)
+        list_push(
+            out,
+            HostEvent {
+                window_id: if raw_wid > 0 { raw_wid } else { 1 },
+                kind: kind,
+                button: out_i32(lib.scratch_ev, base + 1),
+                modifiers: mods,
+                key_code: out_i32(lib.scratch_ev, base + 3),
+                x: out_f32(lib.scratch_ev, base + 4),
+                y: out_f32(lib.scratch_ev, base + 5),
+                text: txt,
+            },
+        )
+    }
+    return out
+}
+
+/// Inject a synthetic `HostEvent` into a host queue (for deterministic testing/automation).
+pub def ui_native_inject_event(lib: NativeUiLib, ev: HostEvent) -> i64 effect ffi {
+    val cell = lib.scratch_out
+    for k in 0..16 {
+        val _z = out_set_i32(cell, k, 0)
+    }
+    val kind_code = encode_event_kind(ev.kind)
+    val _k0 = out_set_i32(cell, 0, kind_code)
+    val _k1 = out_set_i32(cell, 1, ev.button)
+    val _k3 = out_set_i32(cell, 3, ev.key_code)
+    val _k4 = out_set_f32(cell, 4, ev.x)
+    val _k5 = out_set_f32(cell, 5, ev.y)
+    val _k14 = out_set_i32(cell, 14, if ev.window_id > 0 { ev.window_id } else { 1 })
+    if kind_code == 9 {
+        val written = out_write_bytes(cell, 24, ev.text)
+        val _k2 = out_set_i32(cell, 2, written)
+    } else {
+        val _k2 = out_set_i32(cell, 2, ev.modifiers)
+    }
+    return ffi_call_i64(lib.dll, "iris_ui_inject_event", lib.host, cell, 64)
+}
+
+/// Query current logical dimensions, DPI scale, and open state from the host.
+pub def ui_native_metrics(lib: NativeUiLib) -> WindowMetrics effect ffi {
+    val rc = ffi_call_i64(lib.dll, "iris_ui_get_metrics", lib.host, lib.scratch_out, 16)
+    if rc != 0 {
+        return WindowMetrics {}
+    }
+    val w = to_f64(out_i32(lib.scratch_out, 0))
+    val h = to_f64(out_i32(lib.scratch_out, 1))
+    val sc = to_f64(out_i32(lib.scratch_out, 2)) / 1000.0
+    val open = out_i32(lib.scratch_out, 3) != 0
+    return WindowMetrics { width: w, height: h, scale: sc, is_open: open }
+}
+
+/// Open an additional native window in the same host session (1-based id).
+pub def ui_native_window_create(
+    lib: NativeUiLib,
+    title: str,
+    w: i64,
+    h: i64,
+) -> i64 effect ffi {
+    return ffi_call_i64(lib.dll, "iris_ui_window_create", lib.host, title, w, h)
+}
+
+/// Close one window; the host remains alive while another window is open.
+pub def ui_native_window_close(lib: NativeUiLib, id: i64) -> i64 effect ffi {
+    return ffi_call_i64(lib.dll, "iris_ui_window_close", lib.host, id)
+}
+
+pub def ui_native_window_is_open(lib: NativeUiLib, id: i64) -> bool effect ffi {
+    return ffi_call_i64(lib.dll, "iris_ui_window_is_open", lib.host, id) != 0
+}
+
+/// Query logical dimensions, scale and open state for one window.
+pub def ui_native_window_metrics(lib: NativeUiLib, id: i64) -> WindowMetrics effect ffi {
+    val rc = ffi_call_i64(lib.dll, "iris_ui_window_get_metrics", lib.host, id, lib.scratch_out, 16)
+    if rc != 0 {
+        return WindowMetrics {}
+    }
+    val w = to_f64(out_i32(lib.scratch_out, 0))
+    val h = to_f64(out_i32(lib.scratch_out, 1))
+    val sc = to_f64(out_i32(lib.scratch_out, 2)) / 1000.0
+    val open = out_i32(lib.scratch_out, 3) != 0
+    return WindowMetrics { width: w, height: h, scale: sc, is_open: open }
+}
+
+/// Submit a finalized `DrawBuffer` to a specific window.
+pub def ui_native_submit_window(lib: NativeUiLib, id: i64, buf: DrawBuffer) -> i64 effect ffi {
+    val done = draw_buf_finish(buf)
+    val cell = if done.meta != 0 { out_i64(done.meta, 0) } else { done.cell }
+    val wlen = if done.meta != 0 { out_i64(done.meta, 2) } else { done.word_len }
+    return ffi_call_i64(lib.dll, "iris_ui_window_submit_frame", lib.host, id, cell, wlen * 4)
+}
+
+/// Poll up to 32 queued events belonging to one window.
+pub def ui_native_poll_window(
+    lib: NativeUiLib,
+    id: i64,
+    timeout_ms: i64,
+) -> list<HostEvent> effect ffi, alloc {
+    val out: list<HostEvent> = list()
+    val cap = out_len(lib.scratch_ev)
+    val n = ffi_call_i64(
+        lib.dll,
+        "iris_ui_window_poll_events",
+        lib.host,
+        id,
+        timeout_ms,
+        lib.scratch_ev,
+        cap,
+    )
+    if n <= 0 {
+        return out
+    }
+    for i in 0..n {
+        val base = i * 16
+        val raw_kind = out_i32(lib.scratch_ev, base)
+        val kind = decode_event_kind(raw_kind)
+        val mods_or_len = out_i32(lib.scratch_ev, base + 2)
+        val is_text = raw_kind == 9
+        val txt = if is_text {
+            out_str_range(lib.scratch_ev, (base + 6) * 4, mods_or_len)
+        } else {
+            ""
+        }
+        val mods = if is_text { 0 } else { mods_or_len }
+        val raw_wid = out_i32(lib.scratch_ev, base + 14)
+        list_push(
+            out,
+            HostEvent {
+                window_id: if raw_wid > 0 { raw_wid } else { 1 },
+                kind: kind,
+                button: out_i32(lib.scratch_ev, base + 1),
+                modifiers: mods,
+                key_code: out_i32(lib.scratch_ev, base + 3),
+                x: out_f32(lib.scratch_ev, base + 4),
+                y: out_f32(lib.scratch_ev, base + 5),
+                text: txt,
+            },
+        )
+    }
+    return out
+}
+
+/// Sample one rendered physical pixel as `UiColor`.
+pub def ui_native_sample_pixel(lib: NativeUiLib, x_px: i64, y_px: i64) -> UiColor effect ffi {
+    val packed = ffi_call_i64(lib.dll, "iris_ui_sample_pixel", lib.host, x_px, y_px)
+    val r = packed % 256
+    val g = (packed / 256) % 256
+    val b = (packed / 65536) % 256
+    val a = (packed / 16777216) % 256
+    return rgba(r, g, b, a)
+}
+
+/// Export the current rendered host framebuffer to a PNG image file.
+pub def ui_native_save_png(lib: NativeUiLib, path: str) -> i64 effect ffi {
+    return ffi_call_i64(lib.dll, "iris_ui_save_png", lib.host, path)
+}
+
+extern def iris_ui_pool_begin() -> i64 effect ffi, alloc
+extern def iris_ui_pool_pause() -> i64 effect ffi
+extern def iris_ui_pool_resume(handle: i64) -> i64 effect ffi
+extern def iris_ui_pool_destroy(handle: i64) -> i64 effect ffi
+
+/// Begin a thread-local per-frame arena scope for UI tree construction, layout, and paint.
+pub def ui_frame_pool_begin() -> i64 effect ffi, alloc {
+    return iris_ui_pool_begin()
+}
+
+/// Temporarily suspend recording new allocations into the active UI frame pool.
+pub def ui_frame_pool_pause() -> i64 effect ffi {
+    return iris_ui_pool_pause()
+}
+
+/// Resume recording allocations into a previously paused UI frame pool handle.
+pub def ui_frame_pool_resume(handle: i64) -> i64 effect ffi {
+    return iris_ui_pool_resume(handle)
+}
+
+/// Reclaim all pool-scoped allocations from `handle` after detaching any surviving state.
+pub def ui_frame_pool_destroy(handle: i64) -> i64 effect ffi {
+    return iris_ui_pool_destroy(handle)
+}

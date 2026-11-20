@@ -1,0 +1,185 @@
+bring std.fs
+bring std.json
+bring "domain.iris"
+
+def format_advisory_json(hit: AdvisoryHit) -> str effect alloc, io {
+    val keys = list("id", "alias", "summary")
+    val vals = list(
+        json_str(json_escape(hit.id)),
+        json_str(json_escape(hit.alias)),
+        json_str(json_escape(hit.summary)),
+    )
+    return json_obj(keys, vals)
+}
+
+def format_package_json(item: AuditedPackage) -> str effect alloc, io {
+    val adv_strs: list<str> = list()
+    for i in 0..list_len(item.telemetry.advisories) {
+        val h = list_get(item.telemetry.advisories, i)
+        val _ = list_push(adv_strs, format_advisory_json(h))
+    }
+    val lock_hex = when item.pkg.checksum {
+        some(d) => d.hex,
+        none => "",
+    }
+    val keys = list(
+        "name",
+        "version",
+        "digest_verdict",
+        "advisory_verdict",
+        "severity",
+        "risk_score",
+        "yanked",
+        "license",
+        "downloads",
+        "lock_sha256",
+        "notes",
+        "advisories",
+    )
+    val vals = list(
+        json_str(json_escape(item.pkg.name.value)),
+        json_str(json_escape(item.pkg.version.raw)),
+        json_str(digest_label(item.digest_verdict)),
+        json_str(advisory_label(item.advisory_verdict)),
+        json_str(severity_label(item.severity)),
+        json_num_i64(item.risk_score),
+        json_bool(item.telemetry.yanked),
+        json_str(json_escape(item.telemetry.license)),
+        json_num_i64(item.telemetry.downloads),
+        json_str(lock_hex),
+        json_str(json_escape(item.notes)),
+        json_arr(adv_strs),
+    )
+    return json_obj(keys, vals)
+}
+
+/// Serialize full `AttestationSummary` and per-package verdicts to RFC-8259 JSON.
+pub def render_attestation_json(
+    summary: AttestationSummary,
+    items: list<AuditedPackage>,
+) -> str effect alloc, io {
+    val pkg_strs: list<str> = list()
+    for i in 0..list_len(items) {
+        val _ = list_push(pkg_strs, format_package_json(list_get(items, i)))
+    }
+    val keys = list(
+        "schema",
+        "lockfile_path",
+        "lockfile_sha256",
+        "audited_count",
+        "yanked_count",
+        "mismatch_count",
+        "vuln_pkg_count",
+        "drift_count",
+        "duplicate_count",
+        "audited_at_iso",
+        "merkle_root",
+        "hmac_tag",
+        "packages",
+    )
+    val vals = list(
+        json_str("lattice_audit.attestation.v1"),
+        json_str(json_escape(summary.lockfile_path)),
+        json_str(summary.lockfile_sha256.hex),
+        json_num_i64(summary.audited_count),
+        json_num_i64(summary.yanked_count),
+        json_num_i64(summary.mismatch_count),
+        json_num_i64(summary.vuln_pkg_count),
+        json_num_i64(summary.drift_count),
+        json_num_i64(summary.duplicate_count),
+        json_str(summary.audited_at_iso),
+        json_str(summary.merkle_root.hex),
+        json_str(summary.hmac_tag),
+        json_arr(pkg_strs),
+    )
+    return json_obj(keys, vals)
+}
+
+/// Render one concise single-line terminal finding for an `AuditedPackage`.
+pub def format_package_row(item: AuditedPackage) -> str effect alloc {
+    val sev = severity_label(item.severity)
+    val dig = digest_label(item.digest_verdict)
+    val adv = advisory_label(item.advisory_verdict)
+    val lic = if len(item.telemetry.license) > 0 { item.telemetry.license } else { "-" }
+    return f"  [{sev}] {item.pkg.name.value}@{item.pkg.version.raw} | {dig} | {adv} | score={item.risk_score} | lic={lic} | {item.notes}"
+}
+
+/// Render human-readable attestation certificate banner.
+pub def format_summary_banner(s: AttestationSummary) -> str effect alloc {
+    val lines = list(
+        "=== LATTICE AUDIT ATTESTATION CERTIFICATE ===",
+        f"Lockfile     : {s.lockfile_path} (sha256={slice(s.lockfile_sha256.hex, 0, 16)}...)",
+        f"Timestamp    : {s.audited_at_iso}",
+        f"Audited      : {s.audited_count} crates (yanked={s.yanked_count}, mismatch={s.mismatch_count}, vulns={s.vuln_pkg_count}, drift={s.drift_count}, dups={s.duplicate_count})",
+        f"Merkle Root  : {s.merkle_root.hex}",
+        f"HMAC-SHA256  : {s.hmac_tag}",
+    )
+    return join(lines, "\n")
+}
+
+/// Persist serialized attestation JSON to `path` via strict filesystem effects.
+pub def write_json_certificate(path: str, content: str) -> result<bool, AuditError> effect fs, io {
+    val res = write_text(path, content)
+    return when res {
+        ok(written) => ok(written),
+        err(msg) => err(AuditError.IoFailed(msg)),
+    }
+}
+
+def sample_render_audited(sha: Sha256Digest) -> AuditedPackage effect alloc, throw {
+    val pkg = LockedPackage {
+        name: unwrap(parse_package_name("serde")),
+        version: unwrap(parse_semver("1.0.228")),
+        origin: PackageOrigin.CratesIo,
+        checksum: some(sha),
+        dep_count: 1,
+        deps: list("serde_core"),
+    }
+    val tel = RegistryTelemetry {
+        pkg_name: "serde",
+        locked_ver: "1.0.228",
+        yanked: false,
+        upstream_checksum: some(sha),
+        max_stable: some(pkg.version),
+        license: "MIT",
+        crate_size_bytes: 1000,
+        downloads: 500,
+        advisories: list(),
+        lookup_ok: true,
+        error_note: "",
+    }
+    return AuditedPackage {
+        pkg: pkg,
+        telemetry: tel,
+        digest_verdict: DigestVerdict.VerifiedMatch,
+        advisory_verdict: AdvisoryVerdict.NoKnownCves,
+        risk_score: 0,
+        severity: Severity.Clean,
+        notes: "attested clean",
+    }
+}
+
+def test_render_json_shape() -> i64 effect alloc, io, throw {
+    val sha = unwrap(
+        parse_sha256("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+    )
+    val item = sample_render_audited(sha)
+    val summary = AttestationSummary {
+        lockfile_path: "Cargo.lock",
+        lockfile_sha256: sha,
+        audited_count: 1,
+        yanked_count: 0,
+        mismatch_count: 0,
+        vuln_pkg_count: 0,
+        drift_count: 0,
+        duplicate_count: 0,
+        audited_at_iso: "2026-11-15T00:00:00.000Z",
+        merkle_root: sha,
+        hmac_tag: "deadbeef",
+    }
+    val out = render_attestation_json(summary, list(item))
+    assert(contains(out, "\"schema\":\"lattice_audit.attestation.v1\""))
+    assert(contains(out, "\"name\":\"serde\""))
+    assert(contains(out, "\"digest_verdict\":\"SHA256_MATCH\""))
+    return 0
+}

@@ -1,0 +1,330 @@
+bring std.crypto
+bring std.time
+bring "domain.iris"
+
+/// Constant-time verification comparing local `Cargo.lock` digest to crates.io SHA-256.
+pub def verify_package_digest(
+    pkg: LockedPackage,
+    tel: RegistryTelemetry,
+    offline: bool,
+) -> DigestVerdict {
+    val is_ws = when pkg.origin {
+        PackageOrigin.WorkspaceLocal => true,
+        _ => false,
+    }
+    if is_ws {
+        return DigestVerdict.WorkspaceUnpinned
+    }
+    if offline || !tel.lookup_ok {
+        return DigestVerdict.UnverifiedOffline
+    }
+    return when pkg.checksum {
+        some(local_sha) => when tel.upstream_checksum {
+            some(up_sha) => {
+                if timing_safe_equal(local_sha.hex, up_sha.hex) {
+                    DigestVerdict.VerifiedMatch
+                } else {
+                    DigestVerdict.HashMismatch
+                }
+            },
+            none => DigestVerdict.UnverifiedOffline,
+        },
+        none => DigestVerdict.UnverifiedOffline,
+    }
+}
+
+/// Summarize OSV advisory screening verdict for one package telemetry snapshot.
+pub def evaluate_advisory_verdict(
+    tel: RegistryTelemetry,
+    offline: bool,
+) -> AdvisoryVerdict effect alloc {
+    if offline || !tel.lookup_ok {
+        return AdvisoryVerdict.SkippedOffline
+    }
+    val cnt = list_len(tel.advisories)
+    if cnt == 0 {
+        return AdvisoryVerdict.NoKnownCves
+    }
+    return AdvisoryVerdict.AdvisoriesFound(cnt)
+}
+
+def compute_drift_bonus(pkg: LockedPackage, tel: RegistryTelemetry) -> (i64, str) effect alloc {
+    return when tel.max_stable {
+        some(latest) => {
+            val kind = semver_drift_kind(pkg.version, latest)
+            if kind == "major" {
+                (15, f"major drift behind {latest.raw}")
+            } else if kind == "minor" {
+                (5, f"minor drift behind {latest.raw}")
+            } else {
+                (0, "")
+            }
+        },
+        none => (0, ""),
+    }
+}
+
+def classify_severity(
+    score: i64,
+    dig: DigestVerdict,
+    adv: AdvisoryVerdict,
+    yanked: bool,
+) -> Severity {
+    val mismatch = when dig {
+        DigestVerdict.HashMismatch => true,
+        _ => false,
+    }
+    val cve_cnt = when adv {
+        AdvisoryVerdict.AdvisoriesFound(n) => n,
+        _ => 0,
+    }
+    if mismatch || cve_cnt >= 2 {
+        return Severity.Critical
+    }
+    if cve_cnt > 0 || yanked {
+        return Severity.High
+    }
+    if score >= 15 {
+        return Severity.Medium
+    }
+    if score > 0 {
+        return Severity.Info
+    }
+    return Severity.Clean
+}
+
+def collect_audit_notes(
+    pkg: LockedPackage,
+    tel: RegistryTelemetry,
+    dig: DigestVerdict,
+    adv: AdvisoryVerdict,
+    drift_note: str,
+) -> str effect alloc {
+    val notes: list<str> = list()
+    val _d = when dig {
+        DigestVerdict.HashMismatch => list_push(notes, "checksum mismatch vs crates.io"),
+        _ => 0,
+    }
+    val _y = if tel.yanked { list_push(notes, "version yanked upstream") } else { 0 }
+    val _c = when adv {
+        AdvisoryVerdict.AdvisoriesFound(_) => {
+            val first = list_get(tel.advisories, 0)
+            list_push(notes, f"OSV {first.id} ({first.alias})")
+        },
+        _ => 0,
+    }
+    val _dr = if len(drift_note) > 0 { list_push(notes, drift_note) } else { 0 }
+    val _f = if pkg.dep_count >= 15 {
+        list_push(notes, f"high fan-out ({pkg.dep_count} deps)")
+    } else {
+        0
+    }
+    val _o = if !tel.lookup_ok && len(tel.error_note) > 0 {
+        list_push(notes, tel.error_note)
+    } else {
+        0
+    }
+    return if list_len(notes) == 0 { "attested clean" } else { join(notes, "; ") }
+}
+
+/// Score risk, digest match, CVE count, and SemVer drift into `AuditedPackage`.
+pub def evaluate_audited_package(
+    pkg: LockedPackage,
+    tel: RegistryTelemetry,
+    offline: bool,
+) -> AuditedPackage effect alloc {
+    val dig = verify_package_digest(pkg, tel, offline)
+    val adv = evaluate_advisory_verdict(tel, offline)
+    val mismatch_pts = when dig {
+        DigestVerdict.HashMismatch => 100,
+        _ => 0,
+    }
+    val cve_pts = when adv {
+        AdvisoryVerdict.AdvisoriesFound(n) => 60 + (n * 15),
+        _ => 0,
+    }
+    val yank_pts = if tel.yanked { 45 } else { 0 }
+    val drift_info = compute_drift_bonus(pkg, tel)
+    val fan_pts = if pkg.dep_count >= 15 { 5 } else { 0 }
+    val total = mismatch_pts + cve_pts + yank_pts + drift_info.0 + fan_pts
+    val sev = classify_severity(total, dig, adv, tel.yanked)
+    val notes = collect_audit_notes(pkg, tel, dig, adv, drift_info.1)
+    return AuditedPackage {
+        pkg: pkg,
+        telemetry: tel,
+        digest_verdict: dig,
+        advisory_verdict: adv,
+        risk_score: total,
+        severity: sev,
+        notes: notes,
+    }
+}
+
+/// Produce deterministic pipe-delimited canonical record string for SHA-256 chaining.
+pub def canonical_package_digest_input(item: AuditedPackage) -> str effect alloc {
+    val dig = digest_label(item.digest_verdict)
+    val adv = advisory_label(item.advisory_verdict)
+    val sev = severity_label(item.severity)
+    return f"{item.pkg.name.value}|{item.pkg.version.raw}|{dig}|{adv}|{sev}|{item.risk_score}"
+}
+
+/// Compute chained SHA-256 Merkle accumulator over `lock_sha` and audited packages.
+pub def compute_merkle_root(
+    lock_sha: Sha256Digest,
+    items: list<AuditedPackage>,
+) -> result<Sha256Digest, AuditError> effect alloc, io {
+    var cur = lock_sha.hex
+    for i in 0..list_len(items) {
+        val line = canonical_package_digest_input(list_get(items, i))
+        cur = hash_sha256(concat(cur, concat("|", line)))
+    }
+    return parse_sha256(cur)
+}
+
+/// Build and HMAC-SHA256-seal `AttestationSummary`, verifying HMAC self-consistency.
+pub def seal_attestation_summary(
+    lock_rep: LockfileReport,
+    items: list<AuditedPackage>,
+    hmac_key: str,
+) -> result<AttestationSummary, AuditError> effect alloc, io, time {
+    var yanked = 0
+    var mismatches = 0
+    var vulns = 0
+    var drifts = 0
+    for i in 0..list_len(items) {
+        val it = list_get(items, i)
+        yanked = if it.telemetry.yanked { yanked + 1 } else { yanked }
+        val is_mm = when it.digest_verdict {
+            DigestVerdict.HashMismatch => true,
+            _ => false,
+        }
+        val has_cve = when it.advisory_verdict {
+            AdvisoryVerdict.AdvisoriesFound(_) => true,
+            _ => false,
+        }
+        val drift_res = compute_drift_bonus(it.pkg, it.telemetry)
+        mismatches = if is_mm { mismatches + 1 } else { mismatches }
+        vulns = if has_cve { vulns + 1 } else { vulns }
+        drifts = if drift_res.0 > 0 { drifts + 1 } else { drifts }
+    }
+    val merkle = compute_merkle_root(lock_rep.sha256, items)?
+    val iso_ts = format_iso8601(now_ms())
+    val body = f"{lock_rep.path}|{lock_rep.sha256.hex}|{list_len(items)}|{yanked}|{mismatches}|{vulns}|{merkle.hex}|{iso_ts}"
+    val tag = hmac_simple(hmac_key, body)
+    if !hmac_verify(hmac_key, body, tag) {
+        return err(AuditError.ValidationFailed("internal HMAC verification failed"))
+    }
+    return ok(
+        AttestationSummary {
+            lockfile_path: lock_rep.path,
+            lockfile_sha256: lock_rep.sha256,
+            audited_count: list_len(items),
+            yanked_count: yanked,
+            mismatch_count: mismatches,
+            vuln_pkg_count: vulns,
+            drift_count: drifts,
+            duplicate_count: list_len(lock_rep.duplicate_names),
+            audited_at_iso: iso_ts,
+            merkle_root: merkle,
+            hmac_tag: tag,
+        },
+    )
+}
+
+def test_digest_mismatch_and_cve_escalation() -> i64 effect alloc, io, throw {
+    val sha_a = unwrap(
+        parse_sha256("1111111111111111111111111111111111111111111111111111111111111111"),
+    )
+    val sha_b = unwrap(
+        parse_sha256("2222222222222222222222222222222222222222222222222222222222222222"),
+    )
+    val pkg = LockedPackage {
+        name: unwrap(parse_package_name("time")),
+        version: unwrap(parse_semver("0.2.0")),
+        origin: PackageOrigin.CratesIo,
+        checksum: some(sha_a),
+        dep_count: 2,
+        deps: list("libc", "winapi"),
+    }
+    val hits = list(
+        AdvisoryHit { id: "GHSA-wcg3-cvx6-7396", alias: "CVE-2020-26235", summary: "segfault" },
+    )
+    val tel = RegistryTelemetry {
+        pkg_name: "time",
+        locked_ver: "0.2.0",
+        yanked: false,
+        upstream_checksum: some(sha_b),
+        max_stable: some(unwrap(parse_semver("0.3.37"))),
+        license: "MIT",
+        crate_size_bytes: 50000,
+        downloads: 1000,
+        advisories: hits,
+        lookup_ok: true,
+        error_note: "",
+    }
+    val evaluated = evaluate_audited_package(pkg, tel, false)
+    assert(evaluated.risk_score >= 175)
+    assert(severity_rank(evaluated.severity) == 4)
+    return 0
+}
+
+def test_merkle_and_hmac_tamper_detection() -> i64 effect alloc, io, time, throw {
+    val sha_a = unwrap(
+        parse_sha256("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+    )
+    val pkg = LockedPackage {
+        name: unwrap(parse_package_name("serde")),
+        version: unwrap(parse_semver("1.0.228")),
+        origin: PackageOrigin.CratesIo,
+        checksum: some(sha_a),
+        dep_count: 1,
+        deps: list("serde_core"),
+    }
+    val tel = build_offline_telemetry_mock(pkg, sha_a)
+    val eval_ok = evaluate_audited_package(pkg, tel, false)
+    val empty_dups: list<str> = list()
+    val rep = LockfileReport {
+        path: "Cargo.lock",
+        sha256: sha_a,
+        packages: list(pkg),
+        duplicate_names: empty_dups,
+        workspace_count: 0,
+        missing_checksum_count: 0,
+    }
+    val s1 = unwrap(seal_attestation_summary(rep, list(eval_ok), "test-key"))
+    val bad_sha = unwrap(
+        parse_sha256("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
+    )
+    val rep2 = LockfileReport {
+        path: "Cargo.lock",
+        sha256: bad_sha,
+        packages: list(pkg),
+        duplicate_names: empty_dups,
+        workspace_count: 0,
+        missing_checksum_count: 0,
+    }
+    val s2 = unwrap(seal_attestation_summary(rep2, list(eval_ok), "test-key"))
+    assert(s1.merkle_root.hex != s2.merkle_root.hex)
+    assert(s1.hmac_tag != s2.hmac_tag)
+    return 0
+}
+
+def build_offline_telemetry_mock(
+    pkg: LockedPackage,
+    up_sha: Sha256Digest,
+) -> RegistryTelemetry effect alloc {
+    val empty_hits: list<AdvisoryHit> = list()
+    return RegistryTelemetry {
+        pkg_name: pkg.name.value,
+        locked_ver: pkg.version.raw,
+        yanked: false,
+        upstream_checksum: some(up_sha),
+        max_stable: some(pkg.version),
+        license: "MIT",
+        crate_size_bytes: 1000,
+        downloads: 100,
+        advisories: empty_hits,
+        lookup_ok: true,
+        error_note: "",
+    }
+}

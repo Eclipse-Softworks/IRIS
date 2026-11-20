@@ -98,12 +98,12 @@ pub def checksum(payload: str) -> i64 {
 }
 
 // Wrap a payload as a complete frame.
-pub def frame(payload: str) -> str {
+pub def frame(payload: str) -> str effect alloc {
     payload + "*" + to_str(checksum(payload))
 }
 
 // True when `line` is a well-formed frame whose checksum matches.
-pub def frame_verify(line: str) -> bool {
+pub def frame_verify(line: str) -> bool effect alloc, throw {
     val star_at = find(line, "*");
     if !is_some(star_at) { return false };
     val star = unwrap(star_at);
@@ -114,7 +114,7 @@ pub def frame_verify(line: str) -> bool {
 }
 
 // The payload of a frame, or an error naming what was wrong with it.
-pub def frame_payload(line: str) -> result<str, str> {
+pub def frame_payload(line: str) -> result<str, str> effect alloc, throw {
     val star_at = find(line, "*");
     if !is_some(star_at) {
         return err("frame has no checksum separator '*': " + line)
@@ -131,7 +131,7 @@ pub def frame_payload(line: str) -> result<str, str> {
 }
 
 // The kind letter of a frame -- "R", "W" or "Q".
-pub def frame_kind(line: str) -> result<str, str> {
+pub def frame_kind(line: str) -> result<str, str> effect alloc, throw {
     val payload = frame_payload(line)?;
     if len(payload) < 2 {
         return err("frame payload too short to have a kind: " + payload)
@@ -145,22 +145,22 @@ pub def frame_kind(line: str) -> result<str, str> {
 }
 
 // Encode a sensor reading for transmission.
-pub def encode_reading(name: str, value: f64) -> str {
+pub def encode_reading(name: str, value: f64) -> str effect alloc {
     frame("R:" + name + "=" + to_str(value))
 }
 
 // Encode "write `value` to `pin`".
-pub def encode_write(pin: i64, value: i64) -> str {
+pub def encode_write(pin: i64, value: i64) -> str effect alloc {
     frame("W:" + to_str(pin) + "=" + to_str(value))
 }
 
 // Encode "report the current value of `pin`".
-pub def encode_query(pin: i64) -> str {
+pub def encode_query(pin: i64) -> str effect alloc {
     frame("Q:" + to_str(pin))
 }
 
 // Decode a reading frame.
-pub def parse_reading(line: str) -> result<Reading, str> {
+pub def parse_reading(line: str) -> result<Reading, str> effect alloc, throw {
     val payload = frame_payload(line)?;
     val colon_at = find(payload, ":");
     if !is_some(colon_at) {
@@ -196,7 +196,7 @@ pub def parse_reading(line: str) -> result<Reading, str> {
 }
 
 // Decode the pin and value of a write frame.
-pub def parse_write(line: str) -> result<PinWrite, str> {
+pub def parse_write(line: str) -> result<PinWrite, str> effect alloc, throw {
     val payload = frame_payload(line)?;
     val colon_at = find(payload, ":");
     if !is_some(colon_at) {
@@ -236,7 +236,7 @@ pub def parse_write(line: str) -> result<PinWrite, str> {
 //
 // Shells out, which is the limitation named in the header. Returns the port
 // name on success so it can be chained.
-pub def serial_configure(port: str, baud: i64) -> result<bool, str> effect ffi, sys {
+pub def serial_configure(port: str, baud: i64) -> result<bool, str> effect alloc, sys {
     if len(port) == 0 {
         return err("serial_configure: empty port name")
     };
@@ -253,7 +253,7 @@ pub def serial_configure(port: str, baud: i64) -> result<bool, str> effect ffi, 
 }
 
 // Open a configured port for reading and writing.
-pub def serial_open(port: str, baud: i64) -> result<Serial, str> effect fs, io, ffi, sys {
+pub def serial_open(port: str, baud: i64) -> result<Serial, str> effect fs, alloc, sys {
     val _cfg = serial_configure(port, baud)?;
     val h = file_open(port, "r+");
     if h == 0 {
@@ -263,7 +263,7 @@ pub def serial_open(port: str, baud: i64) -> result<Serial, str> effect fs, io, 
     }
 }
 
-pub def serial_close(s: Serial) -> result<bool, str> effect fs, io {
+pub def serial_close(s: Serial) -> result<bool, str> effect fs, alloc {
     if file_close(s.file) {
         ok(true)
     } else {
@@ -272,7 +272,7 @@ pub def serial_close(s: Serial) -> result<bool, str> effect fs, io {
 }
 
 // Write a frame, terminated by a newline so the device can split on it.
-pub def serial_write_line(s: Serial, line: str) -> result<bool, str> effect fs, io {
+pub def serial_write_line(s: Serial, line: str) -> result<bool, str> effect fs, alloc {
     if file_write(s.file, line + "\n") {
         ok(true)
     } else {
@@ -281,7 +281,7 @@ pub def serial_write_line(s: Serial, line: str) -> result<bool, str> effect fs, 
 }
 
 // Read one newline-terminated line.
-pub def serial_read_line(s: Serial) -> result<str, str> effect fs, io {
+pub def serial_read_line(s: Serial) -> result<str, str> effect fs, alloc {
     var acc = "";
     var guard = 0;
     // Bounded rather than `loop`: an unplugged device returns empty forever,
@@ -300,17 +300,17 @@ pub def serial_read_line(s: Serial) -> result<str, str> effect fs, io {
 }
 
 // Send one sensor reading.
-pub def serial_send_reading(s: Serial, name: str, value: f64) -> result<bool, str> effect fs, io {
+pub def serial_send_reading(s: Serial, name: str, value: f64) -> result<bool, str> effect fs, alloc {
     serial_write_line(s, encode_reading(name, value))
 }
 
 // Command a pin, then confirm the device echoed the same command back.
-pub def serial_write_pin(s: Serial, pin: i64, value: i64) -> result<bool, str> effect fs, io {
+pub def serial_write_pin(s: Serial, pin: i64, value: i64) -> result<bool, str> effect fs, alloc {
     serial_write_line(s, encode_write(pin, value))
 }
 
 // Read the next reading from the device.
-pub def serial_poll(s: Serial) -> result<Reading, str> effect fs, io {
+pub def serial_poll(s: Serial) -> result<Reading, str> effect fs, alloc, throw {
     val line = serial_read_line(s)?;
     parse_reading(line)
 }

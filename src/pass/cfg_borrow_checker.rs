@@ -300,11 +300,34 @@ impl MoveStatus {
 /// Forward dataflow state tracked across CFG edges and instructions.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct NllState {
-    moved: HashMap<PlaceRoot, MoveStatus>,
+    /// Moved-out places. Keys are full projection paths, so moving `p.a` does
+    /// not mark `p.b` as moved. A key with no projections means the whole root.
+    moved: HashMap<Place, MoveStatus>,
     active_loans: BTreeSet<usize>,
 }
 
 impl NllState {
+    /// Status of a place if any moved-out place overlaps it. Overlap is what
+    /// makes a partial move invalidate a read of the whole record, or a move
+    /// of a whole record invalidate a read of one of its fields.
+    fn moved_status(&self, place: &Place) -> Option<MoveStatus> {
+        self.moved
+            .iter()
+            .find(|(moved, _)| moved.overlaps(place))
+            .map(|(_, status)| *status)
+    }
+
+    /// Restores a place after reassignment. Writing a whole binding clears
+    /// every moved field of it; writing `p.a` clears only that field and its
+    /// descendants.
+    fn clear_moved(&mut self, place: &Place) {
+        self.moved.retain(|moved, _| {
+            moved.root != place.root
+                || !(place.projections.is_empty()
+                    || moved.projections.starts_with(&place.projections))
+        });
+    }
+
     fn join_from(&mut self, incoming: &Self) -> bool {
         let mut changed = false;
         for &loan_id in &incoming.active_loans {
@@ -313,31 +336,42 @@ impl NllState {
             }
         }
 
-        // Any root moved in one incoming path and unmoved in another becomes
-        // MaybeMoved; both Moved stays Moved.
-        let mut all_roots: BTreeSet<PlaceRoot> = self.moved.keys().copied().collect();
-        all_roots.extend(incoming.moved.keys().copied());
-        for root in all_roots {
-            let merged = match (
-                self.moved.get(&root).copied(),
-                incoming.moved.get(&root).copied(),
-            ) {
-                (Some(MoveStatus::Moved(a)), Some(MoveStatus::Moved(b))) => {
-                    Some(MoveStatus::Moved(earlier_span(a, b)))
-                }
-                (Some(a), Some(b)) => {
-                    Some(MoveStatus::MaybeMoved(earlier_span(a.span(), b.span())))
-                }
-                (Some(a), None) => Some(MoveStatus::MaybeMoved(a.span())),
-                (None, Some(b)) => Some(MoveStatus::MaybeMoved(b.span())),
-                (None, None) => None,
-            };
-            if let Some(status) = merged {
-                if self.moved.get(&root).copied() != Some(status) {
-                    self.moved.insert(root, status);
-                    changed = true;
-                }
+        // Merge moved places from both predecessors. Overlapping places are
+        // represented by the more general one (shorter projection path), and
+        // a place moved on only one path becomes MaybeMoved.
+        let mut combined: Vec<Place> = self.moved.keys().cloned().collect();
+        for place in incoming.moved.keys() {
+            if !combined.iter().any(|p| p.overlaps(place)) {
+                combined.push(place.clone());
             }
+        }
+        combined.sort_by(|a, b| {
+            a.root
+                .cmp(&b.root)
+                .then_with(|| a.projections.len().cmp(&b.projections.len()))
+                .then_with(|| a.projections.cmp(&b.projections))
+        });
+        let next: HashMap<Place, MoveStatus> = combined
+            .into_iter()
+            .filter_map(|place| {
+                let a = self.moved_status(&place);
+                let b = incoming.moved_status(&place);
+                let merged = match (a, b) {
+                    (Some(MoveStatus::Moved(x)), Some(MoveStatus::Moved(y))) => {
+                        Some(MoveStatus::Moved(earlier_span(x, y)))
+                    }
+                    (Some(a), Some(b)) => {
+                        Some(MoveStatus::MaybeMoved(earlier_span(a.span(), b.span())))
+                    }
+                    (Some(a), None) | (None, Some(a)) => Some(MoveStatus::MaybeMoved(a.span())),
+                    (None, None) => None,
+                };
+                merged.map(|status| (place, status))
+            })
+            .collect();
+        if next != self.moved {
+            self.moved = next;
+            changed = true;
         }
         changed
     }
@@ -993,12 +1027,11 @@ fn simulate_block_transfer(analysis: &NllAnalysis<'_>, block: &IrBlock, state: &
 
         if let Some(events) = analysis.func.place_meta.events.get(&(block.id.0, ii)) {
             for event in events {
-                if let PlaceEventKind::Write {
-                    slot,
-                    field_index: None,
-                } = event.kind
-                {
-                    state.moved.remove(&PlaceRoot::Slot(slot));
+                if let PlaceEventKind::Write { slot, field_index } = &event.kind {
+                    state.clear_moved(&Place {
+                        root: PlaceRoot::Slot(*slot),
+                        projections: field_index.iter().copied().collect(),
+                    });
                 }
             }
         }
@@ -1010,8 +1043,8 @@ fn simulate_block_transfer(analysis: &NllAnalysis<'_>, block: &IrBlock, state: &
                 }
             }
             IrInstr::Move { place, .. } => {
-                let (root, span) = resolve_move_target(analysis, block.id, ii, *place);
-                state.moved.insert(root, MoveStatus::Moved(span));
+                let (target, span) = resolve_move_target(analysis, block.id, ii, *place);
+                state.moved.insert(target, MoveStatus::Moved(span));
             }
             _ => {}
         }
@@ -1025,12 +1058,11 @@ fn simulate_block_transfer(analysis: &NllAnalysis<'_>, block: &IrBlock, state: &
         .get(&(block.id.0, block.instrs.len()))
     {
         for event in events {
-            if let PlaceEventKind::Write {
-                slot,
-                field_index: None,
-            } = event.kind
-            {
-                state.moved.remove(&PlaceRoot::Slot(slot));
+            if let PlaceEventKind::Write { slot, field_index } = &event.kind {
+                state.clear_moved(&Place {
+                    root: PlaceRoot::Slot(*slot),
+                    projections: field_index.iter().copied().collect(),
+                });
             }
         }
     }
@@ -1062,9 +1094,9 @@ fn check_block_instructions(
                 }
             }
             IrInstr::Move { place, .. } => {
-                let (root, span) = resolve_move_target(analysis, block.id, ii, *place);
-                check_move_instr(analysis, root, span, state)?;
-                state.moved.insert(root, MoveStatus::Moved(span));
+                let (target, span) = resolve_move_target(analysis, block.id, ii, *place);
+                check_move_instr(analysis, &target, span, state)?;
+                state.moved.insert(target, MoveStatus::Moved(span));
             }
             _ => {
                 if let Some(target_val) = mutating_container_operand(instr) {
@@ -1099,12 +1131,12 @@ fn process_boundary_events(
     state: &mut NllState,
 ) -> Result<(), PassError> {
     let owned_slot = match instr {
-        IrInstr::Move { .. } => events.iter().find_map(|e| match e.kind {
-            PlaceEventKind::Move(slot) => Some(slot),
+        IrInstr::Move { .. } => events.iter().find_map(|e| match &e.kind {
+            PlaceEventKind::Move { slot, .. } => Some(*slot),
             _ => None,
         }),
-        IrInstr::Borrow { .. } => events.iter().find_map(|e| match e.kind {
-            PlaceEventKind::Borrow { slot, .. } => Some(slot),
+        IrInstr::Borrow { .. } => events.iter().find_map(|e| match &e.kind {
+            PlaceEventKind::Borrow { slot, .. } => Some(*slot),
             _ => None,
         }),
         _ => None,
@@ -1122,12 +1154,16 @@ fn check_single_event(
     state: &mut NllState,
 ) -> Result<(), PassError> {
     match &event.kind {
-        PlaceEventKind::Read(slot) => {
+        PlaceEventKind::Read { slot, projections } => {
             if skip_read_slot == Some(*slot) {
                 return Ok(());
             }
             let root = PlaceRoot::Slot(*slot);
-            if let Some(status) = state.moved.get(&root).copied() {
+            let read_place = Place {
+                root,
+                projections: projections.clone(),
+            };
+            if let Some(status) = state.moved_status(&read_place) {
                 return Err(diag_use_after_move(
                     analysis.func,
                     root,
@@ -1135,7 +1171,6 @@ fn check_single_event(
                     event.span,
                 ));
             }
-            let read_place = Place::whole(root);
             for &loan_id in &state.active_loans {
                 let loan = &analysis.loans[loan_id];
                 if loan.kind == BorrowKind::Mutable && read_place.overlaps(&loan.place) {
@@ -1165,19 +1200,21 @@ fn check_single_event(
                     ));
                 }
             }
-            if field_index.is_none() {
-                // Reassigning the full binding restores initialization.
-                state.moved.remove(&root);
-            } else if let Some(status) = state.moved.get(&root).copied() {
-                return Err(diag_use_after_move(
-                    analysis.func,
-                    root,
-                    status.span(),
-                    event.span,
-                ));
+            // Reassigning the whole binding is always allowed and restores
+            // initialization. Writing one field of a moved binding is not.
+            if field_index.is_some() {
+                if let Some(status) = state.moved_status(&write_place) {
+                    return Err(diag_use_after_move(
+                        analysis.func,
+                        root,
+                        status.span(),
+                        event.span,
+                    ));
+                }
             }
+            state.clear_moved(&write_place);
         }
-        PlaceEventKind::Borrow { .. } | PlaceEventKind::Move(_) => {}
+        PlaceEventKind::Borrow { .. } | PlaceEventKind::Move { .. } => {}
     }
     Ok(())
 }
@@ -1188,7 +1225,7 @@ fn check_borrow_instr(
     state: &NllState,
 ) -> Result<(), PassError> {
     let loan = &analysis.loans[loan_id];
-    if let Some(status) = state.moved.get(&loan.place.root).copied() {
+    if let Some(status) = state.moved_status(&loan.place) {
         return Err(diag_borrow_after_move(
             analysis.func,
             loan.place.root,
@@ -1217,24 +1254,24 @@ fn check_borrow_instr(
 
 fn check_move_instr(
     analysis: &NllAnalysis<'_>,
-    root: PlaceRoot,
+    target: &Place,
     move_span: PlaceSpan,
     state: &NllState,
 ) -> Result<(), PassError> {
-    if let Some(status) = state.moved.get(&root).copied() {
+    if let Some(status) = state.moved_status(target) {
         return Err(diag_move_after_move(
             analysis.func,
-            root,
+            target.root,
             status.span(),
             move_span,
         ));
     }
     for &active_id in &state.active_loans {
         let existing = &analysis.loans[active_id];
-        if existing.place.root == root {
+        if existing.place.overlaps(target) {
             return Err(diag_move_while_borrowed(
                 analysis.func,
-                root,
+                target.root,
                 existing,
                 Some(move_span),
             ));
@@ -1282,7 +1319,7 @@ fn check_raw_operand_moves(
 ) -> Result<(), PassError> {
     for op in instr.operands() {
         let root = PlaceRoot::Value(op);
-        if let Some(status) = state.moved.get(&root).copied() {
+        if let Some(status) = state.moved_status(&Place::whole(root)) {
             let use_span = value_or_instr_span(analysis.func, bid, ii, op).unwrap_or(status.span());
             return Err(diag_use_after_move(
                 analysis.func,
@@ -1390,18 +1427,24 @@ fn resolve_move_target(
     bid: BlockId,
     ii: usize,
     place: ValueId,
-) -> (PlaceRoot, PlaceSpan) {
+) -> (Place, PlaceSpan) {
     if let Some(events) = analysis.func.place_meta.events.get(&(bid.0, ii)) {
         for event in events {
-            if let PlaceEventKind::Move(slot) = event.kind {
-                return (PlaceRoot::Slot(slot), event.span);
+            if let PlaceEventKind::Move { slot, projections } = &event.kind {
+                return (
+                    Place {
+                        root: PlaceRoot::Slot(*slot),
+                        projections: projections.clone(),
+                    },
+                    event.span,
+                );
             }
         }
     }
     let root = resolve_place_from_val(analysis.func, &analysis.def_map, place).root;
     let span = value_or_instr_span(analysis.func, bid, ii, place)
         .unwrap_or(PlaceSpan { start: 0, end: 0 });
-    (root, span)
+    (Place::whole(root), span)
 }
 
 fn value_or_instr_span(
@@ -2168,7 +2211,14 @@ mod tests {
 
             builder.set_current_block(then_bb);
             let y = builder.fresh_value();
-            builder.record_place_event(PlaceEventKind::Move(slot_x), 10, 16);
+            builder.record_place_event(
+                PlaceEventKind::Move {
+                    slot: slot_x,
+                    projections: Vec::new(),
+                },
+                10,
+                16,
+            );
             builder.push_instr(
                 IrInstr::Move {
                     result: y,
@@ -2204,7 +2254,14 @@ mod tests {
             );
 
             builder.set_current_block(merge_bb);
-            builder.record_place_event(PlaceEventKind::Read(slot_x), 30, 31);
+            builder.record_place_event(
+                PlaceEventKind::Read {
+                    slot: slot_x,
+                    projections: Vec::new(),
+                },
+                30,
+                31,
+            );
             builder.push_instr(IrInstr::Return { values: vec![x] }, None);
             builder.build()
         };
@@ -2350,6 +2407,124 @@ mod tests {
     }
 
     #[test]
+    fn test_nll_partial_field_moves_are_independent() {
+        let i64_ty = IrType::Scalar(DType::I64);
+        let pair_ty = IrType::Struct {
+            name: "Pair".into(),
+            fields: vec![("a".into(), i64_ty.clone()), ("b".into(), i64_ty.clone())],
+        };
+
+        let build_moves = |move_whole: bool| {
+            let mut builder = IrFunctionBuilder::new("field_moves", vec![], i64_ty.clone());
+            let entry = builder.create_block(Some("entry"));
+            builder.set_current_block(entry);
+
+            let slot_p = builder.alloc_place_slot("p", None);
+            let c = builder.fresh_value();
+            builder.push_instr(
+                IrInstr::ConstInt {
+                    result: c,
+                    value: 1,
+                    ty: i64_ty.clone(),
+                },
+                Some(i64_ty.clone()),
+            );
+            let p = builder.fresh_value();
+            builder.push_instr(
+                IrInstr::MakeStruct {
+                    result: p,
+                    fields: vec![c, c],
+                    result_ty: pair_ty.clone(),
+                },
+                Some(pair_ty.clone()),
+            );
+            builder.map_value_slot_if_unset(p, slot_p);
+
+            let f0 = builder.fresh_value();
+            builder.push_instr(
+                IrInstr::GetField {
+                    result: f0,
+                    base: p,
+                    field_index: 0,
+                    result_ty: i64_ty.clone(),
+                },
+                Some(i64_ty.clone()),
+            );
+            let m0 = builder.fresh_value();
+            builder.record_place_event(
+                PlaceEventKind::Move {
+                    slot: slot_p,
+                    projections: vec![0],
+                },
+                10,
+                14,
+            );
+            builder.push_instr(
+                IrInstr::Move {
+                    result: m0,
+                    place: f0,
+                },
+                Some(i64_ty.clone()),
+            );
+
+            if move_whole {
+                let mw = builder.fresh_value();
+                builder.record_place_event(
+                    PlaceEventKind::Move {
+                        slot: slot_p,
+                        projections: Vec::new(),
+                    },
+                    20,
+                    26,
+                );
+                builder.push_instr(
+                    IrInstr::Move {
+                        result: mw,
+                        place: p,
+                    },
+                    Some(pair_ty.clone()),
+                );
+                builder.push_instr(IrInstr::Return { values: vec![mw] }, None);
+            } else {
+                let f1 = builder.fresh_value();
+                builder.push_instr(
+                    IrInstr::GetField {
+                        result: f1,
+                        base: p,
+                        field_index: 1,
+                        result_ty: i64_ty.clone(),
+                    },
+                    Some(i64_ty.clone()),
+                );
+                let m1 = builder.fresh_value();
+                builder.record_place_event(
+                    PlaceEventKind::Move {
+                        slot: slot_p,
+                        projections: vec![1],
+                    },
+                    20,
+                    24,
+                );
+                builder.push_instr(
+                    IrInstr::Move {
+                        result: m1,
+                        place: f1,
+                    },
+                    Some(i64_ty.clone()),
+                );
+                builder.push_instr(IrInstr::Return { values: vec![m1] }, None);
+            }
+            builder.build()
+        };
+
+        run_cfg_checker(build_moves(false))
+            .expect("moving disjoint fields p.a and p.b must be allowed");
+        let err =
+            run_cfg_checker(build_moves(true)).expect_err("moving p.a then the whole p must fail");
+        assert!(err.to_string().contains("already been moved"), "got: {err}");
+    }
+
+    #[test]
     fn test_nll_loop_move_and_outer_borrow() {
         let i64_ty = IrType::Scalar(DType::I64);
         let bool_ty = IrType::Scalar(DType::Bool);
@@ -2402,7 +2577,14 @@ mod tests {
 
         builder.set_current_block(body);
         let moved = builder.fresh_value();
-        builder.record_place_event(PlaceEventKind::Move(slot_x), 15, 21);
+        builder.record_place_event(
+            PlaceEventKind::Move {
+                slot: slot_x,
+                projections: Vec::new(),
+            },
+            15,
+            21,
+        );
         builder.push_instr(
             IrInstr::Move {
                 result: moved,

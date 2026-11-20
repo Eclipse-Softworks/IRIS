@@ -1,0 +1,492 @@
+/// AIS navigational status codes defined by ITU-R M.1371.
+pub choice NavStatus {
+    UnderWayEngine,
+    AtAnchor,
+    NotUnderCommand,
+    RestrictedManeuver,
+    ConstrainedDraught,
+    Moored,
+    Aground,
+    Fishing,
+    UnderWaySailing,
+    Reserved(i64),
+}
+
+/// Active Inference hidden sea-state and traffic hazard regimes.
+pub choice SeaRegime {
+    CalmPassage,
+    SwellBuild,
+    SquallTraffic,
+    StormHazard,
+}
+
+/// Navigational helm control commands cleared through `SafetyPolicy`.
+pub choice HelmAction {
+    MaintainCourse,
+    ReduceSpeedWeathervane,
+    AlterCourseSeekShelter,
+}
+
+/// Maritime corridor preset or custom coordinate mode.
+pub choice CorridorKind {
+    GulfOfFinland,
+    AlandSea,
+    DoverStrait,
+    Skagerrak,
+    CustomCoord,
+}
+
+/// Typed domain error hierarchy for NMEA, validation, network, and persistence.
+pub choice AisError {
+    NmeaChecksumFailed(str),
+    ValidationFailed(str),
+    NetworkFailed(str),
+    ParseFailed(str),
+    IoFailed(str),
+}
+
+/// Validated 9-digit Maritime Mobile Service Identity with MID flag lookup.
+pub record Mmsi {
+    raw: i64,
+    mid_code: i64,
+    flag_country: str,
+}
+
+/// Validated WGS-84 latitude in decimal degrees `[-90.0, 90.0]`.
+pub record GeoLat {
+    deg: f64,
+}
+
+/// Validated WGS-84 longitude in decimal degrees `[-180.0, 180.0]`.
+pub record GeoLon {
+    deg: f64,
+}
+
+/// Validated surface speed over ground in knots `[0.0, 102.2]`.
+pub record Knots {
+    value: f64,
+}
+
+/// Checksum-verified NMEA-0183 `!AIVDM` / `!AIVDO` frame envelope.
+pub record CheckedNmeaFrame {
+    raw: str,
+    channel: str,
+    payload: str,
+    fill_bits: i64,
+    checksum_hex: str,
+}
+
+/// Validated AIS vessel position report decoded from NMEA or corridor waypoints.
+pub record VesselContact {
+    label: str,
+    mmsi: Mmsi,
+    msg_type: i64,
+    lat: GeoLat,
+    lon: GeoLon,
+    sog: Knots,
+    cog_deg: f64,
+    heading_deg: i64,
+    nav_status: NavStatus,
+}
+
+/// Real live marine wave and atmospheric surface observations for `(lat, lon)`.
+pub record MarineWeather {
+    lat: f64,
+    lon: f64,
+    wave_height_m: f64,
+    wave_dir_deg: f64,
+    wave_period_s: f64,
+    wind_knots: f64,
+    gust_knots: f64,
+    wind_dir_deg: f64,
+    pressure_hpa: f64,
+    current_knots: f64 = 0.0,
+    sea_temp_c: f64 = 0.0,
+    observed_iso: str = "",
+    live_ok: bool,
+    note: str,
+}
+
+/// Relative encounter geometry and Closest Point of Approach (`CPA` / `TCPA`).
+pub record EncounterMetrics {
+    own_lat: f64,
+    own_lon: f64,
+    target_label: str,
+    target_mmsi: i64,
+    range_nm: f64,
+    bearing_deg: f64,
+    cpa_nm: f64,
+    tcpa_min: f64,
+}
+
+/// Output of `std.ais` Active Inference, World-Model Autopilot, Safety Shield & Governor.
+pub record AisPilotVerdict {
+    regime: SeaRegime,
+    proposed_action: HelmAction,
+    approved_action: HelmAction,
+    overridden: bool,
+    safety_rule: str,
+    active_inf_conf: f64,
+    wm_predicted_wave_m: f64,
+    wm_predicted_cpa_nm: f64,
+    homeostat_health: f64,
+    governor_action: str,
+    ewc_penalty_val: f64,
+    audit_notes: str,
+}
+
+/// Complete telemetry + `std.ais` decision evaluation for one maritime waypoint or vessel.
+pub record SentinelDecision {
+    contact: VesselContact,
+    encounter: EncounterMetrics,
+    weather: MarineWeather,
+    verdict: AisPilotVerdict,
+    risk_score: i64,
+}
+
+/// Fleet-level sentinel summary across evaluated waypoints or contacts.
+pub record FleetSummary {
+    corridor: str,
+    corridor_kind: CorridorKind,
+    waypoint_count: i64,
+    override_count: i64,
+    min_cpa_nm: f64,
+    max_wave_m: f64,
+    max_gust_kn: f64,
+    avg_health: f64,
+    pomdp_saved_path: str,
+    observed_at_iso: str,
+    feed_source: str = "offline-tss-sim",
+    feed_ok: bool = true,
+}
+
+def lookup_european_mid(mid: i64) -> str {
+    if mid == 230 {
+        return "Finland"
+    }
+    if mid == 276 {
+        return "Estonia"
+    }
+    if mid == 275 {
+        return "Latvia"
+    }
+    if mid == 277 {
+        return "Lithuania"
+    }
+    if mid >= 257 && mid <= 259 {
+        return "Norway"
+    }
+    if mid >= 265 && mid <= 266 {
+        return "Sweden"
+    }
+    if mid >= 211 && mid <= 218 {
+        return "Germany"
+    }
+    if mid >= 219 && mid <= 220 {
+        return "Denmark"
+    }
+    if mid >= 232 && mid <= 235 {
+        return "United Kingdom"
+    }
+    if mid >= 244 && mid <= 246 {
+        return "Netherlands"
+    }
+    if mid >= 226 && mid <= 228 {
+        return "France"
+    }
+    if mid == 261 {
+        return "Poland"
+    }
+    if mid == 273 {
+        return "Russia"
+    }
+    return ""
+}
+
+/// Map ITU Maritime Identification Digits (3 digits) to flag state.
+pub def lookup_mid_country(mid: i64) -> str {
+    val eu = lookup_european_mid(mid)
+    if len(eu) > 0 {
+        return eu
+    }
+    if mid == 205 {
+        return "Belgium"
+    }
+    if mid >= 209 && mid <= 210 {
+        return "Cyprus"
+    }
+    if mid == 215 || mid == 229 || mid == 248 || mid == 249 || mid == 256 {
+        return "Malta"
+    }
+    if mid >= 304 && mid <= 305 {
+        return "Antigua & Barbuda"
+    }
+    if mid >= 308 && mid <= 311 {
+        return "Bahamas"
+    }
+    if mid >= 351 && mid <= 357 {
+        return "Panama"
+    }
+    if mid >= 366 && mid <= 369 {
+        return "United States"
+    }
+    if mid == 477 {
+        return "Hong Kong"
+    }
+    if mid == 538 {
+        return "Marshall Islands"
+    }
+    if mid == 636 || mid == 637 {
+        return "Liberia"
+    }
+    return f"MID-{mid}"
+}
+
+/// Smart constructor validating 9-digit MMSI range and MID prefix.
+pub def parse_mmsi(raw: i64) -> result<Mmsi, AisError> {
+    if raw < 100000000 || raw > 999999999 {
+        return err(AisError.ValidationFailed(f"MMSI must be 9 digits: {raw}"))
+    }
+    val mid = raw / 1000000
+    if mid < 200 || mid > 775 {
+        return err(AisError.ValidationFailed(f"invalid maritime MID prefix: {mid}"))
+    }
+    return ok(Mmsi { raw: raw, mid_code: mid, flag_country: lookup_mid_country(mid) })
+}
+
+/// Smart constructor validating WGS-84 latitude `[-90.0, 90.0]`.
+pub def parse_geo_lat(v: f64) -> result<GeoLat, AisError> {
+    if v < -90.0 || v > 90.0 {
+        return err(AisError.ValidationFailed(f"latitude out of bounds: {v}"))
+    }
+    return ok(GeoLat { deg: v })
+}
+
+/// Smart constructor validating WGS-84 longitude `[-180.0, 180.0]`.
+pub def parse_geo_lon(v: f64) -> result<GeoLon, AisError> {
+    if v < -180.0 || v > 180.0 {
+        return err(AisError.ValidationFailed(f"longitude out of bounds: {v}"))
+    }
+    return ok(GeoLon { deg: v })
+}
+
+/// Smart constructor validating vessel SOG in knots `[0.0, 102.2]`.
+pub def parse_knots(v: f64) -> result<Knots, AisError> {
+    if v < 0.0 || v > 102.2 {
+        return err(AisError.ValidationFailed(f"speed over ground out of bounds: {v}"))
+    }
+    return ok(Knots { value: v })
+}
+
+/// Convert raw ITU-R M.1371 navigation status integer `0..15` to `NavStatus`.
+pub def nav_status_from_code(code: i64) -> NavStatus {
+    return when code {
+        0 => NavStatus.UnderWayEngine,
+        1 => NavStatus.AtAnchor,
+        2 => NavStatus.NotUnderCommand,
+        3 => NavStatus.RestrictedManeuver,
+        4 => NavStatus.ConstrainedDraught,
+        5 => NavStatus.Moored,
+        6 => NavStatus.Aground,
+        7 => NavStatus.Fishing,
+        8 => NavStatus.UnderWaySailing,
+        _ => NavStatus.Reserved(code),
+    }
+}
+
+/// Convert `NavStatus` back into ITU-R M.1371 integer code.
+pub def nav_status_code(st: NavStatus) -> i64 {
+    return when st {
+        NavStatus.UnderWayEngine => 0,
+        NavStatus.AtAnchor => 1,
+        NavStatus.NotUnderCommand => 2,
+        NavStatus.RestrictedManeuver => 3,
+        NavStatus.ConstrainedDraught => 4,
+        NavStatus.Moored => 5,
+        NavStatus.Aground => 6,
+        NavStatus.Fishing => 7,
+        NavStatus.UnderWaySailing => 8,
+        NavStatus.Reserved(code) => code,
+    }
+}
+
+/// Human-readable label for `NavStatus`.
+pub def nav_status_label(st: NavStatus) -> str effect alloc {
+    return when st {
+        NavStatus.UnderWayEngine => "Under way using engine",
+        NavStatus.AtAnchor => "At anchor",
+        NavStatus.NotUnderCommand => "Not under command",
+        NavStatus.RestrictedManeuver => "Restricted maneuverability",
+        NavStatus.ConstrainedDraught => "Constrained by draught",
+        NavStatus.Moored => "Moored",
+        NavStatus.Aground => "Aground",
+        NavStatus.Fishing => "Engaged in fishing",
+        NavStatus.UnderWaySailing => "Under way sailing",
+        NavStatus.Reserved(c) => f"Status({c})",
+    }
+}
+
+/// Convert discrete index `0..2` to strongly-typed `HelmAction`.
+pub def helm_action_from_index(idx: i64) -> HelmAction {
+    if idx == 1 {
+        return HelmAction.ReduceSpeedWeathervane
+    }
+    if idx == 2 {
+        return HelmAction.AlterCourseSeekShelter
+    }
+    return HelmAction.MaintainCourse
+}
+
+/// Human-readable label for `HelmAction`.
+pub def helm_action_label(act: HelmAction) -> str {
+    return when act {
+        HelmAction.MaintainCourse => "MAINTAIN_COURSE",
+        HelmAction.ReduceSpeedWeathervane => "REDUCE_SPEED_WEATHERVANE",
+        HelmAction.AlterCourseSeekShelter => "ALTER_COURSE_SHELTER",
+    }
+}
+
+/// Human-readable label for `SeaRegime`.
+pub def sea_regime_label(reg: SeaRegime) -> str {
+    return when reg {
+        SeaRegime.CalmPassage => "CALM_PASSAGE",
+        SeaRegime.SwellBuild => "SWELL_BUILD",
+        SeaRegime.SquallTraffic => "SQUALL_TRAFFIC",
+        SeaRegime.StormHazard => "STORM_HAZARD",
+    }
+}
+
+/// Exhaustive diagnostic message extraction from `AisError`.
+pub def ais_error_message(e: AisError) -> str {
+    return when e {
+        AisError.NmeaChecksumFailed(msg) => concat("NMEA checksum mismatch: ", msg),
+        AisError.ValidationFailed(msg) => concat("validation error: ", msg),
+        AisError.NetworkFailed(msg) => concat("network error: ", msg),
+        AisError.ParseFailed(msg) => concat("parse error: ", msg),
+        AisError.IoFailed(msg) => concat("io error: ", msg),
+    }
+}
+
+/// Parse non-negative float cleanly from decimal string into `option<f64>`.
+pub def safe_parse_float(raw: str) -> option<f64> {
+    val s = trim(raw)
+    if len(s) == 0 {
+        return none()
+    }
+    return parse_f64(s)
+}
+
+def approx_atan_unit(z: f64) -> f64 {
+    val z2 = z * z
+    return z
+        * (
+            0.99997726
+                + z2
+                    * (
+                        -0.33262347
+                            + z2
+                                * (
+                                    0.19354346
+                                        + z2 * (-0.11643287 + z2 * (0.05265332 - 0.01172120 * z2))
+                                )
+                    )
+        )
+}
+
+def geo_atan2(y: f64, x: f64) -> f64 {
+    val half_pi = 1.5707963267948966
+    val pi = 3.141592653589793
+    val ay = if y < 0.0 { -y } else { y }
+    val ax = if x < 0.0 { -x } else { x }
+    if ax < 1.0e-12 && ay < 1.0e-12 {
+        return 0.0
+    }
+    val base = if ax >= ay {
+        approx_atan_unit(ay / ax)
+    } else {
+        half_pi - approx_atan_unit(ax / ay)
+    }
+    val q = if x < 0.0 { pi - base } else { base }
+    return if y < 0.0 { -q } else { q }
+}
+
+def geo_deg_to_rad(deg: f64) -> f64 {
+    return deg * 0.017453292519943295
+}
+
+def vel_xy_nm_per_min(sog_kn: f64, cog_deg: f64) -> (f64, f64) {
+    val rad = geo_deg_to_rad(cog_deg)
+    val speed_nm_min = sog_kn / 60.0
+    return (speed_nm_min * sin(rad), speed_nm_min * cos(rad))
+}
+
+/// Compute geodesic range, initial bearing, CPA (nautical miles), and TCPA (minutes).
+pub def compute_encounter_cpa(own: VesselContact, target: VesselContact) -> EncounterMetrics {
+    val mid_lat_rad = geo_deg_to_rad((own.lat.deg + target.lat.deg) * 0.5)
+    val dx = (target.lon.deg - own.lon.deg) * 60.0 * cos(mid_lat_rad)
+    val dy = (target.lat.deg - own.lat.deg) * 60.0
+    val range_nm = sqrt(dx * dx + dy * dy)
+    val raw_brg = geo_atan2(dx, dy) * 180.0 / 3.141592653589793
+    val brg = if raw_brg < 0.0 { raw_brg + 360.0 } else { raw_brg }
+    val v_own = vel_xy_nm_per_min(own.sog.value, own.cog_deg)
+    val v_tgt = vel_xy_nm_per_min(target.sog.value, target.cog_deg)
+    val rvx = v_tgt.0 - v_own.0
+    val rvy = v_tgt.1 - v_own.1
+    val rv2 = rvx * rvx + rvy * rvy
+    val tcpa_raw = if rv2 > 1.0e-9 { -(dx * rvx + dy * rvy) / rv2 } else { 0.0 }
+    val tcpa = if tcpa_raw < 0.0 {
+        0.0
+    } else if tcpa_raw > 120.0 {
+        120.0
+    } else {
+        tcpa_raw
+    }
+    val cpa_x = dx + rvx * tcpa
+    val cpa_y = dy + rvy * tcpa
+    val cpa = sqrt(cpa_x * cpa_x + cpa_y * cpa_y)
+    return EncounterMetrics {
+        own_lat: own.lat.deg,
+        own_lon: own.lon.deg,
+        target_label: target.label,
+        target_mmsi: target.mmsi.raw,
+        range_nm: range_nm,
+        bearing_deg: brg,
+        cpa_nm: cpa,
+        tcpa_min: tcpa,
+    }
+}
+
+def test_validated_newtypes_and_cpa() -> i64 effect alloc, throw {
+    val fin = parse_mmsi(230111190)
+    assert(is_ok(fin))
+    assert(unwrap(fin).flag_country == "Finland")
+    assert(is_err(parse_mmsi(12345)))
+    assert(is_err(parse_geo_lat(95.0)))
+    assert(is_err(parse_geo_lon(-185.0)))
+    assert(is_err(parse_knots(-1.0)))
+    val own = VesselContact {
+        label: "SENTINEL",
+        mmsi: unwrap(parse_mmsi(230001001)),
+        msg_type: 1,
+        lat: unwrap(parse_geo_lat(60.15)),
+        lon: unwrap(parse_geo_lon(24.95)),
+        sog: unwrap(parse_knots(12.0)),
+        cog_deg: 90.0,
+        heading_deg: 90,
+        nav_status: NavStatus.UnderWayEngine,
+    }
+    val tgt = VesselContact {
+        label: "CROSSING",
+        mmsi: unwrap(parse_mmsi(257002002)),
+        msg_type: 1,
+        lat: unwrap(parse_geo_lat(60.15)),
+        lon: unwrap(parse_geo_lon(25.05)),
+        sog: unwrap(parse_knots(12.0)),
+        cog_deg: 270.0,
+        heading_deg: 270,
+        nav_status: NavStatus.UnderWayEngine,
+    }
+    val enc = compute_encounter_cpa(own, tgt)
+    assert(enc.range_nm > 2.5 && enc.cpa_nm < 0.01 && enc.tcpa_min > 5.0)
+    return 0
+}

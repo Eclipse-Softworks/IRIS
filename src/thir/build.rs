@@ -151,6 +151,7 @@ impl<'h, 'a, 'r> Builder<'h, 'a, 'r> {
     fn expr_block(&self, expr: ThirExpr) -> ThirBlock {
         let span = expr.span;
         ThirBlock {
+            scope_id: 0,
             stmts: Vec::new(),
             tail: Some(Box::new(expr)),
             span,
@@ -265,6 +266,7 @@ impl<'h, 'a, 'r> Builder<'h, 'a, 'r> {
         let tail = b.tail.as_ref().map(|e| Box::new(self.expr(e)));
         self.pop_scope();
         ThirBlock {
+            scope_id: b.scope_id,
             stmts,
             tail,
             span: b.span,
@@ -279,6 +281,7 @@ impl<'h, 'a, 'r> Builder<'h, 'a, 'r> {
         }
         self.pop_scope();
         ThirBlock {
+            scope_id: 0,
             stmts: out,
             tail: None,
             span,

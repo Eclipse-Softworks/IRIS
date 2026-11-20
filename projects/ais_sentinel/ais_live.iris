@@ -1,0 +1,750 @@
+bring std.http
+bring std.json
+bring std.math
+bring domain
+
+/// Mutable in-memory cache mapping live MMSI numbers to resolved vessel names.
+pub record VesselMetaCache {
+    mmsis: list<i64>,
+    names: list<str>,
+}
+
+/// Result of acquiring a real-time AIS corridor batch plus live coastal metadata.
+pub record LiveCorridorFetch {
+    corridor_name: str,
+    own_ship: VesselContact,
+    targets: list<VesselContact>,
+    observed_iso: str,
+    feed_source: str,
+    feed_ok: bool,
+    status_note: str,
+    cache: VesselMetaCache,
+}
+
+/// Construct an empty MMSI vessel metadata cache.
+pub def vessel_cache_new() -> VesselMetaCache effect alloc {
+    val ms: list<i64> = list()
+    val ns: list<str> = list()
+    return VesselMetaCache { mmsis: ms, names: ns }
+}
+
+def cache_lookup_name(cache: VesselMetaCache, mmsi: i64) -> option<str> effect alloc {
+    for i in 0..list_len(cache.mmsis) {
+        if list_get(cache.mmsis, i) == mmsi {
+            return some(list_get(cache.names, i))
+        }
+    }
+    return none()
+}
+
+def cache_store_name(cache: VesselMetaCache, mmsi: i64, name: str) -> VesselMetaCache effect alloc {
+    val _1 = list_push(cache.mmsis, mmsi)
+    val _2 = list_push(cache.names, name)
+    return cache
+}
+
+def make_station(
+    label: str,
+    mmsi_raw: i64,
+    coords: (f64, f64),
+    sog_kn: f64,
+    cog: f64,
+) -> VesselContact {
+    val mid = mmsi_raw / 1000000
+    return VesselContact {
+        label: label,
+        mmsi: Mmsi { raw: mmsi_raw, mid_code: mid, flag_country: lookup_mid_country(mid) },
+        msg_type: 1,
+        lat: GeoLat { deg: coords.0 },
+        lon: GeoLon { deg: coords.1 },
+        sog: Knots { value: sog_kn },
+        cog_deg: cog,
+        heading_deg: cog to i64,
+        nav_status: NavStatus.UnderWayEngine,
+    }
+}
+
+pub def sector_station_contact(
+    kind: CorridorKind,
+    c_lat: f64,
+    c_lon: f64,
+    label: str,
+) -> VesselContact {
+    val safe_lat = if c_lat >= -89.0 && c_lat <= 89.0 { c_lat } else { 60.05 }
+    val safe_lon = if c_lon >= -179.0 && c_lon <= 179.0 { c_lon } else { 24.95 }
+    val custom_lbl = if len(label) > 0 { label } else { "SENTINEL_CUSTOM" }
+    return when kind {
+        CorridorKind.GulfOfFinland => make_station(
+            "SENTINEL_GOF",
+            230001001,
+            (60.05, 24.95),
+            12.0,
+            75.0,
+        ),
+        CorridorKind.AlandSea => make_station(
+            "SENTINEL_ALAND",
+            230002002,
+            (59.95, 19.50),
+            13.0,
+            185.0,
+        ),
+        CorridorKind.Skagerrak => make_station(
+            "SENTINEL_SKAG",
+            257003003,
+            (58.65, 10.20),
+            11.5,
+            225.0,
+        ),
+        CorridorKind.DoverStrait => make_station(
+            "SENTINEL_DOVER",
+            235004004,
+            (51.05, 1.48),
+            10.0,
+            42.0,
+        ),
+        CorridorKind.CustomCoord => make_station(
+            custom_lbl,
+            230009009,
+            (safe_lat, safe_lon),
+            11.0,
+            90.0,
+        ),
+    }
+}
+
+def parse_f64_or(raw: str, fallback: f64) -> f64 effect alloc {
+    return when safe_parse_float(raw) {
+        some(v) => v,
+        none => fallback,
+    }
+}
+
+def parse_i64_or(raw: str, fallback: i64) -> i64 effect alloc {
+    val s = trim(raw)
+    if len(s) == 0 || s == "null" {
+        return fallback
+    }
+    val maybe = parse_i64(s)
+    if is_some(maybe) {
+        return unwrap(maybe)
+    }
+    return when safe_parse_float(s) {
+        some(v) => v to i64,
+        none => fallback,
+    }
+}
+
+def clamp_sog(v: f64) -> f64 {
+    if v < 0.0 || v > 102.2 {
+        return 0.0
+    }
+    return v
+}
+
+def clamp_cog(v: f64) -> f64 {
+    if v < 0.0 || v >= 360.0 {
+        return 0.0
+    }
+    return v
+}
+
+def clamp_hdg(hdg: i64, cog: f64) -> i64 {
+    if hdg < 0 || hdg >= 360 {
+        return (clamp_cog(cog)) to i64
+    }
+    return hdg
+}
+
+def contact_sort_score(own: VesselContact, target: VesselContact) -> f64 {
+    val enc = compute_encounter_cpa(own, target)
+    val moving_bonus = if target.sog.value >= 0.4 { 0.0 } else { 50.0 }
+    return enc.range_nm + moving_bonus
+}
+
+def select_top_ranked_contacts(
+    own: VesselContact,
+    candidates: list<VesselContact>,
+    max_targets: i64,
+) -> list<VesselContact> effect alloc {
+    val scores: list<f64> = list()
+    for i in 0..list_len(candidates) {
+        val _ = list_push(scores, contact_sort_score(own, list_get(candidates, i)))
+    }
+    val used: list<i64> = list()
+    for _u in 0..list_len(candidates) {
+        val _ = list_push(used, 0)
+    }
+    val out: list<VesselContact> = list()
+    val limit = if list_len(candidates) < max_targets { list_len(candidates) } else { max_targets }
+    for _k in 0..limit {
+        var best_idx = -1
+        var best_sc = 1.0e9
+        for j in 0..list_len(candidates) {
+            if list_get(used, j) == 0 && list_get(scores, j) < best_sc {
+                best_sc = list_get(scores, j)
+                best_idx = j
+            }
+        }
+        if best_idx >= 0 {
+            val _s = list_set(used, best_idx, 1)
+            val _p = list_push(out, list_get(candidates, best_idx))
+        }
+    }
+    return out
+}
+
+def build_validated_contact(
+    label: str,
+    mmsi_raw: i64,
+    coords: (f64, f64),
+    kinematics: (f64, f64, i64),
+    nav_code: i64,
+) -> option<VesselContact> effect alloc {
+    val mmsi = when parse_mmsi(mmsi_raw) {
+        ok(m) => m,
+        err(_) => {
+            return none()
+        },
+    }
+    val lat = when parse_geo_lat(coords.0) {
+        ok(g) => g,
+        err(_) => {
+            return none()
+        },
+    }
+    val lon = when parse_geo_lon(coords.1) {
+        ok(g) => g,
+        err(_) => {
+            return none()
+        },
+    }
+    val sog = when parse_knots(clamp_sog(kinematics.0)) {
+        ok(k) => k,
+        err(_) => {
+            return none()
+        },
+    }
+    val cog = clamp_cog(kinematics.1)
+    return some(
+        VesselContact {
+            label: label,
+            mmsi: mmsi,
+            msg_type: 1,
+            lat: lat,
+            lon: lon,
+            sog: sog,
+            cog_deg: cog,
+            heading_deg: clamp_hdg(kinematics.2, cog),
+            nav_status: nav_status_from_code(nav_code),
+        },
+    )
+}
+
+def decode_digitraffic_feature(feat_json: str) -> option<VesselContact> effect alloc {
+    var mmsi_raw = parse_i64_or(json_query(feat_json, "properties.mmsi"), -1)
+    if mmsi_raw < 200000000 {
+        mmsi_raw = parse_i64_or(json_query(feat_json, "mmsi"), -1)
+    }
+    if mmsi_raw < 200000000 {
+        return none()
+    }
+    val lon_opt = safe_parse_float(json_query(feat_json, "geometry.coordinates.0"))
+    val lat_opt = safe_parse_float(json_query(feat_json, "geometry.coordinates.1"))
+    if is_none(lon_opt) || is_none(lat_opt) {
+        return none()
+    }
+    val sog_v = parse_f64_or(json_query(feat_json, "properties.sog"), 0.0)
+    val cog_v = parse_f64_or(json_query(feat_json, "properties.cog"), 0.0)
+    val hdg_v = parse_i64_or(json_query(feat_json, "properties.heading"), 511)
+    val nav_v = parse_i64_or(json_query(feat_json, "properties.navStat"), 0)
+    return build_validated_contact(
+        f"MV-{mmsi_raw}",
+        mmsi_raw,
+        (unwrap(lat_opt), unwrap(lon_opt)),
+        (sog_v, cog_v, hdg_v),
+        nav_v,
+    )
+}
+
+def extract_digitraffic_obs_iso(json_body: str) -> str effect alloc {
+    val parts = split(json_body, "\"features\"")
+    val header_json = if list_len(parts) > 1 {
+        concat(list_get(parts, 0), "\"features\":[]}")
+    } else {
+        json_body
+    }
+    val obs_raw = trim(json_query(header_json, "dataUpdatedTime"))
+    return if len(obs_raw) > 0 { obs_raw } else { "live-utc" }
+}
+
+def clean_digitraffic_feature_chunk(chunk: str) -> str effect alloc {
+    val braces = split(chunk, "}")
+    if list_len(braces) < 2 {
+        return ""
+    }
+    val geom = list_get(braces, 0)
+    val props = list_get(braces, 1)
+    return concat("{\"type\":\"Feature\",", concat(geom, concat("}", concat(props, "}}"))))
+}
+
+/// Parse Fintraffic Digitraffic `/api/ais/v1/locations` GeoJSON and rank active contacts.
+pub def parse_digitraffic_locations_json(
+    json_body: str,
+    own_ship: VesselContact,
+    max_targets: i64,
+) -> (str, list<VesselContact>) effect alloc {
+    val obs_iso = extract_digitraffic_obs_iso(json_body)
+    var chunks = split(json_body, "\"type\" : \"Feature\",")
+    if list_len(chunks) <= 1 {
+        chunks = split(json_body, "\"type\":\"Feature\",")
+    }
+    val all_candidates: list<VesselContact> = list()
+    val max_scan = if list_len(chunks) < 64 { list_len(chunks) } else { 64 }
+    for i in 1..max_scan {
+        val feat = clean_digitraffic_feature_chunk(list_get(chunks, i))
+        val _added = if len(feat) > 0 {
+            when decode_digitraffic_feature(feat) {
+                some(c) => {
+                    val _p = list_push(all_candidates, c)
+                    0
+                },
+                none => 0,
+            }
+        } else {
+            0
+        }
+    }
+    return (obs_iso, select_top_ranked_contacts(own_ship, all_candidates, max_targets))
+}
+
+def sanitize_vessel_label(raw: str, mmsi: i64) -> str effect alloc {
+    val clean = trim(raw)
+    if len(clean) == 0 || clean == "null" {
+        return f"MV-{mmsi}"
+    }
+    return clean
+}
+
+def lookup_digitraffic_vessel_meta(mmsi: i64) -> str effect net, alloc {
+    val url = f"https://meri.digitraffic.fi/api/ais/v1/vessels/{mmsi}"
+    val hdr = "Digitraffic-User: IRIS-AIS-Sentinel/1.0\r\nAccept-Encoding: gzip\r\n"
+    val resp = when http_send(
+        HttpRequest { method: "GET", url: url, headers: hdr, body: "", timeout_ms: 2000 },
+    ) {
+        ok(r) => r,
+        err(_) => {
+            return f"MV-{mmsi}"
+        },
+    }
+    if resp.status != 200 || len(resp.body) == 0 {
+        return f"MV-{mmsi}"
+    }
+    return sanitize_vessel_label(json_query(resp.body, "name"), mmsi)
+}
+
+def collect_uncached_mmsis(
+    targets: list<VesselContact>,
+    cache: VesselMetaCache,
+) -> list<i64> effect alloc {
+    val missing: list<i64> = list()
+    for i in 0..list_len(targets) {
+        val mmsi = list_get(targets, i).mmsi.raw
+        if is_none(cache_lookup_name(cache, mmsi)) {
+            var seen = false
+            for j in 0..list_len(missing) {
+                if list_get(missing, j) == mmsi {
+                    seen = true
+                }
+            }
+            if !seen && list_len(missing) < 12 {
+                val _p = list_push(missing, mmsi)
+            }
+        }
+    }
+    return missing
+}
+
+def enrich_digitraffic_names(
+    targets: list<VesselContact>,
+    cache: VesselMetaCache,
+) -> (list<VesselContact>, VesselMetaCache) effect net, alloc, thread {
+    val missing = collect_uncached_mmsis(targets, cache)
+    var next_cache = cache
+    val pending = list_len(missing)
+    if pending > 0 {
+        val res_ch: chan<(i64, str)> = channel(16)
+        for i in 0..pending {
+            val target_mmsi = list_get(missing, i)
+            spawn {
+                send(res_ch, (target_mmsi, lookup_digitraffic_vessel_meta(target_mmsi)))
+            }
+        }
+        for _k in 0..pending {
+            val pair = recv(res_ch)
+            next_cache = cache_store_name(next_cache, pair.0, pair.1)
+        }
+    }
+    val out: list<VesselContact> = list()
+    for i in 0..list_len(targets) {
+        val c = list_get(targets, i)
+        val resolved = when cache_lookup_name(next_cache, c.mmsi.raw) {
+            some(cached) => cached,
+            none => c.label,
+        }
+        val _p = list_push(
+            out,
+            VesselContact {
+                label: resolved,
+                mmsi: c.mmsi,
+                msg_type: c.msg_type,
+                lat: c.lat,
+                lon: c.lon,
+                sog: c.sog,
+                cog_deg: c.cog_deg,
+                heading_deg: c.heading_deg,
+                nav_status: c.nav_status,
+            },
+        )
+    }
+    return (out, next_cache)
+}
+
+def clean_kyst_feature_chunk(chunk: str) -> str effect alloc {
+    var body = trim(chunk)
+    if ends_with(body, ",") {
+        body = trim(slice(body, 0, len(body) - 1))
+    }
+    if ends_with(body, "]}") {
+        body = trim(slice(body, 0, len(body) - 2))
+    } else if ends_with(body, "]") {
+        body = trim(slice(body, 0, len(body) - 1))
+    }
+    if ends_with(body, "}") == false {
+        return ""
+    }
+    return concat("{\"type\": \"Feature\",", body)
+}
+
+def kyst_chunk_in_skagerrak_hint(chunk: str) -> bool {
+    return contains(chunk, "57.") || contains(chunk, "58.") || contains(chunk, "59.")
+}
+
+def decode_kyst_feature(feat_json: str) -> option<(str, VesselContact)> effect alloc {
+    val mmsi_raw = parse_i64_or(json_query(feat_json, "properties.mmsi"), -1)
+    if mmsi_raw < 200000000 {
+        return none()
+    }
+    var lon_s = json_query(feat_json, "geometry.coordinates.1.0")
+    var lat_s = json_query(feat_json, "geometry.coordinates.1.1")
+    if len(lon_s) == 0 || len(lat_s) == 0 {
+        lon_s = json_query(feat_json, "geometry.coordinates.0.0")
+        lat_s = json_query(feat_json, "geometry.coordinates.0.1")
+    }
+    val lon_opt = safe_parse_float(lon_s)
+    val lat_opt = safe_parse_float(lat_s)
+    if is_none(lon_opt) || is_none(lat_opt) {
+        return none()
+    }
+    val lon_v = unwrap(lon_opt)
+    val lat_v = unwrap(lat_opt)
+    if lat_v < 56.8 || lat_v > 59.8 || lon_v < 7.5 || lon_v > 12.2 {
+        return none()
+    }
+    val name = sanitize_vessel_label(json_query(feat_json, "properties.ship_name"), mmsi_raw)
+    val utc = trim(json_query(feat_json, "properties.date_time_utc"))
+    val contact_opt = build_validated_contact(
+        name,
+        mmsi_raw,
+        (lat_v, lon_v),
+        (
+            parse_f64_or(json_query(feat_json, "properties.speed"), 0.0),
+            parse_f64_or(json_query(feat_json, "properties.cog"), 0.0),
+            parse_i64_or(json_query(feat_json, "properties.true_heading"), 511),
+        ),
+        parse_i64_or(json_query(feat_json, "properties.status"), 0),
+    )
+    return when contact_opt {
+        some(c) => some((utc, c)),
+        none => none(),
+    }
+}
+
+/// Parse Kystdatahuset `/api/ais/realtime/geojson` and select live Skagerrak contacts.
+pub def parse_kystdatahuset_skagerrak_json(
+    json_body: str,
+    own_ship: VesselContact,
+    max_targets: i64,
+) -> (str, list<VesselContact>) effect alloc {
+    var chunks = split(json_body, "{\"type\": \"Feature\",")
+    if list_len(chunks) <= 1 {
+        chunks = split(json_body, "{\"type\":\"Feature\",")
+    }
+    val candidates: list<VesselContact> = list()
+    var latest_iso = ""
+    for i in 1..list_len(chunks) {
+        val raw_part = list_get(chunks, i)
+        if kyst_chunk_in_skagerrak_hint(raw_part) {
+            val feat = clean_kyst_feature_chunk(raw_part)
+            val _step = if len(feat) > 0 {
+                when decode_kyst_feature(feat) {
+                    some(pair) => {
+                        if len(pair.0) > 0 && (len(latest_iso) == 0 || pair.0 > latest_iso) {
+                            latest_iso = pair.0
+                        }
+                        val _p = list_push(candidates, pair.1)
+                        0
+                    },
+                    none => 0,
+                }
+            } else {
+                0
+            }
+        }
+    }
+    val obs = if len(latest_iso) > 0 { latest_iso } else { "live-utc" }
+    return (obs, select_top_ranked_contacts(own_ship, candidates, max_targets))
+}
+
+def live_fetch_error(
+    name: str,
+    own: VesselContact,
+    source: str,
+    note: str,
+    cache: VesselMetaCache,
+) -> LiveCorridorFetch effect alloc {
+    val empty: list<VesselContact> = list()
+    return LiveCorridorFetch {
+        corridor_name: name,
+        own_ship: own,
+        targets: empty,
+        observed_iso: "live-error",
+        feed_source: source,
+        feed_ok: false,
+        status_note: note,
+        cache: cache,
+    }
+}
+
+def fetch_digitraffic_live_corridor(
+    name: str,
+    own: VesselContact,
+    radius_km: i64,
+    cache: VesselMetaCache,
+) -> LiveCorridorFetch effect net, alloc, thread {
+    val url = f"https://meri.digitraffic.fi/api/ais/v1/locations?latitude={to_str(own.lat.deg)}&longitude={to_str(own.lon.deg)}&radius={radius_km}"
+    val hdr = "Digitraffic-User: IRIS-AIS-Sentinel/1.0\r\nAccept-Encoding: gzip\r\n"
+    val resp = http_send(
+        HttpRequest { method: "GET", url: url, headers: hdr, body: "", timeout_ms: 5000 },
+    )
+    return when resp {
+        ok(r) => {
+            if r.status != 200 {
+                return live_fetch_error(
+                    name,
+                    own,
+                    f"digitraffic-http-{r.status}",
+                    f"Digitraffic HTTP {r.status}",
+                    cache,
+                )
+            }
+            val parsed = parse_digitraffic_locations_json(r.body, own, 8)
+            val named = enrich_digitraffic_names(parsed.1, cache)
+            val cnt = list_len(named.0)
+            LiveCorridorFetch {
+                corridor_name: name,
+                own_ship: own,
+                targets: named.0,
+                observed_iso: parsed.0,
+                feed_source: "digitraffic-live-ais",
+                feed_ok: true,
+                status_note: f"{cnt} live AIS tracks (Fintraffic Digitraffic)",
+                cache: named.1,
+            }
+        },
+        err(msg) => live_fetch_error(name, own, "digitraffic-offline-err", msg, cache),
+    }
+}
+
+def fetch_kystdatahuset_type(
+    own: VesselContact,
+    ship_type: i64,
+    cache: VesselMetaCache,
+) -> LiveCorridorFetch effect net, alloc {
+    val url = f"https://kystdatahuset.kystverket.no/ws/api/ais/realtime/geojson?aisShipType={ship_type}"
+    val resp = http_send(
+        HttpRequest {
+            method: "GET",
+            url: url,
+            headers: "Accept-Encoding: gzip\r\nUser-Agent: IRIS-AIS-Sentinel/1.0\r\n",
+            body: "",
+            timeout_ms: 9000,
+        },
+    )
+    return when resp {
+        ok(r) => {
+            if r.status != 200 {
+                return live_fetch_error(
+                    "skagerrak",
+                    own,
+                    f"kystverket-http-{r.status}",
+                    f"Kystverket HTTP {r.status}",
+                    cache,
+                )
+            }
+            val parsed = parse_kystdatahuset_skagerrak_json(r.body, own, 8)
+            val cnt = list_len(parsed.1)
+            LiveCorridorFetch {
+                corridor_name: "skagerrak",
+                own_ship: own,
+                targets: parsed.1,
+                observed_iso: parsed.0,
+                feed_source: "kystverket-live-ais",
+                feed_ok: true,
+                status_note: f"{cnt} live Skagerrak AIS tracks (Kystverket)",
+                cache: cache,
+            }
+        },
+        err(msg) => live_fetch_error("skagerrak", own, "kystverket-offline-err", msg, cache),
+    }
+}
+
+def fetch_kystdatahuset_skagerrak(
+    own: VesselContact,
+    cache: VesselMetaCache,
+) -> LiveCorridorFetch effect net, alloc {
+    val tankers = fetch_kystdatahuset_type(own, 80, cache)
+    if !tankers.feed_ok || list_len(tankers.targets) >= 4 {
+        return tankers
+    }
+    val ferries = fetch_kystdatahuset_type(own, 60, cache)
+    return if ferries.feed_ok && list_len(ferries.targets) > list_len(tankers.targets) {
+        ferries
+    } else {
+        tankers
+    }
+}
+
+/// Query UK Environment Agency real-time Dover Harbour tide level station `E70124`.
+pub def parse_uk_ea_tide_json(body: str) -> (str, str) effect alloc {
+    val dt = trim(json_query(body, "items.0.dateTime"))
+    val val_s = trim(json_query(body, "items.0.value"))
+    val note = if len(val_s) > 0 {
+        f"Dover Harbour tide={val_s}m @ {dt} (no keyless AIS REST)"
+    } else {
+        "Live Open-Meteo marine/wind (no keyless AIS REST)"
+    }
+    return (dt, note)
+}
+
+def fetch_dover_live_station(
+    own: VesselContact,
+    cache: VesselMetaCache,
+) -> LiveCorridorFetch effect net, alloc {
+    val url = "https://environment.data.gov.uk/flood-monitoring/id/stations/E70124/readings?latest"
+    val empty: list<VesselContact> = list()
+    return when http_send(
+        HttpRequest { method: "GET", url: url, headers: "", body: "", timeout_ms: 6000 },
+    ) {
+        ok(r) => {
+            if r.status != 200 {
+                return LiveCorridorFetch {
+                    corridor_name: "dover_strait",
+                    own_ship: own,
+                    targets: empty,
+                    observed_iso: "live-meteo",
+                    feed_source: "open-meteo-live",
+                    feed_ok: true,
+                    status_note: "Live Open-Meteo marine/wind (no keyless AIS feed in Dover)",
+                    cache: cache,
+                }
+            }
+            val tide = parse_uk_ea_tide_json(r.body)
+            LiveCorridorFetch {
+                corridor_name: "dover_strait",
+                own_ship: own,
+                targets: empty,
+                observed_iso: if len(tide.0) > 0 { tide.0 } else { "live-utc" },
+                feed_source: "uk-ea-tide+open-meteo",
+                feed_ok: true,
+                status_note: tide.1,
+                cache: cache,
+            }
+        },
+        err(_) => LiveCorridorFetch {
+            corridor_name: "dover_strait",
+            own_ship: own,
+            targets: empty,
+            observed_iso: "live-meteo",
+            feed_source: "open-meteo-live",
+            feed_ok: true,
+            status_note: "Live Open-Meteo marine/wind (no keyless AIS feed in Dover)",
+            cache: cache,
+        },
+    }
+}
+
+/// Fetch genuine real-time AIS vessel contacts (zero simulated ships) for `kind`.
+pub def fetch_live_ais_corridor(
+    kind: CorridorKind,
+    lat: f64,
+    lon: f64,
+    label: str,
+    cache: VesselMetaCache,
+) -> LiveCorridorFetch effect net, alloc, thread {
+    val own = sector_station_contact(kind, lat, lon, label)
+    return when kind {
+        CorridorKind.GulfOfFinland => fetch_digitraffic_live_corridor(
+            "gulf_of_finland",
+            own,
+            25,
+            cache,
+        ),
+        CorridorKind.AlandSea => fetch_digitraffic_live_corridor("aland_sea", own, 60, cache),
+        CorridorKind.Skagerrak => fetch_kystdatahuset_skagerrak(own, cache),
+        CorridorKind.DoverStrait => fetch_dover_live_station(own, cache),
+        CorridorKind.CustomCoord => {
+            if lat >= 58.0 && lat <= 66.0 && lon >= 17.0 && lon <= 30.0 {
+                return fetch_digitraffic_live_corridor("custom_baltic", own, 40, cache)
+            }
+            if lat >= 56.8 && lat <= 60.0 && lon >= 7.5 && lon <= 12.2 {
+                return fetch_kystdatahuset_skagerrak(own, cache)
+            }
+            val empty: list<VesselContact> = list()
+            LiveCorridorFetch {
+                corridor_name: "custom",
+                own_ship: own,
+                targets: empty,
+                observed_iso: "live-meteo",
+                feed_source: "open-meteo-live",
+                feed_ok: true,
+                status_note: "Live Open-Meteo sector weather (no public AIS in coords)",
+                cache: cache,
+            }
+        },
+    }
+}
+
+def test_parse_digitraffic_and_kystverket_live_json() -> i64 effect alloc, throw {
+    val own = sector_station_contact(CorridorKind.GulfOfFinland, 60.05, 24.95, "")
+    val digi_sample = "{\"type\":\"FeatureCollection\",\"dataUpdatedTime\":\"2026-11-15T16:14:55Z\",\"features\":[{\"mmsi\":276859000,\"type\":\"Feature\",\"geometry\":{\"type\":\"Point\",\"coordinates\":[24.8966,60.0652]},\"properties\":{\"mmsi\":276859000,\"sog\":22.2,\"cog\":2.8,\"navStat\":0,\"heading\":359}},{\"mmsi\":230685000,\"type\":\"Feature\",\"geometry\":{\"type\":\"Point\",\"coordinates\":[25.1491,60.0540]},\"properties\":{\"mmsi\":230685000,\"sog\":0.0,\"cog\":16.2,\"navStat\":5,\"heading\":511}}]}"
+    val d_res = parse_digitraffic_locations_json(digi_sample, own, 8)
+    assert(d_res.0 == "2026-11-15T16:14:55Z")
+    assert(list_len(d_res.1) == 2)
+    assert(list_get(d_res.1, 0).mmsi.raw == 276859000)
+    assert(list_get(d_res.1, 0).mmsi.flag_country == "Estonia")
+    assert(list_get(d_res.1, 0).sog.value > 22.0)
+
+    val skag_own = sector_station_contact(CorridorKind.Skagerrak, 58.65, 10.20, "")
+    val kyst_sample = "{\"type\": \"FeatureCollection\", \"features\": [{\"type\": \"Feature\", \"geometry\": {\"type\": \"LineString\", \"coordinates\": [[9.40635, 58.85053], [9.40636, 58.85054]]}, \"properties\": {\"cog\": 184.4, \"mmsi\": 257326400, \"speed\": 14.2, \"status\": 0, \"ship_name\": \"NORVIK\", \"true_heading\": 182, \"date_time_utc\": \"2026-11-15T16:04:22\"}}, {\"type\": \"Feature\", \"geometry\": {\"type\": \"LineString\", \"coordinates\": [[14.90, 68.79]]}, \"properties\": {\"cog\": 10.0, \"mmsi\": 257012480, \"speed\": 12.0, \"status\": 0, \"ship_name\": \"ARCTIC\", \"true_heading\": 10, \"date_time_utc\": \"2026-11-15T16:01:00\"}}]}"
+    val k_res = parse_kystdatahuset_skagerrak_json(kyst_sample, skag_own, 8)
+    assert(k_res.0 == "2026-11-15T16:04:22")
+    assert(list_len(k_res.1) == 1)
+    assert(list_get(k_res.1, 0).label == "NORVIK")
+    assert(list_get(k_res.1, 0).mmsi.flag_country == "Norway")
+
+    val tide = parse_uk_ea_tide_json(
+        "{\"items\":[{\"dateTime\":\"2026-11-15T15:30:00Z\",\"value\":7.783}]}",
+    )
+    assert(tide.0 == "2026-11-15T15:30:00Z" && contains(tide.1, "7.783m"))
+    return 0
+}

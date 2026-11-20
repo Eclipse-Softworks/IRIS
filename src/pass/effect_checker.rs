@@ -222,7 +222,11 @@ impl EffectChecker {
                     self.collect_callees_expr(v, callees);
                 }
             }
-            AstStmt::Spawn { body, .. } => {
+            AstStmt::Spawn { body, group, .. } => {
+                callees.insert("spawn".to_string());
+                if let Some(g) = group {
+                    self.collect_callees_expr(g, callees);
+                }
                 for s in body {
                     self.collect_callees_stmt(s, callees);
                 }
@@ -497,11 +501,20 @@ impl EffectChecker {
 
             self.inferred.insert(name.to_string(), inferred.clone());
 
+            // Short-name aliases exist in the call graph only so callers
+            // using unqualified names can look up `self.inferred`. Emit
+            // per-function diagnostics once against the canonical node.
+            let is_canonical = func.name.name == name;
+
             // Warn on unused declared effects (concrete only). Compared against
             // `from_callees`, not `inferred` — the latter contains the declared
             // row itself, so this warning could never fire. Strict mode only, to
             // keep default output unchanged.
-            if self.strict && !inferred_stdlib_contract && !concrete_effects.is_empty() {
+            if is_canonical
+                && self.strict
+                && !inferred_stdlib_contract
+                && !concrete_effects.is_empty()
+            {
                 let unused: Vec<String> = concrete_effects
                     .iter()
                     .filter(|e| !from_callees.effects.contains(*e))
@@ -518,7 +531,8 @@ impl EffectChecker {
             }
 
             // Strict mode: require explicit clause on effectful functions.
-            if self.strict
+            if is_canonical
+                && self.strict
                 && !inferred_stdlib_contract
                 && func.effects.is_empty()
                 && !inferred.is_pure()
@@ -538,7 +552,8 @@ impl EffectChecker {
             // while declaring only `throw`, and used to pass silently. A row
             // variable (`effect E`) is row-polymorphic and absorbs anything, so
             // it is exempt.
-            if self.strict
+            if is_canonical
+                && self.strict
                 && !inferred_stdlib_contract
                 && !func.effects.is_empty()
                 && declared.vars.is_empty()
@@ -1112,7 +1127,27 @@ impl EffectChecker {
                     self.verify_expr(caller, caller_row, v);
                 }
             }
-            AstStmt::Spawn { body, .. } => {
+            AstStmt::Spawn { body, group, .. } => {
+                if let Some(spawn_row) = self.registry.lookup("spawn") {
+                    let missing: Vec<String> = spawn_row
+                        .effects
+                        .iter()
+                        .filter(|e| !caller_row.contains(e))
+                        .cloned()
+                        .collect();
+                    if !missing.is_empty() {
+                        self.errors.push(format!(
+                            "error[E0302]: [effect check] `spawn` requires effect{} `{}` but caller `{}` has effects `{}`",
+                            if missing.len() == 1 { "" } else { "s" },
+                            missing.join(", "),
+                            caller,
+                            caller_row.display()
+                        ));
+                    }
+                }
+                if let Some(g) = group {
+                    self.verify_expr(caller, caller_row, g);
+                }
                 for s in body {
                     self.verify_stmt(caller, caller_row, s);
                 }
@@ -1452,6 +1487,50 @@ impl PureEval for Printer {
                 .any(|e| e.contains("E0304") && e.contains("io")),
             "expected E0304 trait effect violation, got: {:?}",
             checker2.errors
+        );
+    }
+
+    #[test]
+    fn spawn_requires_thread_and_alloc_in_strict_mode() {
+        let bad_src = "def bad() -> i64 { spawn { val x = 1; }; 0 }\n";
+        let bad_ast = crate::parse_recovering(bad_src).unwrap();
+        let mut bad_checker = EffectChecker::new(true);
+        bad_checker.run(&bad_ast);
+        assert!(
+            bad_checker
+                .errors
+                .iter()
+                .any(|e| e.contains("E0301") && e.contains("thread") && e.contains("alloc")),
+            "expected E0301 for spawn in strict mode, got: {:?}",
+            bad_checker.errors
+        );
+
+        let ok_src = "def ok_spawn() -> i64 effect thread, alloc { spawn { val x = 1; }; 0 }\n";
+        let ok_ast = crate::parse_recovering(ok_src).unwrap();
+        let mut ok_checker = EffectChecker::new(true);
+        ok_checker.run(&ok_ast);
+        assert!(
+            ok_checker.errors.is_empty(),
+            "expected clean declared spawn, got diagnostics={:?}",
+            ok_checker.errors
+        );
+    }
+
+    #[test]
+    fn discard_wildcard_binding_remains_pure() {
+        let src = "def discard_ok() -> i64 { val _ = 1; 0 }\n";
+        let ast = crate::parse_recovering(src).unwrap();
+        let mut checker = EffectChecker::new(true);
+        checker.run(&ast);
+        assert!(
+            checker.errors.is_empty()
+                && checker
+                    .inferred
+                    .get("discard_ok")
+                    .is_none_or(|effs| effs.effects.is_empty() && effs.vars.is_empty()),
+            "wildcard val _ should remain pure, got diagnostics={:?} inferred={:?}",
+            checker.errors,
+            checker.inferred.get("discard_ok")
         );
     }
 }

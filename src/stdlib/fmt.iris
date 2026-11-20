@@ -3,7 +3,7 @@
 // Provides printf-style formatting, integer padding, string alignment, and table formatting.
 
 /// Pad an integer to at least `width` characters, right-aligned with spaces.
-pub def pad_int(n: i64, width: i64) -> str {
+pub def pad_int(n: i64, width: i64) -> str effect alloc {
     val s = to_str(n)
     var result = s
     var current_len = len(result)
@@ -15,7 +15,7 @@ pub def pad_int(n: i64, width: i64) -> str {
 }
 
 /// Pad an integer with leading zeros to at least `width` characters.
-pub def zero_pad_int(n: i64, width: i64) -> str {
+pub def zero_pad_int(n: i64, width: i64) -> str effect alloc {
     val s = to_str(n)
     if width <= len(s) { return s }
     val needed = width - len(s)
@@ -28,7 +28,7 @@ pub def zero_pad_int(n: i64, width: i64) -> str {
 }
 
 /// Left-align a string in a field of at least `width` characters.
-pub def left_align(s: str, width: i64) -> str {
+pub def left_align(s: str, width: i64) -> str effect alloc {
     var result = s
     var current_len = len(result)
     while current_len < width {
@@ -39,7 +39,7 @@ pub def left_align(s: str, width: i64) -> str {
 }
 
 /// Right-align a string in a field of at least `width` characters.
-pub def right_align(s: str, width: i64) -> str {
+pub def right_align(s: str, width: i64) -> str effect alloc {
     var result = s
     var current_len = len(result)
     while current_len < width {
@@ -50,7 +50,7 @@ pub def right_align(s: str, width: i64) -> str {
 }
 
 /// Internal: find the index of the first format type char (d,s,f,g,x,i) at or after `start`.
-pub def fmt_find_type(s: str, start: i64) -> i64 {
+pub def fmt_find_type(s: str, start: i64) -> i64 effect alloc {
     val n = len(s)
     var j = start
     var result = n
@@ -64,7 +64,7 @@ pub def fmt_find_type(s: str, start: i64) -> i64 {
 }
 
 /// Internal: truncate a decimal string to `prec` places with rounding.
-pub def fmt_float_prec(s: str, prec: i64) -> str {
+pub def fmt_float_prec(s: str, prec: i64) -> str effect alloc, throw {
     val dot_opt = find(s, ".")
     if is_some(dot_opt) {
         val dp = unwrap(dot_opt)
@@ -104,7 +104,7 @@ pub def fmt_float_prec(s: str, prec: i64) -> str {
 }
 
 /// Internal: apply format spec (flags+width+prec) and type_char to arg string.
-pub def fmt_apply_spec(spec: str, type_char: str, arg: str) -> str {
+pub def fmt_apply_spec(spec: str, type_char: str, arg: str) -> str effect alloc, throw {
     val has_minus = starts_with(spec, "-")
     val spec_body = if has_minus { slice(spec, 1, len(spec)) } else { spec }
     val dot_opt = find(spec_body, ".")
@@ -144,7 +144,7 @@ pub def fmt_apply_spec(spec: str, type_char: str, arg: str) -> str {
 }
 
 /// Internal: recursive sprintf worker. Processes one % spec per call.
-pub def sprintf_from(fmt: str, args: list<str>, arg_start: i64) -> str {
+pub def sprintf_from(fmt: str, args: list<str>, arg_start: i64) -> str effect alloc, throw {
     val n = len(fmt)
     val pos = find(fmt, "%")
     if is_some(pos) {
@@ -176,12 +176,12 @@ pub def sprintf_from(fmt: str, args: list<str>, arg_start: i64) -> str {
 /// Example: `sprintf("%05d %.2f", [to_str(7), to_str(3.14)])`
 /// Supported specifiers: `%s` (string), `%d`/`%i` (integer), `%f` (float), `%g` (general float), `%x` (hex), `%%` (literal %)
 /// Flags: `-` (left-align), `0` (zero-pad), width, `.precision`
-pub def sprintf(fmt: str, args: list<str>) -> str {
+pub def sprintf(fmt: str, args: list<str>) -> str effect alloc, throw {
     sprintf_from(fmt, args, 0)
 }
 
 /// Convenience: format and print with a newline.
-pub def printf(fmt: str, args: list<str>) -> str effect io {
+pub def printf(fmt: str, args: list<str>) -> str effect io, alloc, throw {
     val result = sprintf_from(fmt, args, 0);
     print(result);
     result
@@ -193,7 +193,7 @@ pub def printf(fmt: str, args: list<str>) -> str effect io {
 /// Widths are UTF-8 byte counts; supplied widths are minimums (never truncate).
 /// Ragged rows are padded with empty cells. Extra cells create extra columns.
 /// Rows use " | " separators and LF, with no final newline. Empty headers are omitted.
-pub def format_table(headers: list<str>, rows: list<list<str>>, col_widths: option<list<i64>>) -> str {
+pub def format_table(headers: list<str>, rows: list<list<str>>, col_widths: option<list<i64>>) -> str effect alloc, throw {
     var columns = list_len(headers)
     var r = 0
     while r < list_len(rows) {
@@ -238,7 +238,7 @@ pub def format_table(headers: list<str>, rows: list<list<str>>, col_widths: opti
     join(output, "\n")
 }
 // Missing cells are empty; omit padding after the final column.
-def fmt_table_row(row: list<str>, widths: list<i64>) -> str {
+def fmt_table_row(row: list<str>, widths: list<i64>) -> str effect alloc {
     val cells: list<str> = list()
     var c = 0
     while c < list_len(widths) {

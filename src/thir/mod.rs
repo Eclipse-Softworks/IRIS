@@ -312,6 +312,9 @@ pub(crate) enum ThirExprKind {
 /// A block of THIR statements and an optional tail expression.
 #[derive(Clone, Debug)]
 pub(crate) struct ThirBlock {
+    /// Source-level block identity inherited from [`AstBlock`](crate::parser::ast::AstBlock).
+    /// `0` for compiler-synthesized blocks. Drives `EnterBlock` / `ExitBlock` emission.
+    pub scope_id: u32,
     pub stmts: Vec<ThirStmt>,
     pub tail: Option<Box<ThirExpr>>,
     pub span: Span,

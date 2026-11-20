@@ -139,8 +139,12 @@ pub struct PlaceSpan {
 /// Source-level place event attached at an instruction boundary `(block_id, instr_idx)`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PlaceEventKind {
-    /// Reading a variable binding (checks that its slot has not been moved).
-    Read(PlaceSlot),
+    /// Reading a variable binding or one of its fields (checks that the place
+    /// has not been moved). An empty projection path reads the whole binding.
+    Read {
+        slot: PlaceSlot,
+        projections: Vec<usize>,
+    },
     /// Reassigning or mutating a binding slot (`x = v`, `x.f = v`, `t.0 = v`).
     /// When updating a single struct/tuple field, `field_index` identifies it.
     Write {
@@ -153,8 +157,13 @@ pub enum PlaceEventKind {
         slot: PlaceSlot,
         projections: Vec<usize>,
     },
-    /// Attaches the explicit binding slot to an `IrInstr::Move` at `(block_id, instr_idx)`.
-    Move(PlaceSlot),
+    /// Attaches the binding slot and optional field/tuple projection path to an
+    /// `IrInstr::Move` at `(block_id, instr_idx)`. An empty path moves the whole
+    /// binding; a non-empty path moves only that field.
+    Move {
+        slot: PlaceSlot,
+        projections: Vec<usize>,
+    },
 }
 
 /// A recorded source-level place operation together with its source span.

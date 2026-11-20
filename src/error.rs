@@ -307,6 +307,10 @@ pub enum InterpError {
     #[error("not yet supported — {detail}")]
     Unsupported { detail: String },
 
+    /// `ExitBlock` executed without a matching `EnterBlock` — malformed IR.
+    #[error("internal error: exit_block for scope s{scope} without a matching enter_block — this is a compiler bug")]
+    UnmatchedExitBlock { scope: u32 },
+
     #[error("program panicked: {msg}")]
     Panic { msg: String },
 
@@ -547,6 +551,7 @@ impl Error {
                     InterpError::StackOverflow { .. } => "E0408",
                     InterpError::IntegerOverflow { .. } => "E0409",
                     InterpError::Located { .. } => "E0400",
+                    InterpError::UnmatchedExitBlock { .. } => "E0401",
                 }
             }
             Error::Io(_) => "E0500",

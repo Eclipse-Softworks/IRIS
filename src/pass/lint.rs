@@ -216,6 +216,7 @@ fn collect_bindings_in_block(
 
 fn collect_bindings_in_stmt(stmt: &AstStmt, out: &mut Vec<(String, Option<Span>, &'static str)>) {
     let block = AstBlock {
+        scope_id: 0,
         stmts: vec![stmt.clone()],
         tail: None,
         span: stmt_span(stmt),

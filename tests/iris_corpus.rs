@@ -48,6 +48,18 @@ const MUST_FAIL: &[(&str, &str)] = &[
     ),
     ("test_move_error.iris", "use after move must be rejected"),
     (
+        "test_partial_field_move_error.iris",
+        "reading a moved-out record field must be rejected",
+    ),
+    (
+        "test_record_call_move_error.iris",
+        "using a record after passing it by value must be rejected",
+    ),
+    (
+        "test_record_binding_move_error.iris",
+        "using a record after moving it into another binding must be rejected",
+    ),
+    (
         "test_dyn_requires_impl.iris",
         "a record that does not implement the trait must not become dyn",
     ),

@@ -15,7 +15,6 @@
   "iris.formatOnSave": true,
   "iris.trace.server": "off",
   "git.ignoreLimitWarning": true,
-
   // Give rust-analyzer its own target directory.
   //
   // By default it runs `cargo check --workspace --all-targets` against the same
@@ -25,9 +24,8 @@
   // rebuilds that look spontaneous. A separate directory costs disk space and
   // buys back the incremental build.
   "rust-analyzer.cargo.targetDir": true,
-
   // Surface clippy findings without a second flag set fighting the check above.
   "rust-analyzer.check.command": "check",
   "rust-analyzer.check.allTargets": true,
-  "rust-analyzer.checkOnSave": false
+  "rust-analyzer.checkOnSave": true
 }

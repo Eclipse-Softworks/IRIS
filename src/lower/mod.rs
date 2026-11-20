@@ -80,6 +80,18 @@ use self::thir_bridge::{
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
+use std::sync::OnceLock;
+
+/// Whether by-value record uses are implicit moves.
+///
+/// Off by default: existing IRIS code passes record-typed values to ordinary
+/// functions and reuses them, which is not a move in today's language. Set
+/// `IRIS_STRICT_RECORD_OWNERSHIP=1` to opt into Rust-like by-value ownership.
+/// Explicit `move` is always checked regardless of this flag.
+pub(crate) fn strict_record_ownership() -> bool {
+    static FLAG: OnceLock<bool> = OnceLock::new();
+    *FLAG.get_or_init(|| std::env::var_os("IRIS_STRICT_RECORD_OWNERSHIP").is_some())
+}
 
 /// Runtime builtins lowered to a call of the C runtime: the runtime's name
 /// for each, and the type it returns. Shared by lowering and the source
@@ -192,11 +204,20 @@ pub(crate) fn runtime_builtin(name: &str) -> Option<(&'static str, IrType)> {
         // pointer was unreachable.
         "ffi_out_new" => Some(("ffi_out_new", IrType::Scalar(DType::I64))),
         "ffi_out_free" => Some(("ffi_out_free", IrType::Scalar(DType::I64))),
+        "ffi_out_len" => Some(("ffi_out_len", IrType::Scalar(DType::I64))),
         "ffi_out_get_f64" => Some(("ffi_out_get_f64", IrType::Scalar(DType::F64))),
         "ffi_out_get_i64" => Some(("ffi_out_get_i64", IrType::Scalar(DType::I64))),
+        "ffi_out_get_i32" => Some(("ffi_out_get_i32_i64", IrType::Scalar(DType::I64))),
+        "ffi_out_get_f32" => Some(("ffi_out_get_f32", IrType::Scalar(DType::F64))),
+        "ffi_out_get_u8" => Some(("ffi_out_get_u8", IrType::Scalar(DType::I64))),
         "ffi_out_get_str" => Some(("ffi_out_get_str", IrType::Str)),
+        "ffi_out_get_str_range" => Some(("ffi_out_get_str_range", IrType::Str)),
         "ffi_out_set_f64" => Some(("ffi_out_set_f64", IrType::Scalar(DType::I64))),
         "ffi_out_set_i64" => Some(("ffi_out_set_i64", IrType::Scalar(DType::I64))),
+        "ffi_out_set_i32" => Some(("ffi_out_set_i32", IrType::Scalar(DType::I64))),
+        "ffi_out_set_f32" => Some(("ffi_out_set_f32", IrType::Scalar(DType::I64))),
+        "ffi_out_set_u8" => Some(("ffi_out_set_u8", IrType::Scalar(DType::I64))),
+        "ffi_out_write_bytes" => Some(("ffi_out_write_bytes", IrType::Scalar(DType::I64))),
         // Python FFI
         "python_eval" => Some(("python_eval", IrType::Str)),
         "python_exec" => Some(("python_exec", IrType::Scalar(DType::I64))),
@@ -621,11 +642,15 @@ pub(crate) fn resolve_brought_name(name: &str, module: &IrModule) -> String {
         return name.to_string();
     }
     // Fallback: scan all type registries for any mangled candidate matching `*__name`.
+    // Ignore mangled generic struct specializations (`Generic__Arg`) so an
+    // uninstantiated template specialization like `SignalBox__T` never shadows `T`.
     let suffix = format!("__{}", name);
     let mut candidates: Vec<String> = Vec::new();
     for key in module.struct_defs.keys() {
-        if key.ends_with(&suffix) {
-            candidates.push(key.clone());
+        if let Some(prefix) = key.strip_suffix(&suffix) {
+            if !module.generic_struct_names.contains(prefix) {
+                candidates.push(key.clone());
+            }
         }
     }
     for key in module.enum_defs.keys() {
@@ -1461,11 +1486,29 @@ pub fn lower(ast: &AstModule, module_name: &str) -> Result<IrModule, LowerError>
                 }
             }
         }
+        // Build type-parameter markers for `impl[T, ...]` so generic parameters
+        // on the impl header never accidentally resolve to brought types.
+        let impl_tp_subs: HashMap<String, IrType> =
+            split_generic_param_names(&impl_def.generic_params)
+                .0
+                .into_iter()
+                .map(|tp| {
+                    let marker = IrType::Struct {
+                        name: tp.clone(),
+                        fields: Vec::new(),
+                    };
+                    (tp, marker)
+                })
+                .collect();
+
         //
         // A target carrying type arguments dispatches on the whole type, so
         // `impl Show for list<i64>` registers `IrType::List(I64)` rather than
         // dispatching on the bare name `list`.
         let dispatch_ty = match &impl_def.target_ty {
+            Some(t) if !impl_tp_subs.is_empty() => {
+                resolve_ast_type_with_subs(t, &impl_tp_subs, &module)?
+            }
             Some(t) => lower_type_with_structs(t, &module)?,
             None => type_name_to_ir_type(&impl_def.type_name, &module)
                 .ok_or_else(|| unknown_impl_type(&impl_def.type_name, impl_def.span))?,
@@ -1488,7 +1531,11 @@ pub fn lower(ast: &AstModule, module_name: &str) -> Result<IrModule, LowerError>
                     impl_def.trait_name, impl_type_key, method.name.name
                 )
             };
-            let mut ret_ty = lower_type_with_structs(&method.return_ty, &module)?;
+            let mut ret_ty = if !impl_tp_subs.is_empty() {
+                resolve_ast_type_with_subs(&method.return_ty, &impl_tp_subs, &module)?
+            } else {
+                lower_type_with_structs(&method.return_ty, &module)?
+            };
             if method.is_async {
                 ret_ty = IrType::Task(Box::new(ret_ty));
             }
@@ -1547,7 +1594,13 @@ pub fn lower(ast: &AstModule, module_name: &str) -> Result<IrModule, LowerError>
             let lowered_params: Option<Vec<IrType>> = renamed
                 .params
                 .iter()
-                .map(|p| lower_type_with_structs(&p.ty, &module).ok())
+                .map(|p| {
+                    if !impl_tp_subs.is_empty() {
+                        resolve_ast_type_with_subs(&p.ty, &impl_tp_subs, &module).ok()
+                    } else {
+                        lower_type_with_structs(&p.ty, &module).ok()
+                    }
+                })
                 .collect();
             if let Some(types) = lowered_params {
                 impl_method_param_types.insert(mangled, types);
@@ -1942,7 +1995,17 @@ pub fn lower(ast: &AstModule, module_name: &str) -> Result<IrModule, LowerError>
     Ok(module)
 }
 
-type LoopFrame = (BlockId, BlockId, BlockId, Vec<String>, Option<String>, bool);
+#[derive(Clone)]
+pub(super) struct LoopFrame {
+    pub(super) header_bb: BlockId,
+    pub(super) merge_bb: BlockId,
+    pub(super) loop_var_names: Vec<String>,
+    pub(super) label: Option<String>,
+    /// For `for var in start..end` range loops, stores `(header_param_val, var_ty)`
+    /// so `continue`/`break` and the back-edge never read a shadowing inner
+    /// binding or wildcard discard (`val _ = ...`) from `self.scope`.
+    pub(super) for_range_var: Option<(ValueId, IrType)>,
+}
 
 type ResolvedPlace = (
     ValueId,
@@ -2280,6 +2343,9 @@ impl<'m> Lowerer<'m> {
     /// Inserts a variable into `scope` and binds a fresh IR place slot for it.
     fn bind_scope_var(&mut self, name: impl Into<String>, val: ValueId, ty: IrType) {
         let name = name.into();
+        if name == "_" {
+            return;
+        }
         if self.mut_borrowed_vars.contains(&name) {
             let cell = self.builder.fresh_value();
             let cell_ty = IrType::MutRef(Box::new(ty.clone()));
@@ -2457,7 +2523,10 @@ impl<'m> Lowerer<'m> {
                     .note_value_full_span(val, span.start.0, span.end.0);
             }
             self.builder.record_place_event(
-                crate::ir::function::PlaceEventKind::Read(slot),
+                crate::ir::function::PlaceEventKind::Read {
+                    slot,
+                    projections: Vec::new(),
+                },
                 span.start.0,
                 span.end.0,
             );
@@ -2515,16 +2584,19 @@ impl<'m> Lowerer<'m> {
     }
 
     /// Emits `IrInstr::Move` and records `PlaceEventKind::Move` when moving a tracked place.
+    ///
+    /// `place` carries the binding slot and its field/tuple projection path, so
+    /// moving `p.a` only invalidates `p.a` instead of the whole record.
     fn emit_move_marker(
         &mut self,
         place_val: ValueId,
         ty: IrType,
-        slot: Option<crate::ir::function::PlaceSlot>,
+        place: Option<(crate::ir::function::PlaceSlot, Vec<usize>)>,
         span: Span,
     ) -> (ValueId, IrType) {
-        if let Some(slot) = slot {
+        if let Some((slot, projections)) = place {
             self.builder.record_place_event(
-                crate::ir::function::PlaceEventKind::Move(slot),
+                crate::ir::function::PlaceEventKind::Move { slot, projections },
                 span.start.0,
                 span.end.0,
             );
@@ -2756,8 +2828,8 @@ impl<'m> Lowerer<'m> {
     fn emit_drops(&mut self, ret_values: &[ValueId]) {
         let drops: Vec<_> = self.drop_stack.clone();
         for (_var_name, val, drop_fn) in drops.iter().rev() {
-            if ret_values.contains(val) {
-                continue; // Moved into return value, do not destruct
+            if ret_values.contains(val) || self.builder.value_is_moved(*val) {
+                continue; // Ownership transferred; the new owner is responsible
             }
             let ty = self
                 .scope
@@ -3966,7 +4038,7 @@ impl<'m> Lowerer<'m> {
             }
 
             AstExpr::Block(block) => {
-                if let Some(v) = self.lower_block_with_keep_ref(block, true)? {
+                if let Some(v) = self.lower_scoped_block_expr(block, true)? {
                     Ok(v)
                 } else if let Some((param_id, param_ty)) = self.builder.current_block_first_param()
                 {
@@ -4142,6 +4214,21 @@ impl<'m> Lowerer<'m> {
                             field_ty,
                             provided.1.span(),
                         )?;
+                        let (val, actual_ty) = if strict_record_ownership()
+                            && matches!(field_ty, IrType::Struct { .. })
+                        {
+                            match self.resolve_ast_place(&provided.1) {
+                                Ok((_, _, Some(place))) => self.emit_move_marker(
+                                    val,
+                                    actual_ty,
+                                    Some(place),
+                                    provided.1.span(),
+                                ),
+                                _ => (val, actual_ty),
+                            }
+                        } else {
+                            (val, actual_ty)
+                        };
                         field_vals.push(val);
                         field_actual_tys.push(actual_ty);
                     } else if let Some((spread_val_id, spread_ty)) = &spread_val {
@@ -4347,7 +4434,7 @@ impl<'m> Lowerer<'m> {
                     }
                 }
                 // Normal struct field access — also handles grad<T>.value / grad<T>.grad
-                let (base_val, base_ty) = self.lower_expr(base)?;
+                let (base_val, base_ty, base_place) = self.resolve_ast_place(base)?;
                 // grad<T> pseudo-fields: .value → GradValue, .grad / .tangent → GradTangent
                 if let IrType::Grad(inner) = &base_ty {
                     let inner_ty = *inner.clone();
@@ -4451,6 +4538,14 @@ impl<'m> Lowerer<'m> {
                     },
                 };
                 let result_ty = struct_fields[field_index].1.clone();
+                if let Some((slot, mut projections)) = base_place {
+                    projections.push(field_index);
+                    self.builder.record_place_event(
+                        crate::ir::function::PlaceEventKind::Read { slot, projections },
+                        span.start.0,
+                        span.end.0,
+                    );
+                }
                 let result = self.builder.fresh_value();
                 self.builder.push_instr(
                     IrInstr::GetField {
@@ -6483,7 +6578,7 @@ impl<'m> Lowerer<'m> {
             }
             AstExpr::Move { expr, span } => {
                 let (val, ty, slot_proj) = self.resolve_ast_place(expr)?;
-                Ok(self.emit_move_marker(val, ty, slot_proj.map(|(s, _)| s), *span))
+                Ok(self.emit_move_marker(val, ty, slot_proj, *span))
             }
             AstExpr::Unsafe { body, .. } => self.lower_expr(body),
             AstExpr::Splat { expr, .. } => self.lower_expr(expr),
@@ -7632,6 +7727,33 @@ impl<'m> Lowerer<'m> {
         self.lower_block_with_keep_ref(block, false)
     }
 
+    /// Lower a source-level `{ ... }` expression, bracketing it with a real
+    /// structured scope. The markers survive every pass and are observed by
+    /// the interpreter; this is what makes a block a genuine IR construct
+    /// instead of a purely syntactic grouping.
+    fn lower_scoped_block_expr(
+        &mut self,
+        block: &AstBlock,
+        keep_ref: bool,
+    ) -> Result<Option<(ValueId, IrType)>, LowerError> {
+        // Compiler-synthesized blocks (scope_id == 0) carry no source scope.
+        let scope = (block.scope_id != 0 && !self.builder.is_current_block_terminated())
+            .then(|| self.builder.alloc_drop_scope(None));
+        if let Some(scope) = scope {
+            self.builder.push_instr(IrInstr::EnterBlock { scope }, None);
+        }
+        let result = self.lower_block_with_keep_ref(block, keep_ref);
+        if let Some(scope) = scope {
+            // A `break` / `return` / `continue` inside the block may have
+            // terminated the current block; no instruction may follow a
+            // terminator. Outer ExitBlock markers unwind such scopes.
+            if !self.builder.is_current_block_terminated() {
+                self.builder.push_instr(IrInstr::ExitBlock { scope }, None);
+            }
+        }
+        result
+    }
+
     fn lower_block_with_keep_ref(
         &mut self,
         block: &AstBlock,
@@ -7805,6 +7927,23 @@ impl<'m> Lowerer<'m> {
                 }
 
                 // The annotation completes what the initialiser leaves open:
+
+                if strict_record_ownership()
+                    && matches!(ty, IrType::Struct { .. })
+                    && matches!(
+                        &**init,
+                        crate::parser::ast::AstExpr::Ident(_)
+                            | crate::parser::ast::AstExpr::FieldAccess { .. }
+                            | crate::parser::ast::AstExpr::TupleIndex { .. }
+                    )
+                {
+                    if let Ok((_, _, Some(place))) = self.resolve_ast_place(init) {
+                        let (moved, moved_ty) =
+                            self.emit_move_marker(val, ty, Some(place), init.span());
+                        val = moved;
+                        ty = moved_ty;
+                    }
+                }
 
                 if let Some(drop_fn) = self.find_destructor(&ty) {
                     self.register_drop(name.name.clone(), val, drop_fn, ty.clone());
@@ -8206,6 +8345,7 @@ impl<'m> Lowerer<'m> {
 
                 // Build the lifted function with a synthetic AstBlock.
                 let ast_block = AstBlock {
+                    scope_id: 0,
                     stmts: body.clone(),
                     tail: None,
                     span: *span,

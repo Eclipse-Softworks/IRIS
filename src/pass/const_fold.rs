@@ -772,7 +772,10 @@ fn apply_reps(instr: &mut IrInstr, reps: &HashMap<ValueId, ValueId>) {
         IrInstr::Borrow { place, .. } | IrInstr::Move { place, .. } => {
             replace(place);
         }
-        IrInstr::EnterScope { .. } | IrInstr::ExitScope { .. } => {}
+        IrInstr::EnterBlock { .. }
+        | IrInstr::ExitBlock { .. }
+        | IrInstr::EnterScope { .. }
+        | IrInstr::ExitScope { .. } => {}
         IrInstr::Drop { value, .. } => {
             replace(value);
         }

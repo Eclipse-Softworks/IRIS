@@ -1,0 +1,1202 @@
+bring std.math
+bring std.ui
+bring "domain.iris"
+bring "analytics.iris"
+bring "store.iris"
+bring "gui_theme.iris"
+
+/// Active primary workspace visualization mode.
+pub choice WorkspaceView {
+    GlobalMap,
+    AdFitView,
+    GeomagneticView,
+    AtmosphericView,
+}
+
+/// Active focal-depth filter applied to map markers and seismic table rows.
+pub choice DepthFilter {
+    AllRegimes,
+    ShallowOnly,
+    MidOnly,
+    DeepOnly,
+}
+
+/// Camera tracking behavior for the global observatory map viewport.
+pub choice MapFocusMode {
+    WorldView,
+    FocusSelected,
+    TrackIss,
+}
+
+/// Asynchronous command dispatched from UI event reduction to background telemetry worker.
+pub choice GuiWorkerCmd {
+    NoOp,
+    FetchFeed(str),
+    ProbeWeather(str, f64, f64),
+    SetAutoSync(bool),
+    ExportBundle,
+}
+
+/// Interactive equirectangular map viewport configuration and layer flags.
+pub record MapViewport {
+    zoom: f64 = 1.0,
+    center_lon: f64 = 0.0,
+    center_lat: f64 = 10.0,
+    focus: MapFocusMode = MapFocusMode.WorldView,
+    show_arcs: bool = true,
+    show_weather: bool = true,
+    show_footprint: bool = true,
+    show_labels: bool = true,
+}
+
+/// Bundle passed to `gui_state_init` containing path and persistence options.
+pub record GuiLaunchOpts {
+    feed_slug: str = "2.5_day",
+    db_path: str = "terra_pulse.db",
+    svg_path: str = "terra_pulse_map.svg",
+    json_path: str = "terra_pulse_summary.json",
+    enable_db: bool = true,
+}
+
+/// Complete long-lived desktop state shared across frames cleanly on the main heap.
+pub record TelemetryGuiState {
+    feed_slug: str = "2.5_day",
+    active_view: WorkspaceView = WorkspaceView.GlobalMap,
+    depth_filter: DepthFilter = DepthFilter.AllRegimes,
+    min_mag: f64 = 0.0,
+    search_text: str = "",
+    selected_event_id: str = "",
+    table_page: i64 = 0,
+    auto_sync: bool = true,
+    loading: bool = true,
+    weather_probing: bool = false,
+    tick: i64 = 0,
+    last_stage1_ms: i64 = 0,
+    last_stage2_ms: i64 = 0,
+    hover_lat: f64 = 0.0,
+    hover_lon: f64 = 0.0,
+    hover_in_map: bool = false,
+    hovered_event_id: str = "",
+    status_note: str = "Acquiring live USGS, NOAA SWPC & WhereTheISS telemetry...",
+    db_path: str = "terra_pulse.db",
+    svg_path: str = "terra_pulse_map.svg",
+    json_path: str = "terra_pulse_summary.json",
+    enable_db: bool = true,
+    map: MapViewport = MapViewport {},
+    snap: ObservatorySnapshot,
+    delta: HistoryDelta,
+    recent_runs: list<StoredRunSummary>,
+    probed_weather: list<SurfaceWeather>,
+}
+
+/// Clone a string onto the currently active heap (safe during `ui_frame_pool_pause`).
+pub def clone_str_detached(s: str) -> str {
+    if len(s) == 0 {
+        return ""
+    }
+    return "" + s
+}
+
+/// Construct an empty baseline `RunAnalytics` prior to first telemetry acquisition.
+pub def empty_run_analytics() -> RunAnalytics {
+    return RunAnalytics {
+        total_quakes: 0,
+        shallow_count: 0,
+        intermediate_count: 0,
+        deep_count: 0,
+        max_magnitude: 0.0,
+        strongest_idx: 0,
+        secondary_idx: 0,
+        total_energy_log10_j: 0.0,
+        closest_iss_km: 0.0,
+        closest_iss_idx: 0,
+        watch_plus_count: 0,
+        mag_mean: 0.0,
+        mag_ci_low: 0.0,
+        mag_ci_high: 0.0,
+        kp_latest: 0.0,
+        kp_peak: 0.0,
+        kp_ci_low: 0.0,
+        kp_ci_high: 0.0,
+        gr_fit: GutenbergRichterFit {
+            a_value: 0.0,
+            b_value: 1.0,
+            r2_score: 0.0,
+            bin_count: 0,
+            expected_daily_m5: 0.0,
+            expected_daily_m6: 0.0,
+        },
+        overall_alert: AlertSeverity.Quiet,
+    }
+}
+
+/// Construct an empty baseline `ObservatorySnapshot` before live feeds arrive.
+pub def empty_observatory_snapshot() -> ObservatorySnapshot effect alloc {
+    val empty_eq: list<SeismicEvent> = list()
+    val empty_kp: list<GeomagneticSample> = list()
+    val empty_wx: list<SurfaceWeather> = list()
+    val iss = OrbitalState {
+        name: "iss",
+        latitude: 0.0,
+        longitude: 0.0,
+        altitude_km: 0.0,
+        velocity_kmh: 0.0,
+        footprint_km: 0.0,
+        visibility: "pending",
+        timestamp_s: 0,
+        solar_lat: 0.0,
+        solar_lon: 0.0,
+    }
+    return ObservatorySnapshot {
+        events: empty_eq,
+        kps: empty_kp,
+        iss: iss,
+        weather: empty_wx,
+        analytics: empty_run_analytics(),
+    }
+}
+
+/// Construct initial empty `TelemetryGuiState` from CLI launch options.
+pub def gui_state_init(opts: GuiLaunchOpts) -> TelemetryGuiState effect alloc {
+    val empty_runs: list<StoredRunSummary> = list()
+    val empty_probed: list<SurfaceWeather> = list()
+    return TelemetryGuiState {
+        feed_slug: clone_str_detached(opts.feed_slug),
+        db_path: clone_str_detached(opts.db_path),
+        svg_path: clone_str_detached(opts.svg_path),
+        json_path: clone_str_detached(opts.json_path),
+        enable_db: opts.enable_db,
+        snap: empty_observatory_snapshot(),
+        delta: HistoryDelta {
+            prior_runs: 0,
+            stored_events_total: 0,
+            new_events_count: 0,
+            has_previous: false,
+            prev_kp: 0.0,
+            prev_gr_b: 1.0,
+            prev_max_mag: 0.0,
+        },
+        recent_runs: empty_runs,
+        probed_weather: empty_probed,
+    }
+}
+
+def clone_events_detached(src: list<SeismicEvent>) -> list<SeismicEvent> effect alloc {
+    val out: list<SeismicEvent> = list()
+    for i in 0..list_len(src) {
+        val e = list_get(src, i)
+        val _ = list_push(
+            out,
+            SeismicEvent {
+                event_id: clone_str_detached(e.event_id),
+                time_utc: clone_str_detached(e.time_utc),
+                coord: GeoCoord {
+                    lat_deg: e.coord.lat_deg,
+                    lon_deg: e.coord.lon_deg,
+                    depth_km: e.coord.depth_km,
+                },
+                magnitude: e.magnitude,
+                mag_type: clone_str_detached(e.mag_type),
+                place: clone_str_detached(e.place),
+                station_count: e.station_count,
+                gap_deg: e.gap_deg,
+                rms_sec: e.rms_sec,
+            },
+        )
+    }
+    return out
+}
+
+def clone_kps_detached(src: list<GeomagneticSample>) -> list<GeomagneticSample> effect alloc {
+    val out: list<GeomagneticSample> = list()
+    for i in 0..list_len(src) {
+        val k = list_get(src, i)
+        val _ = list_push(
+            out,
+            GeomagneticSample {
+                time_tag: clone_str_detached(k.time_tag),
+                kp_index: k.kp_index,
+                a_running: k.a_running,
+                station_count: k.station_count,
+            },
+        )
+    }
+    return out
+}
+
+/// Deeply clone a list of `SurfaceWeather` values onto the active non-pool heap.
+pub def clone_weather_list_detached(
+    src: list<SurfaceWeather>,
+) -> list<SurfaceWeather> effect alloc {
+    val out: list<SurfaceWeather> = list()
+    for i in 0..list_len(src) {
+        val w = list_get(src, i)
+        val _ = list_push(
+            out,
+            SurfaceWeather {
+                label: clone_str_detached(w.label),
+                lat: w.lat,
+                lon: w.lon,
+                temp_c: w.temp_c,
+                pressure_hpa: w.pressure_hpa,
+                wind_kmh: w.wind_kmh,
+                humidity_pct: w.humidity_pct,
+                precipitation_mm: w.precipitation_mm,
+            },
+        )
+    }
+    return out
+}
+
+def clone_alert_severity(s: AlertSeverity) -> AlertSeverity {
+    return when s {
+        AlertSeverity.Quiet => AlertSeverity.Quiet,
+        AlertSeverity.Elevated => AlertSeverity.Elevated,
+        AlertSeverity.Watch => AlertSeverity.Watch,
+        AlertSeverity.Critical => AlertSeverity.Critical,
+    }
+}
+
+def clone_analytics_detached(a: RunAnalytics) -> RunAnalytics {
+    val g = a.gr_fit
+    return RunAnalytics {
+        total_quakes: a.total_quakes,
+        shallow_count: a.shallow_count,
+        intermediate_count: a.intermediate_count,
+        deep_count: a.deep_count,
+        max_magnitude: a.max_magnitude,
+        strongest_idx: a.strongest_idx,
+        secondary_idx: a.secondary_idx,
+        total_energy_log10_j: a.total_energy_log10_j,
+        closest_iss_km: a.closest_iss_km,
+        closest_iss_idx: a.closest_iss_idx,
+        watch_plus_count: a.watch_plus_count,
+        mag_mean: a.mag_mean,
+        mag_ci_low: a.mag_ci_low,
+        mag_ci_high: a.mag_ci_high,
+        kp_latest: a.kp_latest,
+        kp_peak: a.kp_peak,
+        kp_ci_low: a.kp_ci_low,
+        kp_ci_high: a.kp_ci_high,
+        gr_fit: GutenbergRichterFit {
+            a_value: g.a_value,
+            b_value: g.b_value,
+            r2_score: g.r2_score,
+            bin_count: g.bin_count,
+            expected_daily_m5: g.expected_daily_m5,
+            expected_daily_m6: g.expected_daily_m6,
+        },
+        overall_alert: clone_alert_severity(a.overall_alert),
+    }
+}
+
+/// Deeply clone an `ObservatorySnapshot` onto the active non-pool heap.
+pub def clone_snapshot_detached(snap: ObservatorySnapshot) -> ObservatorySnapshot effect alloc {
+    val iss = snap.iss
+    val cloned_iss = OrbitalState {
+        name: clone_str_detached(iss.name),
+        latitude: iss.latitude,
+        longitude: iss.longitude,
+        altitude_km: iss.altitude_km,
+        velocity_kmh: iss.velocity_kmh,
+        footprint_km: iss.footprint_km,
+        visibility: clone_str_detached(iss.visibility),
+        timestamp_s: iss.timestamp_s,
+        solar_lat: iss.solar_lat,
+        solar_lon: iss.solar_lon,
+    }
+    return ObservatorySnapshot {
+        events: clone_events_detached(snap.events),
+        kps: clone_kps_detached(snap.kps),
+        iss: cloned_iss,
+        weather: clone_weather_list_detached(snap.weather),
+        analytics: clone_analytics_detached(snap.analytics),
+    }
+}
+
+/// Deeply clone recent SQLite run history onto the active non-pool heap.
+pub def clone_runs_detached(runs: list<StoredRunSummary>) -> list<StoredRunSummary> effect alloc {
+    val out: list<StoredRunSummary> = list()
+    for i in 0..list_len(runs) {
+        val r = list_get(runs, i)
+        val _ = list_push(
+            out,
+            StoredRunSummary {
+                run_id: r.run_id,
+                fetched_at_ms: r.fetched_at_ms,
+                quake_count: r.quake_count,
+                max_mag: r.max_mag,
+                kp_latest: r.kp_latest,
+                gr_b: r.gr_b,
+                alert_tier: clone_str_detached(r.alert_tier),
+            },
+        )
+    }
+    return out
+}
+
+def matches_depth_filter(depth_km: f64, flt: DepthFilter) -> bool {
+    val regime = depth_regime(depth_km)
+    return when flt {
+        DepthFilter.AllRegimes => true,
+        DepthFilter.ShallowOnly => when regime {
+            DepthRegime.Shallow => true,
+            _ => false,
+        },
+        DepthFilter.MidOnly => when regime {
+            DepthRegime.Intermediate => true,
+            _ => false,
+        },
+        DepthFilter.DeepOnly => when regime {
+            DepthRegime.Deep => true,
+            _ => false,
+        },
+    }
+}
+
+def matches_search(ev: SeismicEvent, query: str) -> bool {
+    if len(query) == 0 {
+        return true
+    }
+    return tp_contains_ci(ev.place, query)
+        || tp_contains_ci(ev.event_id, query)
+        || tp_contains_ci(ev.mag_type, query)
+}
+
+def sort_indices_by_mag_desc(
+    events: list<SeismicEvent>,
+    idxs: list<i64>,
+) -> list<i64> effect alloc {
+    val n = list_len(idxs)
+    var i = 1
+    while i < n {
+        val key_idx = list_get(idxs, i)
+        val key_mag = list_get(events, key_idx).magnitude
+        var j = i - 1
+        while j >= 0 && list_get(events, list_get(idxs, j)).magnitude < key_mag {
+            list_set(idxs, j + 1, list_get(idxs, j))
+            j = j - 1
+        }
+        list_set(idxs, j + 1, key_idx)
+        i = i + 1
+    }
+    return idxs
+}
+
+/// Filter and rank seismic events descending by magnitude using active GUI controls.
+pub def filtered_event_indices(st: TelemetryGuiState) -> list<i64> effect alloc {
+    val matched: list<i64> = list()
+    val events = st.snap.events
+    for i in 0..list_len(events) {
+        val ev = list_get(events, i)
+        if ev.magnitude >= st.min_mag
+            && matches_depth_filter(ev.coord.depth_km, st.depth_filter)
+            && matches_search(ev, st.search_text) {
+            val _ = list_push(matched, i)
+        }
+    }
+    return sort_indices_by_mag_desc(events, matched)
+}
+
+/// Resolve selected seismic event index matching `selected_event_id`, or fallback strongest event.
+pub def resolve_selected_event_idx(st: TelemetryGuiState) -> option<i64> effect alloc {
+    val events = st.snap.events
+    val n = list_len(events)
+    if n == 0 {
+        return none
+    }
+    if len(st.selected_event_id) > 0 {
+        for i in 0..n {
+            if list_get(events, i).event_id == st.selected_event_id {
+                return some(i)
+            }
+        }
+    }
+    val filtered = filtered_event_indices(st)
+    if list_len(filtered) > 0 {
+        return some(list_get(filtered, 0))
+    }
+    if st.snap.analytics.strongest_idx >= 0 && st.snap.analytics.strongest_idx < n {
+        return some(st.snap.analytics.strongest_idx)
+    }
+    return some(0)
+}
+
+/// Compare two `WorkspaceView` variants for active segmented tab highlight.
+pub def workspace_view_eq(a: WorkspaceView, b: WorkspaceView) -> bool {
+    return when a {
+        WorkspaceView.GlobalMap => when b {
+            WorkspaceView.GlobalMap => true,
+            _ => false,
+        },
+        WorkspaceView.AdFitView => when b {
+            WorkspaceView.AdFitView => true,
+            _ => false,
+        },
+        WorkspaceView.GeomagneticView => when b {
+            WorkspaceView.GeomagneticView => true,
+            _ => false,
+        },
+        WorkspaceView.AtmosphericView => when b {
+            WorkspaceView.AtmosphericView => true,
+            _ => false,
+        },
+    }
+}
+
+/// Compare two `DepthFilter` variants for active filter pill highlight.
+pub def depth_filter_eq(a: DepthFilter, b: DepthFilter) -> bool {
+    return when a {
+        DepthFilter.AllRegimes => when b {
+            DepthFilter.AllRegimes => true,
+            _ => false,
+        },
+        DepthFilter.ShallowOnly => when b {
+            DepthFilter.ShallowOnly => true,
+            _ => false,
+        },
+        DepthFilter.MidOnly => when b {
+            DepthFilter.MidOnly => true,
+            _ => false,
+        },
+        DepthFilter.DeepOnly => when b {
+            DepthFilter.DeepOnly => true,
+            _ => false,
+        },
+    }
+}
+
+def with_map_focus(
+    st: TelemetryGuiState,
+    zoom: f64,
+    lon: f64,
+    lat: f64,
+    focus: MapFocusMode,
+) -> TelemetryGuiState {
+    val m = st.map
+    val next_map = MapViewport {
+        zoom: clamp_f64(zoom, 1.0, 6.0),
+        center_lon: clamp_f64(lon, -180.0, 180.0),
+        center_lat: clamp_f64(lat, -85.0, 85.0),
+        focus: focus,
+        show_arcs: m.show_arcs,
+        show_weather: m.show_weather,
+        show_footprint: m.show_footprint,
+        show_labels: m.show_labels,
+    }
+    return gui_with_map(st, next_map)
+}
+
+def gui_with_map(st: TelemetryGuiState, next_map: MapViewport) -> TelemetryGuiState {
+    return TelemetryGuiState {
+        feed_slug: st.feed_slug,
+        active_view: st.active_view,
+        depth_filter: st.depth_filter,
+        min_mag: st.min_mag,
+        search_text: st.search_text,
+        selected_event_id: st.selected_event_id,
+        table_page: st.table_page,
+        auto_sync: st.auto_sync,
+        loading: st.loading,
+        weather_probing: st.weather_probing,
+        tick: st.tick,
+        last_stage1_ms: st.last_stage1_ms,
+        last_stage2_ms: st.last_stage2_ms,
+        hover_lat: st.hover_lat,
+        hover_lon: st.hover_lon,
+        hover_in_map: st.hover_in_map,
+        hovered_event_id: st.hovered_event_id,
+        status_note: st.status_note,
+        db_path: st.db_path,
+        svg_path: st.svg_path,
+        json_path: st.json_path,
+        enable_db: st.enable_db,
+        map: next_map,
+        snap: st.snap,
+        delta: st.delta,
+        recent_runs: st.recent_runs,
+        probed_weather: st.probed_weather,
+    }
+}
+
+def sync_camera_after_update(
+    st: TelemetryGuiState,
+    snap: ObservatorySnapshot,
+    selected_id: str,
+) -> MapViewport effect alloc {
+    val m = st.map
+    return when m.focus {
+        MapFocusMode.WorldView => m,
+        MapFocusMode.TrackIss => MapViewport {
+            zoom: m.zoom,
+            center_lon: snap.iss.longitude,
+            center_lat: snap.iss.latitude,
+            focus: m.focus,
+            show_arcs: m.show_arcs,
+            show_weather: m.show_weather,
+            show_footprint: m.show_footprint,
+            show_labels: m.show_labels,
+        },
+        MapFocusMode.FocusSelected => {
+            var next_lon = m.center_lon
+            var next_lat = m.center_lat
+            for i in 0..list_len(snap.events) {
+                val ev = list_get(snap.events, i)
+                if ev.event_id == selected_id {
+                    next_lon = ev.coord.lon_deg
+                    next_lat = ev.coord.lat_deg
+                    break
+                }
+            }
+            MapViewport {
+                zoom: m.zoom,
+                center_lon: next_lon,
+                center_lat: next_lat,
+                focus: m.focus,
+                show_arcs: m.show_arcs,
+                show_weather: m.show_weather,
+                show_footprint: m.show_footprint,
+                show_labels: m.show_labels,
+            }
+        },
+    }
+}
+
+def pick_selected_id_after_update(
+    events: list<SeismicEvent>,
+    current_sel: str,
+    strongest_idx: i64,
+) -> str effect alloc {
+    var sel = current_sel
+    var found = false
+    for i in 0..list_len(events) {
+        if list_get(events, i).event_id == sel {
+            found = true
+            break
+        }
+    }
+    if (!found || len(sel) == 0) && list_len(events) > 0 {
+        val valid = if strongest_idx >= 0 && strongest_idx < list_len(events) {
+            strongest_idx
+        } else {
+            0
+        }
+        sel = list_get(events, valid).event_id
+    }
+    return sel
+}
+
+/// Fold a completed background telemetry bundle into `TelemetryGuiState`.
+pub def apply_live_snapshot(
+    st: TelemetryGuiState,
+    snap: ObservatorySnapshot,
+    delta: HistoryDelta,
+    recent_runs: list<StoredRunSummary>,
+    timings_and_note: (i64, i64, str),
+) -> TelemetryGuiState effect alloc {
+    val sel = pick_selected_id_after_update(
+        snap.events,
+        st.selected_event_id,
+        snap.analytics.strongest_idx,
+    )
+    val next_map = sync_camera_after_update(st, snap, sel)
+    return TelemetryGuiState {
+        feed_slug: st.feed_slug,
+        active_view: st.active_view,
+        depth_filter: st.depth_filter,
+        min_mag: st.min_mag,
+        search_text: st.search_text,
+        selected_event_id: sel,
+        table_page: st.table_page,
+        auto_sync: st.auto_sync,
+        loading: false,
+        weather_probing: st.weather_probing,
+        tick: st.tick + 1,
+        last_stage1_ms: timings_and_note.0,
+        last_stage2_ms: timings_and_note.1,
+        hover_lat: st.hover_lat,
+        hover_lon: st.hover_lon,
+        hover_in_map: st.hover_in_map,
+        hovered_event_id: st.hovered_event_id,
+        status_note: timings_and_note.2,
+        db_path: st.db_path,
+        svg_path: st.svg_path,
+        json_path: st.json_path,
+        enable_db: st.enable_db,
+        map: next_map,
+        snap: snap,
+        delta: delta,
+        recent_runs: recent_runs,
+        probed_weather: st.probed_weather,
+    }
+}
+
+/// Append a newly probed Open-Meteo surface observation, keeping a bounded 8-station ring.
+pub def append_probed_weather(
+    st: TelemetryGuiState,
+    wx: SurfaceWeather,
+) -> TelemetryGuiState effect alloc {
+    val next_list: list<SurfaceWeather> = list(wx)
+    for i in 0..list_len(st.probed_weather) {
+        val existing = list_get(st.probed_weather, i)
+        if existing.label != wx.label && list_len(next_list) < 8 {
+            val _ = list_push(next_list, existing)
+        }
+    }
+    val note = f"Probed Open-Meteo @ {wx.label}: {format_fixed_1(wx.temp_c)} C, {format_fixed_0(wx.pressure_hpa)} hPa"
+    return TelemetryGuiState {
+        feed_slug: st.feed_slug,
+        active_view: st.active_view,
+        depth_filter: st.depth_filter,
+        min_mag: st.min_mag,
+        search_text: st.search_text,
+        selected_event_id: st.selected_event_id,
+        table_page: st.table_page,
+        auto_sync: st.auto_sync,
+        loading: st.loading,
+        weather_probing: false,
+        tick: st.tick,
+        last_stage1_ms: st.last_stage1_ms,
+        last_stage2_ms: st.last_stage2_ms,
+        hover_lat: st.hover_lat,
+        hover_lon: st.hover_lon,
+        hover_in_map: st.hover_in_map,
+        hovered_event_id: st.hovered_event_id,
+        status_note: note,
+        db_path: st.db_path,
+        svg_path: st.svg_path,
+        json_path: st.json_path,
+        enable_db: st.enable_db,
+        map: st.map,
+        snap: st.snap,
+        delta: st.delta,
+        recent_runs: st.recent_runs,
+        probed_weather: next_list,
+    }
+}
+
+def reduce_toggle_action(st: TelemetryGuiState, key: str, value: bool) -> TelemetryGuiState {
+    val m = st.map
+    val next_map = MapViewport {
+        zoom: m.zoom,
+        center_lon: m.center_lon,
+        center_lat: m.center_lat,
+        focus: m.focus,
+        show_arcs: if key == "tog_arcs" { value } else { m.show_arcs },
+        show_weather: if key == "tog_wx" { value } else { m.show_weather },
+        show_footprint: if key == "tog_footprint" { value } else { m.show_footprint },
+        show_labels: if key == "tog_labels" { value } else { m.show_labels },
+    }
+    val auto_s = if key == "tog_auto_sync" { value } else { st.auto_sync }
+    return TelemetryGuiState {
+        feed_slug: st.feed_slug,
+        active_view: st.active_view,
+        depth_filter: st.depth_filter,
+        min_mag: st.min_mag,
+        search_text: st.search_text,
+        selected_event_id: st.selected_event_id,
+        table_page: st.table_page,
+        auto_sync: auto_s,
+        loading: st.loading,
+        weather_probing: st.weather_probing,
+        tick: st.tick,
+        last_stage1_ms: st.last_stage1_ms,
+        last_stage2_ms: st.last_stage2_ms,
+        hover_lat: st.hover_lat,
+        hover_lon: st.hover_lon,
+        hover_in_map: st.hover_in_map,
+        hovered_event_id: st.hovered_event_id,
+        status_note: st.status_note,
+        db_path: st.db_path,
+        svg_path: st.svg_path,
+        json_path: st.json_path,
+        enable_db: st.enable_db,
+        map: next_map,
+        snap: st.snap,
+        delta: st.delta,
+        recent_runs: st.recent_runs,
+        probed_weather: st.probed_weather,
+    }
+}
+
+def resolve_workspace_view(act: str, cur: WorkspaceView) -> WorkspaceView {
+    if act == "act_view_map" {
+        return WorkspaceView.GlobalMap
+    }
+    if act == "act_view_ad" {
+        return WorkspaceView.AdFitView
+    }
+    if act == "act_view_kp" {
+        return WorkspaceView.GeomagneticView
+    }
+    if act == "act_view_wx" {
+        return WorkspaceView.AtmosphericView
+    }
+    return cur
+}
+
+def resolve_depth_filter(act: str, cur: DepthFilter) -> DepthFilter {
+    if act == "act_flt_all" {
+        return DepthFilter.AllRegimes
+    }
+    if act == "act_flt_shallow" {
+        return DepthFilter.ShallowOnly
+    }
+    if act == "act_flt_mid" {
+        return DepthFilter.MidOnly
+    }
+    if act == "act_flt_deep" {
+        return DepthFilter.DeepOnly
+    }
+    return cur
+}
+
+def reduce_view_or_depth(st: TelemetryGuiState, act: str) -> TelemetryGuiState {
+    val page = if starts_with(act, "act_flt_") { 0 } else { st.table_page }
+    return TelemetryGuiState {
+        feed_slug: st.feed_slug,
+        active_view: resolve_workspace_view(act, st.active_view),
+        depth_filter: resolve_depth_filter(act, st.depth_filter),
+        min_mag: st.min_mag,
+        search_text: st.search_text,
+        selected_event_id: st.selected_event_id,
+        table_page: page,
+        auto_sync: st.auto_sync,
+        loading: st.loading,
+        weather_probing: st.weather_probing,
+        tick: st.tick,
+        last_stage1_ms: st.last_stage1_ms,
+        last_stage2_ms: st.last_stage2_ms,
+        hover_lat: st.hover_lat,
+        hover_lon: st.hover_lon,
+        hover_in_map: st.hover_in_map,
+        hovered_event_id: st.hovered_event_id,
+        status_note: st.status_note,
+        db_path: st.db_path,
+        svg_path: st.svg_path,
+        json_path: st.json_path,
+        enable_db: st.enable_db,
+        map: st.map,
+        snap: st.snap,
+        delta: st.delta,
+        recent_runs: st.recent_runs,
+        probed_weather: st.probed_weather,
+    }
+}
+
+def reduce_map_action(st: TelemetryGuiState, act: str) -> TelemetryGuiState effect alloc {
+    val m = st.map
+    if act == "act_zoom_in" {
+        return with_map_focus(st, m.zoom * 1.5, m.center_lon, m.center_lat, m.focus)
+    }
+    if act == "act_zoom_out" {
+        val next_z = max_f64(1.0, m.zoom / 1.5)
+        val next_f = if next_z <= 1.05 { MapFocusMode.WorldView } else { m.focus }
+        val lon = if next_z <= 1.05 { 0.0 } else { m.center_lon }
+        val lat = if next_z <= 1.05 { 10.0 } else { m.center_lat }
+        return with_map_focus(st, next_z, lon, lat, next_f)
+    }
+    if act == "act_map_reset" {
+        return with_map_focus(st, 1.0, 0.0, 10.0, MapFocusMode.WorldView)
+    }
+    if act == "act_focus_iss" {
+        val next = with_map_focus(
+            st,
+            max_f64(2.2, m.zoom),
+            st.snap.iss.longitude,
+            st.snap.iss.latitude,
+            MapFocusMode.TrackIss,
+        )
+        return gui_with_view_map(next)
+    }
+    if act == "act_focus_eq" {
+        return when resolve_selected_event_idx(st) {
+            some(idx) => {
+                val ev = list_get(st.snap.events, idx)
+                val next = with_map_focus(
+                    st,
+                    max_f64(2.8, m.zoom),
+                    ev.coord.lon_deg,
+                    ev.coord.lat_deg,
+                    MapFocusMode.FocusSelected,
+                )
+                gui_with_view_map(next)
+            },
+            none => st,
+        }
+    }
+    return st
+}
+
+def gui_with_view_map(st: TelemetryGuiState) -> TelemetryGuiState {
+    return TelemetryGuiState {
+        feed_slug: st.feed_slug,
+        active_view: WorkspaceView.GlobalMap,
+        depth_filter: st.depth_filter,
+        min_mag: st.min_mag,
+        search_text: st.search_text,
+        selected_event_id: st.selected_event_id,
+        table_page: st.table_page,
+        auto_sync: st.auto_sync,
+        loading: st.loading,
+        weather_probing: st.weather_probing,
+        tick: st.tick,
+        last_stage1_ms: st.last_stage1_ms,
+        last_stage2_ms: st.last_stage2_ms,
+        hover_lat: st.hover_lat,
+        hover_lon: st.hover_lon,
+        hover_in_map: st.hover_in_map,
+        hovered_event_id: st.hovered_event_id,
+        status_note: st.status_note,
+        db_path: st.db_path,
+        svg_path: st.svg_path,
+        json_path: st.json_path,
+        enable_db: st.enable_db,
+        map: st.map,
+        snap: st.snap,
+        delta: st.delta,
+        recent_runs: st.recent_runs,
+        probed_weather: st.probed_weather,
+    }
+}
+
+def resolve_feed_slug_action(act: str) -> option<str> effect alloc {
+    if act == "act_feed_all_day" {
+        return some("all_day")
+    }
+    if act == "act_feed_2.5_day" {
+        return some("2.5_day")
+    }
+    if act == "act_feed_2.5_week" {
+        return some("2.5_week")
+    }
+    if act == "act_feed_4.5_week" {
+        return some("4.5_week")
+    }
+    return none
+}
+
+def with_selection_and_status(
+    st: TelemetryGuiState,
+    sel_id: str,
+    page: i64,
+    note: str,
+) -> TelemetryGuiState {
+    return TelemetryGuiState {
+        feed_slug: st.feed_slug,
+        active_view: st.active_view,
+        depth_filter: st.depth_filter,
+        min_mag: st.min_mag,
+        search_text: st.search_text,
+        selected_event_id: sel_id,
+        table_page: page,
+        auto_sync: st.auto_sync,
+        loading: st.loading,
+        weather_probing: st.weather_probing,
+        tick: st.tick,
+        last_stage1_ms: st.last_stage1_ms,
+        last_stage2_ms: st.last_stage2_ms,
+        hover_lat: st.hover_lat,
+        hover_lon: st.hover_lon,
+        hover_in_map: st.hover_in_map,
+        hovered_event_id: st.hovered_event_id,
+        status_note: note,
+        db_path: st.db_path,
+        svg_path: st.svg_path,
+        json_path: st.json_path,
+        enable_db: st.enable_db,
+        map: st.map,
+        snap: st.snap,
+        delta: st.delta,
+        recent_runs: st.recent_runs,
+        probed_weather: st.probed_weather,
+    }
+}
+
+def with_search_and_min_mag(
+    st: TelemetryGuiState,
+    search_val: str,
+    min_mag_val: f64,
+    page: i64,
+) -> TelemetryGuiState {
+    return TelemetryGuiState {
+        feed_slug: st.feed_slug,
+        active_view: st.active_view,
+        depth_filter: st.depth_filter,
+        min_mag: clamp_f64(min_mag_val, 0.0, 7.5),
+        search_text: search_val,
+        selected_event_id: st.selected_event_id,
+        table_page: page,
+        auto_sync: st.auto_sync,
+        loading: st.loading,
+        weather_probing: st.weather_probing,
+        tick: st.tick,
+        last_stage1_ms: st.last_stage1_ms,
+        last_stage2_ms: st.last_stage2_ms,
+        hover_lat: st.hover_lat,
+        hover_lon: st.hover_lon,
+        hover_in_map: st.hover_in_map,
+        hovered_event_id: st.hovered_event_id,
+        status_note: st.status_note,
+        db_path: st.db_path,
+        svg_path: st.svg_path,
+        json_path: st.json_path,
+        enable_db: st.enable_db,
+        map: st.map,
+        snap: st.snap,
+        delta: st.delta,
+        recent_runs: st.recent_runs,
+        probed_weather: st.probed_weather,
+    }
+}
+
+def start_fetch_for_feed(
+    st: TelemetryGuiState,
+    slug: str,
+    note: str,
+) -> (TelemetryGuiState, GuiWorkerCmd) {
+    val next = TelemetryGuiState {
+        feed_slug: slug,
+        active_view: st.active_view,
+        depth_filter: st.depth_filter,
+        min_mag: st.min_mag,
+        search_text: st.search_text,
+        selected_event_id: st.selected_event_id,
+        table_page: 0,
+        auto_sync: st.auto_sync,
+        loading: true,
+        weather_probing: st.weather_probing,
+        tick: st.tick,
+        last_stage1_ms: st.last_stage1_ms,
+        last_stage2_ms: st.last_stage2_ms,
+        hover_lat: st.hover_lat,
+        hover_lon: st.hover_lon,
+        hover_in_map: st.hover_in_map,
+        hovered_event_id: st.hovered_event_id,
+        status_note: note,
+        db_path: st.db_path,
+        svg_path: st.svg_path,
+        json_path: st.json_path,
+        enable_db: st.enable_db,
+        map: st.map,
+        snap: st.snap,
+        delta: st.delta,
+        recent_runs: st.recent_runs,
+        probed_weather: st.probed_weather,
+    }
+    return (next, GuiWorkerCmd.FetchFeed(slug))
+}
+
+def apply_live_control_deltas(
+    st: TelemetryGuiState,
+    ui_st: UiState,
+) -> (TelemetryGuiState, UiState) {
+    var cur = st
+    var out_ui = ui_st
+    if ui_st.has_toggle_change {
+        cur = reduce_toggle_action(cur, ui_st.last_toggle_key, ui_st.last_toggle_val)
+    }
+    if ui_st.has_slider_change && ui_st.last_slider_key == "sldr_min_mag" {
+        cur = with_search_and_min_mag(cur, cur.search_text, ui_st.last_slider_val, 0)
+    }
+    if ui_st.last_text_key == "inp_search" && ui_st.last_text_val != cur.search_text {
+        cur = with_search_and_min_mag(cur, ui_st.last_text_val, cur.min_mag, 0)
+    }
+    if ui_st.dispatched_action == "act_clear_search" {
+        cur = with_search_and_min_mag(cur, "", cur.min_mag, 0)
+        out_ui = ui_state_set_text(out_ui, "inp_search", "")
+    }
+    return (cur, out_ui)
+}
+
+def reduce_probe_or_export(
+    cur: TelemetryGuiState,
+    act: str,
+) -> (TelemetryGuiState, GuiWorkerCmd) effect alloc {
+    if act == "act_probe_wx" {
+        return when resolve_selected_event_idx(cur) {
+            some(idx) => {
+                val ev = list_get(cur.snap.events, idx)
+                val probing_st = TelemetryGuiState {
+                    feed_slug: cur.feed_slug,
+                    active_view: cur.active_view,
+                    depth_filter: cur.depth_filter,
+                    min_mag: cur.min_mag,
+                    search_text: cur.search_text,
+                    selected_event_id: cur.selected_event_id,
+                    table_page: cur.table_page,
+                    auto_sync: cur.auto_sync,
+                    loading: cur.loading,
+                    weather_probing: true,
+                    tick: cur.tick,
+                    last_stage1_ms: cur.last_stage1_ms,
+                    last_stage2_ms: cur.last_stage2_ms,
+                    hover_lat: cur.hover_lat,
+                    hover_lon: cur.hover_lon,
+                    hover_in_map: cur.hover_in_map,
+                    hovered_event_id: cur.hovered_event_id,
+                    status_note: concat("Probing Open-Meteo at ", ev.place),
+                    db_path: cur.db_path,
+                    svg_path: cur.svg_path,
+                    json_path: cur.json_path,
+                    enable_db: cur.enable_db,
+                    map: cur.map,
+                    snap: cur.snap,
+                    delta: cur.delta,
+                    recent_runs: cur.recent_runs,
+                    probed_weather: cur.probed_weather,
+                }
+                (
+                    probing_st,
+                    GuiWorkerCmd.ProbeWeather(ev.place, ev.coord.lat_deg, ev.coord.lon_deg),
+                )
+            },
+            none => (cur, GuiWorkerCmd.NoOp),
+        }
+    }
+    return (cur, GuiWorkerCmd.ExportBundle)
+}
+
+def reduce_action_dispatch(
+    cur0: TelemetryGuiState,
+    out_ui: UiState,
+    act: str,
+) -> (TelemetryGuiState, GuiWorkerCmd, UiState) effect alloc {
+    when resolve_feed_slug_action(act) {
+        some(slug) => {
+            val pair = start_fetch_for_feed(cur0, slug, concat("Switching USGS feed to ", slug))
+            return (pair.0, pair.1, out_ui)
+        },
+        none => {},
+    }
+    if act == "act_refresh_now" {
+        val pair = start_fetch_for_feed(cur0, cur0.feed_slug, "Refreshing live telemetry feeds...")
+        return (pair.0, pair.1, out_ui)
+    }
+    if act == "act_probe_wx" || act == "act_export_bundle" {
+        val pair = reduce_probe_or_export(cur0, act)
+        return (pair.0, pair.1, out_ui)
+    }
+    if starts_with(act, "sel_eq_") {
+        val ev_id = slice(act, 7, len(act))
+        val next = with_selection_and_status(cur0, ev_id, cur0.table_page, cur0.status_note)
+        return (next, GuiWorkerCmd.NoOp, out_ui)
+    }
+    if act == "act_page_prev" {
+        val prev_p = if cur0.table_page > 0 { cur0.table_page - 1 } else { 0 }
+        val next = with_selection_and_status(cur0, cur0.selected_event_id, prev_p, cur0.status_note)
+        return (next, GuiWorkerCmd.NoOp, out_ui)
+    }
+    if act == "act_page_next" {
+        val p = cur0.table_page + 1
+        val next = with_selection_and_status(cur0, cur0.selected_event_id, p, cur0.status_note)
+        return (next, GuiWorkerCmd.NoOp, out_ui)
+    }
+    val cur1 = reduce_view_or_depth(cur0, act)
+    return (reduce_map_action(cur1, act), GuiWorkerCmd.NoOp, out_ui)
+}
+
+/// Apply polled `UiState` widget edges and optional map pick ID to application state.
+pub def reduce_gui_interaction(
+    st: TelemetryGuiState,
+    ui_st: UiState,
+    map_pick_id: str,
+) -> (TelemetryGuiState, GuiWorkerCmd, UiState) effect alloc {
+    val delta_res = apply_live_control_deltas(st, ui_st)
+    var cur = delta_res.0
+    val out_ui = delta_res.1
+    val sync_toggled = ui_st.has_toggle_change && ui_st.last_toggle_key == "tog_auto_sync"
+    if len(map_pick_id) > 0 {
+        cur = with_selection_and_status(cur, map_pick_id, cur.table_page, cur.status_note)
+    }
+    val act = out_ui.dispatched_action
+    if len(act) == 0 {
+        val cmd = if sync_toggled {
+            GuiWorkerCmd.SetAutoSync(cur.auto_sync)
+        } else {
+            GuiWorkerCmd.NoOp
+        }
+        return (cur, cmd, out_ui)
+    }
+    return reduce_action_dispatch(cur, out_ui, act)
+}
+
+def sample_state_test_snap() -> ObservatorySnapshot effect alloc, thread {
+    val events: list<SeismicEvent> = list(
+        SeismicEvent {
+            event_id: "eq_a",
+            time_utc: "2026-11-15T10:00:00Z",
+            coord: GeoCoord { lat_deg: 36.2, lon_deg: 141.0, depth_km: 24.0 },
+            magnitude: 5.4,
+            mag_type: "mww",
+            place: "Off East Coast of Honshu, Japan",
+            station_count: 40,
+            gap_deg: 30.0,
+            rms_sec: 0.4,
+        },
+        SeismicEvent {
+            event_id: "eq_b",
+            time_utc: "2026-11-15T09:12:00Z",
+            coord: GeoCoord { lat_deg: -21.5, lon_deg: -176.2, depth_km: 410.0 },
+            magnitude: 4.1,
+            mag_type: "mb",
+            place: "Fiji Region",
+            station_count: 18,
+            gap_deg: 75.0,
+            rms_sec: 0.3,
+        },
+    )
+    val kps = list(
+        GeomagneticSample { time_tag: "t0", kp_index: 3.33, a_running: 18.0, station_count: 8 },
+    )
+    val iss = OrbitalState {
+        name: "iss",
+        latitude: 12.0,
+        longitude: 45.0,
+        altitude_km: 416.0,
+        velocity_kmh: 27590.0,
+        footprint_km: 4480.0,
+        visibility: "daylight",
+        timestamp_s: 1794690639,
+        solar_lat: -18.0,
+        solar_lon: 110.0,
+    }
+    val an = analyze_observatory_feeds(events, kps, iss)
+    val empty_wx: list<SurfaceWeather> = list()
+    return ObservatorySnapshot {
+        events: events,
+        kps: kps,
+        iss: iss,
+        weather: empty_wx,
+        analytics: an,
+    }
+}
+
+def test_gui_state_filtering_and_reduction() -> i64 effect alloc, thread, throw {
+    val base0 = gui_state_init(GuiLaunchOpts {})
+    val snap = sample_state_test_snap()
+    val runs: list<StoredRunSummary> = list()
+    var st = apply_live_snapshot(base0, snap, base0.delta, runs, (120, 80, "Live ok"))
+    assert(!st.loading && st.selected_event_id == "eq_a")
+    assert(list_len(filtered_event_indices(st)) == 2)
+
+    val ui_search = ui_state_set_text(UiState {}, "inp_search", "fiji")
+    val r1 = reduce_gui_interaction(st, ui_search, "")
+    st = r1.0
+    assert(list_len(filtered_event_indices(st)) == 1)
+    assert(list_get(st.snap.events, list_get(filtered_event_indices(st), 0)).event_id == "eq_b")
+
+    val ui_clear = UiState {
+        last_text_key: "inp_search",
+        last_text_val: "fiji",
+        dispatched_action: "act_clear_search",
+    }
+    val r2 = reduce_gui_interaction(st, ui_clear, "")
+    st = r2.0
+    assert(st.search_text == "" && r2.2.last_text_val == "")
+
+    val ui_feed = UiState { dispatched_action: "act_feed_4.5_week" }
+    val r3 = reduce_gui_interaction(st, ui_feed, "")
+    assert(r3.0.feed_slug == "4.5_week" && r3.0.loading)
+    return 0
+}

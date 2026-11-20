@@ -1,0 +1,1036 @@
+// From-scratch adversarial neural cipher invention (Alice/Bob/Eve via DiffTensor AD)
+// distilled into an exact bijective 6-round Neural-Feistel block cipher in CBC mode.
+
+bring std.tensor
+bring std.nn
+bring std.math
+bring std.fs
+bring std.os
+bring std.json
+bring domain
+
+/// Numeric parameter vector paired with Adam first/second moment accumulators.
+pub record ParamVec {
+    data: list<f64>,
+    m: list<f64>,
+    v: list<f64>,
+    rows: i64,
+    cols: i64,
+}
+
+/// Extracted numeric weights of Alice's adversarially trained bilinear S-Box round network.
+pub record AliceBilinearWeights {
+    wx: list<f64>,
+    wk: list<f64>,
+    bm: list<f64>,
+    w2: list<f64>,
+    b2: list<f64>,
+    w3: list<f64>,
+    b3: list<f64>,
+    hidden: i64,
+}
+
+/// Hyperparameters governing adversarial DiffTensor training.
+pub record NeuralForgeConfig {
+    steps: i64,
+    batch_size: i64,
+    hidden: i64,
+    lr: f64,
+    adv_weight: f64,
+    sac_weight: f64,
+}
+
+/// Complete record of a neural cipher invention run and cryptanalytic stress evaluation.
+pub record NeuralForgeArtifact {
+    kernel: AliceBilinearWeights,
+    key_label: str,
+    bob_init_acc: f64,
+    bob_final_acc: f64,
+    eve_init_acc: f64,
+    eve_final_acc: f64,
+    sac_score: f64,
+    entropy_norm: f64,
+    roundtrip_passed: i64,
+    roundtrip_total: i64,
+    epoch_bob_acc: list<f64>,
+    epoch_eve_acc: list<f64>,
+    classifier_label: str,
+    classifier_conf: f64,
+}
+
+record AliceParams {
+    wx: ParamVec,
+    wk: ParamVec,
+    bm: ParamVec,
+    w2: ParamVec,
+    b2: ParamVec,
+    w3: ParamVec,
+    b3: ParamVec,
+}
+
+record EveParams {
+    w1: ParamVec,
+    b1: ParamVec,
+    w2: ParamVec,
+    b2: ParamVec,
+    w3: ParamVec,
+    b3: ParamVec,
+}
+
+record CryptShardResult {
+    ok_count: i64,
+    flips: i64,
+    trials: i64,
+}
+
+record ForgeHistory {
+    b_init: f64,
+    b_last: f64,
+    e_init: f64,
+    e_last: f64,
+    bob_hist: list<f64>,
+    eve_hist: list<f64>,
+}
+
+/// Return balanced default hyperparameters for Alice-Bob-Eve training.
+pub def default_forge_config(steps: i64) -> NeuralForgeConfig {
+    NeuralForgeConfig {
+        steps: if steps < 40 { 40 } else { steps },
+        batch_size: 64,
+        hidden: 24,
+        lr: 0.015,
+        adv_weight: 3.0,
+        sac_weight: 1.5,
+    }
+}
+
+def make_filled_matrix(rows: i64, cols: i64, fill: f64) -> DiffTensor effect alloc {
+    val n = rows * cols
+    val vals: list<f64> = list()
+    var i = 0
+    while i < n {
+        list_push(vals, fill)
+        i = i + 1
+    }
+    tensor_ad_from_data(vals, list(rows, cols))
+}
+
+def zero_f64_vec(n: i64) -> list<f64> effect alloc {
+    val out: list<f64> = list()
+    var i = 0
+    while i < n {
+        list_push(out, 0.0)
+        i = i + 1
+    }
+    out
+}
+
+def init_param_vec(rows: i64, cols: i64) -> ParamVec effect alloc, random, time {
+    val scale = sqrt(2.0 / to_f64(rows + cols))
+    val n = rows * cols
+    val vals: list<f64> = list()
+    var i = 0
+    while i < n {
+        list_push(vals, (random() * 2.0 - 1.0) * scale)
+        i = i + 1
+    }
+    ParamVec {
+        data: vals,
+        m: zero_f64_vec(n),
+        v: zero_f64_vec(n),
+        rows: rows,
+        cols: cols,
+    }
+}
+
+def to_ad_param(p: ParamVec) -> DiffTensor effect alloc {
+    tensor_ad_parameter(tensor_ad_from_data(p.data, list(p.rows, p.cols)))
+}
+
+def clamp_grad(g: f64) -> f64 {
+    if g > 1.0 {
+        return 1.0
+    }
+    if g < -1.0 {
+        return -1.0
+    }
+    g
+}
+
+def apply_adam_grad(
+    p: ParamVec,
+    ad_w: DiffTensor,
+    lr: f64,
+    step_num: i64,
+) -> ParamVec effect alloc {
+    val g_data = tensor_ad_data(tensor_ad_grad(ad_w))
+    val n = p.rows * p.cols
+    val b1 = 0.9
+    val b2 = 0.999
+    val bc1 = 1.0 - pow(b1, to_f64(step_num))
+    val bc2 = 1.0 - pow(b2, to_f64(step_num))
+    val nw: list<f64> = list()
+    val nm: list<f64> = list()
+    val nv: list<f64> = list()
+    var i = 0
+    while i < n {
+        val g = clamp_grad(list_get(g_data, i))
+        val m_i = b1 * list_get(p.m, i) + (1.0 - b1) * g
+        val v_i = b2 * list_get(p.v, i) + (1.0 - b2) * g * g
+        val delta = lr * (m_i / bc1) / (sqrt(v_i / bc2) + 0.00000001)
+        list_push(nw, list_get(p.data, i) - delta)
+        list_push(nm, m_i)
+        list_push(nv, v_i)
+        i = i + 1
+    }
+    ParamVec {
+        data: nw,
+        m: nm,
+        v: nv,
+        rows: p.rows,
+        cols: p.cols,
+    }
+}
+
+def init_alice_params(hidden: i64) -> AliceParams effect alloc, random, time {
+    AliceParams {
+        wx: init_param_vec(8, hidden),
+        wk: init_param_vec(8, hidden),
+        bm: init_param_vec(1, hidden),
+        w2: init_param_vec(hidden, hidden),
+        b2: init_param_vec(1, hidden),
+        w3: init_param_vec(hidden, 8),
+        b3: init_param_vec(1, 8),
+    }
+}
+
+def init_eve_params(hidden: i64) -> EveParams effect alloc, random, time {
+    EveParams {
+        w1: init_param_vec(8, hidden),
+        b1: init_param_vec(1, hidden),
+        w2: init_param_vec(hidden, hidden),
+        b2: init_param_vec(1, hidden),
+        w3: init_param_vec(hidden, 8),
+        b3: init_param_vec(1, 8),
+    }
+}
+
+/// Convert an unsigned byte [0..255] into an 8-element bipolar {-1.0, +1.0} vector.
+pub def byte_to_bipolar(b: i64) -> list<f64> effect alloc {
+    val out: list<f64> = list()
+    var bit = 0
+    while bit < 8 {
+        val v = if band(b, shl(1, bit)) != 0 { 1.0 } else { -1.0 }
+        list_push(out, v)
+        bit = bit + 1
+    }
+    out
+}
+
+def push_bipolar_byte(dst: list<f64>, byte_val: i64) -> i64 effect alloc {
+    var bit = 0
+    while bit < 8 {
+        val v = if band(byte_val, shl(1, bit)) != 0 { 1.0 } else { -1.0 }
+        list_push(dst, v)
+        bit = bit + 1
+    }
+    0
+}
+
+def sample_corpus_batch(
+    blocks: list<PlainBlock>,
+    batch: i64,
+    step: i64,
+) -> list<f64> effect alloc, random, time {
+    val out: list<f64> = list()
+    val nb = list_len(blocks)
+    var r = 0
+    while r < batch {
+        val use_corpus = nb > 0 && (r % 2 == 0)
+        val byte_val = if use_corpus {
+            val blk = list_get(blocks, (step * 7 + r) % nb)
+            val blen = list_len(blk.bytes)
+            list_get(blk.bytes, (step * 13 + r * 5) % blen)
+        } else {
+            (floor(random() * 256.0) to i64)
+        }
+        val _z = push_bipolar_byte(out, byte_val)
+        r = r + 1
+    }
+    out
+}
+
+def random_bipolar_batch(batch: i64) -> list<f64> effect alloc, random, time {
+    val out: list<f64> = list()
+    var i = 0
+    while i < batch * 8 {
+        list_push(out, if random() < 0.5 { -1.0 } else { 1.0 })
+        i = i + 1
+    }
+    out
+}
+
+def flip_batch_bit(msg: list<f64>, batch: i64, bit_idx: i64) -> list<f64> effect alloc {
+    val out: list<f64> = list()
+    var r = 0
+    while r < batch {
+        var c = 0
+        while c < 8 {
+            val v = list_get(msg, r * 8 + c)
+            list_push(out, if c == bit_idx { 0.0 - v } else { v })
+            c = c + 1
+        }
+        r = r + 1
+    }
+    out
+}
+
+def bilinear_tensors(
+    x: DiffTensor,
+    key: DiffTensor,
+    ones_b: DiffTensor,
+    ts: list<DiffTensor>,
+) -> DiffTensor effect alloc {
+    val hx = tensor_ad_tanh(tensor_ad_matmul(x, list_get(ts, 0)))
+    val hk = tensor_ad_tanh(tensor_ad_matmul(key, list_get(ts, 1)))
+    val mixed = tensor_ad_add(tensor_ad_mul(hx, hk), tensor_ad_matmul(ones_b, list_get(ts, 2)))
+    val h2 = tensor_ad_tanh(
+        tensor_ad_add(
+            tensor_ad_matmul(mixed, list_get(ts, 3)),
+            tensor_ad_matmul(ones_b, list_get(ts, 4)),
+        ),
+    )
+    tensor_ad_tanh(
+        tensor_ad_add(
+            tensor_ad_matmul(h2, list_get(ts, 5)),
+            tensor_ad_matmul(ones_b, list_get(ts, 6)),
+        ),
+    )
+}
+
+def alice_to_ad_list(a: AliceParams) -> list<DiffTensor> effect alloc {
+    val out: list<DiffTensor> = list()
+    list_push(out, to_ad_param(a.wx))
+    list_push(out, to_ad_param(a.wk))
+    list_push(out, to_ad_param(a.bm))
+    list_push(out, to_ad_param(a.w2))
+    list_push(out, to_ad_param(a.b2))
+    list_push(out, to_ad_param(a.w3))
+    list_push(out, to_ad_param(a.b3))
+    out
+}
+
+def step_alice_from_list(
+    a: AliceParams,
+    ts: list<DiffTensor>,
+    lr: f64,
+    step_num: i64,
+) -> AliceParams effect alloc {
+    AliceParams {
+        wx: apply_adam_grad(a.wx, list_get(ts, 0), lr, step_num),
+        wk: apply_adam_grad(a.wk, list_get(ts, 1), lr, step_num),
+        bm: apply_adam_grad(a.bm, list_get(ts, 2), lr, step_num),
+        w2: apply_adam_grad(a.w2, list_get(ts, 3), lr, step_num),
+        b2: apply_adam_grad(a.b2, list_get(ts, 4), lr, step_num),
+        w3: apply_adam_grad(a.w3, list_get(ts, 5), lr, step_num),
+        b3: apply_adam_grad(a.b3, list_get(ts, 6), lr, step_num),
+    }
+}
+
+def eve_to_ad_list(e: EveParams) -> list<DiffTensor> effect alloc {
+    val out: list<DiffTensor> = list()
+    list_push(out, to_ad_param(e.w1))
+    list_push(out, to_ad_param(e.b1))
+    list_push(out, to_ad_param(e.w2))
+    list_push(out, to_ad_param(e.b2))
+    list_push(out, to_ad_param(e.w3))
+    list_push(out, to_ad_param(e.b3))
+    out
+}
+
+def step_eve_from_list(
+    e: EveParams,
+    ts: list<DiffTensor>,
+    lr: f64,
+    step_num: i64,
+) -> EveParams effect alloc {
+    EveParams {
+        w1: apply_adam_grad(e.w1, list_get(ts, 0), lr, step_num),
+        b1: apply_adam_grad(e.b1, list_get(ts, 1), lr, step_num),
+        w2: apply_adam_grad(e.w2, list_get(ts, 2), lr, step_num),
+        b2: apply_adam_grad(e.b2, list_get(ts, 3), lr, step_num),
+        w3: apply_adam_grad(e.w3, list_get(ts, 4), lr, step_num),
+        b3: apply_adam_grad(e.b3, list_get(ts, 5), lr, step_num),
+    }
+}
+
+def eve_tensors(
+    c_t: DiffTensor,
+    ones_b: DiffTensor,
+    ts: list<DiffTensor>,
+) -> DiffTensor effect alloc {
+    val h1 = tensor_ad_tanh(
+        tensor_ad_add(
+            tensor_ad_matmul(c_t, list_get(ts, 0)),
+            tensor_ad_matmul(ones_b, list_get(ts, 1)),
+        ),
+    )
+    val h2 = tensor_ad_tanh(
+        tensor_ad_add(
+            tensor_ad_matmul(h1, list_get(ts, 2)),
+            tensor_ad_matmul(ones_b, list_get(ts, 3)),
+        ),
+    )
+    tensor_ad_tanh(
+        tensor_ad_add(
+            tensor_ad_matmul(h2, list_get(ts, 4)),
+            tensor_ad_matmul(ones_b, list_get(ts, 5)),
+        ),
+    )
+}
+
+def bit_acc(pred: list<f64>, target: list<f64>) -> f64 effect alloc {
+    val n = len(target)
+    if n == 0 {
+        return 0.0
+    }
+    var hits = 0
+    var i = 0
+    while i < n {
+        val p_sign = if list_get(pred, i) >= 0.0 { 1.0 } else { -1.0 }
+        if p_sign == list_get(target, i) {
+            hits = hits + 1
+        }
+        i = i + 1
+    }
+    to_f64(hits) / to_f64(n)
+}
+
+def run_ab_joint_step(
+    alice: AliceParams,
+    bob: AliceParams,
+    eve: EveParams,
+    blocks: list<PlainBlock>,
+    cfg_step: (NeuralForgeConfig, i64),
+) -> (AliceParams, AliceParams, f64, f64) effect alloc, random, time {
+    val cfg = cfg_step.0
+    val step = cfg_step.1
+    val ones_b = make_filled_matrix(cfg.batch_size, 1, 1.0)
+    val one_s = tensor_ad_from_data(list(1.0), list(1))
+    val adv_w = tensor_ad_from_data(list(cfg.adv_weight), list(1))
+    val sac_w = tensor_ad_from_data(list(cfg.sac_weight), list(1))
+    val inv_n = tensor_ad_from_data(list(1.0 / to_f64(cfg.batch_size * 8)), list(1))
+    val msg = sample_corpus_batch(blocks, cfg.batch_size, step)
+    val key = random_bipolar_batch(cfg.batch_size)
+    val msg_t = tensor_ad_from_data(msg, list(cfg.batch_size, 8))
+    val key_t = tensor_ad_from_data(key, list(cfg.batch_size, 8))
+    val flip_t = tensor_ad_from_data(
+        flip_batch_bit(msg, cfg.batch_size, step % 8),
+        list(cfg.batch_size, 8),
+    )
+    val ats = alice_to_ad_list(alice)
+    val bts = alice_to_ad_list(bob)
+    val ets = eve_to_ad_list(eve)
+    val c_t = bilinear_tensors(msg_t, key_t, ones_b, ats)
+    val c_flip_t = bilinear_tensors(flip_t, key_t, ones_b, ats)
+    val bob_pred = bilinear_tensors(c_t, key_t, ones_b, bts)
+    val eve_ab = eve_tensors(c_t, ones_b, ets)
+    val loss_bob = tensor_ad_mul(nn_ad_squared_error(bob_pred, msg_t), inv_n)
+    val loss_eve = tensor_ad_mul(nn_ad_squared_error(eve_ab, msg_t), inv_n)
+    val gap = tensor_ad_sub(one_s, loss_eve)
+    val sac_m = tensor_ad_mul(tensor_ad_sum(tensor_ad_mul(c_t, c_flip_t)), inv_n)
+    val ab_loss = tensor_ad_add(
+        tensor_ad_add(loss_bob, tensor_ad_mul(adv_w, tensor_ad_mul(gap, gap))),
+        tensor_ad_mul(sac_w, tensor_ad_mul(sac_m, sac_m)),
+    )
+    val _bk = tensor_ad_backward(ab_loss)
+    val b_acc = bit_acc(tensor_ad_data(bob_pred), msg)
+    val e_acc = bit_acc(tensor_ad_data(eve_ab), msg)
+    (
+        step_alice_from_list(alice, ats, cfg.lr, step),
+        step_alice_from_list(bob, bts, cfg.lr, step),
+        b_acc,
+        e_acc,
+    )
+}
+
+def run_eve_substeps(
+    alice: AliceParams,
+    eve: EveParams,
+    blocks: list<PlainBlock>,
+    cfg_step: (NeuralForgeConfig, i64),
+) -> EveParams effect alloc, random, time {
+    val cfg = cfg_step.0
+    val step = cfg_step.1
+    val ones_b = make_filled_matrix(cfg.batch_size, 1, 1.0)
+    val inv_n = tensor_ad_from_data(list(1.0 / to_f64(cfg.batch_size * 8)), list(1))
+    var cur_eve = eve
+    var es = 0
+    while es < 2 {
+        val m2 = sample_corpus_batch(blocks, cfg.batch_size, step + es * 17)
+        val k2 = random_bipolar_batch(cfg.batch_size)
+        val m2_t = tensor_ad_from_data(m2, list(cfg.batch_size, 8))
+        val k2_t = tensor_ad_from_data(k2, list(cfg.batch_size, 8))
+        val ats = alice_to_ad_list(alice)
+        val ets = eve_to_ad_list(cur_eve)
+        val c2_t = bilinear_tensors(m2_t, k2_t, ones_b, ats)
+        val ep2 = eve_tensors(c2_t, ones_b, ets)
+        val le = tensor_ad_mul(nn_ad_squared_error(ep2, m2_t), inv_n)
+        val _bk = tensor_ad_backward(le)
+        cur_eve = step_eve_from_list(cur_eve, ets, cfg.lr, (step - 1) * 2 + es + 1)
+        es = es + 1
+    }
+    cur_eve
+}
+
+/// Extract numeric trained weight arrays from Alice's neural network.
+pub def extract_alice_weights(alice: AliceParams, hidden: i64) -> AliceBilinearWeights {
+    AliceBilinearWeights {
+        wx: alice.wx.data,
+        wk: alice.wk.data,
+        bm: alice.bm.data,
+        w2: alice.w2.data,
+        b2: alice.b2.data,
+        w3: alice.w3.data,
+        b3: alice.b3.data,
+        hidden: hidden,
+    }
+}
+
+def tanh_scalar(x: f64) -> f64 {
+    if x > 15.0 {
+        return 1.0
+    }
+    if x < -15.0 {
+        return -1.0
+    }
+    val e2 = exp(2.0 * x)
+    (e2 - 1.0) / (e2 + 1.0)
+}
+
+/// Evaluate Alice's trained neural S-Box round network and quantize output into an 8-bit XOR mask.
+pub def neural_round_mask(
+    r_byte: i64,
+    k_byte: i64,
+    kernel: AliceBilinearWeights,
+) -> i64 effect alloc {
+    val hidden = kernel.hidden
+    val r_vec = byte_to_bipolar(r_byte)
+    val k_vec = byte_to_bipolar(k_byte)
+    val mixed: list<f64> = list()
+    var j = 0
+    while j < hidden {
+        var sx = 0.0
+        var sk = 0.0
+        var i = 0
+        while i < 8 {
+            sx = sx + list_get(r_vec, i) * list_get(kernel.wx, i * hidden + j)
+            sk = sk + list_get(k_vec, i) * list_get(kernel.wk, i * hidden + j)
+            i = i + 1
+        }
+        list_push(mixed, tanh_scalar(sx) * tanh_scalar(sk) + list_get(kernel.bm, j))
+        j = j + 1
+    }
+    val h2: list<f64> = list()
+    var j2 = 0
+    while j2 < hidden {
+        var acc = list_get(kernel.b2, j2)
+        var j1 = 0
+        while j1 < hidden {
+            acc = acc + list_get(mixed, j1) * list_get(kernel.w2, j1 * hidden + j2)
+            j1 = j1 + 1
+        }
+        list_push(h2, tanh_scalar(acc))
+        j2 = j2 + 1
+    }
+    quantize_output_byte(h2, kernel)
+}
+
+def quantize_output_byte(h2: list<f64>, kernel: AliceBilinearWeights) -> i64 effect alloc {
+    val hidden = kernel.hidden
+    var out_byte = 0
+    var o = 0
+    while o < 8 {
+        var acc = list_get(kernel.b3, o)
+        var j1 = 0
+        while j1 < hidden {
+            acc = acc + list_get(h2, j1) * list_get(kernel.w3, j1 * 8 + o)
+            j1 = j1 + 1
+        }
+        if acc >= 0.0 {
+            out_byte = bor(out_byte, shl(1, o))
+        }
+        o = o + 1
+    }
+    out_byte
+}
+
+def feistel_round_key(key: KeySchedule, round: i64) -> i64 effect alloc {
+    val kl = list_len(key.bytes)
+    band(bxor(list_get(key.bytes, round % kl), round * 73 + 29), 255)
+}
+
+/// Invertible 6-round 16-bit Neural-Feistel block encryption using Alice's learned network.
+pub def neural_feistel_encrypt_u16(
+    l0: i64,
+    r0: i64,
+    key: KeySchedule,
+    kernel: AliceBilinearWeights,
+) -> (i64, i64) effect alloc {
+    var l = band(l0, 255)
+    var r = band(r0, 255)
+    var round = 0
+    while round < 6 {
+        val rk = feistel_round_key(key, round)
+        val f = neural_round_mask(r, rk, kernel)
+        val next_r = band(bxor(l, f), 255)
+        l = r
+        r = next_r
+        round = round + 1
+    }
+    (l, r)
+}
+
+/// Exact inverse 6-round 16-bit Neural-Feistel block decryption (guaranteed lossless).
+pub def neural_feistel_decrypt_u16(
+    cl: i64,
+    cr: i64,
+    key: KeySchedule,
+    kernel: AliceBilinearWeights,
+) -> (i64, i64) effect alloc {
+    var l = band(cl, 255)
+    var r = band(cr, 255)
+    var round = 5
+    while round >= 0 {
+        val rk = feistel_round_key(key, round)
+        val f = neural_round_mask(l, rk, kernel)
+        val prev_l = band(bxor(r, f), 255)
+        r = l
+        l = prev_l
+        round = round - 1
+    }
+    (l, r)
+}
+
+def pad_u16_even(plain: list<i64>) -> list<i64> effect alloc {
+    val out: list<i64> = list()
+    val n = list_len(plain)
+    var i = 0
+    while i < n {
+        list_push(out, band(list_get(plain, i), 255))
+        i = i + 1
+    }
+    if (n % 2) == 0 {
+        list_push(out, 2)
+        list_push(out, 2)
+    } else {
+        list_push(out, 1)
+    }
+    out
+}
+
+def unpad_u16_even(dec: list<i64>) -> result<list<i64>, StageError> effect alloc {
+    val n = list_len(dec)
+    if n < 2 || (n % 2) != 0 {
+        return err(StageError.CryptoError("invalid neural-feistel block padding"))
+    }
+    val last = list_get(dec, n - 1)
+    val pad_len = if last == 1 || last == 2 { last } else { 0 }
+    if pad_len == 0 || pad_len > n {
+        return err(StageError.CryptoError("corrupted neural-feistel pad tag"))
+    }
+    val out: list<i64> = list()
+    var i = 0
+    while i < n - pad_len {
+        list_push(out, list_get(dec, i))
+        i = i + 1
+    }
+    ok(out)
+}
+
+/// Encrypt arbitrary-length byte stream under invented Neural-Feistel-CBC mode.
+pub def neural_forge_encrypt_bytes(
+    plain: list<i64>,
+    key: KeySchedule,
+    kernel: AliceBilinearWeights,
+    iv_seed: i64,
+) -> list<i64> effect alloc {
+    val padded = pad_u16_even(plain)
+    val out: list<i64> = list()
+    var prev_l = band(iv_seed * 37 + list_get(key.bytes, 0), 255)
+    var prev_r = band(iv_seed * 83 + list_get(key.bytes, 1), 255)
+    var i = 0
+    val n = list_len(padded)
+    while i < n {
+        val x_l = bxor(list_get(padded, i), prev_l)
+        val x_r = bxor(list_get(padded, i + 1), prev_r)
+        val enc = neural_feistel_encrypt_u16(x_l, x_r, key, kernel)
+        list_push(out, enc.0)
+        list_push(out, enc.1)
+        prev_l = enc.0
+        prev_r = enc.1
+        i = i + 2
+    }
+    out
+}
+
+/// Decrypt Neural-Feistel-CBC byte stream back to the exact original bytes.
+pub def neural_forge_decrypt_bytes(
+    cipher: list<i64>,
+    key: KeySchedule,
+    kernel: AliceBilinearWeights,
+    iv_seed: i64,
+) -> result<list<i64>, StageError> effect alloc {
+    val n = list_len(cipher)
+    if n < 2 || (n % 2) != 0 {
+        return err(
+            StageError.CryptoError("neural-feistel ciphertext length must be non-empty even"),
+        )
+    }
+    val dec: list<i64> = list()
+    var prev_l = band(iv_seed * 37 + list_get(key.bytes, 0), 255)
+    var prev_r = band(iv_seed * 83 + list_get(key.bytes, 1), 255)
+    var i = 0
+    while i < n {
+        val c_l = list_get(cipher, i)
+        val c_r = list_get(cipher, i + 1)
+        val raw = neural_feistel_decrypt_u16(c_l, c_r, key, kernel)
+        list_push(dec, band(bxor(raw.0, prev_l), 255))
+        list_push(dec, band(bxor(raw.1, prev_r), 255))
+        prev_l = c_l
+        prev_r = c_r
+        i = i + 2
+    }
+    unpad_u16_even(dec)
+}
+
+def eval_crypt_shard(
+    kernel: AliceBilinearWeights,
+    key: KeySchedule,
+    start_t: i64,
+    end_t: i64,
+) -> CryptShardResult effect alloc {
+    var ok_cnt = 0
+    var flips = 0
+    var t = start_t
+    while t < end_t {
+        val l0 = band(t * 73 + 19, 255)
+        val r0 = band(t * 139 + 53, 255)
+        val ct = neural_feistel_encrypt_u16(l0, r0, key, kernel)
+        val dt = neural_feistel_decrypt_u16(ct.0, ct.1, key, kernel)
+        if dt.0 == l0 && dt.1 == r0 {
+            ok_cnt = ok_cnt + 1
+        }
+        val fbit = t % 8
+        val ct2 = neural_feistel_encrypt_u16(bxor(l0, shl(1, fbit)), r0, key, kernel)
+        flips = flips + popcount_byte(bxor(ct.0, ct2.0)) + popcount_byte(bxor(ct.1, ct2.1))
+        t = t + 1
+    }
+    CryptShardResult {
+        ok_count: ok_cnt,
+        flips: flips,
+        trials: end_t - start_t,
+    }
+}
+
+def pack_kernel_lists(k: AliceBilinearWeights) -> list<list<f64>> effect alloc {
+    list(k.wx, k.wk, k.bm, k.w2, k.b2, k.w3, k.b3)
+}
+
+def unpack_kernel_lists(mats: list<list<f64>>, hidden: i64) -> AliceBilinearWeights effect alloc {
+    AliceBilinearWeights {
+        wx: list_get(mats, 0),
+        wk: list_get(mats, 1),
+        bm: list_get(mats, 2),
+        w2: list_get(mats, 3),
+        b2: list_get(mats, 4),
+        w3: list_get(mats, 5),
+        b3: list_get(mats, 6),
+        hidden: hidden,
+    }
+}
+
+/// Stress-test lossless roundtrip and Strict Avalanche Criterion concurrently across workers.
+pub def verify_invented_cipher_concurrent(
+    kernel: AliceBilinearWeights,
+    key: KeySchedule,
+    total_trials: i64,
+    workers: i64,
+) -> CryptShardResult effect alloc, thread {
+    val w_eff = clamp_i64(workers, 1, 4)
+    val mats = pack_kernel_lists(kernel)
+    val hidden = kernel.hidden
+    val k_label = key.label
+    val k_bytes = key.bytes
+    val tg = task_group()
+    val ch: chan<CryptShardResult> = channel()
+    val stride = (total_trials + w_eff - 1) / w_eff
+    var w = 0
+    var launched = 0
+    while w < w_eff {
+        val s = w * stride
+        val e_raw = s + stride
+        val e = if e_raw > total_trials { total_trials } else { e_raw }
+        if s < e {
+            launched = launched + 1
+            spawn(tg) {
+                val wk_kernel = unpack_kernel_lists(mats, hidden)
+                val wk_key = KeySchedule { label: k_label, bytes: k_bytes }
+                send(ch, eval_crypt_shard(wk_kernel, wk_key, s, e))
+            }
+        }
+        w = w + 1
+    }
+    task_group_join(tg)
+    sum_crypt_shards(ch, launched)
+}
+
+def sum_crypt_shards(ch: chan<CryptShardResult>, launched: i64) -> CryptShardResult {
+    var ok_sum = 0
+    var flip_sum = 0
+    var trial_sum = 0
+    var i = 0
+    while i < launched {
+        val sh = recv(ch)
+        ok_sum = ok_sum + sh.ok_count
+        flip_sum = flip_sum + sh.flips
+        trial_sum = trial_sum + sh.trials
+        i = i + 1
+    }
+    CryptShardResult {
+        ok_count: ok_sum,
+        flips: flip_sum,
+        trials: trial_sum,
+    }
+}
+
+/// Train Alice, Bob & Eve from scratch using DiffTensor autodiff on live web corpus bytes.
+pub def train_neural_forge(
+    blocks: list<PlainBlock>,
+    key: KeySchedule,
+    cfg: NeuralForgeConfig,
+    workers: i64,
+) -> NeuralForgeArtifact effect alloc, random, thread, time {
+    var alice = init_alice_params(cfg.hidden)
+    var bob = init_alice_params(cfg.hidden)
+    var eve = init_eve_params(cfg.hidden)
+    val bob_hist: list<f64> = list()
+    val eve_hist: list<f64> = list()
+    var b_init = 0.5
+    var e_init = 0.5
+    var b_last = 0.5
+    var e_last = 0.5
+    var step = 1
+    while step <= cfg.steps {
+        val ab = run_ab_joint_step(alice, bob, eve, blocks, (cfg, step))
+        alice = ab.0
+        bob = ab.1
+        if step == 1 {
+            b_init = ab.2
+            e_init = ab.3
+        }
+        b_last = ab.2
+        e_last = ab.3
+        eve = run_eve_substeps(alice, eve, blocks, (cfg, step))
+        if step == 1 || (step % 25) == 0 || step == cfg.steps {
+            list_push(bob_hist, b_last)
+            list_push(eve_hist, e_last)
+        }
+        step = step + 1
+    }
+    val hist = ForgeHistory {
+        b_init: b_init,
+        b_last: b_last,
+        e_init: e_init,
+        e_last: e_last,
+        bob_hist: bob_hist,
+        eve_hist: eve_hist,
+    }
+    finalize_forge_artifact(alice, blocks, key, (cfg, workers, hist))
+}
+
+def finalize_forge_artifact(
+    alice: AliceParams,
+    blocks: list<PlainBlock>,
+    key: KeySchedule,
+    meta: (NeuralForgeConfig, i64, ForgeHistory),
+) -> NeuralForgeArtifact effect alloc, thread {
+    val cfg = meta.0
+    val workers = meta.1
+    val hist = meta.2
+    val kernel = extract_alice_weights(alice, cfg.hidden)
+    val audit = verify_invented_cipher_concurrent(kernel, key, 100, workers)
+    val sac = to_f64(audit.flips) / to_f64(audit.trials * 16)
+    val sample_plain = if list_len(blocks) > 0 {
+        list_get(blocks, 0).bytes
+    } else {
+        str_to_u8("Default neural cryptography probe message for entropy verification.")
+    }
+    val sample_ct = neural_forge_encrypt_bytes(sample_plain, key, kernel, 42)
+    val m = summarize_cipher_metrics(sample_ct)
+    NeuralForgeArtifact {
+        kernel: kernel,
+        key_label: key.label,
+        bob_init_acc: hist.b_init,
+        bob_final_acc: hist.b_last,
+        eve_init_acc: hist.e_init,
+        eve_final_acc: hist.e_last,
+        sac_score: sac,
+        entropy_norm: m.entropy_norm,
+        roundtrip_passed: audit.ok_count,
+        roundtrip_total: audit.trials,
+        epoch_bob_acc: hist.bob_hist,
+        epoch_eve_acc: hist.eve_hist,
+        classifier_label: "untested",
+        classifier_conf: 0.0,
+    }
+}
+
+/// Update forge artifact with the attack verdict from the trained Cipher Classifier.
+pub def attach_classifier_attack(
+    art: NeuralForgeArtifact,
+    label: str,
+    conf: f64,
+) -> NeuralForgeArtifact {
+    NeuralForgeArtifact {
+        kernel: art.kernel,
+        key_label: art.key_label,
+        bob_init_acc: art.bob_init_acc,
+        bob_final_acc: art.bob_final_acc,
+        eve_init_acc: art.eve_init_acc,
+        eve_final_acc: art.eve_final_acc,
+        sac_score: art.sac_score,
+        entropy_norm: art.entropy_norm,
+        roundtrip_passed: art.roundtrip_passed,
+        roundtrip_total: art.roundtrip_total,
+        epoch_bob_acc: art.epoch_bob_acc,
+        epoch_eve_acc: art.epoch_eve_acc,
+        classifier_label: label,
+        classifier_conf: conf,
+    }
+}
+
+def encode_f64_csv(vals: list<f64>) -> str effect alloc {
+    var out = ""
+    var i = 0
+    val n = list_len(vals)
+    while i < n {
+        val tok = to_str(list_get(vals, i))
+        out = if i == 0 { tok } else { concat(out, concat(",", tok)) }
+        i = i + 1
+    }
+    out
+}
+
+def decode_f64_csv(raw: str) -> list<f64> effect alloc, throw {
+    val parts = split(raw, ",")
+    val out: list<f64> = list()
+    var i = 0
+    while i < list_len(parts) {
+        val tok = list_get(parts, i)
+        if len(tok) > 0 {
+            val p = parse_f64(tok)
+            if is_some(p) { list_push(out, unwrap(p)) }
+        }
+        i = i + 1
+    }
+    out
+}
+
+/// Save Alice's trained Neural-Feistel kernel weights to JSON state directory.
+pub def save_forge_kernel(
+    dir_path: str,
+    k: AliceBilinearWeights,
+) -> result<str, StageError> effect fs, alloc {
+    val _ok = make_dir(dir_path)
+    val path = concat(dir_path, "/neural_forge_kernel.json")
+    val keys = list("hidden", "wx", "wk", "bm", "w2", "b2", "w3", "b3")
+    val vals = list(
+        json_num_i64(k.hidden),
+        json_str(encode_f64_csv(k.wx)),
+        json_str(encode_f64_csv(k.wk)),
+        json_str(encode_f64_csv(k.bm)),
+        json_str(encode_f64_csv(k.w2)),
+        json_str(encode_f64_csv(k.b2)),
+        json_str(encode_f64_csv(k.w3)),
+        json_str(encode_f64_csv(k.b3)),
+    )
+    when write_text(path, json_obj(keys, vals)) {
+        ok(_) => ok(path),
+        err(e) => err(StageError.IoFailure(e)),
+    }
+}
+
+/// Reload trained Neural-Feistel kernel weights from JSON state directory.
+pub def load_forge_kernel(
+    dir_path: str,
+) -> result<AliceBilinearWeights, StageError> effect fs, alloc, throw {
+    val path = concat(dir_path, "/neural_forge_kernel.json")
+    when read_text(path) {
+        ok(raw) => {
+            val h_opt = parse_i64(json_query(raw, "hidden"))
+            val h = if is_some(h_opt) { unwrap(h_opt) } else { 0 }
+            if h < 4 {
+                return err(StageError.IoFailure("invalid neural_forge_kernel.json"))
+            }
+            ok(
+                AliceBilinearWeights {
+                    wx: decode_f64_csv(json_query(raw, "wx")),
+                    wk: decode_f64_csv(json_query(raw, "wk")),
+                    bm: decode_f64_csv(json_query(raw, "bm")),
+                    w2: decode_f64_csv(json_query(raw, "w2")),
+                    b2: decode_f64_csv(json_query(raw, "b2")),
+                    w3: decode_f64_csv(json_query(raw, "w3")),
+                    b3: decode_f64_csv(json_query(raw, "b3")),
+                    hidden: h,
+                },
+            )
+        },
+        err(e) => err(StageError.IoFailure(e)),
+    }
+}
+
+def test_feistel_concurrent_verify() -> i64 effect alloc, thread, throw {
+    val hidden = 4
+    val wx = zero_f64_vec(8 * hidden)
+    val wk = zero_f64_vec(8 * hidden)
+    val bm = zero_f64_vec(hidden)
+    val w2 = zero_f64_vec(hidden * hidden)
+    val b2 = zero_f64_vec(hidden)
+    val w3 = zero_f64_vec(hidden * 8)
+    val b3 = zero_f64_vec(8)
+    val k = AliceBilinearWeights {
+        wx: wx,
+        wk: wk,
+        bm: bm,
+        w2: w2,
+        b2: b2,
+        w3: w3,
+        b3: b3,
+        hidden: hidden,
+    }
+    val key = unwrap(make_key_schedule("t", str_to_u8("seed123")))
+    val res = verify_invented_cipher_concurrent(k, key, 20, 2)
+    assert(res.ok_count == 20)
+    0
+}
+
+def test_neural_forge_learns_and_encrypts() -> i64 effect alloc, random, thread, throw, time {
+    val blocks: list<PlainBlock> = list()
+    val s = "Adversarial neural cryptography trains encryptor Alice and decryptor Bob to defeat Eve."
+    list_push(blocks, unwrap(make_plain_block("t1", str_to_u8(s))))
+    val key = unwrap(make_key_schedule("forge-test", str_to_u8("iris-quantum-seed")))
+    val cfg = default_forge_config(160)
+    val art = train_neural_forge(blocks, key, cfg, 2)
+    assert(art.bob_final_acc >= 0.85)
+    assert(art.eve_final_acc <= 0.68)
+    assert(art.roundtrip_passed == 100)
+    assert(art.sac_score > 0.25)
+    val msg = str_to_u8("IRIS invented Neural-Feistel-CBC cipher!")
+    val ct = neural_forge_encrypt_bytes(msg, key, art.kernel, 9)
+    val dec = unwrap(neural_forge_decrypt_bytes(ct, key, art.kernel, 9))
+    assert(list_len(dec) == list_len(msg))
+    assert(list_get(dec, 0) == list_get(msg, 0))
+    assert(list_get(dec, list_len(msg) - 1) == list_get(msg, list_len(msg) - 1))
+    0
+}

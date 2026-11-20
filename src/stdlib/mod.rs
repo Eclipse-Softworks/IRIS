@@ -58,6 +58,13 @@ pub const STDLIB_MODULE_NAMES: &[&str] = &[
     "testing",
     "time",
     "tls",
+    "ui",
+    "ui_layout",
+    "ui_motion",
+    "ui_protocol",
+    "ui_theme",
+    "ui_icons",
+    "ui_widgets",
     "uncertainty",
     "unicode",
 ];
@@ -118,6 +125,14 @@ pub fn stdlib_source(name: &str) -> Option<&'static str> {
         "http_server" => Some(include_str!("http_server.iris")),
         "net" => Some(include_str!("net.iris")),
         "unicode" => Some(include_str!("unicode.iris")),
+        // Native CPU GUI toolkit
+        "ui_theme" => Some(include_str!("ui_theme.iris")),
+        "ui_protocol" => Some(include_str!("ui_protocol.iris")),
+        "ui_layout" => Some(include_str!("ui_layout.iris")),
+        "ui_motion" => Some(include_str!("ui_motion.iris")),
+        "ui_icons" => Some(include_str!("ui_icons.iris")),
+        "ui_widgets" => Some(include_str!("ui_widgets.iris")),
+        "ui" => Some(include_str!("ui.iris")),
         // Self-Evolving & Reflection modules
         "reflect" => Some(include_str!("reflect.iris")),
         "meta" => Some(include_str!("meta.iris")),

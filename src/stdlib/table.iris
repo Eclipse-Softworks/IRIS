@@ -4,24 +4,24 @@
 // Each row is stored as a tab-joined string (cell values must not contain tabs).
 
 // Encode a row (list<str>) to a single string for internal storage.
-pub def table_encode_row(row: list<str>) -> str {
+pub def table_encode_row(row: list<str>) -> str effect alloc {
     join(row, "\t")
 }
 
 // Decode a stored row string back to list<str>.
-pub def table_decode_row(encoded: str) -> list<str> {
+pub def table_decode_row(encoded: str) -> list<str> effect alloc {
     split(encoded, "\t")
 }
 
 record Table { columns: list<str>, rows: list<str> }
 
 // Create a new empty table with the given column names.
-pub def table_new(columns: list<str>) -> Table {
+pub def table_new(columns: list<str>) -> Table effect alloc {
     Table { columns: columns, rows: list() }
 }
 
 // Insert a row (list<str> of values, one per column). Returns updated table.
-pub def table_insert(t: Table, row: list<str>) -> Table {
+pub def table_insert(t: Table, row: list<str>) -> Table effect alloc {
     val encoded = table_encode_row(row)
     val n = list_len(t.rows)
     var new_rows: list<str> = list()
@@ -35,12 +35,12 @@ pub def table_insert(t: Table, row: list<str>) -> Table {
 }
 
 // Return the number of rows in the table.
-pub def table_len(t: Table) -> i64 {
+pub def table_len(t: Table) -> i64 effect alloc {
     list_len(t.rows)
 }
 
 // Return the index of a column by name, or -1 if not found.
-pub def table_col_idx(t: Table, col: str) -> i64 {
+pub def table_col_idx(t: Table, col: str) -> i64 effect alloc {
     val n = list_len(t.columns)
     var idx = -1
     var i = 0
@@ -53,7 +53,7 @@ pub def table_col_idx(t: Table, col: str) -> i64 {
 }
 
 // Extract all values for a named column as list<str>.
-pub def table_select(t: Table, col: str) -> list<str> {
+pub def table_select(t: Table, col: str) -> list<str> effect alloc {
     val col_i = table_col_idx(t, col)
     val n = list_len(t.rows)
     var result: list<str> = list()
@@ -67,7 +67,7 @@ pub def table_select(t: Table, col: str) -> list<str> {
 }
 
 // Filter rows where the named column equals the given value.
-pub def table_where(t: Table, col: str, value: str) -> Table {
+pub def table_where(t: Table, col: str, value: str) -> Table effect alloc {
     val col_i = table_col_idx(t, col)
     val n = list_len(t.rows)
     var new_rows: list<str> = list()
@@ -86,7 +86,7 @@ pub def table_where(t: Table, col: str, value: str) -> Table {
 }
 
 // Emit the table as CSV text (header row + data rows).
-pub def table_to_csv(t: Table) -> str {
+pub def table_to_csv(t: Table) -> str effect alloc {
     val header = join(t.columns, ",")
     val n = list_len(t.rows)
     var lines: list<str> = list()

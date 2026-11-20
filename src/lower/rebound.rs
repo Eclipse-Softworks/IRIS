@@ -4,6 +4,12 @@ use crate::parser::ast::{AstBlock, AstExpr, AstStmt};
 
 use super::{synth_marker_at, SynthMarker};
 
+fn push_rebound_name(names: &mut Vec<String>, name: &str) {
+    if name != "_" && !names.iter().any(|n| n == name) {
+        names.push(name.to_string());
+    }
+}
+
 pub(super) fn find_rebound_vars_thir(
     then_blk: &crate::thir::ThirBlock,
     else_blk: Option<&crate::thir::ThirBlock>,
@@ -51,8 +57,8 @@ pub(super) fn collect_rebound_vars_in_thir_stmt(
 ) -> Option<()> {
     match &stmt.kind {
         crate::thir::ThirStmtKind::Let { name, init, .. } => {
-            if include_lets && !names.contains(name) {
-                names.push(name.clone());
+            if include_lets {
+                push_rebound_name(names, name);
             }
             collect_rebound_vars_in_thir_expr(init, names)?;
             Some(())
@@ -78,8 +84,8 @@ pub(super) fn collect_rebound_vars_in_thir_stmt(
             body,
             ..
         } => {
-            if include_lets && !names.contains(var) {
-                names.push(var.clone());
+            if include_lets {
+                push_rebound_name(names, var);
             }
             collect_rebound_vars_in_thir_expr(start, names)?;
             collect_rebound_vars_in_thir_expr(end, names)?;
@@ -96,8 +102,8 @@ pub(super) fn collect_rebound_vars_in_thir_stmt(
             body,
             ..
         } => {
-            if include_lets && !names.contains(var) {
-                names.push(var.clone());
+            if include_lets {
+                push_rebound_name(names, var);
             }
             collect_rebound_vars_in_thir_expr(start, names)?;
             collect_rebound_vars_in_thir_expr(end, names)?;
@@ -107,8 +113,8 @@ pub(super) fn collect_rebound_vars_in_thir_stmt(
         crate::thir::ThirStmtKind::ForEach {
             var, iter, body, ..
         } => {
-            if include_lets && !names.contains(var) {
-                names.push(var.clone());
+            if include_lets {
+                push_rebound_name(names, var);
             }
             collect_rebound_vars_in_thir_expr(iter, names)?;
             collect_rebound_vars_in_thir_block(body, names, false)?;
@@ -937,8 +943,8 @@ pub(super) fn collect_rebound_vars_in_stmt(
 ) {
     match stmt {
         AstStmt::Let { name, init, .. } => {
-            if include_lets && !names.contains(&name.name) {
-                names.push(name.name.clone());
+            if include_lets {
+                push_rebound_name(names, &name.name);
             }
             collect_rebound_vars_in_expr(init, names);
         }
@@ -965,8 +971,8 @@ pub(super) fn collect_rebound_vars_in_stmt(
             body,
             ..
         } => {
-            if include_lets && !names.contains(&var.name) {
-                names.push(var.name.clone());
+            if include_lets {
+                push_rebound_name(names, &var.name);
             }
             collect_rebound_vars_in_expr(start, names);
             collect_rebound_vars_in_expr(end, names);
@@ -978,9 +984,7 @@ pub(super) fn collect_rebound_vars_in_stmt(
                 cur = base.as_ref();
             }
             if let AstExpr::Ident(ident) = cur {
-                if !names.contains(&ident.name) {
-                    names.push(ident.name.clone());
-                }
+                push_rebound_name(names, &ident.name);
             }
             collect_rebound_vars_in_expr(target, names);
             collect_rebound_vars_in_expr(value, names);
@@ -992,9 +996,7 @@ pub(super) fn collect_rebound_vars_in_stmt(
         } => {
             if include_lets {
                 for name in tuple_names {
-                    if !names.contains(&name.name) {
-                        names.push(name.name.clone());
-                    }
+                    push_rebound_name(names, &name.name);
                 }
             }
             collect_rebound_vars_in_expr(init, names);
@@ -1012,8 +1014,8 @@ pub(super) fn collect_rebound_vars_in_stmt(
         AstStmt::ForEach {
             var, iter, body, ..
         } => {
-            if include_lets && !names.contains(&var.name) {
-                names.push(var.name.clone());
+            if include_lets {
+                push_rebound_name(names, &var.name);
             }
             collect_rebound_vars_in_expr(iter, names);
             collect_rebound_vars_in_block(body, names, false);

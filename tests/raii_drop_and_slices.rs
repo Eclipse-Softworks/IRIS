@@ -91,6 +91,52 @@ def transfer(r: Resource) -> Resource {
 }
 
 #[test]
+fn test_raii_explicit_move_drops_new_owner_once() {
+    let src = r#"
+record Resource {
+    id: i64,
+}
+
+trait Drop {
+    def drop(r: Resource) -> i64
+}
+
+impl Drop for Resource {
+    def drop(r: Resource) -> i64 {
+        return 0
+    }
+}
+
+def transfer() -> i64 {
+    val r = Resource { id: 7 }
+    val moved = move r
+    return moved.id
+}
+"#;
+
+    let module = compile_to_module(src, "test_raii_explicit_move").expect("compile to IR");
+    let transfer_fn = module
+        .functions()
+        .iter()
+        .find(|f| f.name == "transfer")
+        .expect("find transfer function");
+
+    let drop_calls = transfer_fn
+        .blocks()
+        .iter()
+        .flat_map(|b| b.instrs.iter())
+        .filter(|instr| {
+            matches!(instr, IrInstr::Call { callee, .. } if callee.contains("Resource__drop"))
+        })
+        .count();
+
+    assert_eq!(
+        drop_calls, 1,
+        "an explicitly moved record must be dropped exactly once, by its new owner"
+    );
+}
+
+#[test]
 fn test_slice_views_ast_and_ir() {
     let src = r#"
 def take_slice(s: &[f64]) -> i64 {

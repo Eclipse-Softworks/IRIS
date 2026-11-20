@@ -27,14 +27,14 @@ pub def async_queued_tasks() -> i64 effect thread {
 /// Wait for `t` for at most `ms` milliseconds: `some(result)` if it finished
 /// in time, `none` otherwise. The task keeps running; await it again later,
 /// or stop it with `task_cancel`.
-pub async def timeout_after[T](t: task<T>, ms: i64) -> option<T> effect time {
+pub async def timeout_after[T](t: task<T>, ms: i64) -> option<T> effect time, thread, alloc {
     val which = await async_any(t, async_sleep(ms))
     if which == 0 { some(await t) } else { none }
 }
 
 /// Await every task, in order, and collect the results. The tasks already
 /// run concurrently from the moment they were created; this only gathers them.
-pub async def join_all[T](tasks: list<task<T>>) -> list<T> {
+pub async def join_all[T](tasks: list<task<T>>) -> list<T> effect alloc {
     val results: list<T> = list()
     for i in 0..list_len(tasks) {
         list_push(results, await list_get(tasks, i))
@@ -43,7 +43,7 @@ pub async def join_all[T](tasks: list<task<T>>) -> list<T> {
 }
 
 /// Cancel every unfinished task in `tasks`; returns how many were cancelled.
-pub def cancel_all[T](tasks: list<task<T>>) -> i64 effect thread {
+pub def cancel_all[T](tasks: list<task<T>>) -> i64 effect thread, alloc {
     var cancelled = 0
     for i in 0..list_len(tasks) {
         val t = list_get(tasks, i)
@@ -73,12 +73,12 @@ pub def try_recv(ch: chan<i64>) -> option<i64> effect alloc, thread {
 }
 
 /// Create a new bounded channel with the specified capacity.
-pub def channel_bounded(capacity: i64) -> chan<i64> {
+pub def channel_bounded(capacity: i64) -> chan<i64> effect alloc {
     channel(capacity)
 }
 
 /// Create a new unbounded channel.
-pub def channel_unbounded() -> chan<i64> {
+pub def channel_unbounded() -> chan<i64> effect alloc {
     channel(-1)
 }
 
@@ -94,7 +94,7 @@ pub def sleep(ms: i64) -> bool effect time {
 }
 
 /// Get the number of available hardware threads.
-pub def num_threads() -> i64 {
+pub def num_threads() -> i64 effect env {
     thread_count()
 }
 
@@ -123,21 +123,21 @@ pub def select_first(channels: list<chan<i64>>) -> i64 effect alloc, thread {
 
 /// Receive from channel with a timeout in milliseconds.
 /// Returns `some(val)` if received before timeout, `none` otherwise.
-pub def recv_timeout_ms(ch: chan<i64>, timeout_ms: i64) -> option<i64> {
+pub def recv_timeout_ms(ch: chan<i64>, timeout_ms: i64) -> option<i64> effect thread, alloc {
     recv_timeout(ch, timeout_ms)
 }
 
 /// Create a new structured TaskGroup.
-pub def new_task_group() -> task_group {
+pub def new_task_group() -> task_group effect alloc {
     task_group()
 }
 
 /// Force a cycle collection sweep on the GC side-table.
-pub def gc_collect_sweep() -> bool {
+pub def gc_collect_sweep() -> bool effect alloc {
     gc_collect()
 }
 
 /// Retrieve current GC allocation and collection statistics.
-pub def gc_get_stats() -> map<str, i64> {
+pub def gc_get_stats() -> map<str, i64> effect alloc {
     gc_stats()
 }

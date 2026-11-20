@@ -4,35 +4,35 @@
 // Bitsets are represented as lists of 64-bit integers where each bit is a flag.
 
 /// Create a new empty bitset.
-pub def bitset_create() -> list<i64> {
+pub def bitset_create() -> list<i64> effect alloc {
     bitset_new()
 }
 
 /// Set a bit at position `pos` (0-indexed).
 /// Returns the modified bitset for chaining.
-pub def set_bit(bs: list<i64>, pos: i64) -> list<i64> {
+pub def set_bit(bs: list<i64>, pos: i64) -> list<i64> effect alloc {
     bitset_set(bs, pos)
 }
 
 /// Get a bit at position `pos` (0-indexed).
 /// Returns `true` if the bit is set, `false` otherwise.
-pub def get_bit(bs: list<i64>, pos: i64) -> bool {
+pub def get_bit(bs: list<i64>, pos: i64) -> bool effect alloc {
     bitset_get(bs, pos)
 }
 
 /// Clear a bit at position `pos` (0-indexed).
 /// Returns the modified bitset for chaining.
-pub def clear_bit(bs: list<i64>, pos: i64) -> list<i64> {
+pub def clear_bit(bs: list<i64>, pos: i64) -> list<i64> effect alloc {
     bitset_clear(bs, pos)
 }
 
 /// Count the number of set bits in the bitset (population count).
-pub def popcount(bs: list<i64>) -> i64 {
+pub def popcount(bs: list<i64>) -> i64 effect alloc {
     bitset_count(bs)
 }
 
 /// Toggle a bit at position `pos` (0-indexed).
-pub def toggle_bit(bs: list<i64>, pos: i64) -> list<i64> {
+pub def toggle_bit(bs: list<i64>, pos: i64) -> list<i64> effect alloc {
     if get_bit(bs, pos) {
         clear_bit(bs, pos)
     } else {
@@ -41,7 +41,7 @@ pub def toggle_bit(bs: list<i64>, pos: i64) -> list<i64> {
 }
 
 /// Clone an existing bitset.
-pub def bitset_clone(bs: list<i64>) -> list<i64> {
+pub def bitset_clone(bs: list<i64>) -> list<i64> effect alloc {
     val out: list<i64> = list()
     var i = 0
     val n = list_len(bs)
@@ -53,12 +53,12 @@ pub def bitset_clone(bs: list<i64>) -> list<i64> {
 }
 
 /// Return true if no bits are set in the bitset.
-pub def bitset_is_empty(bs: list<i64>) -> bool {
+pub def bitset_is_empty(bs: list<i64>) -> bool effect alloc {
     popcount(bs) == 0
 }
 
 /// Return the bitwise union (A | B) of two bitsets as a new bitset.
-pub def bitset_union(a: list<i64>, b: list<i64>) -> list<i64> {
+pub def bitset_union(a: list<i64>, b: list<i64>) -> list<i64> effect alloc {
     val out: list<i64> = list()
     val len_a = list_len(a)
     val len_b = list_len(b)
@@ -74,7 +74,7 @@ pub def bitset_union(a: list<i64>, b: list<i64>) -> list<i64> {
 }
 
 /// Return the bitwise intersection (A & B) of two bitsets as a new bitset.
-pub def bitset_intersection(a: list<i64>, b: list<i64>) -> list<i64> {
+pub def bitset_intersection(a: list<i64>, b: list<i64>) -> list<i64> effect alloc {
     val out: list<i64> = list()
     val len_a = list_len(a)
     val len_b = list_len(b)
@@ -90,7 +90,7 @@ pub def bitset_intersection(a: list<i64>, b: list<i64>) -> list<i64> {
 }
 
 /// Return the bitwise difference (A \ B) of two bitsets as a new bitset.
-pub def bitset_difference(a: list<i64>, b: list<i64>) -> list<i64> {
+pub def bitset_difference(a: list<i64>, b: list<i64>) -> list<i64> effect alloc {
     val out: list<i64> = list()
     val len_a = list_len(a)
     val len_b = list_len(b)
@@ -105,7 +105,7 @@ pub def bitset_difference(a: list<i64>, b: list<i64>) -> list<i64> {
 }
 
 /// Return the bitwise symmetric difference / XOR (A ^ B) of two bitsets as a new bitset.
-pub def bitset_xor(a: list<i64>, b: list<i64>) -> list<i64> {
+pub def bitset_xor(a: list<i64>, b: list<i64>) -> list<i64> effect alloc {
     val out: list<i64> = list()
     val len_a = list_len(a)
     val len_b = list_len(b)
@@ -121,7 +121,7 @@ pub def bitset_xor(a: list<i64>, b: list<i64>) -> list<i64> {
 }
 
 /// Return true if the two bitsets share at least one common set bit.
-pub def bitset_intersects(a: list<i64>, b: list<i64>) -> bool {
+pub def bitset_intersects(a: list<i64>, b: list<i64>) -> bool effect alloc {
     val len_a = list_len(a)
     val len_b = list_len(b)
     val min_len = if len_a < len_b { len_a } else { len_b }
@@ -138,7 +138,7 @@ pub def bitset_intersects(a: list<i64>, b: list<i64>) -> bool {
 }
 
 /// Return true if `sub` is a subset of `sup` (all bits in sub are in sup).
-pub def bitset_is_subset(sub: list<i64>, sup: list<i64>) -> bool {
+pub def bitset_is_subset(sub: list<i64>, sup: list<i64>) -> bool effect alloc {
     val len_sub = list_len(sub)
     val len_sup = list_len(sup)
     var i = 0
@@ -154,7 +154,7 @@ pub def bitset_is_subset(sub: list<i64>, sup: list<i64>) -> bool {
 }
 
 /// Construct a bitset from a list of integer bit positions.
-pub def bitset_from_indices(indices: list<i64>) -> list<i64> {
+pub def bitset_from_indices(indices: list<i64>) -> list<i64> effect alloc {
     var bs = bitset_create()
     var i = 0
     val n = list_len(indices)
@@ -169,7 +169,7 @@ pub def bitset_from_indices(indices: list<i64>) -> list<i64> {
 }
 
 /// Extract all set bit positions into an ordered list<i64>.
-pub def bitset_to_indices(bs: list<i64>) -> list<i64> {
+pub def bitset_to_indices(bs: list<i64>) -> list<i64> effect alloc {
     val out: list<i64> = list()
     val n = list_len(bs)
     var word_idx = 0
@@ -191,7 +191,7 @@ pub def bitset_to_indices(bs: list<i64>) -> list<i64> {
 }
 
 /// Return the maximum set bit position, or -1 if the bitset is empty.
-pub def bitset_max_bit(bs: list<i64>) -> i64 {
+pub def bitset_max_bit(bs: list<i64>) -> i64 effect alloc {
     val n = list_len(bs)
     var word_idx = n - 1
     while word_idx >= 0 {

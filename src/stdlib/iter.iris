@@ -4,7 +4,7 @@
 
 /// Sum all elements of a list.
 /// Returns 0 for empty lists.
-pub def sum(xs: list<i64>) -> i64 {
+pub def sum(xs: list<i64>) -> i64 effect alloc {
     var acc = 0
     var i = 0
     val n = list_len(xs)
@@ -17,7 +17,7 @@ pub def sum(xs: list<i64>) -> i64 {
 
 /// Product of all elements.
 /// Returns 1 for empty lists.
-pub def product(xs: list<i64>) -> i64 {
+pub def product(xs: list<i64>) -> i64 effect alloc {
     var acc = 1
     var i = 0
     val n = list_len(xs)
@@ -30,7 +30,7 @@ pub def product(xs: list<i64>) -> i64 {
 
 /// Minimum element.
 /// Panics if the list is empty.
-pub def min(xs: list<i64>) -> i64 {
+pub def min(xs: list<i64>) -> i64 effect alloc {
     var m = list_get(xs, 0)
     var i = 1
     val n = list_len(xs)
@@ -44,7 +44,7 @@ pub def min(xs: list<i64>) -> i64 {
 
 /// Maximum element.
 /// Panics if the list is empty.
-pub def max(xs: list<i64>) -> i64 {
+pub def max(xs: list<i64>) -> i64 effect alloc {
     var m = list_get(xs, 0)
     var i = 1
     val n = list_len(xs)
@@ -57,7 +57,7 @@ pub def max(xs: list<i64>) -> i64 {
 }
 
 /// Reverse a list (returns new list).
-pub def reverse(xs: list<i64>) -> list<i64> {
+pub def reverse(xs: list<i64>) -> list<i64> effect alloc {
     var result: list<i64> = list()
     var i = list_len(xs) - 1
     while i >= 0 {
@@ -69,7 +69,7 @@ pub def reverse(xs: list<i64>) -> list<i64> {
 
 /// Take first `n` elements.
 /// Returns all elements if `n` exceeds list length.
-pub def take(xs: list<i64>, n: i64) -> list<i64> {
+pub def take(xs: list<i64>, n: i64) -> list<i64> effect alloc {
     var result: list<i64> = list()
     var i = 0
     val len = list_len(xs)
@@ -83,7 +83,7 @@ pub def take(xs: list<i64>, n: i64) -> list<i64> {
 
 /// Drop first `n` elements.
 /// Returns empty list if `n` exceeds list length.
-pub def drop(xs: list<i64>, n: i64) -> list<i64> {
+pub def drop(xs: list<i64>, n: i64) -> list<i64> effect alloc {
     var result: list<i64> = list()
     val len = list_len(xs)
     var i = if n < 0 { 0 } else { n }
@@ -96,7 +96,7 @@ pub def drop(xs: list<i64>, n: i64) -> list<i64> {
 
 /// Range: generate list from `lo` to `hi-1`.
 /// Returns empty list if `lo >= hi`.
-pub def range(lo: i64, hi: i64) -> list<i64> {
+pub def range(lo: i64, hi: i64) -> list<i64> effect alloc {
     var result: list<i64> = list()
     var i = lo
     while i < hi {
@@ -107,7 +107,7 @@ pub def range(lo: i64, hi: i64) -> list<i64> {
 }
 
 /// Check if any element equals `target`.
-pub def contains(xs: list<i64>, target: i64) -> bool {
+pub def contains(xs: list<i64>, target: i64) -> bool effect alloc {
     var found = false
     var i = 0
     val n = list_len(xs)
@@ -119,7 +119,7 @@ pub def contains(xs: list<i64>, target: i64) -> bool {
 }
 
 /// Count occurrences of `target`.
-pub def count(xs: list<i64>, target: i64) -> i64 {
+pub def count(xs: list<i64>, target: i64) -> i64 effect alloc {
     var c = 0
     var i = 0
     val n = list_len(xs)
@@ -131,7 +131,7 @@ pub def count(xs: list<i64>, target: i64) -> i64 {
 }
 
 /// Index of first occurrence of `target`, or -1 if not found.
-pub def index_of(xs: list<i64>, target: i64) -> i64 {
+pub def index_of(xs: list<i64>, target: i64) -> i64 effect alloc {
     var i = 0
     val n = list_len(xs)
     while i < n {
@@ -144,7 +144,7 @@ pub def index_of(xs: list<i64>, target: i64) -> i64 {
 }
 
 /// Flatten a list of lists into a single list.
-pub def flatten_i64(xss: list<list<i64>>) -> list<i64> {
+pub def flatten_i64(xss: list<list<i64>>) -> list<i64> effect alloc {
     var result: list<i64> = list()
     var i = 0
     val n = list_len(xss)
@@ -162,7 +162,7 @@ pub def flatten_i64(xss: list<list<i64>>) -> list<i64> {
 }
 
 /// Transform each value in order into a fresh list.
-pub def map_i64(xs: list<i64>, transform: |i64| -> i64) -> list<i64> {
+pub def map_i64(xs: list<i64>, transform: |i64| -> i64) -> list<i64> effect alloc {
     val out: list<i64> = list()
     var i = 0
     val n = list_len(xs)
@@ -174,7 +174,7 @@ pub def map_i64(xs: list<i64>, transform: |i64| -> i64) -> list<i64> {
 }
 
 /// Retain matching values in order, without changing the input.
-pub def filter_i64(xs: list<i64>, predicate: |i64| -> bool) -> list<i64> {
+pub def filter_i64(xs: list<i64>, predicate: |i64| -> bool) -> list<i64> effect alloc {
     val out: list<i64> = list()
     var i = 0
     val n = list_len(xs)
@@ -187,7 +187,7 @@ pub def filter_i64(xs: list<i64>, predicate: |i64| -> bool) -> list<i64> {
 }
 
 /// Left fold. Empty lists return initial without calling combine.
-pub def fold_i64(xs: list<i64>, initial: i64, combine: |i64, i64| -> i64) -> i64 {
+pub def fold_i64(xs: list<i64>, initial: i64, combine: |i64, i64| -> i64) -> i64 effect alloc {
     var acc = initial
     var i = 0
     val n = list_len(xs)
@@ -199,7 +199,7 @@ pub def fold_i64(xs: list<i64>, initial: i64, combine: |i64, i64| -> i64) -> i64
 }
 
 /// Short-circuit queries. any(empty) is false; all(empty) is true.
-pub def any_i64(xs: list<i64>, predicate: |i64| -> bool) -> bool {
+pub def any_i64(xs: list<i64>, predicate: |i64| -> bool) -> bool effect alloc {
     var i = 0
     val n = list_len(xs)
     while i < n {
@@ -209,7 +209,7 @@ pub def any_i64(xs: list<i64>, predicate: |i64| -> bool) -> bool {
     false
 }
 
-pub def all_i64(xs: list<i64>, predicate: |i64| -> bool) -> bool {
+pub def all_i64(xs: list<i64>, predicate: |i64| -> bool) -> bool effect alloc {
     var i = 0
     val n = list_len(xs)
     while i < n {
@@ -220,7 +220,7 @@ pub def all_i64(xs: list<i64>, predicate: |i64| -> bool) -> bool {
 }
 
 /// First matching value, or none. Stops at the first match.
-pub def find_i64(xs: list<i64>, predicate: |i64| -> bool) -> option<i64> {
+pub def find_i64(xs: list<i64>, predicate: |i64| -> bool) -> option<i64> effect alloc {
     var i = 0
     val n = list_len(xs)
     while i < n {
@@ -232,7 +232,7 @@ pub def find_i64(xs: list<i64>, predicate: |i64| -> bool) -> option<i64> {
 }
 
 /// Stable partition into (matching, nonmatching), testing each value once.
-pub def partition_i64(xs: list<i64>, predicate: |i64| -> bool) -> (list<i64>, list<i64>) {
+pub def partition_i64(xs: list<i64>, predicate: |i64| -> bool) -> (list<i64>, list<i64>) effect alloc {
     val yes: list<i64> = list()
     val no: list<i64> = list()
     var i = 0
@@ -246,7 +246,7 @@ pub def partition_i64(xs: list<i64>, predicate: |i64| -> bool) -> (list<i64>, li
 }
 
 /// First occurrence of each value, preserving order. O(n^2) worst case.
-pub def unique_i64(xs: list<i64>) -> list<i64> {
+pub def unique_i64(xs: list<i64>) -> list<i64> effect alloc {
     val out: list<i64> = list()
     var i = 0
     val n = list_len(xs)
@@ -259,7 +259,7 @@ pub def unique_i64(xs: list<i64>) -> list<i64> {
 }
 
 /// Independent chunks, including a final short chunk. size <= 0 returns empty.
-pub def chunks_i64(xs: list<i64>, size: i64) -> list<list<i64>> {
+pub def chunks_i64(xs: list<i64>, size: i64) -> list<list<i64>> effect alloc {
     val out: list<list<i64>> = list()
     if size <= 0 { return out }
     var i = 0
@@ -281,7 +281,7 @@ pub def chunks_i64(xs: list<i64>, size: i64) -> list<list<i64>> {
 
 /// All full, overlapping windows, copied into independent lists.
 /// Nonpositive sizes or sizes larger than the input return empty.
-pub def windows_i64(xs: list<i64>, size: i64) -> list<list<i64>> {
+pub def windows_i64(xs: list<i64>, size: i64) -> list<list<i64>> effect alloc {
     val out: list<list<i64>> = list()
     val n = list_len(xs)
     if size <= 0 || size > n { return out }

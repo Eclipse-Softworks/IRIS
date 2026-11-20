@@ -52,16 +52,21 @@ pub def parse_log_line(line: str) -> option<LogEntry> {
     val status = parse_i64(list_get(fields, 0));
     val size = parse_i64(list_get(fields, 1));
     val parts = split(unwrap(request), " ");
-    if is_some(status) == false || is_some(size) == false || list_len(parts) < 2 || len(unwrap(stamp)) < 17 {
+    if is_some(status) == false
+        || is_some(size) == false
+        || list_len(parts) < 2
+        || len(unwrap(stamp)) < 17 {
         return none()
     };
-    some(LogEntry {
-        ip: slice(line, 0, unwrap(first_space)),
-        minute: slice(unwrap(stamp), 0, 17),
-        path: list_get(parts, 1),
-        status: unwrap(status),
-        bytes: unwrap(size),
-    })
+    some(
+        LogEntry {
+            ip: slice(line, 0, unwrap(first_space)),
+            minute: slice(unwrap(stamp), 0, 17),
+            path: list_get(parts, 1),
+            status: unwrap(status),
+            bytes: unwrap(size),
+        },
+    )
 }
 
 // Add one to `key`, remembering first-seen order in `order`.
@@ -164,9 +169,24 @@ pub def analyze(text: str, scan_threshold: i64) -> LogStats {
 // The report logstat prints.
 pub def report(stats: LogStats) -> str {
     val classes = stats.by_class;
-    var out = "lines " + to_str(stats.lines) + ", parsed " + to_str(stats.parsed) + ", unparsed " + to_str(stats.unparsed) + "\n";
-    out = out + "status 2xx " + to_str(list_get(classes, 2)) + ", 3xx " + to_str(list_get(classes, 3));
-    out = out + ", 4xx " + to_str(list_get(classes, 4)) + ", 5xx " + to_str(list_get(classes, 5)) + "\n";
+    var out = "lines "
+        + to_str(stats.lines)
+        + ", parsed "
+        + to_str(stats.parsed)
+        + ", unparsed "
+        + to_str(stats.unparsed)
+        + "\n";
+    out = out
+        + "status 2xx "
+        + to_str(list_get(classes, 2))
+        + ", 3xx "
+        + to_str(list_get(classes, 3));
+    out = out
+        + ", 4xx "
+        + to_str(list_get(classes, 4))
+        + ", 5xx "
+        + to_str(list_get(classes, 5))
+        + "\n";
     out = out + "bytes " + to_str(stats.bytes) + "\n";
     out = out + "top path " + stats.top_path + " (" + to_str(stats.top_path_hits) + " requests)\n";
     var i = 0;
@@ -175,7 +195,12 @@ pub def report(stats: LogStats) -> str {
         i = i + 1
     };
     if len(stats.worst_minute) > 0 {
-        out = out + "worst minute " + stats.worst_minute + " (" + to_str(stats.worst_minute_5xx) + " 5xx)\n"
+        out = out
+            + "worst minute "
+            + stats.worst_minute
+            + " ("
+            + to_str(stats.worst_minute_5xx)
+            + " 5xx)\n"
     };
     out
 }

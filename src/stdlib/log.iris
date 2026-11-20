@@ -7,35 +7,35 @@ pub def LOG_WARN()  -> i64 { 2 }
 pub def LOG_ERROR() -> i64 { 3 }
 
 /// Log a debug message (with Unix timestamp).
-pub def debug(msg: str) -> bool effect io {
+pub def debug(msg: str) -> bool effect io, alloc, time {
     val ts = to_str(datetime_timestamp());
     print(concat(concat("[", concat(ts, "] ")), concat("[DEBUG] ", msg)));
     true
 }
 
 /// Log an info message.
-pub def info(msg: str) -> bool effect io {
+pub def info(msg: str) -> bool effect io, alloc, time {
     val ts = to_str(datetime_timestamp());
     print(concat(concat("[", concat(ts, "] ")), concat("[INFO]  ", msg)));
     true
 }
 
 /// Log a warning message.
-pub def warn(msg: str) -> bool effect io {
+pub def warn(msg: str) -> bool effect io, alloc, time {
     val ts = to_str(datetime_timestamp());
     print(concat(concat("[", concat(ts, "] ")), concat("[WARN]  ", msg)));
     true
 }
 
 /// Log an error message.
-pub def error(msg: str) -> bool effect io {
+pub def error(msg: str) -> bool effect io, alloc, time {
     val ts = to_str(datetime_timestamp());
     print(concat(concat("[", concat(ts, "] ")), concat("[ERROR] ", msg)));
     true
 }
 
 /// Log at a given level (0=debug,1=info,2=warn,3=error), filtered by min_level.
-pub def log_at(level: i64, min_level: i64, msg: str) -> bool effect io {
+pub def log_at(level: i64, min_level: i64, msg: str) -> bool effect io, alloc, time {
     if level >= min_level {
         val prefix = if level == 0 { "[DEBUG] " } else {
             if level == 1 { "[INFO]  " } else {
@@ -51,7 +51,7 @@ pub def log_at(level: i64, min_level: i64, msg: str) -> bool effect io {
 }
 
 /// Log a key=value structured pair at info level.
-pub def log_kv(key: str, value: str) -> bool effect io {
+pub def log_kv(key: str, value: str) -> bool effect io, alloc, time {
     info(concat(key, concat("=", value)))
 }
 

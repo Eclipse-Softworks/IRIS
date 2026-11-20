@@ -1,0 +1,188 @@
+<svg width="1280" height="760" xmlns="http://www.w3.org/2000/svg">
+  <rect x="0.00" y="0.00" width="1280.00" height="760.00" fill="#070d16" />
+  <rect x="40.00" y="70.00" width="1200.00" height="490.00" fill="#0c1624" />
+  <text x="40.00" y="36.00" fill="#e2e8f0" font-size="19" font-family="sans-serif">TERRA PULSE LIVE PLANETARY OBSERVATORY | ALERT: CRITICAL</text>
+  <text x="40.00" y="56.00" fill="#94a3b8" font-size="13" font-family="sans-serif">USGS M=5.50 peak (46 quakes) | NOAA Kp=1.00 | ISS alt=421.9 km</text>
+  <line x1="140.00" y1="70.00" x2="140.00" y2="560.00" stroke="#152232" stroke-width="1.00" />
+  <line x1="240.00" y1="70.00" x2="240.00" y2="560.00" stroke="#152232" stroke-width="1.00" />
+  <line x1="340.00" y1="70.00" x2="340.00" y2="560.00" stroke="#152232" stroke-width="1.00" />
+  <line x1="440.00" y1="70.00" x2="440.00" y2="560.00" stroke="#152232" stroke-width="1.00" />
+  <line x1="540.00" y1="70.00" x2="540.00" y2="560.00" stroke="#152232" stroke-width="1.00" />
+  <line x1="640.00" y1="70.00" x2="640.00" y2="560.00" stroke="#152232" stroke-width="1.00" />
+  <line x1="740.00" y1="70.00" x2="740.00" y2="560.00" stroke="#152232" stroke-width="1.00" />
+  <line x1="840.00" y1="70.00" x2="840.00" y2="560.00" stroke="#152232" stroke-width="1.00" />
+  <line x1="940.00" y1="70.00" x2="940.00" y2="560.00" stroke="#152232" stroke-width="1.00" />
+  <line x1="1040.00" y1="70.00" x2="1040.00" y2="560.00" stroke="#152232" stroke-width="1.00" />
+  <line x1="1140.00" y1="70.00" x2="1140.00" y2="560.00" stroke="#152232" stroke-width="1.00" />
+  <line x1="40.00" y1="478.33" x2="1240.00" y2="478.33" stroke="#152232" stroke-width="1.00" />
+  <line x1="40.00" y1="396.67" x2="1240.00" y2="396.67" stroke="#152232" stroke-width="1.00" />
+  <line x1="40.00" y1="315.00" x2="1240.00" y2="315.00" stroke="#223850" stroke-width="1.00" />
+  <line x1="40.00" y1="233.33" x2="1240.00" y2="233.33" stroke="#152232" stroke-width="1.00" />
+  <line x1="40.00" y1="151.67" x2="1240.00" y2="151.67" stroke="#152232" stroke-width="1.00" />
+  <line x1="86.67" y1="138.06" x2="173.33" y2="124.44" stroke="#2b425b" stroke-width="1.20" />
+  <line x1="173.33" y1="124.44" x2="323.33" y2="124.44" stroke="#2b425b" stroke-width="1.20" />
+  <line x1="323.33" y1="124.44" x2="440.00" y2="173.44" stroke="#2b425b" stroke-width="1.20" />
+  <line x1="440.00" y1="173.44" x2="406.67" y2="200.67" stroke="#2b425b" stroke-width="1.20" />
+  <line x1="406.67" y1="200.67" x2="370.00" y2="246.94" stroke="#2b425b" stroke-width="1.20" />
+  <line x1="370.00" y1="246.94" x2="340.00" y2="236.06" stroke="#2b425b" stroke-width="1.20" />
+  <line x1="340.00" y1="236.06" x2="316.67" y2="255.11" stroke="#2b425b" stroke-width="1.20" />
+  <line x1="316.67" y1="255.11" x2="360.00" y2="287.78" stroke="#2b425b" stroke-width="1.20" />
+  <line x1="360.00" y1="287.78" x2="380.00" y2="293.22" stroke="#2b425b" stroke-width="1.20" />
+  <line x1="380.00" y1="293.22" x2="333.33" y2="274.17" stroke="#2b425b" stroke-width="1.20" />
+  <line x1="333.33" y1="274.17" x2="290.00" y2="260.56" stroke="#2b425b" stroke-width="1.20" />
+  <line x1="290.00" y1="260.56" x2="250.00" y2="227.89" stroke="#2b425b" stroke-width="1.20" />
+  <line x1="250.00" y1="227.89" x2="223.33" y2="184.33" stroke="#2b425b" stroke-width="1.20" />
+  <line x1="223.33" y1="184.33" x2="190.00" y2="157.11" stroke="#2b425b" stroke-width="1.20" />
+  <line x1="190.00" y1="157.11" x2="86.67" y2="138.06" stroke="#2b425b" stroke-width="1.20" />
+  <line x1="380.00" y1="290.50" x2="433.33" y2="287.78" stroke="#2b425b" stroke-width="1.20" />
+  <line x1="433.33" y1="287.78" x2="473.33" y2="312.28" stroke="#2b425b" stroke-width="1.20" />
+  <line x1="473.33" y1="312.28" x2="523.33" y2="331.33" stroke="#2b425b" stroke-width="1.20" />
+  <line x1="523.33" y1="331.33" x2="506.67" y2="374.89" stroke="#2b425b" stroke-width="1.20" />
+  <line x1="506.67" y1="374.89" x2="456.67" y2="410.28" stroke="#2b425b" stroke-width="1.20" />
+  <line x1="456.67" y1="410.28" x2="413.33" y2="462.00" stroke="#2b425b" stroke-width="1.20" />
+  <line x1="413.33" y1="462.00" x2="393.33" y2="440.22" stroke="#2b425b" stroke-width="1.20" />
+  <line x1="393.33" y1="440.22" x2="403.33" y2="396.67" stroke="#2b425b" stroke-width="1.20" />
+  <line x1="403.33" y1="396.67" x2="406.67" y2="364.00" stroke="#2b425b" stroke-width="1.20" />
+  <line x1="406.67" y1="364.00" x2="370.00" y2="328.61" stroke="#2b425b" stroke-width="1.20" />
+  <line x1="370.00" y1="328.61" x2="380.00" y2="290.50" stroke="#2b425b" stroke-width="1.20" />
+  <line x1="610.00" y1="214.28" x2="623.33" y2="197.94" stroke="#2b425b" stroke-width="1.20" />
+  <line x1="623.33" y1="197.94" x2="646.67" y2="176.17" stroke="#2b425b" stroke-width="1.20" />
+  <line x1="646.67" y1="176.17" x2="673.33" y2="165.28" stroke="#2b425b" stroke-width="1.20" />
+  <line x1="673.33" y1="165.28" x2="706.67" y2="129.89" stroke="#2b425b" stroke-width="1.20" />
+  <line x1="706.67" y1="129.89" x2="740.00" y2="124.44" stroke="#2b425b" stroke-width="1.20" />
+  <line x1="740.00" y1="124.44" x2="773.33" y2="135.33" stroke="#2b425b" stroke-width="1.20" />
+  <line x1="773.33" y1="135.33" x2="733.33" y2="203.39" stroke="#2b425b" stroke-width="1.20" />
+  <line x1="733.33" y1="203.39" x2="756.67" y2="217.00" stroke="#2b425b" stroke-width="1.20" />
+  <line x1="756.67" y1="217.00" x2="750.00" y2="230.61" stroke="#2b425b" stroke-width="1.20" />
+  <line x1="750.00" y1="230.61" x2="783.33" y2="282.33" stroke="#2b425b" stroke-width="1.20" />
+  <line x1="783.33" y1="282.33" x2="810.00" y2="282.33" stroke="#2b425b" stroke-width="1.20" />
+  <line x1="810.00" y1="282.33" x2="773.33" y2="328.61" stroke="#2b425b" stroke-width="1.20" />
+  <line x1="773.33" y1="328.61" x2="756.67" y2="383.06" stroke="#2b425b" stroke-width="1.20" />
+  <line x1="756.67" y1="383.06" x2="706.67" y2="410.28" stroke="#2b425b" stroke-width="1.20" />
+  <line x1="706.67" y1="410.28" x2="690.00" y2="385.78" stroke="#2b425b" stroke-width="1.20" />
+  <line x1="690.00" y1="385.78" x2="680.00" y2="331.33" stroke="#2b425b" stroke-width="1.20" />
+  <line x1="680.00" y1="331.33" x2="646.67" y2="298.67" stroke="#2b425b" stroke-width="1.20" />
+  <line x1="646.67" y1="298.67" x2="583.33" y2="274.17" stroke="#2b425b" stroke-width="1.20" />
+  <line x1="583.33" y1="274.17" x2="606.67" y2="219.72" stroke="#2b425b" stroke-width="1.20" />
+  <line x1="606.67" y1="219.72" x2="610.00" y2="214.28" stroke="#2b425b" stroke-width="1.20" />
+  <line x1="756.67" y1="217.00" x2="773.33" y2="135.33" stroke="#2b425b" stroke-width="1.20" />
+  <line x1="773.33" y1="135.33" x2="873.33" y2="119.00" stroke="#2b425b" stroke-width="1.20" />
+  <line x1="873.33" y1="119.00" x2="990.00" y2="110.83" stroke="#2b425b" stroke-width="1.20" />
+  <line x1="990.00" y1="110.83" x2="1106.67" y2="119.00" stroke="#2b425b" stroke-width="1.20" />
+  <line x1="1106.67" y1="119.00" x2="1223.33" y2="135.33" stroke="#2b425b" stroke-width="1.20" />
+  <line x1="1223.33" y1="135.33" x2="1180.00" y2="168.00" stroke="#2b425b" stroke-width="1.20" />
+  <line x1="1180.00" y1="168.00" x2="1106.67" y2="173.44" stroke="#2b425b" stroke-width="1.20" />
+  <line x1="1106.67" y1="173.44" x2="1073.33" y2="206.11" stroke="#2b425b" stroke-width="1.20" />
+  <line x1="1073.33" y1="206.11" x2="1046.67" y2="233.33" stroke="#2b425b" stroke-width="1.20" />
+  <line x1="1046.67" y1="233.33" x2="1000.00" y2="260.56" stroke="#2b425b" stroke-width="1.20" />
+  <line x1="1000.00" y1="260.56" x2="986.67" y2="309.56" stroke="#2b425b" stroke-width="1.20" />
+  <line x1="986.67" y1="309.56" x2="960.00" y2="271.44" stroke="#2b425b" stroke-width="1.20" />
+  <line x1="960.00" y1="271.44" x2="906.67" y2="293.22" stroke="#2b425b" stroke-width="1.20" />
+  <line x1="906.67" y1="293.22" x2="880.00" y2="260.56" stroke="#2b425b" stroke-width="1.20" />
+  <line x1="880.00" y1="260.56" x2="846.67" y2="246.94" stroke="#2b425b" stroke-width="1.20" />
+  <line x1="846.67" y1="246.94" x2="800.00" y2="233.33" stroke="#2b425b" stroke-width="1.20" />
+  <line x1="800.00" y1="233.33" x2="783.33" y2="282.33" stroke="#2b425b" stroke-width="1.20" />
+  <line x1="783.33" y1="282.33" x2="756.67" y2="217.00" stroke="#2b425b" stroke-width="1.20" />
+  <line x1="1020.00" y1="374.89" x2="1073.33" y2="347.67" stroke="#2b425b" stroke-width="1.20" />
+  <line x1="1073.33" y1="347.67" x2="1113.33" y2="344.94" stroke="#2b425b" stroke-width="1.20" />
+  <line x1="1113.33" y1="344.94" x2="1150.00" y2="385.78" stroke="#2b425b" stroke-width="1.20" />
+  <line x1="1150.00" y1="385.78" x2="1133.33" y2="418.44" stroke="#2b425b" stroke-width="1.20" />
+  <line x1="1133.33" y1="418.44" x2="1090.00" y2="407.56" stroke="#2b425b" stroke-width="1.20" />
+  <line x1="1090.00" y1="407.56" x2="1023.33" y2="407.56" stroke="#2b425b" stroke-width="1.20" />
+  <line x1="1023.33" y1="407.56" x2="1020.00" y2="374.89" stroke="#2b425b" stroke-width="1.20" />
+  <line x1="1073.33" y1="230.61" x2="1093.33" y2="222.44" stroke="#345474" stroke-width="1.40" />
+  <line x1="1093.33" y1="222.44" x2="1110.00" y2="211.56" stroke="#345474" stroke-width="1.40" />
+  <line x1="1110.00" y1="211.56" x2="1123.33" y2="195.22" stroke="#345474" stroke-width="1.40" />
+  <line x1="960.00" y1="301.39" x2="993.33" y2="331.33" stroke="#345474" stroke-width="1.40" />
+  <line x1="993.33" y1="331.33" x2="1040.00" y2="336.78" stroke="#345474" stroke-width="1.40" />
+  <line x1="1040.00" y1="336.78" x2="1090.00" y2="325.89" stroke="#345474" stroke-width="1.40" />
+  <line x1="1090.00" y1="325.89" x2="1133.33" y2="339.50" stroke="#345474" stroke-width="1.40" />
+  <circle cx="416.89" cy="264.36" r="4.93" fill="#f43f5e" />
+  <circle cx="242.24" cy="201.88" r="5.15" fill="#f43f5e" />
+  <circle cx="427.82" cy="375.53" r="11.52" fill="#22d3ee" />
+  <circle cx="1227.87" cy="423.98" r="10.08" fill="#f43f5e" />
+  <circle cx="1062.03" cy="299.76" r="11.16" fill="#f43f5e" />
+  <circle cx="416.99" cy="380.47" r="11.16" fill="#f59e0b" />
+  <circle cx="415.41" cy="266.02" r="3.74" fill="#f43f5e" />
+  <circle cx="1060.70" cy="292.13" r="12.24" fill="#f59e0b" />
+  <circle cx="255.12" cy="225.66" r="4.43" fill="#f43f5e" />
+  <circle cx="255.12" cy="225.65" r="6.08" fill="#f43f5e" />
+  <circle cx="75.87" cy="173.33" r="8.64" fill="#f43f5e" />
+  <circle cx="45.53" cy="404.84" r="12.24" fill="#f43f5e" />
+  <circle cx="1174.33" cy="172.46" r="10.80" fill="#f43f5e" />
+  <circle cx="122.05" cy="263.31" r="4.18" fill="#f43f5e" />
+  <circle cx="255.12" cy="225.66" r="4.18" fill="#f43f5e" />
+  <circle cx="255.16" cy="225.71" r="5.40" fill="#f43f5e" />
+  <circle cx="255.12" cy="225.67" r="4.14" fill="#f43f5e" />
+  <circle cx="255.11" cy="225.68" r="6.34" fill="#f43f5e" />
+  <circle cx="255.12" cy="225.67" r="5.72" fill="#f43f5e" />
+  <circle cx="255.14" cy="225.68" r="5.44" fill="#f43f5e" />
+  <circle cx="497.88" cy="233.00" r="14.40" fill="#f43f5e" />
+  <circle cx="417.40" cy="263.96" r="4.43" fill="#f43f5e" />
+  <circle cx="240.27" cy="183.01" r="6.91" fill="#f43f5e" />
+  <circle cx="415.78" cy="261.89" r="7.38" fill="#f43f5e" />
+  <circle cx="1096.49" cy="233.12" r="9.36" fill="#22d3ee" />
+  <circle cx="144.89" cy="152.07" r="4.32" fill="#f43f5e" />
+  <circle cx="173.72" cy="150.33" r="4.32" fill="#f43f5e" />
+  <circle cx="61.85" cy="356.07" r="11.16" fill="#f43f5e" />
+  <circle cx="134.21" cy="142.59" r="4.68" fill="#f43f5e" />
+  <circle cx="1131.21" cy="288.59" r="13.32" fill="#f43f5e" />
+  <circle cx="313.48" cy="414.26" r="11.88" fill="#f43f5e" />
+  <circle cx="128.88" cy="164.42" r="6.12" fill="#f59e0b" />
+  <circle cx="894.64" cy="221.46" r="9.00" fill="#f43f5e" />
+  <circle cx="1105.55" cy="452.13" r="10.80" fill="#f43f5e" />
+  <circle cx="134.91" cy="146.52" r="3.60" fill="#f59e0b" />
+  <circle cx="417.45" cy="380.18" r="11.52" fill="#f59e0b" />
+  <circle cx="949.42" cy="306.01" r="13.32" fill="#f43f5e" />
+  <circle cx="47.54" cy="368.30" r="10.80" fill="#22d3ee" />
+  <circle cx="312.05" cy="237.35" r="3.96" fill="#f43f5e" />
+  <circle cx="291.89" cy="228.83" r="4.32" fill="#f43f5e" />
+  <circle cx="390.92" cy="418.23" r="11.16" fill="#f43f5e" />
+  <circle cx="1139.73" cy="319.09" r="12.96" fill="#f43f5e" />
+  <circle cx="136.48" cy="156.12" r="9.36" fill="#f43f5e" />
+  <circle cx="1074.94" cy="234.53" r="11.16" fill="#f43f5e" />
+  <circle cx="117.77" cy="161.30" r="3.96" fill="#f43f5e" />
+  <circle cx="44.55" cy="404.14" r="12.24" fill="#f43f5e" />
+  <circle cx="497.88" cy="233.00" r="3.50" fill="#ffffff" />
+  <text x="509.88" y="223.00" fill="#fda4af" font-size="12" font-family="sans-serif">M5.5 northern Mid-Atlantic Ridge</text>
+  <circle cx="819.79" cy="255.54" r="7.00" fill="#38bdf8" />
+  <circle cx="1240.00" cy="365.00" r="5.00" fill="#fde047" />
+  <text x="829.79" y="269.54" fill="#7dd3fc" font-size="12" font-family="sans-serif">ISS (21.8, 53.9)</text>
+  <rect x="1127.21" y="284.59" width="8.00" height="8.00" fill="#34d399" />
+  <rect x="493.88" y="229.00" width="8.00" height="8.00" fill="#34d399" />
+  <rect x="815.79" y="251.54" width="8.00" height="8.00" fill="#34d399" />
+  <rect x="40.00" y="585.00" width="680.00" height="150.00" fill="#0c1624" />
+  <text x="56.00" y="608.00" fill="#e2e8f0" font-size="13" font-family="sans-serif">NOAA SWPC Planetary Kp Index (Recent 3h Intervals)</text>
+  <line x1="56.00" y1="666.89" x2="700.00" y2="666.89" stroke="#ef4444" stroke-width="1.00" />
+  <text x="646.00" y="662.89" fill="#f87171" font-size="10" font-family="sans-serif">G1 Kp=5</text>
+  <rect x="57.00" y="704.40" width="22.83" height="13.50" fill="#22c55e" />
+  <rect x="82.83" y="707.78" width="22.83" height="10.22" fill="#22c55e" />
+  <rect x="108.67" y="700.93" width="22.83" height="17.07" fill="#22c55e" />
+  <rect x="134.50" y="700.93" width="22.83" height="17.07" fill="#22c55e" />
+  <rect x="160.33" y="711.15" width="22.83" height="6.85" fill="#22c55e" />
+  <rect x="186.17" y="711.15" width="22.83" height="6.85" fill="#22c55e" />
+  <rect x="212.00" y="714.63" width="22.83" height="3.37" fill="#22c55e" />
+  <rect x="237.83" y="704.40" width="22.83" height="13.50" fill="#22c55e" />
+  <rect x="263.67" y="700.93" width="22.83" height="17.07" fill="#22c55e" />
+  <rect x="289.50" y="704.40" width="22.83" height="13.50" fill="#22c55e" />
+  <rect x="315.33" y="714.63" width="22.83" height="3.37" fill="#22c55e" />
+  <rect x="341.17" y="704.40" width="22.83" height="13.50" fill="#22c55e" />
+  <rect x="367.00" y="707.78" width="22.83" height="10.22" fill="#22c55e" />
+  <rect x="392.83" y="711.15" width="22.83" height="6.85" fill="#22c55e" />
+  <rect x="418.67" y="711.15" width="22.83" height="6.85" fill="#22c55e" />
+  <rect x="444.50" y="711.15" width="22.83" height="6.85" fill="#22c55e" />
+  <rect x="470.33" y="711.15" width="22.83" height="6.85" fill="#22c55e" />
+  <rect x="496.17" y="714.63" width="22.83" height="3.37" fill="#22c55e" />
+  <rect x="522.00" y="711.15" width="22.83" height="6.85" fill="#22c55e" />
+  <rect x="547.83" y="707.78" width="22.83" height="10.22" fill="#22c55e" />
+  <rect x="573.67" y="704.40" width="22.83" height="13.50" fill="#22c55e" />
+  <rect x="599.50" y="700.93" width="22.83" height="17.07" fill="#22c55e" />
+  <rect x="625.33" y="707.78" width="22.83" height="10.22" fill="#22c55e" />
+  <rect x="651.17" y="707.78" width="22.83" height="10.22" fill="#22c55e" />
+  <rect x="745.00" y="585.00" width="495.00" height="150.00" fill="#0c1624" />
+  <text x="762.00" y="608.00" fill="#e2e8f0" font-size="13" font-family="sans-serif">IRIS AD Gutenberg-Richter &amp; Bayesian Credible Bounds</text>
+  <text x="762.00" y="636.00" fill="#38bdf8" font-size="12" font-family="sans-serif">AD Fit log10(N&gt;=M) = 2.85 - 0.43 * M   (R^2=0.76)</text>
+  <text x="762.00" y="662.00" fill="#cbd5e1" font-size="12" font-family="sans-serif">Depth Regimes: Shallow=38 | Mid=5 | Deep=3</text>
+  <text x="762.00" y="688.00" fill="#cbd5e1" font-size="12" font-family="sans-serif">Magnitude Mean=3.75  95% CI [3.48, 4.02]</text>
+  <text x="762.00" y="714.00" fill="#34d399" font-size="12" font-family="sans-serif">Planetary Kp Peak=5.33  95% CI [1.79, 2.35]</text>
+</svg>
