@@ -3131,6 +3131,7 @@ impl<'t> Parser<'t> {
         // Note: `let _ = expr` is irrefutable and parses as a normal `AstStmt::Let`
         // so it never synthesizes a unreachable `panic(...)` arm or spurious `throw` effect.
         let is_refutable = match self.peek_tok() {
+            Token::Ident(ref name) if name == "_" => true,
             Token::Ident(ref name) if name == "none" => !self
                 .tokens
                 .get(self.pos + 1)
@@ -3203,16 +3204,16 @@ impl<'t> Parser<'t> {
 
             // Determine the binding name from the pattern (before moving pattern into arms)
             let binding_name = match &pattern {
-                AstWhenPattern::Binding { name, .. } => Some(name.clone()),
+                AstWhenPattern::Binding { name, .. } if name != "_" => Some(name.clone()),
                 AstWhenPattern::OptionSome {
                     binding: Some(name),
-                } => Some(name.clone()),
+                } if name != "_" => Some(name.clone()),
                 AstWhenPattern::ResultOk {
                     binding: Some(name),
-                } => Some(name.clone()),
+                } if name != "_" => Some(name.clone()),
                 AstWhenPattern::ResultErr {
                     binding: Some(name),
-                } => Some(name.clone()),
+                } if name != "_" => Some(name.clone()),
                 AstWhenPattern::EnumVariant { bindings, .. } if !bindings.is_empty() => {
                     Some(bindings[0].clone())
                 }
@@ -3225,6 +3226,15 @@ impl<'t> Parser<'t> {
                     name: name.clone(),
                     span: pat_span,
                 }),
+                AstWhenPattern::OptionSome {
+                    binding: Some(name),
+                }
+                | AstWhenPattern::ResultOk {
+                    binding: Some(name),
+                }
+                | AstWhenPattern::ResultErr {
+                    binding: Some(name),
+                } if name == "_" => AstExpr::IntLit { value: 0, span },
                 AstWhenPattern::OptionSome {
                     binding: Some(name),
                 }
