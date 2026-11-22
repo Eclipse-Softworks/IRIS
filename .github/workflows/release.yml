@@ -254,7 +254,7 @@ jobs:
           rm -rf toolchain-dl
 
           echo "--- Toolchain contents ---"
-          find toolchain -type f | head -30
+          find toolchain -type f | head -30 || true
           du -sh toolchain/
 
       - name: Generate prebuilt C runtime objects (native hosts)
@@ -488,9 +488,9 @@ jobs:
 
           # Find the iris binary
           if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
-            BIN=$(find extracted -name 'iris.exe' -type f | head -1)
+            BIN=$(find extracted -name 'iris.exe' -type f | head -1 || true)
           else
-            BIN=$(find extracted -name 'iris' -type f ! -name '*.iris' | head -1)
+            BIN=$(find extracted -name 'iris' -type f ! -name '*.iris' | head -1 || true)
           fi
 
           if [ -z "$BIN" ]; then
