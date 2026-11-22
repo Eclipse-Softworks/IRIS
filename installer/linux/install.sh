@@ -11,7 +11,7 @@
 # ──────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
-VERSION="1.0.0-rc1"
+VERSION="1.0.0-rc3"
 INSTALL_DIR="${IRIS_INSTALL_DIR:-$HOME/.iris}"
 BIN_DIR="$INSTALL_DIR/bin"
 
@@ -217,6 +217,12 @@ step "Installing iris -> $BIN_DIR/iris"
 cp "$IRIS_BIN" "$BIN_DIR/iris"
 chmod +x "$BIN_DIR/iris"
 ok "Binary installed."
+local_host_dir="$(dirname "$IRIS_BIN")"
+if [[ -f "$local_host_dir/libiris_ui_host.so" ]]; then
+    cp "$local_host_dir/libiris_ui_host.so" "$BIN_DIR/libiris_ui_host.so"
+    chmod +x "$BIN_DIR/libiris_ui_host.so"
+    ok "UI host installed -> $BIN_DIR/libiris_ui_host.so"
+fi
 
 # Step 4: Install stdlib + examples
 step "Installing standard library and examples..."

@@ -1,5 +1,7 @@
 pub mod abi;
 pub mod accessibility;
+pub mod camera;
+pub mod clipboard;
 pub mod protocol;
 pub mod renderer;
 pub mod svg;

@@ -74,11 +74,13 @@ else
 fi
 
 # ── Step 3: Remove .pkg receipt (if installed via .pkg) ───────────────────
-if pkgutil --pkgs 2>/dev/null | grep -q "dev.moon9t.iris"; then
-    step "Removing .pkg receipt..."
-    sudo pkgutil --forget dev.moon9t.iris 2>/dev/null && ok "Removed .pkg receipt." || \
-        warn "Could not remove .pkg receipt. Try: sudo pkgutil --forget dev.moon9t.iris"
-fi
+for pkg_id in "dev.eclipsesoftworks.iris" "dev.moon9t.iris"; do
+    if pkgutil --pkgs 2>/dev/null | grep -q "$pkg_id"; then
+        step "Removing .pkg receipt ($pkg_id)..."
+        sudo pkgutil --forget "$pkg_id" 2>/dev/null && ok "Removed .pkg receipt." || \
+            warn "Could not remove .pkg receipt. Try: sudo pkgutil --forget $pkg_id"
+    fi
+done
 
 # ── Step 4: Remove install directory ──────────────────────────────────────
 echo ""

@@ -1,4 +1,9 @@
 @echo off
+setlocal
+
+if exist "%LOCALAPPDATA%\Pandoc\pandoc.exe" set "PATH=%LOCALAPPDATA%\Pandoc;%PATH%"
+if exist "%LOCALAPPDATA%\Programs\MiKTeX\miktex\bin\x64\xelatex.exe" set "PATH=%LOCALAPPDATA%\Programs\MiKTeX\miktex\bin\x64;%PATH%"
+
 where pandoc >nul 2>nul
 if %errorlevel% neq 0 (
   echo Pandoc was not found on PATH. Install Pandoc and reopen this shell.
@@ -12,13 +17,15 @@ if %errorlevel% neq 0 (
 
 echo Building PDF (generating .tex then running XeLaTeX three times)...
 pandoc -s docs\BOOK.md -o "docs\The-IRIS-Programming-Language.tex" ^
+  --lua-filter=docs\pdf-filter.lua ^
   --syntax-definition=docs\iris.xml ^
-  --highlight-style=docs\iris-theme.theme ^
-  --toc --toc-depth=2 --number-sections ^
-  --top-level-division=chapter -V book=true ^
+  --syntax-highlighting=docs\iris-theme.theme ^
+  --toc --toc-depth=1 ^
+  --top-level-division=part -V book=true ^
+  -V documentclass=book -V classoption=oneside ^
   -V "title=The IRIS Programming Language" ^
   -V "author=Moon9t" ^
-  -V "date=August 2026" ^
+  -V "date=November 2026" ^
   -V "lang=en"
 
 if %errorlevel% neq 0 (
@@ -26,7 +33,7 @@ if %errorlevel% neq 0 (
   exit /b %errorlevel%
 )
 
-REM Run XeLaTeX three times to resolve cross-references and hyperlinks
+REM Run XeLaTeX three times to resolve cross-references, TOC pages, and bookmarks
 xelatex -interaction=nonstopmode -halt-on-error -output-directory=docs docs\The-IRIS-Programming-Language.tex
 if %errorlevel% neq 0 (
   echo XeLaTeX first pass failed!

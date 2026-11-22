@@ -1,13 +1,13 @@
-// std.ui_icons -- resolution-independent line icons for IRIS native UI.
+// std.ui_icons -- resolution-independent 24x24 SVG vector icons for IRIS native UI.
 //
-// Icons are drawn from the same primitive draw commands as the rest of the
-// toolkit, so they need no font atlas, no image files, and scale to any size
-// without blurring. Coordinates are defined in a 24x24 design grid and mapped
-// onto the destination rectangle by `draw_icon`.
+// Icons are defined on a canonical 24x24 viewBox using SVG path syntax and
+// rasterized directly by `iris_ui_host` via `draw_cmd_svg_path`, giving crisp
+// antialiased curves, arcs, and strokes at any DPI or size.
 
 pub bring std.ui_protocol
 pub bring std.ui_theme
 
+/// Built-in vector icon catalog (24x24 design grid).
 pub choice UiIcon {
     Search,
     Plus,
@@ -18,11 +18,17 @@ pub choice UiIcon {
     ChevronRight,
     ChevronUp,
     ChevronDown,
+    ArrowLeft,
+    ArrowRight,
+    ArrowUp,
+    ArrowDown,
     Play,
     Pause,
     Stop,
     Refresh,
+    RotateCcw,
     Settings,
+    Sliders,
     Brain,
     Network,
     Chart,
@@ -34,177 +40,535 @@ pub choice UiIcon {
     EyeOff,
     Home,
     Link,
+    ExternalLink,
     Download,
     Upload,
+    Copy,
+    Clipboard,
+    Save,
+    Undo,
+    Redo,
+    Share,
     Spark,
     Radio,
     Layers,
     Terminal,
+    Code,
+    GitBranch,
+    Package,
+    Rocket,
     Clock,
+    Calendar,
     Bell,
+    Mail,
+    MapPin,
     User,
     Lock,
     Unlock,
+    Key,
     Filter,
     Grid,
     List,
     Trash,
     Edit,
     Star,
+    Heart,
+    Bookmark,
+    Tag,
     Cpu,
     Database,
     Globe,
+    Cloud,
+    Wifi,
     Activity,
     SearchSmall,
+    Info,
+    Warning,
+    AlertCircle,
+    CheckCircle,
+    HelpCircle,
+    Sun,
+    Moon,
+    Palette,
+    Menu,
+    Sidebar,
+    PanelLeft,
+    PanelRight,
+    Maximize,
+    Minimize,
+    Volume,
+    VolumeMute,
+    Camera,
+    Image,
+    Compass,
+    LogIn,
+    LogOut,
+    ZoomIn,
+    ZoomOut,
+    Grip,
+    MoreHorizontal,
+    MoreVertical,
 }
 
-def ix(r: UiRect, x: f64) -> f64 {
-    return r.x + (x / 24.0) * r.w
-}
-
-def iy(r: UiRect, y: f64) -> f64 {
-    return r.y + (y / 24.0) * r.h
-}
-
-def isz(r: UiRect, v: f64) -> f64 {
-    return (v / 24.0) * r.w
-}
-
-def iline(buf: DrawBuffer, r: UiRect, x1: f64, y1: f64, x2: f64, y2: f64, c: UiColor, w: f64) -> DrawBuffer effect ffi, alloc {
-    return draw_cmd_line(
-        buf,
-        UiRect { x: ix(r, x1), y: iy(r, y1), w: ix(r, x2), h: iy(r, y2) },
-        c,
-        w,
-        false,
-    )
-}
-
-def icircle(buf: DrawBuffer, r: UiRect, cx: f64, cy: f64, rad: f64, c: UiColor, fill: UiColor, w: f64) -> DrawBuffer effect ffi, alloc {
-    return draw_cmd_circle(buf, ix(r, cx), iy(r, cy), isz(r, rad), UiStyle { bg: fill, border: c, border_width: w })
-}
-
-def ibox(buf: DrawBuffer, r: UiRect, x: f64, y: f64, w: f64, h: f64, rad: f64, c: UiColor, fill: UiColor, bw: f64) -> DrawBuffer effect ffi, alloc {
-    return draw_cmd_round_rect(
-        buf,
-        UiRect { x: ix(r, x), y: iy(r, y), w: isz(r, w), h: isz(r, h) },
-        isz(r, rad),
-        UiStyle { bg: fill, border: c, border_width: bw },
-    )
-}
-
-def ipoly(buf: DrawBuffer, r: UiRect, xs: list<f64>, ys: list<f64>, c: UiColor, fill: UiColor) -> DrawBuffer effect ffi, alloc {
-    val px: list<f64> = list()
-    val py: list<f64> = list()
-    var i = 0
-    while i < list_len(xs) {
-        list_push(px, ix(r, list_get(xs, i)))
-        list_push(py, iy(r, list_get(ys, i)))
-        i = i + 1
-    }
-    return draw_cmd_polyline(buf, px, py, c, fill)
-}
-
-/// Draw one icon into `r` using `color` and a 1.6-unit stroke.
-pub def draw_icon(buf: DrawBuffer, icon: UiIcon, r: UiRect, color: UiColor) -> DrawBuffer effect ffi, alloc {
-    val clear = UiColor { r: 0, g: 0, b: 0, a: 0 }
-    val w = 1.6
+/// Canonical 24x24 SVG path `d` data for `icon`.
+pub def icon_svg_path(icon: UiIcon) -> str {
     return when icon {
-        UiIcon.Search => icircle(iline(buf, r, 13.0, 13.0, 20.0, 20.0, color, w), r, 10.5, 10.5, 6.5, color, clear, w),
-        UiIcon.SearchSmall => icircle(iline(buf, r, 12.0, 12.0, 16.0, 16.0, color, w), r, 9.0, 9.0, 4.5, color, clear, w),
-        UiIcon.Plus => iline(iline(buf, r, 12.0, 4.0, 12.0, 20.0, color, w), r, 4.0, 12.0, 20.0, 12.0, color, w),
-        UiIcon.Minus => iline(buf, r, 4.0, 12.0, 20.0, 12.0, color, w),
-        UiIcon.Close => iline(iline(buf, r, 5.0, 5.0, 19.0, 19.0, color, w), r, 19.0, 5.0, 5.0, 19.0, color, w),
-        UiIcon.Check => iline(iline(buf, r, 4.0, 13.0, 10.0, 19.0, color, w), r, 10.0, 19.0, 20.0, 6.0, color, w),
-        UiIcon.ChevronLeft => iline(iline(buf, r, 15.0, 4.0, 8.0, 12.0, color, w), r, 8.0, 12.0, 15.0, 20.0, color, w),
-        UiIcon.ChevronRight => iline(iline(buf, r, 9.0, 4.0, 16.0, 12.0, color, w), r, 16.0, 12.0, 9.0, 20.0, color, w),
-        UiIcon.ChevronUp => iline(iline(buf, r, 4.0, 15.0, 12.0, 8.0, color, w), r, 12.0, 8.0, 20.0, 15.0, color, w),
-        UiIcon.ChevronDown => iline(iline(buf, r, 4.0, 9.0, 12.0, 16.0, color, w), r, 12.0, 16.0, 20.0, 9.0, color, w),
-        UiIcon.Play => ipoly(buf, r, list(7.0, 7.0, 19.0), list(4.0, 20.0, 12.0), color, color),
-        UiIcon.Pause => ibox(ibox(buf, r, 6.0, 4.0, 4.0, 16.0, 1.0, color, color, 0.0), r, 14.0, 4.0, 4.0, 16.0, 1.0, color, color, 0.0),
-        UiIcon.Stop => ibox(buf, r, 5.0, 5.0, 14.0, 14.0, 2.0, color, color, 0.0),
-        UiIcon.Refresh => iline(
-            icircle(iline(buf, r, 19.0, 7.0, 20.0, 13.0, color, w), r, 12.0, 12.0, 8.0, color, clear, w),
-            r, 20.0, 13.0, 14.0, 12.0, color, w,
-        ),
-        UiIcon.Settings => {
-            var b = buf
-            var a = 0.0
-            while a < 6.28318 {
-                val x1 = 12.0 + cos(a) * 7.0
-                val y1 = 12.0 + sin(a) * 7.0
-                val x2 = 12.0 + cos(a) * 10.0
-                val y2 = 12.0 + sin(a) * 10.0
-                b = iline(b, r, x1, y1, x2, y2, color, w)
-                a = a + 0.785398
-            }
-            icircle(b, r, 12.0, 12.0, 5.0, color, clear, w)
-        },
-        UiIcon.Brain => {
-            var b = buf
-            val cx = list(12.0, 7.0, 5.0, 17.0, 19.0, 10.0, 14.0, 8.0, 16.0)
-            val cy = list(12.0, 8.0, 14.0, 8.0, 14.0, 18.0, 18.0, 12.0, 12.0)
-            val edges = list(0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 6)
-            val to = list(1, 2, 3, 4, 5, 6, 7, 8, 7, 8, 7, 8, 7, 8)
-            var i = 0
-            while i < list_len(edges) {
-                val a = list_get(edges, i)
-                val z = list_get(to, i)
-                b = iline(b, r, list_get(cx, a), list_get(cy, a), list_get(cx, z), list_get(cy, z), color, 0.8)
-                i = i + 1
-            }
-            i = 0
-            while i < list_len(cx) {
-                b = icircle(b, r, list_get(cx, i), list_get(cy, i), 1.6, color, color, 0.0)
-                i = i + 1
-            }
-            b
-        },
-        UiIcon.Network => {
-            var b = buf
-            b = iline(iline(iline(iline(buf, r, 4.0, 6.0, 12.0, 12.0, color, w), r, 4.0, 18.0, 12.0, 12.0, color, w), r, 12.0, 12.0, 20.0, 5.0, color, w), r, 12.0, 12.0, 20.0, 19.0, color, w)
-            b = icircle(icircle(icircle(icircle(b, r, 4.0, 6.0, 2.2, color, color, 0.0), r, 4.0, 18.0, 2.2, color, color, 0.0), r, 20.0, 5.0, 2.2, color, color, 0.0), r, 20.0, 19.0, 2.2, color, color, 0.0)
-            icircle(b, r, 12.0, 12.0, 3.0, color, color, 0.0)
-        },
-        UiIcon.Chart => ibox(
-            ipoly(buf, r, list(4.0, 9.0, 14.0, 20.0), list(18.0, 12.0, 15.0, 5.0), color, clear),
-            r, 4.0, 4.0, 16.0, 16.0, 2.0, color, clear, w,
-        ),
-        UiIcon.Folder => ipoly(buf, r, list(3.0, 3.0, 9.0, 21.0, 21.0, 15.0), list(6.0, 10.0, 10.0, 10.0, 10.0, 6.0), color, clear),
-        UiIcon.File => ipoly(buf, r, list(5.0, 5.0, 15.0, 19.0, 19.0), list(3.0, 21.0, 21.0, 9.0, 3.0), color, clear),
-        UiIcon.Bolt => ipoly(buf, r, list(13.0, 4.0, 10.0, 18.0, 9.0), list(2.0, 13.0, 13.0, 22.0, 11.0), color, color),
-        UiIcon.Shield => ipoly(buf, r, list(12.0, 4.0, 12.0, 20.0, 12.0), list(3.0, 7.0, 21.0, 17.0, 21.0), color, clear),
-        UiIcon.Eye => icircle(
-            ipoly(buf, r, list(2.0, 12.0, 22.0), list(12.0, 4.0, 12.0), color, clear),
-            r, 12.0, 12.0, 5.0, color, clear, w,
-        ),
-        UiIcon.EyeOff => iline(
-            icircle(ipoly(buf, r, list(2.0, 12.0, 22.0), list(12.0, 5.0, 12.0), color, clear), r, 12.0, 12.0, 4.0, color, clear, w),
-            r, 3.0, 21.0, 21.0, 3.0, color, w,
-        ),
-        UiIcon.Home => ipoly(buf, r, list(2.0, 12.0, 22.0, 18.0, 18.0, 6.0, 6.0), list(12.0, 2.0, 12.0, 12.0, 22.0, 22.0, 12.0), color, clear),
-        UiIcon.Link => iline(iline(buf, r, 10.0, 14.0, 14.0, 10.0, color, w), r, 8.0, 10.0, 6.0, 12.0, color, w),
-        UiIcon.Download => iline(iline(iline(buf, r, 12.0, 3.0, 12.0, 16.0, color, w), r, 6.0, 11.0, 12.0, 17.0, color, w), r, 18.0, 11.0, 12.0, 17.0, color, w),
-        UiIcon.Upload => iline(iline(iline(buf, r, 12.0, 17.0, 12.0, 4.0, color, w), r, 6.0, 9.0, 12.0, 3.0, color, w), r, 18.0, 9.0, 12.0, 3.0, color, w),
-        UiIcon.Spark => iline(iline(iline(iline(buf, r, 12.0, 2.0, 12.0, 22.0, color, w), r, 2.0, 12.0, 22.0, 12.0, color, w), r, 5.0, 5.0, 19.0, 19.0, color, 0.8), r, 19.0, 5.0, 5.0, 19.0, color, 0.8),
-        UiIcon.Radio => icircle(icircle(icircle(buf, r, 12.0, 12.0, 2.0, color, color, 0.0), r, 12.0, 12.0, 6.5, color, clear, w), r, 12.0, 12.0, 10.0, color, clear, w),
-        UiIcon.Layers => ipoly(ipoly(buf, r, list(12.0, 3.0, 21.0, 12.0), list(4.0, 9.0, 9.0, 4.0), color, clear), r, list(3.0, 12.0, 21.0, 12.0), list(12.0, 18.0, 12.0, 6.0), color, clear),
-        UiIcon.Terminal => ibox(iline(iline(buf, r, 6.0, 8.0, 10.0, 12.0, color, w), r, 10.0, 12.0, 6.0, 16.0, color, w), r, 2.0, 3.0, 20.0, 18.0, 3.0, color, clear, w),
-        UiIcon.Clock => iline(iline(icircle(buf, r, 12.0, 12.0, 9.0, color, clear, w), r, 12.0, 12.0, 12.0, 6.0, color, w), r, 12.0, 12.0, 16.0, 14.0, color, w),
-        UiIcon.Bell => icircle(iline(buf, r, 12.0, 19.0, 12.0, 22.0, color, w), r, 6.0, 10.0, 6.0, color, clear, w),
-        UiIcon.User => icircle(icircle(buf, r, 12.0, 8.0, 4.0, color, clear, w), r, 12.0, 20.0, 8.0, color, clear, w),
-        UiIcon.Lock => ibox(icircle(buf, r, 12.0, 9.0, 4.0, color, clear, w), r, 5.0, 12.0, 14.0, 10.0, 2.0, color, clear, w),
-        UiIcon.Unlock => ibox(icircle(buf, r, 12.0, 9.0, 4.0, color, clear, w), r, 5.0, 12.0, 14.0, 10.0, 2.0, color, clear, w),
-        UiIcon.Filter => ipoly(buf, r, list(3.0, 21.0, 15.0, 9.0), list(5.0, 5.0, 13.0, 13.0), color, clear),
-        UiIcon.Grid => ibox(ibox(ibox(ibox(buf, r, 3.0, 3.0, 8.0, 8.0, 1.0, color, clear, w), r, 13.0, 3.0, 8.0, 8.0, 1.0, color, clear, w), r, 3.0, 13.0, 8.0, 8.0, 1.0, color, clear, w), r, 13.0, 13.0, 8.0, 8.0, 1.0, color, clear, w),
-        UiIcon.List => iline(iline(iline(buf, r, 8.0, 6.0, 21.0, 6.0, color, w), r, 8.0, 12.0, 21.0, 12.0, color, w), r, 8.0, 18.0, 21.0, 18.0, color, w),
-        UiIcon.Trash => iline(iline(iline(ibox(buf, r, 5.0, 7.0, 14.0, 14.0, 2.0, color, clear, w), r, 3.0, 7.0, 21.0, 7.0, color, w), r, 9.0, 7.0, 9.0, 4.0, color, w), r, 15.0, 7.0, 15.0, 4.0, color, w),
-        UiIcon.Edit => iline(iline(buf, r, 4.0, 20.0, 4.0, 16.0, color, w), r, 4.0, 16.0, 16.0, 4.0, color, w),
-        UiIcon.Star => ipoly(buf, r, list(12.0, 15.0, 22.0, 17.0, 19.0, 12.0, 5.0, 2.0, 7.0), list(2.0, 9.0, 9.0, 21.0, 14.0, 22.0, 14.0, 9.0, 9.0), color, clear),
-        UiIcon.Cpu => ibox(ibox(buf, r, 7.0, 7.0, 10.0, 10.0, 1.0, color, clear, w), r, 3.0, 3.0, 18.0, 18.0, 3.0, color, clear, w),
-        UiIcon.Database => icircle(iline(iline(buf, r, 4.0, 6.0, 4.0, 18.0, color, w), r, 20.0, 6.0, 20.0, 18.0, color, w), r, 12.0, 6.0, 8.0, color, clear, w),
-        UiIcon.Globe => icircle(iline(iline(buf, r, 3.0, 12.0, 21.0, 12.0, color, w), r, 12.0, 3.0, 12.0, 21.0, color, w), r, 12.0, 12.0, 9.0, color, clear, w),
-        UiIcon.Activity => ipoly(buf, r, list(2.0, 7.0, 11.0, 15.0, 22.0), list(12.0, 12.0, 4.0, 20.0, 12.0), color, clear),
+        UiIcon.Search => "M11 4a7 7 0 1 0 0 14 7 7 0 0 0 0-14z M21 21l-4.35-4.35",
+        UiIcon.SearchSmall => "M10 5a5 5 0 1 0 0 10 5 5 0 0 0 0-10z M19 19l-3.8-3.8",
+        UiIcon.Plus => "M12 5v14 M5 12h14",
+        UiIcon.Minus => "M5 12h14",
+        UiIcon.Close => "M18 6L6 18 M6 6l12 12",
+        UiIcon.Check => "M20 6L9 17l-5-5",
+        UiIcon.ChevronLeft => "M15 18l-6-6 6-6",
+        UiIcon.ChevronRight => "M9 18l6-6-6-6",
+        UiIcon.ChevronUp => "M18 15l-6-6-6 6",
+        UiIcon.ChevronDown => "M6 9l6 6 6-6",
+        UiIcon.ArrowLeft => "M19 12H5 M12 19l-7-7 7-7",
+        UiIcon.ArrowRight => "M5 12h14 M12 5l7 7-7 7",
+        UiIcon.ArrowUp => "M12 19V5 M5 12l7-7 7 7",
+        UiIcon.ArrowDown => "M12 5v14 M19 12l-7 7-7-7",
+        UiIcon.Play => "M6 4l14 8-14 8z",
+        UiIcon.Pause => "M6 4h4v16H6z M14 4h4v16h-4z",
+        UiIcon.Stop => "M5 5h14v14H5z",
+        UiIcon.Refresh => "M21 12a9 9 0 1 1-2.64-6.36 M21 3v6h-6",
+        UiIcon.RotateCcw => "M3 12a9 9 0 1 0 2.64-6.36 M3 3v6h6",
+        UiIcon.Settings => "M12 9a3 3 0 1 0 0 6 3 3 0 0 0 0-6z M12 2v3 M12 19v3 M4.93 4.93l2.12 2.12 M16.95 16.95l2.12 2.12 M2 12h3 M19 12h3 M4.93 19.07l2.12-2.12 M16.95 7.05l2.12-2.12",
+        UiIcon.Sliders => "M4 21v-7 M4 10V3 M12 21v-9 M12 8V3 M20 21v-5 M20 12V3 M1 14h6 M9 8h6 M17 16h6",
+        UiIcon.Brain => "M9.5 4A4.5 4.5 0 0 0 5 8.5c0 1.2.4 2.2 1 3A3.5 3.5 0 0 0 7 18c1.5 1.2 3.2 1.8 5 1.8s3.5-.6 5-1.8a3.5 3.5 0 0 0 1-6.5c.6-.8 1-1.8 1-3A4.5 4.5 0 0 0 14.5 4c-1 0-1.9.4-2.5 1A3.4 3.4 0 0 0 9.5 4z M12 5v14 M8 10h2 M14 14h2",
+        UiIcon.Network => "M12 9a3 3 0 1 0 0 6 3 3 0 0 0 0-6z M5 4a2 2 0 1 0 0 4 2 2 0 0 0 0-4z M19 4a2 2 0 1 0 0 4 2 2 0 0 0 0-4z M5 16a2 2 0 1 0 0 4 2 2 0 0 0 0-4z M19 16a2 2 0 1 0 0 4 2 2 0 0 0 0-4z M6.8 7.4L9.8 10 M17.2 7.4L14.2 10 M6.8 16.6L9.8 14 M17.2 16.6L14.2 14",
+        UiIcon.Chart => "M3 3v18h18 M7 15l4-5 4 3 5-7",
+        UiIcon.Folder => "M3 6a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z",
+        UiIcon.File => "M6 2h8l5 5v13a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2z M14 2v5h5",
+        UiIcon.Bolt => "M13 2L4 14h7l-1 8 9-12h-7z",
+        UiIcon.Shield => "M12 2l8 3.5v6c0 5-3.4 9.1-8 10.5-4.6-1.4-8-5.5-8-10.5v-6z",
+        UiIcon.Eye => "M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z M12 9a3 3 0 1 0 0 6 3 3 0 0 0 0-6z",
+        UiIcon.EyeOff => "M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z M3 3l18 18",
+        UiIcon.Home => "M3 10.5L12 3l9 7.5V20a1 1 0 0 1-1 1h-5v-6H9v6H4a1 1 0 0 1-1-1z",
+        UiIcon.Link => "M10 13a5 5 0 0 0 7.5.5l2-2a5 5 0 0 0-7-7l-1.5 1.5 M14 11a5 5 0 0 0-7.5-.5l-2 2a5 5 0 0 0 7 7l1.5-1.5",
+        UiIcon.ExternalLink => "M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6 M15 3h6v6 M10 14L21 3",
+        UiIcon.Download => "M12 3v12 M7 10l5 5 5-5 M4 19h16",
+        UiIcon.Upload => "M12 15V3 M7 8l5-5 5 5 M4 19h16",
+        UiIcon.Copy => "M9 9h11v11H9z M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1",
+        UiIcon.Clipboard => "M9 3h6v3H9z M6 5H5a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-1",
+        UiIcon.Save => "M4 3h13l4 4v13a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1z M7 3v5h8V3 M7 21v-7h10v7",
+        UiIcon.Undo => "M3 7v6h6 M3 13a9 9 0 0 1 15.5-5.5L21 10",
+        UiIcon.Redo => "M21 7v6h-6 M21 13a9 9 0 0 0-15.5-5.5L3 10",
+        UiIcon.Share => "M18 3a3 3 0 1 0 0 6 3 3 0 0 0 0-6z M6 9a3 3 0 1 0 0 6 3 3 0 0 0 0-6z M18 15a3 3 0 1 0 0 6 3 3 0 0 0 0-6z M8.6 13.5l6.8 4 M15.4 6.5l-6.8 4",
+        UiIcon.Spark => "M12 2l2.4 7.6L22 12l-7.6 2.4L12 22l-2.4-7.6L2 12l7.6-2.4z",
+        UiIcon.Radio => "M12 10a2 2 0 1 0 0 4 2 2 0 0 0 0-4z M7.8 7.8a6 6 0 0 0 0 8.4 M16.2 7.8a6 6 0 0 1 0 8.4 M4.9 4.9a10 10 0 0 0 0 14.2 M19.1 4.9a10 10 0 0 1 0 14.2",
+        UiIcon.Layers => "M12 2L2 7l10 5 10-5z M2 12l10 5 10-5 M2 17l10 5 10-5",
+        UiIcon.Terminal => "M3 4h18v16H3z M7 9l4 3-4 3 M12 15h5",
+        UiIcon.Code => "M16 18l6-6-6-6 M8 6l-6 6 6 6 M13.5 4l-3 16",
+        UiIcon.GitBranch => "M6 3v12 M18 6a3 3 0 1 0 0 6 3 3 0 0 0 0-6z M6 15a3 3 0 1 0 0 6 3 3 0 0 0 0-6z M18 12a6 6 0 0 1-6 6H9",
+        UiIcon.Package => "M12 2l9 4.5v11L12 22l-9-4.5v-11z M12 11.5L21 7 M12 11.5V22 M12 11.5L3 7 M7.5 4.2L16.5 8.8",
+        UiIcon.Rocket => "M4.5 16.5c-1.5 1.2-2 5-2 5s3.8-.5 5-2c.7-.7.7-1.9 0-2.6-.7-.7-2.2-.9-3-.4z M12 15l-3-3a22 22 0 0 1 2-3.9A12 12 0 0 1 21 3a12 12 0 0 1-5 10c-1.3.9-2.6 1.5-4 2z",
+        UiIcon.Clock => "M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18z M12 7v5l3.5 2",
+        UiIcon.Calendar => "M3 5h18v16H3z M16 2v4 M8 2v4 M3 10h18",
+        UiIcon.Bell => "M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9 M10.3 21a2 2 0 0 0 3.4 0",
+        UiIcon.Mail => "M3 5h18v14H3z M3 7l9 6 9-6",
+        UiIcon.MapPin => "M12 21s-7-5.6-7-11.5a7 7 0 1 1 14 0C19 15.4 12 21 12 21z M12 7a2.5 2.5 0 1 0 0 5 2.5 2.5 0 0 0 0-5z",
+        UiIcon.User => "M12 5a4 4 0 1 0 0 8 4 4 0 0 0 0-8z M5 21a7 7 0 0 1 14 0",
+        UiIcon.Lock => "M5 11h14v10H5z M8 11V7a4 4 0 0 1 8 0v4",
+        UiIcon.Unlock => "M5 11h14v10H5z M8 11V7a4 4 0 0 1 7.8-1",
+        UiIcon.Key => "M7.5 10a4.5 4.5 0 1 0 0 9 4.5 4.5 0 0 0 0-9z M10.8 11.2L20 2 M17 5l3 3 M14.5 7.5l2.5 2.5",
+        UiIcon.Filter => "M22 4H2l8 9.2V20l4 2v-8.8z",
+        UiIcon.Grid => "M3 3h7v7H3z M14 3h7v7h-7z M3 14h7v7H3z M14 14h7v7h-7z",
+        UiIcon.List => "M8 6h13 M8 12h13 M8 18h13 M3 6h1 M3 12h1 M3 18h1",
+        UiIcon.Trash => "M3 6h18 M8 6V4h8v2 M6 6v14a1 1 0 0 0 1 1h10a1 1 0 0 0 1-1V6 M10 11v6 M14 11v6",
+        UiIcon.Edit => "M12 20h9 M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z",
+        UiIcon.Star => "M12 2l3.1 6.3 6.9 1-5 4.9 1.2 6.8L12 17.8 5.8 21 7 14.2 2 9.3l6.9-1z",
+        UiIcon.Heart => "M12 20.5s-8.5-5.4-8.5-11a4.5 4.5 0 0 1 8.5-2.1 4.5 4.5 0 0 1 8.5 2.1c0 5.6-8.5 11-8.5 11z",
+        UiIcon.Bookmark => "M5 3h14v18l-7-5-7 5z",
+        UiIcon.Tag => "M12 2H4a2 2 0 0 0-2 2v8l9.2 9.2a2 2 0 0 0 2.8 0l7.2-7.2a2 2 0 0 0 0-2.8z M7 7h.01",
+        UiIcon.Cpu => "M7 7h10v10H7z M4 4h16v16H4z M9 1v3 M15 1v3 M9 20v3 M15 20v3 M1 9h3 M1 15h3 M20 9h3 M20 15h3",
+        UiIcon.Database => "M4 6a8 3 0 1 0 16 0 8 3 0 0 0-16 0z M4 6v12a8 3 0 0 0 16 0V6 M4 12a8 3 0 0 0 16 0",
+        UiIcon.Globe => "M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18z M3 12h18 M12 3c2.5 2.8 3.8 5.8 3.8 9s-1.3 6.2-3.8 9c-2.5-2.8-3.8-5.8-3.8-9S9.5 5.8 12 3z",
+        UiIcon.Cloud => "M17.5 19H7a5 5 0 0 1-.8-9.9 6 6 0 0 1 11.6 1.5A4.2 4.2 0 0 1 17.5 19z",
+        UiIcon.Wifi => "M2.5 8.5a13.5 13.5 0 0 1 19 0 M5.5 12a9 9 0 0 1 13 0 M8.8 15.5a4.5 4.5 0 0 1 6.4 0 M12 19h.01",
+        UiIcon.Activity => "M22 12h-4l-3 9L9 3l-3 9H2",
+        UiIcon.Info => "M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18z M12 11v5 M12 8h.01",
+        UiIcon.Warning => "M12 3L2 20h20z M12 9v5 M12 17h.01",
+        UiIcon.AlertCircle => "M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18z M12 8v5 M12 16h.01",
+        UiIcon.CheckCircle => "M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18z M8.5 12.5l2.5 2.5 5-5.5",
+        UiIcon.HelpCircle => "M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18z M9.5 9a2.5 2.5 0 0 1 5 .5c0 1.8-2.5 2-2.5 3.5 M12 17h.01",
+        UiIcon.Sun => "M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8z M12 2v2 M12 20v2 M4.93 4.93l1.41 1.41 M17.66 17.66l1.41 1.41 M2 12h2 M20 12h2 M4.93 19.07l1.41-1.41 M17.66 6.34l1.41-1.41",
+        UiIcon.Moon => "M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z",
+        UiIcon.Palette => "M12 2a10 10 0 0 0-1 19.9c1.2.1 2-.8 2-1.9 0-.5-.2-.9-.5-1.3-.3-.4-.4-.8-.3-1.2.2-.8.9-1.4 1.8-1.4h2.1A5.9 5.9 0 0 0 22 10.2C22 5.7 17.5 2 12 2z M7.5 10.5h.01 M10.5 7.5h.01 M15.5 7.5h.01",
+        UiIcon.Menu => "M3 6h18 M3 12h18 M3 18h18",
+        UiIcon.Sidebar => "M3 4h18v16H3z M9 4v16",
+        UiIcon.PanelLeft => "M3 4h18v16H3z M9 4v16 M13 9l-2 3 2 3",
+        UiIcon.PanelRight => "M3 4h18v16H3z M15 4v16 M11 9l2 3-2 3",
+        UiIcon.Maximize => "M15 3h6v6 M9 21H3v-6 M21 3l-7 7 M3 21l7-7",
+        UiIcon.Minimize => "M4 14h6v6 M20 10h-6V4 M14 10l7-7 M3 21l7-7",
+        UiIcon.Volume => "M11 5L6 9H2v6h4l5 4z M15.5 8.5a5 5 0 0 1 0 7 M18.5 5.5a9 9 0 0 1 0 13",
+        UiIcon.VolumeMute => "M11 5L6 9H2v6h4l5 4z M22 9l-6 6 M16 9l6 6",
+        UiIcon.Camera => "M3 8h4l2-3h6l2 3h4v12H3z M12 11a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7z",
+        UiIcon.Image => "M3 4h18v16H3z M8 8.5a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3z M21 16l-5-5-9 9",
+        UiIcon.Compass => "M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20z M16 8l-2 6-6 2 2-6z",
+        UiIcon.LogIn => "M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4 M10 17l5-5-5-5 M15 12H3",
+        UiIcon.LogOut => "M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4 M16 17l5-5-5-5 M21 12H9",
+        UiIcon.ZoomIn => "M11 4a7 7 0 1 0 0 14 7 7 0 0 0 0-14z M21 21l-4.35-4.35 M11 8v6 M8 11h6",
+        UiIcon.ZoomOut => "M11 4a7 7 0 1 0 0 14 7 7 0 0 0 0-14z M21 21l-4.35-4.35 M8 11h6",
+        UiIcon.Grip => "M9 5h1 M9 12h1 M9 19h1 M15 5h1 M15 12h1 M15 19h1",
+        UiIcon.MoreHorizontal => "M5 12h.5 M12 12h.5 M19 12h.5",
+        UiIcon.MoreVertical => "M12 5h.01 M12 12h.01 M12 19h.01",
     }
 }
 
+/// Draw one icon into `r` using `color` and crisp antialiased SVG vector strokes.
+pub def draw_icon(
+    buf: DrawBuffer,
+    icon: UiIcon,
+    r: UiRect,
+    color: UiColor,
+) -> DrawBuffer effect ffi, alloc {
+    val clear = UiColor { r: 0, g: 0, b: 0, a: 0 }
+    return draw_cmd_svg_path(
+        buf,
+        r,
+        UiSize { w: 24.0, h: 24.0 },
+        UiTransform {},
+        icon_svg_path(icon),
+        clear,
+        color,
+        1.75,
+    )
+}
+
+/// Draw one icon with configurable stroke color, fill color, and stroke width.
+pub def draw_icon_styled(
+    buf: DrawBuffer,
+    icon: UiIcon,
+    r: UiRect,
+    stroke: UiColor,
+    fill: UiColor,
+    stroke_w: f64,
+) -> DrawBuffer effect ffi, alloc {
+    return draw_cmd_svg_path(
+        buf,
+        r,
+        UiSize { w: 24.0, h: 24.0 },
+        UiTransform {},
+        icon_svg_path(icon),
+        fill,
+        stroke,
+        stroke_w,
+    )
+}
+
+/// Draw an arbitrary custom 24x24 SVG path `d` string into `r`.
+pub def draw_svg_icon(
+    buf: DrawBuffer,
+    path_data: str,
+    r: UiRect,
+    stroke: UiColor,
+    fill: UiColor,
+    stroke_w: f64,
+) -> DrawBuffer effect ffi, alloc {
+    return draw_cmd_svg_path(
+        buf,
+        r,
+        UiSize { w: 24.0, h: 24.0 },
+        UiTransform {},
+        path_data,
+        fill,
+        stroke,
+        stroke_w,
+    )
+}
+
+/// Resolve a lowercase icon name (`"search"`, `"rocket"`, `"sun"`, etc.) to `UiIcon`.
+pub def ui_icon_from_name(name: str) -> UiIcon {
+    if name == "search" {
+        return UiIcon.Search
+    }
+    if name == "plus" || name == "add" {
+        return UiIcon.Plus
+    }
+    if name == "minus" {
+        return UiIcon.Minus
+    }
+    if name == "close" || name == "x" {
+        return UiIcon.Close
+    }
+    if name == "check" {
+        return UiIcon.Check
+    }
+    if name == "chevron-left" {
+        return UiIcon.ChevronLeft
+    }
+    if name == "chevron-right" {
+        return UiIcon.ChevronRight
+    }
+    if name == "chevron-up" {
+        return UiIcon.ChevronUp
+    }
+    if name == "chevron-down" {
+        return UiIcon.ChevronDown
+    }
+    if name == "arrow-left" {
+        return UiIcon.ArrowLeft
+    }
+    if name == "arrow-right" {
+        return UiIcon.ArrowRight
+    }
+    if name == "arrow-up" {
+        return UiIcon.ArrowUp
+    }
+    if name == "arrow-down" {
+        return UiIcon.ArrowDown
+    }
+    if name == "play" {
+        return UiIcon.Play
+    }
+    if name == "pause" {
+        return UiIcon.Pause
+    }
+    if name == "stop" {
+        return UiIcon.Stop
+    }
+    if name == "refresh" {
+        return UiIcon.Refresh
+    }
+    if name == "settings" || name == "gear" {
+        return UiIcon.Settings
+    }
+    if name == "sliders" {
+        return UiIcon.Sliders
+    }
+    if name == "brain" {
+        return UiIcon.Brain
+    }
+    if name == "network" {
+        return UiIcon.Network
+    }
+    if name == "chart" {
+        return UiIcon.Chart
+    }
+    if name == "folder" {
+        return UiIcon.Folder
+    }
+    if name == "file" {
+        return UiIcon.File
+    }
+    if name == "bolt" || name == "zap" {
+        return UiIcon.Bolt
+    }
+    if name == "shield" {
+        return UiIcon.Shield
+    }
+    if name == "eye" {
+        return UiIcon.Eye
+    }
+    if name == "eye-off" {
+        return UiIcon.EyeOff
+    }
+    if name == "home" {
+        return UiIcon.Home
+    }
+    if name == "link" {
+        return UiIcon.Link
+    }
+    if name == "external-link" {
+        return UiIcon.ExternalLink
+    }
+    if name == "download" {
+        return UiIcon.Download
+    }
+    if name == "upload" {
+        return UiIcon.Upload
+    }
+    if name == "copy" {
+        return UiIcon.Copy
+    }
+    if name == "clipboard" {
+        return UiIcon.Clipboard
+    }
+    if name == "save" {
+        return UiIcon.Save
+    }
+    if name == "undo" {
+        return UiIcon.Undo
+    }
+    if name == "redo" {
+        return UiIcon.Redo
+    }
+    if name == "share" {
+        return UiIcon.Share
+    }
+    if name == "spark" {
+        return UiIcon.Spark
+    }
+    if name == "radio" {
+        return UiIcon.Radio
+    }
+    if name == "layers" {
+        return UiIcon.Layers
+    }
+    if name == "terminal" {
+        return UiIcon.Terminal
+    }
+    if name == "code" {
+        return UiIcon.Code
+    }
+    if name == "git-branch" {
+        return UiIcon.GitBranch
+    }
+    if name == "package" {
+        return UiIcon.Package
+    }
+    if name == "rocket" {
+        return UiIcon.Rocket
+    }
+    if name == "clock" {
+        return UiIcon.Clock
+    }
+    if name == "calendar" {
+        return UiIcon.Calendar
+    }
+    if name == "bell" {
+        return UiIcon.Bell
+    }
+    if name == "mail" {
+        return UiIcon.Mail
+    }
+    if name == "map-pin" {
+        return UiIcon.MapPin
+    }
+    if name == "user" {
+        return UiIcon.User
+    }
+    if name == "lock" {
+        return UiIcon.Lock
+    }
+    if name == "unlock" {
+        return UiIcon.Unlock
+    }
+    if name == "key" {
+        return UiIcon.Key
+    }
+    if name == "filter" {
+        return UiIcon.Filter
+    }
+    if name == "grid" {
+        return UiIcon.Grid
+    }
+    if name == "list" {
+        return UiIcon.List
+    }
+    if name == "trash" {
+        return UiIcon.Trash
+    }
+    if name == "edit" {
+        return UiIcon.Edit
+    }
+    if name == "star" {
+        return UiIcon.Star
+    }
+    if name == "heart" {
+        return UiIcon.Heart
+    }
+    if name == "bookmark" {
+        return UiIcon.Bookmark
+    }
+    if name == "tag" {
+        return UiIcon.Tag
+    }
+    if name == "cpu" {
+        return UiIcon.Cpu
+    }
+    if name == "database" {
+        return UiIcon.Database
+    }
+    if name == "globe" {
+        return UiIcon.Globe
+    }
+    if name == "cloud" {
+        return UiIcon.Cloud
+    }
+    if name == "wifi" {
+        return UiIcon.Wifi
+    }
+    if name == "activity" {
+        return UiIcon.Activity
+    }
+    if name == "info" {
+        return UiIcon.Info
+    }
+    if name == "warning" {
+        return UiIcon.Warning
+    }
+    if name == "alert-circle" {
+        return UiIcon.AlertCircle
+    }
+    if name == "check-circle" {
+        return UiIcon.CheckCircle
+    }
+    if name == "help-circle" {
+        return UiIcon.HelpCircle
+    }
+    if name == "sun" {
+        return UiIcon.Sun
+    }
+    if name == "moon" {
+        return UiIcon.Moon
+    }
+    if name == "palette" {
+        return UiIcon.Palette
+    }
+    if name == "menu" {
+        return UiIcon.Menu
+    }
+    if name == "sidebar" {
+        return UiIcon.Sidebar
+    }
+    if name == "panel-left" {
+        return UiIcon.PanelLeft
+    }
+    if name == "panel-right" {
+        return UiIcon.PanelRight
+    }
+    if name == "maximize" {
+        return UiIcon.Maximize
+    }
+    if name == "minimize" {
+        return UiIcon.Minimize
+    }
+    if name == "volume" {
+        return UiIcon.Volume
+    }
+    if name == "volume-mute" {
+        return UiIcon.VolumeMute
+    }
+    if name == "camera" {
+        return UiIcon.Camera
+    }
+    if name == "image" {
+        return UiIcon.Image
+    }
+    if name == "compass" {
+        return UiIcon.Compass
+    }
+    if name == "log-in" {
+        return UiIcon.LogIn
+    }
+    if name == "log-out" {
+        return UiIcon.LogOut
+    }
+    if name == "zoom-in" {
+        return UiIcon.ZoomIn
+    }
+    if name == "zoom-out" {
+        return UiIcon.ZoomOut
+    }
+    if name == "grip" {
+        return UiIcon.Grip
+    }
+    if name == "more-horizontal" {
+        return UiIcon.MoreHorizontal
+    }
+    if name == "more-vertical" {
+        return UiIcon.MoreVertical
+    }
+    return UiIcon.Spark
+}

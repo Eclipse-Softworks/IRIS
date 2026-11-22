@@ -136,9 +136,10 @@ fn run() {
             };
             process::exit(iris::devtools::watch(&file, mode));
         }
-        Ok(ParseArgsResult::Doctor) => {
+        Ok(ParseArgsResult::Doctor { fix }) => {
             process::exit(iris::devtools::doctor(
                 is_stderr_tty() && std::io::IsTerminal::is_terminal(&std::io::stdout()),
+                fix,
             ));
         }
         Ok(ParseArgsResult::New { template, name }) => {
@@ -149,7 +150,7 @@ fn run() {
                     .iter()
                     .any(|(t, _)| *t == template) =>
                 {
-                    eprintln!("usage: iris new [TEMPLATE] NAME   (templates: app, cli, server, ros2, controller)");
+                    eprintln!("usage: iris new [TEMPLATE] NAME   (templates: app, cli, server, ros2, controller, ui)");
                     process::exit(2);
                 }
                 None => ("app".to_string(), template),
@@ -158,6 +159,10 @@ fn run() {
         }
         Ok(ParseArgsResult::BugReport { file, output, run }) => {
             process::exit(iris::devtools::bug_report(&file, output.as_deref(), run));
+        }
+        Ok(ParseArgsResult::Completions(shell)) => {
+            print!("{}", iris::completions::generate(shell));
+            process::exit(0);
         }
         Ok(ParseArgsResult::Version) => {
             print!("{}", iris::cli::version_text());
@@ -659,6 +664,61 @@ fn run() {
         }
         Ok(ParseArgsResult::EvolveLive(args)) => run_evolve_live(args),
         Ok(ParseArgsResult::EvolveServe(args)) => run_evolve_serve(args),
+        Ok(ParseArgsResult::Bundle(args)) => {
+            let format = match iris::codegen::app_bundle::BundleFormat::parse(&args.format) {
+                Some(f) => f,
+                None => {
+                    eprintln!(
+                        "error: unknown bundle format '{}'; expected auto, dir, zip, inno, app, or appimage",
+                        args.format
+                    );
+                    process::exit(2);
+                }
+            };
+            let gui = if args.gui {
+                Some(true)
+            } else if args.console {
+                Some(false)
+            } else {
+                None
+            };
+            let cfg = iris::codegen::app_bundle::BundleConfig {
+                input: args.file.unwrap_or_else(|| PathBuf::from(".")),
+                output: args.output,
+                format,
+                icon: args.icon,
+                title: args.title,
+                identifier: args.identifier,
+                gui,
+                install: args.install,
+                uninstall: args.uninstall,
+                install_dir: args.install_dir,
+                no_register: args.no_register,
+                release: args.release,
+            };
+            match iris::codegen::app_bundle::run_bundle(&cfg) {
+                Ok(out) => {
+                    if let Some(ref note) = out.note {
+                        eprintln!("{note}");
+                    }
+                    if !args.uninstall {
+                        eprintln!("bundled standalone app: {}", out.artifact_path.display());
+                        eprintln!("  executable: {}", out.executable_path.display());
+                        if let Some(ref host) = out.ui_host_bundled {
+                            eprintln!("  ui host lib: {}", host.display());
+                        }
+                        if let Some(ref inst) = out.installed_dir {
+                            eprintln!("  installed: {}", inst.display());
+                        }
+                    }
+                    process::exit(0);
+                }
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    process::exit(1);
+                }
+            }
+        }
         Ok(ParseArgsResult::Meta { file, emit_ir }) => {
             let source = match std::fs::read_to_string(&file) {
                 Ok(source) => source,
@@ -774,8 +834,14 @@ fn run() {
                 process::exit(1);
             }
         }
-        Ok(ParseArgsResult::Upgrade { check, yes, force }) => {
-            if let Err(e) = iris::upgrade::run_upgrade_command(check, yes, force) {
+        Ok(ParseArgsResult::Upgrade {
+            check,
+            yes,
+            force,
+            full,
+        }) => {
+            if let Err(e) = iris::upgrade::run_upgrade_command_with_options(check, yes, force, full)
+            {
                 eprintln!("error: {}", e);
                 process::exit(1);
             }
@@ -787,8 +853,31 @@ fn run() {
                 process::exit(1);
             }
         }
-        Ok(ParseArgsResult::Setup) => {
-            if let Err(e) = iris::setup::run_setup_command() {
+        Ok(ParseArgsResult::Setup {
+            components,
+            dir,
+            yes,
+            force,
+        }) => {
+            let parsed = components
+                .iter()
+                .map(|c| iris::setup::SetupComponent::parse(c))
+                .collect::<Result<Vec<_>, _>>();
+            let parsed = match parsed {
+                Ok(v) if v.is_empty() => vec![iris::setup::SetupComponent::Base],
+                Ok(v) => v,
+                Err(e) => {
+                    eprintln!("error: {}", e);
+                    process::exit(1);
+                }
+            };
+            let opts = iris::setup::SetupOptions {
+                components: parsed,
+                dir,
+                yes,
+                force,
+            };
+            if let Err(e) = iris::setup::run_setup_with_options(&opts) {
                 eprintln!("error: {}", e);
                 process::exit(1);
             }
@@ -1068,6 +1157,17 @@ fn run() {
                 });
                 let built = if let Some(map) = &source_map {
                     iris::codegen::build::build_binary_debug(&module, map, &output_path)
+                } else if cli.gui_subsystem {
+                    let opts = iris::codegen::NativeBuildOptions {
+                        gui_subsystem: true,
+                        ..Default::default()
+                    };
+                    iris::codegen::build_binary_with_options(
+                        &module,
+                        &output_path,
+                        cli.target.as_deref(),
+                        &opts,
+                    )
                 } else {
                     iris::codegen::build_binary_with_target(
                         &module,

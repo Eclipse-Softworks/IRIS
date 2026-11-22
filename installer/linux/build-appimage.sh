@@ -10,7 +10,7 @@
 # ──────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
-VERSION="1.0.0-rc1"
+VERSION="1.0.0-rc3"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
@@ -30,6 +30,7 @@ echo "Building IRIS AppImage v${VERSION} (${ARCH})"
 # ── Clean ─────────────────────────────────────────────────────────────────
 rm -rf "$APPDIR"
 mkdir -p "$APPDIR/usr/bin"
+mkdir -p "$APPDIR/usr/lib"
 mkdir -p "$APPDIR/usr/share/iris/stdlib"
 mkdir -p "$APPDIR/usr/share/iris/examples"
 mkdir -p "$APPDIR/usr/share/icons/hicolor/256x256/apps"
@@ -43,6 +44,10 @@ if [[ ! -f "$IRIS_BIN" ]]; then
 else
     echo "[1/5] Using existing release binary."
 fi
+UI_HOST_LIB="$ROOT/target/release/libiris_ui_host.so"
+if [[ ! -f "$UI_HOST_LIB" ]]; then
+    (cd "$ROOT" && cargo build --release -p iris_ui_host)
+fi
 
 # ── Stage files ───────────────────────────────────────────────────────────
 echo "[2/5] Staging files..."
@@ -50,6 +55,11 @@ echo "[2/5] Staging files..."
 cp "$IRIS_BIN" "$APPDIR/usr/bin/iris"
 chmod 755 "$APPDIR/usr/bin/iris"
 strip "$APPDIR/usr/bin/iris" 2>/dev/null || true
+if [[ -f "$UI_HOST_LIB" ]]; then
+    cp "$UI_HOST_LIB" "$APPDIR/usr/lib/libiris_ui_host.so"
+    chmod 755 "$APPDIR/usr/lib/libiris_ui_host.so"
+    strip --strip-unneeded "$APPDIR/usr/lib/libiris_ui_host.so" 2>/dev/null || true
+fi
 
 cp -r "$ROOT/stdlib/"* "$APPDIR/usr/share/iris/stdlib/" 2>/dev/null || true
 cp -r "$ROOT/examples/"* "$APPDIR/usr/share/iris/examples/" 2>/dev/null || true
@@ -84,6 +94,10 @@ cat > "$APPDIR/AppRun" << 'EOF'
 SELF="$(readlink -f "$0")"
 HERE="${SELF%/*}"
 export IRIS_STDLIB="${HERE}/usr/share/iris/stdlib"
+export LD_LIBRARY_PATH="${HERE}/usr/lib:${LD_LIBRARY_PATH:-}"
+if [[ -f "${HERE}/usr/lib/libiris_ui_host.so" ]]; then
+    export IRIS_UI_HOST_LIB="${HERE}/usr/lib/libiris_ui_host.so"
+fi
 export PATH="${HERE}/usr/bin:${PATH}"
 exec "${HERE}/usr/bin/iris" "$@"
 EOF

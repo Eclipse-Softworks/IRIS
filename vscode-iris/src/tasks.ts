@@ -3,12 +3,18 @@ import * as vscode from 'vscode';
 /** Each provided task: its `iris` arguments and task group. */
 const TASKS: Record<string, { args: string[]; group?: vscode.TaskGroup }> = {
     // No group: VS Code's TaskGroup has only Clean, Build, Rebuild and Test,
-    // so a run task stays ungrouped.
+    // so run/diagnostic tasks stay ungrouped.
     run: { args: ['run', '${file}'] },
     build: { args: ['build', '${file}'], group: vscode.TaskGroup.Build },
     // Native binary with DWARF debug info, for gdb/lldb or a preLaunchTask.
     'build-debug': { args: ['-g', 'build', '${file}'], group: vscode.TaskGroup.Build },
+    'build-gui': { args: ['build', '--gui', '${file}'], group: vscode.TaskGroup.Build },
+    bundle: { args: ['bundle', '--release'], group: vscode.TaskGroup.Build },
+    check: { args: ['check'], group: vscode.TaskGroup.Test },
     test: { args: ['test'], group: vscode.TaskGroup.Test },
+    bench: { args: ['bench', '${file}'] },
+    profile: { args: ['profile', '${file}'] },
+    doctor: { args: ['doctor'] },
 };
 
 export class IrisTaskProvider implements vscode.TaskProvider {

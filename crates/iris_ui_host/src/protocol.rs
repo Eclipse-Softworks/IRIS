@@ -11,8 +11,46 @@ pub const EVENT_RECORD_BYTES: usize = 64;
 pub const MAX_GRADIENT_STOPS: usize = 64;
 /// Maximum number of affine transforms kept on the transform stack.
 pub const MAX_TRANSFORM_DEPTH: usize = 64;
+/// Maximum number of nested opacity layers pushed onto the opacity stack.
+pub const MAX_OPACITY_DEPTH: usize = 64;
 /// Maximum number of SVG path verbs accepted in one command.
 pub const MAX_PATH_VERBS: usize = 250_000;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[repr(i32)]
+pub enum CursorKind {
+    #[default]
+    Default = 0,
+    Pointer = 1,
+    Text = 2,
+    Move = 3,
+    Grab = 4,
+    Grabbing = 5,
+    ResizeEW = 6,
+    ResizeNS = 7,
+    NotAllowed = 8,
+    Wait = 9,
+}
+
+impl TryFrom<i64> for CursorKind {
+    type Error = ProtocolError;
+
+    fn try_from(value: i64) -> Result<Self, Self::Error> {
+        match value {
+            0 => Ok(Self::Default),
+            1 => Ok(Self::Pointer),
+            2 => Ok(Self::Text),
+            3 => Ok(Self::Move),
+            4 => Ok(Self::Grab),
+            5 => Ok(Self::Grabbing),
+            6 => Ok(Self::ResizeEW),
+            7 => Ok(Self::ResizeNS),
+            8 => Ok(Self::NotAllowed),
+            9 => Ok(Self::Wait),
+            other => Err(ProtocolError::InvalidCursorKind(other)),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(i32)]
@@ -48,6 +86,8 @@ pub enum EventKind {
     FocusChanged = 10,
     RedrawRequested = 11,
     ScaleChanged = 12,
+    FileDropped = 13,
+    PointerLeave = 14,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -69,20 +109,46 @@ impl RgbaColor {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[repr(u8)]
+pub enum TextAlign {
+    #[default]
+    Left = 0,
+    Center = 1,
+    Right = 2,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TextFlags {
     pub bold: bool,
     pub monospace: bool,
     pub italic: bool,
+    pub align: TextAlign,
+    pub ellipsis: bool,
 }
 
 impl TextFlags {
     pub const fn from_bits(bits: i32) -> Self {
+        let align = match (bits >> 3) & 3 {
+            1 => TextAlign::Center,
+            2 => TextAlign::Right,
+            _ => TextAlign::Left,
+        };
         Self {
             bold: (bits & 1) != 0,
             monospace: (bits & 2) != 0,
             italic: (bits & 4) != 0,
+            align,
+            ellipsis: (bits & 32) != 0,
         }
+    }
+
+    pub const fn to_bits(self) -> i32 {
+        (if self.bold { 1 } else { 0 })
+            | (if self.monospace { 2 } else { 0 })
+            | (if self.italic { 4 } else { 0 })
+            | ((self.align as i32) << 3)
+            | (if self.ellipsis { 32 } else { 0 })
     }
 }
 
@@ -101,7 +167,7 @@ pub struct A11yCommand {
 
 /// A single verb in an arbitrary vector path. Coordinates are logical pixels;
 /// the enclosing `FillPath` transform maps them into surface space.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum PathVerb {
     MoveTo(f32, f32),
     LineTo(f32, f32),
@@ -255,6 +321,39 @@ pub enum DrawCmd {
         stroke: RgbaColor,
         stroke_width: f32,
     },
+    /// Push a rounded-corner clip region onto the renderer clip stack.
+    PushRoundClip {
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        radii: [f32; 4],
+    },
+    /// Push a multiplicative opacity layer (`0.0..=1.0`) onto the opacity stack.
+    PushOpacity(f32),
+    /// Pop the most recently pushed opacity layer.
+    PopOpacity,
+    /// Circular vector arc stroked with smooth cubic Bezier segments.
+    Arc {
+        cx: f32,
+        cy: f32,
+        radius: f32,
+        start_angle: f32,
+        sweep_angle: f32,
+        stroke: RgbaColor,
+        stroke_width: f32,
+        line_cap: i32,
+    },
+    /// Live or simulated camera feed frame blitted into `(x, y, w, h)`.
+    /// `flags & 1`: horizontal mirror; `(flags >> 1) & 3`: tint mode (0=RGB, 1=NVG, 2=FLIR, 3=Slate).
+    CameraFrame {
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        cam_id: i32,
+        flags: i32,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -311,6 +410,8 @@ pub enum ProtocolError {
     InvalidPathVerb(i32),
     #[error("transform stack underflow")]
     TransformStackUnderflow,
+    #[error("invalid cursor kind: {0}")]
+    InvalidCursorKind(i64),
 }
 
 struct Cursor<'a> {
@@ -448,6 +549,33 @@ fn decode_draw_cmd(cur: &mut Cursor<'_>, idx: usize) -> Result<DrawCmd, Protocol
         15 => Ok(DrawCmd::PushTransform(read_transform(cur)?)),
         16 => Ok(DrawCmd::PopTransform),
         17 => decode_svg_path_cmd(cur),
+        18 => Ok(DrawCmd::PushRoundClip {
+            x: cur.read_f32()?,
+            y: cur.read_f32()?,
+            w: cur.read_f32()?,
+            h: cur.read_f32()?,
+            radii: read_radii(cur)?,
+        }),
+        19 => Ok(DrawCmd::PushOpacity(cur.read_f32()?.clamp(0.0, 1.0))),
+        20 => Ok(DrawCmd::PopOpacity),
+        21 => Ok(DrawCmd::Arc {
+            cx: cur.read_f32()?,
+            cy: cur.read_f32()?,
+            radius: cur.read_f32()?,
+            start_angle: cur.read_f32()?,
+            sweep_angle: cur.read_f32()?,
+            stroke: RgbaColor::from_packed_u32(cur.read_u32()?),
+            stroke_width: cur.read_f32()?,
+            line_cap: cur.read_i32()?,
+        }),
+        22 => Ok(DrawCmd::CameraFrame {
+            x: cur.read_f32()?,
+            y: cur.read_f32()?,
+            w: cur.read_f32()?,
+            h: cur.read_f32()?,
+            cam_id: cur.read_i32()?,
+            flags: cur.read_i32()?,
+        }),
         other => Err(ProtocolError::UnknownOpcode(other, idx)),
     }
 }
@@ -775,7 +903,7 @@ pub fn encode_event_record(ev: &UiHostEvent, out: &mut [u8; EVENT_RECORD_BYTES])
     out.fill(0);
     write_i32(out, 0, ev.kind as i32);
     write_i32(out, 4, ev.target_or_button);
-    if ev.kind == EventKind::TextInput {
+    if matches!(ev.kind, EventKind::TextInput | EventKind::FileDropped) {
         let bytes = ev.text.as_bytes();
         let copy_len = clamp_utf8_prefix(bytes, 32);
         write_i32(out, 8, copy_len as i32);
@@ -812,6 +940,8 @@ pub fn decode_event_record(bytes: &[u8]) -> Result<UiHostEvent, ProtocolError> {
         10 => EventKind::FocusChanged,
         11 => EventKind::RedrawRequested,
         12 => EventKind::ScaleChanged,
+        13 => EventKind::FileDropped,
+        14 => EventKind::PointerLeave,
         other => return Err(ProtocolError::UnknownEventKind(other)),
     };
     let target_or_button = read_i32_at(bytes, 4);
@@ -819,7 +949,7 @@ pub fn decode_event_record(bytes: &[u8]) -> Result<UiHostEvent, ProtocolError> {
     let key_code = read_i32_at(bytes, 12);
     let x = f32::from_bits(read_i32_at(bytes, 16) as u32);
     let y = f32::from_bits(read_i32_at(bytes, 20) as u32);
-    let (modifiers, text) = if kind == EventKind::TextInput {
+    let (modifiers, text) = if matches!(kind, EventKind::TextInput | EventKind::FileDropped) {
         let len = (modifiers_or_len.max(0) as usize).min(32);
         let s =
             std::str::from_utf8(&bytes[24..24 + len]).map_err(|_| ProtocolError::InvalidUtf8)?;

@@ -2,22 +2,64 @@
   "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
   "name": "IRIS",
   "scopeName": "source.iris",
-  "fileTypes": ["iris"],
+  "fileTypes": [
+    "iris"
+  ],
   "patterns": [
-    { "include": "#comments" },
-    { "include": "#fstrings" },
-    { "include": "#strings" },
-    { "include": "#attributes" },
-    { "include": "#labels" },
-    { "include": "#keywords" },
-    { "include": "#declarations" },
-    { "include": "#types" },
-    { "include": "#constants" },
-    { "include": "#functions" },
-    { "include": "#operators" },
-    { "include": "#numbers" },
-    { "include": "#builtins" },
-    { "include": "#identifiers" }
+    {
+      "include": "#comments"
+    },
+    {
+      "include": "#preprocessor"
+    },
+    {
+      "include": "#fstrings"
+    },
+    {
+      "include": "#strings"
+    },
+    {
+      "include": "#chars"
+    },
+    {
+      "include": "#attributes"
+    },
+    {
+      "include": "#labels"
+    },
+    {
+      "include": "#model_dsl"
+    },
+    {
+      "include": "#declarations"
+    },
+    {
+      "include": "#keywords"
+    },
+    {
+      "include": "#types"
+    },
+    {
+      "include": "#constants"
+    },
+    {
+      "include": "#macros"
+    },
+    {
+      "include": "#builtins"
+    },
+    {
+      "include": "#functions"
+    },
+    {
+      "include": "#operators"
+    },
+    {
+      "include": "#numbers"
+    },
+    {
+      "include": "#identifiers"
+    }
   ],
   "repository": {
     "comments": {
@@ -34,6 +76,43 @@
           "name": "comment.block.iris",
           "begin": "/\\*",
           "end": "\\*/"
+        }
+      ]
+    },
+    "preprocessor": {
+      "comment": "Conditional compilation & predefined target symbols from src/preprocessor.rs",
+      "patterns": [
+        {
+          "name": "meta.preprocessor.iris",
+          "begin": "^\\s*(#\\s*(?:define|undef|ifdef|ifndef|if|elif|else|endif|error|warning))\\b",
+          "beginCaptures": {
+            "1": {
+              "name": "keyword.control.directive.iris"
+            }
+          },
+          "end": "$",
+          "patterns": [
+            {
+              "include": "#strings"
+            },
+            {
+              "include": "#numbers"
+            },
+            {
+              "name": "keyword.operator.logical.iris",
+              "match": "\\b(defined)\\b|(&&|\\|\\||!)"
+            },
+            {
+              "name": "constant.language.preprocessor.iris",
+              "match": "\\b(WINDOWS|LINUX|MACOS|WASM|EMBEDDED|TARGET_WINDOWS|TARGET_LINUX|TARGET_MACOS|X86_64|AARCH64|ARM|RISCV32|RISCV64|AVR|XTENSA|WASM32|TARGET_OS|TARGET_ARCH|DEBUG|RELEASE|IRIS_VERSION_MAJOR|IRIS_VERSION_MINOR|IRIS_VERSION_PATCH)\\b"
+            },
+            {
+              "include": "#operators"
+            },
+            {
+              "include": "#identifiers"
+            }
+          ]
         }
       ]
     },
@@ -58,7 +137,9 @@
           "begin": "\\{",
           "end": "\\}",
           "patterns": [
-            { "include": "$self" }
+            {
+              "include": "$self"
+            }
           ]
         },
         {
@@ -67,14 +148,32 @@
         }
       ]
     },
+    "chars": {
+      "comment": "Single-quoted character literal ('A', '\\n')",
+      "patterns": [
+        {
+          "name": "string.quoted.single.iris",
+          "match": "'(?:[^'\\\\]|(\\\\[ntr\\\\'\"]))'",
+          "captures": {
+            "1": {
+              "name": "constant.character.escape.iris"
+            }
+          }
+        }
+      ]
+    },
     "labels": {
-      "comment": "Loop labels. IRIS writes the label after the keyword with no sigil — `for outer i in 0..n { break outer; }` — so only the break/continue form can be matched unambiguously; `for outer i` is indistinguishable from an ordinary loop variable without a parser.",
+      "comment": "Loop labels: `for outer i in 0..n { break outer; }`",
       "patterns": [
         {
           "match": "\\b(break|continue)\\s+([a-z_][a-zA-Z0-9_]*)\\b",
           "captures": {
-            "1": { "name": "keyword.control.flow.iris" },
-            "2": { "name": "entity.name.label.iris" }
+            "1": {
+              "name": "keyword.control.flow.iris"
+            },
+            "2": {
+              "name": "entity.name.label.iris"
+            }
           }
         }
       ]
@@ -85,13 +184,131 @@
           "name": "meta.annotation.iris",
           "match": "@([A-Za-z_][A-Za-z0-9_]*)",
           "captures": {
-            "1": { "name": "entity.name.function.decorator.iris" }
+            "1": {
+              "name": "entity.name.function.decorator.iris"
+            }
+          }
+        }
+      ]
+    },
+    "model_dsl": {
+      "comment": "Highlight contextual `input`, `layer`, `output` strictly inside `model Name { ... }` blocks.",
+      "begin": "\\b(model)\\s+([A-Z][a-zA-Z0-9_]*)\\s*\\{",
+      "beginCaptures": {
+        "1": {
+          "name": "keyword.declaration.iris"
+        },
+        "2": {
+          "name": "entity.name.type.iris"
+        }
+      },
+      "end": "\\}",
+      "patterns": [
+        {
+          "include": "#comments"
+        },
+        {
+          "name": "keyword.control.model.iris",
+          "match": "\\b(input|layer|output)\\b"
+        },
+        {
+          "include": "#types"
+        },
+        {
+          "include": "#operators"
+        },
+        {
+          "include": "#numbers"
+        },
+        {
+          "include": "#strings"
+        },
+        {
+          "include": "#functions"
+        },
+        {
+          "include": "#identifiers"
+        }
+      ]
+    },
+    "declarations": {
+      "patterns": [
+        {
+          "name": "meta.function.definition.iris",
+          "match": "\\b(def)\\s+([a-zA-Z_][a-zA-Z0-9_]*)\\b",
+          "captures": {
+            "1": {
+              "name": "keyword.declaration.iris"
+            },
+            "2": {
+              "name": "entity.name.function.iris"
+            }
+          }
+        },
+        {
+          "name": "meta.macro.definition.iris",
+          "match": "\\b(defmacro)\\s+([a-zA-Z_][a-zA-Z0-9_]*)\\b",
+          "captures": {
+            "1": {
+              "name": "keyword.declaration.iris"
+            },
+            "2": {
+              "name": "entity.name.function.macro.iris"
+            }
+          }
+        },
+        {
+          "name": "meta.type.definition.iris",
+          "match": "\\b(record|choice|model|trait)\\s+([A-Z][a-zA-Z0-9_]*)\\b",
+          "captures": {
+            "1": {
+              "name": "keyword.declaration.iris"
+            },
+            "2": {
+              "name": "entity.name.type.iris"
+            }
+          }
+        },
+        {
+          "name": "meta.type.alias.iris",
+          "match": "\\b(type)\\s+([A-Z][a-zA-Z0-9_]*)\\b",
+          "captures": {
+            "1": {
+              "name": "keyword.declaration.iris"
+            },
+            "2": {
+              "name": "entity.name.type.iris"
+            }
+          }
+        },
+        {
+          "name": "meta.module.definition.iris",
+          "match": "\\b(mod)\\s+([a-zA-Z_][a-zA-Z0-9_]*)\\b",
+          "captures": {
+            "1": {
+              "name": "keyword.other.iris"
+            },
+            "2": {
+              "name": "entity.name.namespace.iris"
+            }
+          }
+        },
+        {
+          "name": "meta.const.definition.iris",
+          "match": "\\b(const)\\s+([A-Z_][A-Z0-9_]*)\\b",
+          "captures": {
+            "1": {
+              "name": "keyword.declaration.iris"
+            },
+            "2": {
+              "name": "entity.name.constant.iris"
+            }
           }
         }
       ]
     },
     "keywords": {
-      "comment": "Mirrors the reserved words in src/parser/lexer.rs. Primitive type names and true/false are handled by #types and #constants. Note that `layer`, `input` and `output` are deliberately absent: they are contextual identifiers inside model blocks, not reserved words, so highlighting them globally mis-colours ordinary variables.",
+      "comment": "Mirrors src/parser/lexer.rs plus contextual operator words.",
       "patterns": [
         {
           "name": "keyword.control.flow.iris",
@@ -111,7 +328,7 @@
         },
         {
           "name": "storage.modifier.iris",
-          "match": "\\b(pub|extern|unsafe|move|dyn)\\b"
+          "match": "\\b(pub|extern|unsafe|move|dyn|mut)\\b"
         },
         {
           "name": "keyword.declaration.iris",
@@ -122,44 +339,16 @@
           "match": "\\b(val|var|let|bring|mod|where)\\b"
         },
         {
+          "name": "keyword.operator.logical.iris",
+          "match": "\\b(and|or|not)\\b"
+        },
+        {
           "name": "keyword.operator.cast.iris",
           "match": "\\b(to)\\b"
-        }
-      ]
-    },
-    "declarations": {
-      "patterns": [
-        {
-          "name": "meta.function.definition.iris",
-          "match": "\\b(def)\\s+([a-zA-Z_][a-zA-Z0-9_]*)\\b",
-          "captures": {
-            "1": { "name": "keyword.declaration.iris" },
-            "2": { "name": "entity.name.function.iris" }
-          }
         },
         {
-          "name": "meta.type.definition.iris",
-          "match": "\\b(record|choice|model)\\s+([A-Z][a-zA-Z0-9_]*)\\b",
-          "captures": {
-            "1": { "name": "keyword.declaration.iris" },
-            "2": { "name": "entity.name.type.iris" }
-          }
-        },
-        {
-          "name": "meta.type.alias.iris",
-          "match": "\\b(type)\\s+([A-Z][a-zA-Z0-9_]*)\\b",
-          "captures": {
-            "1": { "name": "keyword.declaration.iris" },
-            "2": { "name": "entity.name.type.iris" }
-          }
-        },
-        {
-          "name": "meta.const.definition.iris",
-          "match": "\\b(const)\\s+([A-Z_][A-Z0-9_]*)\\b",
-          "captures": {
-            "1": { "name": "keyword.declaration.iris" },
-            "2": { "name": "entity.name.constant.iris" }
-          }
+          "name": "variable.language.iris",
+          "match": "\\b(self|Self)\\b"
         }
       ]
     },
@@ -170,8 +359,24 @@
           "match": "\\b(i64|i32|i8|u8|u32|u64|usize|f64|f32|bool|str|unit)\\b"
         },
         {
+          "comment": "Built-in composite and runtime types",
           "name": "support.type.iris",
-          "match": "\\b(option|result|list|map|set|tensor|tuple|chan|task|atomic|grad|sparse|deque|bitset|mutex|task_group|weak_ref|Dual|Cell|Tensor|DiffTensor|MLTensor|LlmClient|LlmMessage|LlmResponse|MetaProgram|MetaEdit|ViabilityBound|ViabilityAssessment|AutonomyV2Decision|ExpectedFreeEnergy|ActiveInferenceDecision|AgentRuntime|AgentStep|ROS2Node|LifecycleNode|Transform|StampedTransform|Vector3|Quaternion|Point|QoSProfile)\\b"
+          "match": "\\b(task_group|weak_ref|channel|atomic|bitset|option|result|sparse|tensor|deque|mutex|tuple|Cell|Dual|cell|chan|grad|list|task|map|set)\\b"
+        },
+        {
+          "comment": "Native Desktop UI stdlib types (std.ui*)",
+          "name": "support.type.iris",
+          "match": "\\b(UiButtonVariant|BoxConstraints|UiGradientStop|UiInteraction|UiNeuralGraph|WindowMetrics|BarChartSpec|SpringConfig|UiBreakpoint|UiCameraInfo|UiExtraState|ChartSeries|NativeUiLib|TextMetrics|UiAppConfig|UiElevation|UiEventKind|UiFrameStep|UiGraphLink|UiGraphNode|UiOptionBox|UiTransform|DrawBuffer|SelectSpec|TensorSpec|UiHostMode|UiPathVerb|UiReactive|WidgetKind|HostEvent|ImageSpec|RadarBlip|RadarSpec|SignalBox|UiJustify|UiListBox|MenuSpec|StatSpec|TabsSpec|UiCursor|UiInsets|UiMotion|UiSpring|UiAlign|UiClock|UiColor|UiRadii|UiState|UiStyle|UiTheme|UiToast|UiTween|UiEase|UiIcon|UiNode|UiRect|UiSize|UiTone|UiTree)\\b"
+        },
+        {
+          "comment": "AI, ML, AD, LLM & Autonomy stdlib types",
+          "name": "support.type.iris",
+          "match": "\\b(ActiveInferenceDecision|HomeostaticVariable|ViabilityAssessment|AutonomyV2Decision|ExpectedFreeEnergy|EmbeddingResponse|SoftwareGovernor|GenerativeModel|ViabilityChoice|NormalInvGamma|ViabilityBound|AutonomicRule|AutopilotStep|KnowledgeBase|MetaCognition|ModelRegistry|SafetyVerdict|SensorReading|AgentRuntime|Constitution|GovernorStep|ModelSession|ReplayBuffer|RunningStats|SafetyPolicy|AifDecision|BeliefState|FewShotTask|LinearModel|LlmResponse|LlmToolCall|MetaProgram|ModelHealth|PolicyValue|RiskMetrics|Uncertainty|Constraint|DiffTensor|Experience|LlmMessage|LocalModel|MAPEKAgent|Population|SafetyRule|WorldModel|AgentStep|Autopilot|Homeostat|LlmClient|AifAgent|EWCState|MASState|MLTensor|MetaEdit|LlmTool|Genome|Tensor|Pomdp)\\b"
+        },
+        {
+          "comment": "Systems, Networking, Protocol & Robotics stdlib types",
+          "name": "support.type.iris",
+          "match": "\\b(SpeculationOutcome|PcapGlobalHeader|ROS2ActionClient|ROS2ActionServer|StampedTransform|TransformBuffer|TlsClientHello|WebSocketFrame|EthernetFrame|ROS2Publisher|TfBroadcaster|HttpResponse|ROS2Executor|HttpRequest|ROS2Context|ROS2Service|TcpListener|UdpDatagram|ByteBuffer|Ipv4Packet|PcapPacket|QoSProfile|Quaternion|ROS2Client|SVGContext|TcpSegment|Countable|Ja3Result|Ja4Result|ROS2Event|ROS2Timer|TcpStream|TlsRecord|Transform|DateTime|Duration|PinWrite|ROS2Goal|ROS2Node|TfBuffer|ROS2Msg|ROS2Sub|Reading|Vector3|Serial|Point|Queue|Sized|Twist|File|Pose)\\b"
         }
       ]
     },
@@ -180,6 +385,228 @@
         {
           "name": "constant.language.iris",
           "match": "\\b(true|false|none|unit)\\b"
+        }
+      ]
+    },
+    "macros": {
+      "patterns": [
+        {
+          "name": "meta.macro.call.iris",
+          "match": "\\b([a-zA-Z_][a-zA-Z0-9_]*)!",
+          "captures": {
+            "1": {
+              "name": "entity.name.function.macro.iris"
+            }
+          }
+        }
+      ]
+    },
+    "builtins": {
+      "patterns": [
+        {
+          "comment": "Core I/O, Strings, Options/Results, Regex builtins",
+          "name": "support.function.builtin.iris",
+          "match": "\\b(regex_replace_all|json_stringify|regex_find_all|regex_replace|str_pad_right|str_pad_left|regex_match|starts_with|str_replace|str_reverse|unwrap_err|ends_with|exit_code|parse_f64|parse_i64|read_line|str_bytes|str_chars|str_count|str_index|unwrap_or|contains|eprintln|read_f64|read_i64|to_lower|to_upper|char_at|is_none|is_some|println|replace|type_of|assert|concat|format|is_err|repeat|to_f64|to_i64|to_str|unwrap|is_ok|panic|print|slice|split|args|exit|find|join|none|some|trim|err|len|ok)\\b"
+        },
+        {
+          "comment": "Math, Bitwise & Checked/Wrapping arithmetic builtins",
+          "name": "support.function.builtin.iris",
+          "match": "\\b(wrapping_add|wrapping_mul|wrapping_sub|math_inf|math_pi|bitnot|is_inf|is_nan|math_e|clamp|floor|round|band|bxor|ceil|log2|sign|sqrt|abs|bor|cos|exp|log|max|min|pow|shl|shr|sin|tan)\\b"
+        },
+        {
+          "comment": "Collections, Reference Cells, WeakRefs & GC builtins (1/2)",
+          "name": "support.function.builtin.iris",
+          "match": "\\b(deque_push_front|deque_pop_front|deque_push_back|list_scale_blas|deque_pop_back|list_axpy_blas|list_enumerate|array_to_list|list_contains|list_dot_blas|list_index_of|list_mul_elem|bitset_clear|bitset_count|list_flatten|list_max_val|list_min_val|list_reverse|list_sigmoid|list_softmax|map_contains|weak_upgrade|deque_front|list_concat|list_filter|list_insert|list_reduce|list_remove|list_sorted|list_unique|map_entries|sorted_keys|bitset_get|bitset_new|bitset_set|deque_back|gc_collect|list_count|list_scale|list_slice|map_remove|map_values|weak_alive|deque_len|deque_new|list_axpy|list_drop|list_mean|list_norm|list_push|list_relu|list_sort|list_take|cell_get|cell_set|gc_stats|is_empty|list_add|list_all|list_any|list_dir|list_dot|list_get|list_len|list_map|list_max|list_min|list_new|list_pop|list_set|list_std|list_sub|list_sum|list_zip|map_keys|weak_ref|map_get|map_len|map_new|map_set|filter|index|cell|fold|list)\\b"
+        },
+        {
+          "comment": "Collections, Reference Cells, WeakRefs & GC builtins (2/2)",
+          "name": "support.function.builtin.iris",
+          "match": "\\b(push|all|any|get|map|pop|set)\\b"
+        },
+        {
+          "comment": "Autodiff, Tensors & ML compiler builtins",
+          "name": "support.function.builtin.iris",
+          "match": "\\b(dtensor_backward|dtensor_sigmoid|dtensor_to_list|dtensor_matmul|cross_entropy|dtensor_grad|dtensor_item|dtensor_relu|dtensor_tanh|dtensor_tape|dtensor_add|dtensor_div|dtensor_mul|dtensor_sub|dtensor_sum|backward|linspace|mse_loss|sgd_step|sparsify|densify|dtensor|grad_of|tangent|arange|einsum|matmul|zeros|fill|grad|ones|tape|nnz)\\b"
+        },
+        {
+          "comment": "Concurrency, Async, Atomics & Transactional Speculation builtins",
+          "name": "support.function.builtin.iris",
+          "match": "\\b(transaction_rollback|transaction_commit|task_group_cancel|transaction_begin|transaction_depth|task_group_join|async_readable|async_writable|task_cancelled|chan_try_recv|atomic_store|mutex_unlock|recv_timeout|thread_count|async_sleep|async_yield|atomic_load|task_cancel|async_recv|atomic_add|atomic_new|mutex_lock|task_group|async_any|chan_send|mutex_new|task_done|chan_len|barrier|channel|par_map|timeout|atomic|select|recv|send)\\b"
+        },
+        {
+          "comment": "System, Filesystem, SQLite, FFI, Networking & Reflection builtins (1/2)",
+          "name": "support.function.builtin.iris",
+          "match": "\\b(iris_reflection_available|ffi_out_get_str_range|ffi_out_write_bytes|datetime_timestamp|reflect_available|tcp_connect_async|reflect_eval_i64|reflect_validate|tcp_accept_async|term_show_cursor|datetime_format|db_query_params|ffi_out_get_f32|ffi_out_get_f64|ffi_out_get_i32|ffi_out_get_i64|ffi_out_get_str|ffi_out_set_f32|ffi_out_set_f64|ffi_out_set_i32|ffi_out_set_i64|file_read_bytes|tcp_write_async|db_exec_params|ffi_out_get_u8|ffi_out_set_u8|file_write_all|http_get_async|http_post_json|python_version|rust_call_void|tcp_read_async|term_set_color|base64_decode|base64_encode|ffi_call_args|ffi_call_void|file_read_all|iris_eval_i64|iris_validate|read_password|rust_call_f64|rust_call_i64|rust_lib_open|datetime_now|ffi_call_f64|ffi_call_i64|ffi_call_str|ffi_out_free|http_request|random_range|reflect_eval|ffi_out_len|ffi_out_new|file_exists|python_call|python_eval|python_exec|random_seed|remove_file|tcp_connect|term_cursor|time_now_ms|file_close|file_lines|file_write|hex_decode|hex_encode|tcp_accept|tcp_listen|term_clear|term_reset|ffi_close|file_open|file_read|http_post|iris_eval|path_join|tcp_close|tcp_write|term_cols|term_rows|udp_close|db_close|db_query)\\b"
+        },
+        {
+          "comment": "System, Filesystem, SQLite, FFI, Networking & Reflection builtins (2/2)",
+          "name": "support.function.builtin.iris",
+          "match": "\\b(exec_cmd|ffi_call|ffi_open|http_get|list_dir|read_key|sleep_ms|tcp_read|udp_open|udp_recv|udp_send|db_exec|db_open|env_get|env_set|env_var|random|sha256|mkdir|hash|seed|uuid|cwd|pid)\\b"
+        },
+        {
+          "comment": "Native Desktop UI & Camera stdlib (std.ui*) (1/4)",
+          "name": "support.function.stdlib.iris",
+          "match": "\\b(ui_native_camera_set_sim_target|ui_state_has_active_transitions|ui_native_set_size_constraints|ui_native_camera_sample_grid|draw_cmd_round_rect_corners|ui_native_set_cursor_window|ui_native_take_dropped_file|ui_radar_scope_interactive|ui_state_sync_transitions|ui_state_toggle_selection|ui_transform_rotate_about|draw_cmd_linear_gradient|draw_cmd_push_round_clip|draw_cmd_radial_gradient|ui_native_set_fullscreen|ui_native_window_is_open|ui_native_window_metrics|ui_state_clear_selection|ui_transform_scale_about|draw_cmd_push_transform|ui_http_mirror_response|ui_native_clipboard_get|ui_native_clipboard_set|ui_native_set_icon_rgba|ui_native_set_maximized|ui_native_set_resizable|ui_native_submit_window|ui_native_window_create|ui_state_animated_value|ui_state_focus_progress|ui_state_hover_progress|ui_state_press_progress|ui_state_select_changed|ui_state_selected_count|ui_table_row_selectable|draw_cmd_pop_transform|ui_native_camera_close|ui_native_inject_event|ui_native_measure_text|ui_native_sample_pixel|ui_native_window_close|ui_state_set_clipboard|ui_state_set_multiline|ui_state_set_selection|ui_state_text_position|ui_transform_translate|draw_cmd_camera_frame|draw_cmd_push_opacity|ui_frame_pool_destroy|ui_motion_spring_from|ui_native_camera_info|ui_native_camera_open|ui_native_poll_window|ui_radar_scope_action|ui_render_mirror_html|ui_state_dropped_file|ui_state_select_range|ui_state_spring_value|draw_cmd_pop_opacity|emerald_studio_theme|ui_close_native_host|ui_frame_pool_resume|ui_layout_with_state|ui_motion_has_active|ui_motion_to_delayed|ui_native_clock_secs|ui_native_set_cursor|ui_state_close_popup|ui_state_is_dragging|ui_state_is_selected|ui_state_split_ratio|ui_state_spring_from|ui_state_tab_changed|ui_thermal_color_for|draw_cmd_a11y_state)\\b"
+        },
+        {
+          "comment": "Native Desktop UI & Camera stdlib (std.ui*) (2/4)",
+          "name": "support.function.stdlib.iris",
+          "match": "\\b(draw_cmd_box_shadow|draw_cmd_image_rgba|draw_cmd_round_rect|high_contrast_theme|motion_cubic_bezier|ui_frame_pool_begin|ui_frame_pool_pause|ui_motion_is_active|ui_native_pump_once|ui_native_set_title|ui_neural_graph_new|ui_open_native_host|ui_state_begin_drag|ui_state_mark_clean|ui_state_open_popup|ui_state_push_toast|ui_tensor_from_grid|draw_buf_cmd_count|draw_cmd_push_clip|draw_progress_ring|split_divider_rect|ui_layout_scrolled|ui_native_save_png|ui_radar_pick_blip|ui_render_headless|ui_responsive_cols|ui_state_clipboard|ui_state_move_drag|ui_state_scroll_of|ui_state_tick_next|draw_cmd_polyline|draw_cmd_pop_clip|draw_cmd_svg_path|draw_neural_graph|drawer_panel_rect|motion_lerp_color|theme_with_accent|ui_icon_from_name|ui_list_box_first|ui_native_metrics|ui_process_events|ui_push_bar_chart|ui_signal_summary|ui_state_end_drag|ui_state_set_text|ui_tensor_surface|cursor_kind_code|draw_icon_styled|draw_metric_tile|motion_lerp_rect|popup_panel_rect|text_line_col_at|text_style_flags|ui_find_node_key|ui_motion_spring|ui_native_submit|ui_option_box_or|ui_progress_ring|ui_state_animate|ui_thermal_color|draw_buf_finish|draw_cmd_circle|draw_search_box|hkt_bind_signal|modal_card_rect|ui_clear_events|ui_motion_value|ui_progress_bar|ui_slider_range|ui_state_cursor|ui_state_detach|ui_state_spring|ui_table_header|constrain_size|daylight_theme)\\b"
+        },
+        {
+          "comment": "Native Desktop UI & Camera stdlib (std.ui*) (3/4)",
+          "name": "support.function.stdlib.iris",
+          "match": "\\b(draw_buf_begin|draw_segmented|midnight_theme|motion_clamp01|obsidian_theme|ui_apply_event|ui_button_tone|ui_icon_button|ui_motion_tick|ui_native_poll|ui_push_select|ui_push_tensor|ui_radar_scope|ui_state_clock|ui_state_paste|draw_buf_free|draw_cmd_a11y|draw_cmd_line|draw_cmd_path|draw_cmd_text|draw_nav_rail|draw_svg_icon|icon_svg_path|rect_contains|spring_bouncy|spring_gentle|spring_smooth|spring_snappy|ui_breadcrumb|ui_breakpoint|ui_line_chart|ui_motion_new|ui_option_box|ui_push_chart|ui_push_image|ui_push_radar|ui_render_svg|ui_split_pane|ui_state_copy|ui_state_tick|ui_text_input|ui_with_theme|draw_buf_new|draw_cmd_arc|draw_divider|draw_spinner|motion_pulse|segmented_at|ui_a11y_role|ui_accordion|ui_bar_chart|ui_motion_to|ui_node_rect|ui_push_menu|ui_push_stat|ui_push_tabs|ui_segmented|ui_sparkline|ui_stat_card|ui_state_cut|ui_state_new|ui_table_row|ui_text_area|contrast_fg|draw_legend|motion_ease|motion_lerp|motion_wave|nav_item_at|ui_add_node|ui_checkbox|ui_has_node|ui_hit_test|ui_list_box|ui_nav_item)\\b"
+        },
+        {
+          "comment": "Native Desktop UI & Camera stdlib (std.ui*) (4/4)",
+          "name": "support.function.stdlib.iris",
+          "match": "\\b(ui_run_loop|ui_set_root|ui_tree_new|draw_toast|map_signal|nord_theme|signal_get|signal_new|signal_set|tone_color|ui_divider|ui_heading|ui_run_app|ui_spinner|ui_stepper|with_alpha|color_css|draw_glow|draw_icon|mix_color|pack_rgba|ui_avatar|ui_button|ui_drawer|ui_layout|ui_select|ui_slider|ui_spacer|ui_toggle|draw_kbd|ui_badge|ui_image|ui_label|ui_modal|ui_paint|ui_radio|ui_stack|hex_rgb|lighten|ui_card|ui_chip|ui_grid|ui_icon|ui_menu|ui_tabs|ui_wrap|darken|ui_col|ui_new|ui_row|rgba|rgb)\\b"
+        },
+        {
+          "comment": "Embedded Standard Library functions (58 modules) (1/16)",
+          "name": "support.function.stdlib.iris",
+          "match": "\\b(adaptive_set_min_observations_for_retrain|adaptive_predict_with_uncertainty|adaptive_uncertainty_bayes_update|sigmoid_deriv_from_output_local|adaptive_set_retrain_threshold|gaussian_posterior_precision|model_health_mean_latency_ms|replay_buffer_sample_indices|tf_static_broadcaster_create|adaptive_set_risk_threshold|adaptive_current_threshold|adaptive_observation_count|adaptive_set_learning_rate|byte_buffer_to_ascii_lossy|gaussian_credible_interval|model_expected_free_energy|nig_mean_credible_interval|rows_to_supervised_dataset|software_governor_add_rule|action_server_create_with|llm_authorization_headers|pcap_create_global_header|pcap_create_packet_record|sigmoid_deriv_from_output|world_model_predict_state|adaptive_adapt_threshold|byte_buffer_write_u16_be|byte_buffer_write_u16_le|byte_buffer_write_u32_be|byte_buffer_write_u32_le|contextual_bandit_select|contextual_bandit_update|contextual_bandit_values|local_pytorch_train_step|model_session_train_step|pcap_parse_global_header|set_symmetric_difference|tcp_listen_local_checked|active_inference_choose|active_inference_select|adaptive_should_retrain|autopilot_with_learning|byte_buffer_read_u16_be|byte_buffer_read_u16_le|byte_buffer_read_u32_be|byte_buffer_read_u32_le|bytes_timing_safe_equal|confusion_matrix_binary|gaussian_posterior_mean|legacy_create_publisher|linear_regression_train|model_health_error_rate|model_session_run_batch|nig_predictive_variance|param_declare_f64_range|param_declare_i64_range|pomdp_observation_probs|population_best_fitness|speculate_transactional|speculate_with_fallback|subscription_create_qos|transform_buffer_lookup|adaptive_learning_rate|cancellation_requested|chacha20_quarter_round|llm_response_from_json|meta_performance_trend|pomdp_learn_likelihood|pomdp_learn_transition|predict_next_telemetry|prob_exceeds_threshold|running_stats_variance|software_governor_step|sql_rows_to_f64_column|tanh_deriv_from_output)\\b"
+        },
+        {
+          "comment": "Embedded Standard Library functions (58 modules) (2/16)",
+          "name": "support.function.stdlib.iris",
+          "match": "\\b(tf_broadcaster_destroy|tls_parse_client_hello|action_client_destroy|action_server_destroy|active_inference_step|adaptive_record_error|agent_production_step|contextual_bandit_new|goal_publish_feedback|is_ascii_alphanumeric|lifecycle_node_create|lifecycle_state_label|linear_model_variance|nig_credible_interval|onnx_get_output_count|pomdp_novelty_weights|pomdp_set_preferences|pomdp_state_ambiguity|risk_adjusted_predict|software_governor_new|sql_parse_f64_or_zero|tcp_read_with_timeout|tcp_write_all_checked|tf_broadcaster_create|action_client_create|action_server_create|adaptive_reset_stats|adaptive_train_batch|aes128_decrypt_block|aes128_encrypt_block|aes128_key_expansion|agent_record_outcome|aif_decide_permitted|binary_cross_entropy|byte_buffer_contains|byte_buffer_from_hex|byte_buffer_from_str|byte_buffer_has_null|clean_numeric_column|client_wait_response|epoch_ms_to_datetime|expected_free_energy|levenshtein_distance|lifecycle_deactivate|lifecycle_set_result|linear_model_predict|meta_update_efficacy|model_health_observe|normalize_whitespace|onnx_get_input_count|onnx_get_output_name|policy_gradient_loss|pomdp_set_likelihood|pomdp_set_transition|publisher_create_qos|quaternion_conjugate|quaternion_normalize|replay_buffer_sample|running_stats_update|safety_permitted_now|sample_few_shot_task|sql_query_f64_column|subscription_destroy|subscription_matches|task_group_cancelled|tcp_shutdown_checked|tensor_cross_entropy|tensorflow_run_multi|transform_buffer_new|transform_buffer_set|websocket_accept_key|action_server_ready|adapt_learning_rate|adaptive_mean_error|bitset_from_indices)\\b"
+        },
+        {
+          "comment": "Embedded Standard Library functions (58 modules) (3/16)",
+          "name": "support.function.stdlib.iris",
+          "match": "\\b(bitset_intersection|brownian_increments|categorical_entropy|clean_numeric_value|client_wait_service|context_create_with|dataset_batch_count|datetime_to_epoch_s|http_request_method|is_ascii_alphabetic|is_parameter_change|layer_weight_offset|lifecycle_configure|lifecycle_is_active|linear_model_update|llm_chat_with_tools|logreg_predict_prob|mlp_train_step_adam|model_registry_find|model_session_close|nn_ad_squared_error|onnx_get_input_name|publish_float64_obj|quaternion_multiply|safety_require_when|serial_send_reading|sgd_momentum_update|sql_query_xy_params|subscription_create|tcp_connect_checked|tensor_ad_from_data|tensor_ad_parameter|tensor_batch_matmul|tensor_pool_destroy|variance_confidence|viability_bound_new|ws_server_handshake|action_wait_result|action_wait_server|adaptive_get_param|adaptive_is_unsafe|adaptive_set_param|aes128_decrypt_cbc|aes128_encrypt_cbc|agent_loop_rewards|async_queued_tasks|async_worker_count|autonomic_rule_new|byte_buffer_concat|byte_buffer_to_hex|constitution_check|deque_rotate_right|duration_from_secs|executor_spin_once|http_tls_available|is_ascii_lowercase|is_ascii_uppercase|legacy_create_node|lifecycle_activate|lifecycle_shutdown|llm_assistant_turn|model_registry_add|model_registry_new|model_session_open|node_uses_sim_time|param_declare_bool|param_declare_json|path_has_extension|pomdp_policy_value|pytorch_train_step|replay_buffer_push|safety_forbid_when|safety_keep_within|speculate_envelope|standardize_matrix)\\b"
+        },
+        {
+          "comment": "Embedded Standard Library functions (58 modules) (4/16)",
+          "name": "support.function.stdlib.iris",
+          "match": "\\b(tcp_accept_checked|tcp_close_listener|tcp_listen_checked|tensor_ad_backward|tensor_shape_clone|transform_identity|adaptive_get_risk|adaptive_n_params|agent_runtime_new|aif_with_learning|aif_with_sampling|bernoulli_entropy|bitset_difference|bitset_intersects|bitset_to_indices|byte_buffer_slice|byte_buffer_zeros|channel_unbounded|count_subscribers|dataset_get_batch|dataset_normalize|deque_rotate_left|file_close_stream|file_write_stream|goal_feedback_msg|goal_is_canceling|homeostat_add_var|homeostat_is_safe|http_post_request|http_request_path|layer_bias_offset|lifecycle_cleanup|lifecycle_trigger|linear_model_load|linear_model_save|llm_messages_json|maml_inner_update|min_max_normalize|mlp_predict_class|model_session_run|next_power_of_two|nn_ad_linear_relu|param_declare_f64|param_declare_i64|param_declare_str|path_matches_glob|population_evolve|population_ranked|probs_log_softmax|publisher_destroy|publisher_matches|pytorch_run_multi|q_learning_update|quaternion_rotate|replay_buffer_new|risk_observations|round_to_decimals|running_stats_new|running_stats_std|safety_policy_new|serial_write_line|strip_json_quotes|tcp_close_checked|tensor_ad_sigmoid|tensor_layer_norm|tf_buffer_destroy|timing_safe_equal|tls_calculate_ja3|tls_calculate_ja4|tournament_select|transform_compose|transform_inverse|viability_predict|wall_timer_create|ws_unmask_payload)\\b"
+        },
+        {
+          "comment": "Embedded Standard Library functions (58 modules) (5/16)",
+          "name": "support.function.stdlib.iris",
+          "match": "\\b(action_send_goal|adaptive_observe|adaptive_predict|assert_approx_eq|autonomy_v2_step|bitset_is_subset|boltzmann_sample|byte_buffer_find|byte_buffer_push|constitution_add|constitution_new|count_publishers|create_publisher|curiosity_reward|discount_rewards|dissect_ethernet|duration_from_ms|error_confidence|ewc_penalty_grad|file_open_stream|file_read_stream|gc_collect_sweep|genome_crossover|hamming_distance|homeostat_update|http_get_request|http_status_code|is_missing_token|linear_model_new|llm_message_json|llm_request_json|local_onnx_model|log_prob_softmax|ml_backend_ready|model_health_new|nig_update_batch|node_create_with|path_is_absolute|pcap_read_packet|population_score|publisher_create|rc4_crypt_buffer|safety_condition|safety_permitted|serial_configure|serial_read_line|serial_write_pin|set_intersection|sql_query_params|table_decode_row|table_encode_row|tcp_close_server|tcp_listen_local|tcp_read_bounded|tensor_ad_matmul|tensor_attention|tensor_from_data|tensor_pool_init|tf_buffer_create|tf_can_transform|tls_parse_record|train_test_split|udp_close_socket|viability_assess|viability_choose|wait_for_message|zeros_like_local|action_accepted|action_goal_msg|aes_unpad_pkcs7|aif_with_drives|bitset_is_empty|brownian_motion|byte_buffer_get|byte_buffer_new)\\b"
+        },
+        {
+          "comment": "Embedded Standard Library functions (58 modules) (6/16)",
+          "name": "support.function.stdlib.iris",
+          "match": "\\b(byte_buffer_set|bytes_to_base64|channel_bounded|codepoint_count|context_destroy|dataset_shuffle|deque_from_list|ewc_consolidate|format_duration|goal_result_msg|is_ascii_letter|is_continuation|is_power_of_two|lifecycle_state|list_remove_val|llm_tool_result|local_model_run|map_values_list|mapek_agent_new|matrix_col_mean|meta_train_step|nig_std_of_mean|normal_mu_sigma|normalize_angle|normalize_input|out_write_bytes|path_components|pcap_format_mac|pomdp_posterior|pomdp_set_prior|population_best|probs_normalize|publish_float64|publish_vector3|qos_best_effort|qos_sensor_data|queue_from_list|rc4_crypt_bytes|recv_timeout_ms|risk_confidence|risk_mean_error|safety_required|sample_variance|service_destroy|set_is_disjoint|set_is_superset|shuffle_indices|softmax_entropy|sql_exec_params|stopwatch_start|tcp_accept_conn|tcp_write_bytes|tensor_mse_grad|tensor_sgd_step|tensorflow_free|tensorflow_load|tf_buffer_local|timer_create_ns|transform_point|world_model_new|ws_decode_frame|ws_encode_frame|assert_list_eq|autopilot_step|bitset_max_bit|client_destroy|client_request|context_create|deque_contains|deque_is_empty|duration_to_ms|encode_reading|epsilon_greedy|euclidean_dist|fmt_apply_spec)\\b"
+        },
+        {
+          "comment": "Embedded Standard Library functions (58 modules) (7/16)",
+          "name": "support.function.stdlib.iris",
+          "match": "\\b(fmt_float_prec|format_iso8601|graph_services|heap_from_list|internal_error|is_ascii_digit|legacy_publish|linear_forward|linear_predict|linreg_predict|list_all_equal|llm_tool_calls|llm_tools_json|logreg_predict|matrix_col_std|meta_available|mlp_adam_state|mlp_train_adam|mlp_train_step|new_task_group|normalize_list|normalize_path|onnx_run_multi|param_set_bool|param_set_json|path_find_char|pcap_format_ip|population_new|publish_string|queue_contains|queue_is_empty|risk_last_risk|risk_max_error|ros2_available|safety_resolve|sample_indices|service_create|set_difference|softmax_sample|spin_node_once|sql_rows_to_xy|stopwatch_stop|tcp_close_conn|tcp_connect_to|tcp_read_bytes|tcp_write_conn|tensor_ad_data|tensor_ad_grad|tensor_ad_item|tensor_ad_relu|tensor_ad_tanh|tensor_matmul2|tensor_max_val|tensor_min_val|tensor_sigmoid|tensor_softmax|tensorflow_run|unc_confidence|with_extension|ws_extract_key|ws_send_binary|action_cancel|action_status|adaptive_free|adaptive_name|aes_pad_pkcs7|aif_agent_new|apply_sigmoid|assert_str_eq|autopilot_new|belief_update|bitset_create|brownian_path|brownian_step|client_create)\\b"
+        },
+        {
+          "comment": "Embedded Standard Library functions (58 modules) (8/16)",
+          "name": "support.function.stdlib.iris",
+          "match": "\\b(csv_col_count|csv_emit_rows|csv_parse_row|csv_row_count|dataset_split|days_in_month|dense_forward|deque_to_list|dequeue_queue|few_shot_task|fmt_find_type|frame_payload|generate_uuid|genome_mutate|genome_random|goal_canceled|heap_contains|heap_is_empty|heap_pop_heap|homeostat_new|http_response|http_serve_mt|identity_pose|is_transition|is_whitespace|json_get_bool|json_set_bool|kv_write_file|llm_tool_json|mas_consensus|mlp_eval_loss|msg_from_json|msg_set_stamp|normal_sample|novelty_score|out_str_range|param_set_f64|param_set_i64|param_set_str|parse_reading|partition_i64|path_join_all|path_to_posix|pomdp_predict|ppo_clip_loss|probs_softmax|publish_int64|publish_twist|publisher_msg|q_best_action|qos_keep_last|queue_compact|queue_to_list|rc4_crypt_str|service_reply|set_from_list|set_is_subset|sigmoid_deriv|slice_reverse|split_indices|table_col_idx|tcp_listen_on|tcp_read_conn|tensor_ad_add|tensor_ad_div|tensor_ad_mul|tensor_ad_sub|tensor_ad_sum|tensor_offset|term_plot_bar|tf_set_static|timeout_after|timer_destroy|tls_is_grease|truncate_with)\\b"
+        },
+        {
+          "comment": "Embedded Standard Library functions (58 modules) (9/16)",
+          "name": "support.function.stdlib.iris",
+          "match": "\\b(udp_recv_from|adaptive_new|assert_false|bearer_token|bitset_clone|bitset_union|client_ready|codepoint_at|combinations|csv_emit_row|dataset_mean|deque_create|dissect_ipv4|duration_add|encode_query|encode_shape|encode_write|executor_add|executor_new|format_clock|format_table|frame_verify|gather_batch|gc_get_stats|genmodel_new|goal_execute|goal_request|goal_succeed|graph_topics|heap_pop_val|heap_to_list|homeovar_new|integer_sqrt|is_leap_year|is_singleton|json_num_f64|json_num_i64|json_set_f64|json_set_i64|kv_read_file|linreg_train|logreg_train|make_vector3|mas_add_role|meta_analyze|meta_emit_ir|meta_program|mle_variance|mlp_backward|msg_get_json|msg_set_bool|msg_set_f64s|msg_set_json|nn_ad_linear|node_context|node_destroy|out_f64_cell|out_i64_cell|parse_f64_or|permutations|policies_all|probs_argmax|probs_sample|publish_json|publish_pose|pytorch_free|pytorch_load|reptile_step|ros2_version|router_match|sarsa_update|select_first|serial_close|set_contains|set_is_empty)\\b"
+        },
+        {
+          "comment": "Embedded Standard Library functions (58 modules) (10/16)",
+          "name": "support.function.stdlib.iris",
+          "match": "\\b(sprintf_from|sql_query_xy|strip_prefix|strip_suffix|table_insert|table_select|table_to_csv|take_vector3|tensor_numel|tensor_scale|tensor_shape|tensor_zeros|tf_lookup_at|tf_run_multi|timer_cancel|timer_create|unc_lower_95|unc_upper_95|unc_variance|ws_send_ping|ws_send_pong|ws_send_text|zero_pad_int|adam_update|aif_observe|append_text|assert_none|assert_some|assert_true|bad_request|bandit_pull|channel_len|client_call|client_send|create_node|csv_get_row|dataset_std|deque_clear|dequeue_val|dissect_tcp|dissect_udp|ewc_penalty|flatten_i64|format_date|from_base64|get_rcl_lib|goal_finish|goal_status|graph_nodes|hash_sha256|hmac_simple|hmac_verify|http_header|is_response|json_encode|json_escape|knn_predict|list_repeat|llm_message|map_has_key|max_in_list|meta_record|metacog_new|min_in_list|mlp_forward|mlp_predict|msg_set_f64|msg_set_i64|msg_set_str|nig_default|node_create|node_now_ns|normal_pair|num_threads|out_set_f32)\\b"
+        },
+        {
+          "comment": "Embedded Standard Library functions (58 modules) (11/16)",
+          "name": "support.function.stdlib.iris",
+          "match": "\\b(out_set_f64|out_set_i32|out_set_i64|parse_write|path_exists|path_parent|publish_msg|pytorch_run|q_table_new|qos_control|qos_default|qos_latched|response_of|reverse_str|right_align|risk_errors|ros2_now_ns|serial_open|serial_poll|set_to_list|sha1_buffer|shape_n_out|standardize|table_where|tensor_data|tensor_full|tensor_mean|tensor_pair|tensor_relu|tensor_tanh|timer_reset|udp_send_to|windows_i64|wm_features|xavier_init|agent_loop|aif_decide|apply_relu|apply_tanh|assert_err|basic_auth|bitset_xor|call_f64_2|call_i64_2|call_i64_3|call_i64_7|call_i64_8|cancel_all|capitalize|chunks_i64|context_ok|deg_to_rad|deque_size|df_add_row|df_col_idx|elapsed_ms|event_text|filter_i64|frame_kind|goal_abort|heap_clear|heap_merge|http_serve|is_message|is_request|json_parse|json_query|leaky_relu|left_align|llm_client|make_twist|map_get_or|mapek_step|mas_assign|matrix_row)\\b"
+        },
+        {
+          "comment": "Embedded Standard Library functions (58 modules) (12/16)",
+          "name": "support.function.stdlib.iris",
+          "match": "\\b(meta_apply|mlp_create|model_load|model_save|month_name|msg_resize|msg_schema|next_prime|nig_update|out_set_u8|param_bool|param_json|param_list|param_type|peek_front|pomdp_load|pomdp_save|push_front|py_version|queue_peek|rad_to_deg|read_lines|relu_deriv|request_of|ros2_error|router_add|router_new|set_remove|sgd_update|sha1_bytes|shape_n_in|slice_fill|slice_find|smoothstep|split_once|str_repeat|svg_circle|take_twist|tanh_deriv|tensor_add|tensor_div|tensor_exp|tensor_get|tensor_log|tensor_mse|tensor_mul|tensor_neg|tensor_set|tensor_sub|tensor_sum|tf_send_at|toggle_bit|torch_free|torch_load|total_size|trim_start|ucb_select|unique_i64|wm_predict|wm_rollout|word_count|write_text|zero_twist|zeros_like|LOG_DEBUG|LOG_ERROR|aif_reset|assert_eq|assert_ok|clamp_f64|clamp_i64|clear_bit|clip_list|copy_file|cpu_count)\\b"
+        },
+        {
+          "comment": "Embedded Standard Library functions (58 modules) (13/16)",
+          "name": "support.function.stdlib.iris",
+          "match": "\\b(decode_at|df_filter|df_to_csv|eval_rule|extension|factorial|goal_uuid|grid_step|hash_code|heap_peek|heap_push|http_body|http_send|is_cancel|is_letter|join_path|json_bool|json_null|kb_record|kv_delete|lib_close|list_fill|list_swap|llm_embed|log_debug|log_error|make_pose|maml_eval|map_clone|map_merge|mapek_run|md5_bytes|mlp_train|msg_clone|msg_stamp|nig_prior|nn_ad_sgd|node_name|onnx_free|onnx_load|pad_right|param_f64|param_has|param_i64|param_str|peek_back|pomdp_new|pop_front|precision|push_back|queue_len|queue_new|read_text|replace_n|ros2_open|rust_open|set_clear|set_clone|set_union|slice_sum|speculate|spin_once|spin_some|sql_close|sql_query|table_len|table_new|take_pose|tf_frames|tf_lookup|to_base64|torch_run|vec_scale|zero_bias|LOG_INFO)\\b"
+        },
+        {
+          "comment": "Embedded Standard Library functions (58 modules) (14/16)",
+          "name": "support.function.stdlib.iris",
+          "match": "\\b(LOG_WARN|accuracy|basename|call_f64|call_i64|call_str|category|checksum|csv_rows|day_name|f1_score|find_i64|fold_i64|from_hex|gbm_path|heap_len|heap_new|heap_pop|hypot_3d|index_of|inv_lerp|is_blank|is_close|is_digit|is_prime|is_timer|join_all|json_arr|json_get|json_new|json_obj|json_set|json_str|lib_call|lib_open|llm_chat|log_info|log_warn|make_dir|msg_bool|msg_f64s|msg_free|msg_json|msg_type|new_uuid|nig_mean|node_log|onnx_run|out_free|pad_left|pop_back|popcount|probs_kl|py_call1|r2_score|ros2_lib|rust_f64|rust_i64|sha1_str|shutdown|sign_f64|sign_i64|sql_exec|sql_open|str_join|svg_line|svg_rect|svg_save|svg_text|take_f64|take_i64|take_msg|take_str|tanh_act|trim_end)\\b"
+        },
+        {
+          "comment": "Embedded Standard Library functions (58 modules) (15/16)",
+          "name": "support.function.stdlib.iris",
+          "match": "\\b(truncate|try_recv|udp_bind|unc_mean|variance|vec_mean|wm_learn|abs_f64|abs_i64|all_i64|any_i64|dirname|e_const|enqueue|ewc_new|get_bit|get_pid|goal_of|heap_of|is_even|is_goal|json_ok|kv_keys|kv_pair|map_i64|mas_new|max_f64|max_i64|md5_hex|md5_str|min_f64|min_i64|msg_f64|msg_has|msg_i64|msg_len|msg_new|msg_str|nig_dof|one_hot|out_f32|out_f64|out_i32|out_i64|out_len|out_new|out_str|pad_int|pow_i64|product|py_call|py_eval|py_exec|readdir|reverse|set_add|set_bit|set_len|set_new|sigmoid|softmax|split_n|sprintf|std_dev|sum_f64|sum_i64|svg_new|text_ok|tf_free|tf_load|tf_send|vec_add|vec_std|vec_sub|vec_var)\\b"
+        },
+        {
+          "comment": "Embedded Standard Library functions (58 modules) (16/16)",
+          "name": "support.function.stdlib.iris",
+          "match": "\\b(argmax|df_col|df_len|df_new|exists|getcwd|getenv|is_odd|kb_new|kv_get|kv_set|log_at|log_kv|normal|now_ms|out_u8|printf|recall|rotl32|set_of|setenv|tf_run|tf_set|to_hex|wm_new|atan2|count|debug|delay|error|frame|hypot|lines|now_s|q_get|q_set|range|remap|shell|sleep|words|cosh|drop|fail|info|init|lerp|mean|norm|relu|sinh|stem|take|tanh|warn|dot|gae|gcd|lcm|mae|mse|now|sum|tau|pi)\\b"
+        }
+      ]
+    },
+    "functions": {
+      "patterns": [
+        {
+          "name": "meta.function.call.iris",
+          "match": "\\b([a-z_][a-zA-Z0-9_]*)\\s*(?=\\()",
+          "captures": {
+            "1": {
+              "name": "entity.name.function.call.iris"
+            }
+          }
+        }
+      ]
+    },
+    "operators": {
+      "patterns": [
+        {
+          "name": "keyword.operator.range.iris",
+          "match": "\\.\\.=|\\.\\."
+        },
+        {
+          "name": "keyword.operator.null-coalescing.iris",
+          "match": "\\?\\?"
+        },
+        {
+          "name": "keyword.operator.question.iris",
+          "match": "\\?"
+        },
+        {
+          "name": "keyword.operator.arrow.iris",
+          "match": "=>|->"
+        },
+        {
+          "name": "keyword.operator.namespace.iris",
+          "match": "::"
+        },
+        {
+          "name": "keyword.operator.assignment.compound.iris",
+          "match": "(\\+=|-=|\\*=|/=|%=)"
+        },
+        {
+          "name": "keyword.operator.comparison.iris",
+          "match": "(==|!=|<=|>=|<>|<|>)"
+        },
+        {
+          "name": "keyword.operator.logical.iris",
+          "match": "(&&|\\|\\||(?!=)!)"
+        },
+        {
+          "name": "keyword.operator.matmul.iris",
+          "match": "@"
+        },
+        {
+          "name": "keyword.operator.reference.iris",
+          "match": "(&|\\|)"
+        },
+        {
+          "name": "keyword.operator.arithmetic.iris",
+          "match": "(\\+|(?!->)-|\\*|/|%)"
+        },
+        {
+          "name": "keyword.operator.assignment.iris",
+          "match": "="
         }
       ]
     },
@@ -196,218 +623,6 @@
         {
           "name": "constant.numeric.integer.iris",
           "match": "\\b[0-9]+\\b"
-        }
-      ]
-    },
-    "builtins": {
-      "patterns": [
-        {
-          "comment": "Core builtins: I/O, assertions, conversions",
-          "name": "support.function.builtin.iris",
-          "match": "\\b(print|panic|assert|len|to_str|format|read_line|read_i64|read_f64|type_of)\\b"
-        },
-        {
-          "comment": "String builtins",
-          "name": "support.function.builtin.iris",
-          "match": "\\b(concat|contains|starts_with|ends_with|to_upper|to_lower|trim|repeat|split|join|find|slice|str_index|parse_i64|parse_f64|char_at|str_reverse|str_pad_left|str_pad_right|str_chars|str_bytes|str_count)\\b"
-        },
-        {
-          "comment": "Math builtins",
-          "name": "support.function.builtin.iris",
-          "match": "\\b(sqrt|abs|floor|ceil|sin|cos|tan|exp|log|log2|round|sign|pow|min|max|clamp|math_pi|math_e|math_inf|is_nan|is_inf)\\b"
-        },
-        {
-          "comment": "Bitwise builtins",
-          "name": "support.function.builtin.iris",
-          "match": "\\b(band|bor|bxor|shl|shr|bitnot)\\b"
-        },
-        {
-          "comment": "Option / Result builtins",
-          "name": "support.function.builtin.iris",
-          "match": "\\b(some|none|is_some|unwrap|ok|err|is_ok|is_err)\\b"
-        },
-        {
-          "comment": "List builtins",
-          "name": "support.function.builtin.iris",
-          "match": "\\b(list|push|pop|list_get|list_set|list_len|list_pop|list_map|list_filter|list_reduce|list_any|list_all|list_zip|list_enumerate|list_flatten|list_unique|list_reverse|list_sorted|list_sum|list_min|list_max|list_index_of|list_count|list_take|list_drop)\\b"
-        },
-        {
-          "comment": "Map builtins",
-          "name": "support.function.builtin.iris",
-          "match": "\\b(map|map_get|map_set|map_keys|map_values|map_contains)\\b"
-        },
-        {
-          "comment": "Cell builtins",
-          "name": "support.function.builtin.iris",
-          "match": "\\b(cell|cell_get|cell_set)\\b"
-        },
-        {
-          "comment": "Autodiff and gradient builtins",
-          "name": "support.function.builtin.iris",
-          "match": "\\b(tape|backward|grad|grad_t|primal|tangent|dual|zeros|ones|fill|linspace|sparsify|densify|einsum)\\b"
-        },
-        {
-          "comment": "ROS 2 autonomy builtins",
-          "name": "support.function.builtin.iris",
-          "match": "\\b(rcl_init|rcl_ok|node_create|publisher_create|subscription_create|publish|take|publish_float64|publish_int64|publish_str|take_float64|take_int64|take_str)\\b"
-        },
-        {
-          "comment": "Concurrency builtins",
-          "name": "support.function.builtin.iris",
-          "match": "\\b(atomic|atomic_load|atomic_store|atomic_add|atomic_cas|mutex_new|mutex_lock|mutex_unlock|channel|send|recv|chan_try_recv|chan_len|select|timeout|thread_count|par_for|par_map|par_reduce|task_group_new|task_group_spawn|task_group_join|task_group_cancel|task_group_cancelled|cancellation_requested|async_worker_count|async_queued_tasks|async_sleep|async_yield|async_recv|async_any|task_done|task_cancel|task_cancelled)\\b"
-        },
-        {
-          "comment": "Deque builtins",
-          "name": "support.function.builtin.iris",
-          "match": "\\b(deque_new|deque_push_front|deque_push_back|deque_pop_front|deque_pop_back|deque_len|deque_front|deque_back)\\b"
-        },
-        {
-          "comment": "Sorted / BitSet builtins",
-          "name": "support.function.builtin.iris",
-          "match": "\\b(sorted_keys|bitset_new|bitset_set|bitset_get|bitset_count|bitset_clear)\\b"
-        },
-        {
-          "comment": "FFI builtins — C, Python, Rust",
-          "name": "support.function.builtin.iris",
-          "match": "\\b(ffi_open|ffi_call|ffi_close|ffi_call_i64|ffi_call_f64|ffi_call_str|ffi_call_void|ffi_call_args|python_eval|python_exec|python_call|python_version|rust_lib_open|rust_call_i64|rust_call_f64|rust_call_void)\\b"
-        },
-        {
-          "comment": "HTTP / JSON / Regex builtins",
-          "name": "support.function.builtin.iris",
-          "match": "\\b(http_get|http_post|http_request|http_post_json|json_stringify|regex_match|regex_find_all|regex_replace)\\b"
-        },
-        {
-          "comment": "TCP / UDP networking builtins",
-          "name": "support.function.builtin.iris",
-          "match": "\\b(tcp_connect|tcp_listen|tcp_accept|tcp_read|tcp_write|tcp_close|udp_open|udp_send|udp_recv|udp_close)\\b"
-        },
-        {
-          "comment": "Terminal / interactive input builtins",
-          "name": "support.function.builtin.iris",
-          "match": "\\b(read_key|read_password|term_clear|term_cursor|term_show_cursor|term_set_color|term_reset|term_rows|term_cols)\\b"
-        },
-        {
-          "comment": "Date / Time builtins",
-          "name": "support.function.builtin.iris",
-          "match": "\\b(datetime_now|datetime_timestamp|datetime_format)\\b"
-        },
-        {
-          "comment": "OS / System builtins",
-          "name": "support.function.builtin.iris",
-          "match": "\\b(cwd|list_dir|path_join|mkdir|remove_file|env_get|env_set|exit_code|exec_cmd|pid)\\b"
-        },
-        {
-          "comment": "Random / Hash / Crypto builtins",
-          "name": "support.function.builtin.iris",
-          "match": "\\b(random|random_range|hash|base64_encode|base64_decode|uuid|sha256|hex_encode|hex_decode)\\b"
-        },
-        {
-          "comment": "ML stdlib: linear algebra, activations, loss, metrics",
-          "name": "support.function.stdlib.iris",
-          "match": "\\b(dot|vec_add|vec_sub|vec_scale|norm|vec_mean|vec_var|vec_std|standardize|min_max_normalize|shuffle_indices|train_test_split)\\b"
-        },
-        {
-          "comment": "ML stdlib: activations and loss functions",
-          "name": "support.function.stdlib.iris",
-          "match": "\\b(sigmoid|sigmoid_deriv|relu|relu_deriv|leaky_relu|tanh_act|tanh_deriv|softmax|mse|binary_cross_entropy|cross_entropy|mae)\\b"
-        },
-        {
-          "comment": "ML stdlib: algorithms",
-          "name": "support.function.stdlib.iris",
-          "match": "\\b(linear_regression_train|linear_predict|linreg_train|linreg_predict|logreg_train|logreg_predict_prob|logreg_predict|euclidean_dist|knn_predict)\\b"
-        },
-        {
-          "comment": "ML stdlib: clustering and Bayesian",
-          "name": "support.function.stdlib.iris",
-          "match": "\\b(kmeans_init_centroids|kmeans_assign|kmeans_update|kmeans_train|gnb_train|gnb_predict|gini|majority_class)\\b"
-        },
-        {
-          "comment": "ML stdlib: optimizers and dense layer",
-          "name": "support.function.stdlib.iris",
-          "match": "\\b(sgd_update|sgd_momentum_update|adam_update|dense_forward|apply_relu|apply_sigmoid|apply_tanh|xavier_init|zero_bias)\\b"
-        },
-        {
-          "comment": "ML stdlib: metrics",
-          "name": "support.function.stdlib.iris",
-          "match": "\\b(accuracy|r2_score|confusion_matrix_binary|precision|recall|f1_score)\\b"
-        },
-        {
-          "comment": "NN stdlib: MLP",
-          "name": "support.function.stdlib.iris",
-          "match": "\\b(mlp_create|mlp_forward|mlp_backward|mlp_train_step|mlp_train|mlp_predict|mlp_predict_class|mlp_eval_loss|encode_shape|shape_n_in|shape_n_out|layer_weight_offset|layer_bias_offset)\\b"
-        },
-        {
-          "comment": "AIS stdlib: homeostasis, active inference, meta-cognition, MAPE-K",
-          "name": "support.function.stdlib.iris",
-          "match": "\\b(homeostasis_init|homeostasis_step|homeostasis_drive|active_inf_init|active_inf_step|run_statistics_init|run_stats_update|run_stats_mean|run_stats_variance|neuroevo_init|neuroevo_mutate|neuroevo_select|ewc_init|ewc_compute_fisher|ewc_penalty|decision_argmax|decision_epsilon_greedy|decision_softmax|decision_boltzmann|decision_ucb|reward_discount|reward_gae|perception_normalize|perception_clip|world_model_init|world_model_update|world_model_predict|safety_constitution_init|safety_check|epistemic_novelty|epistemic_curiosity|multi_agent_consensus|meta_cognition_init|meta_cognition_update|mapek_agent_init|mapek_step|mapek_run)\\b"
-        },
-        {
-          "comment": "Differentiable tensor runtime",
-          "name": "support.function.stdlib.iris",
-          "match": "\\b(tensor_ad_from_data|tensor_ad_parameter|tensor_ad_add|tensor_ad_sub|tensor_ad_mul|tensor_ad_div|tensor_ad_matmul|tensor_ad_relu|tensor_ad_sigmoid|tensor_ad_tanh|tensor_ad_sum|tensor_ad_backward|tensor_ad_grad|tensor_ad_item|tensor_ad_data)\\b"
-        },
-        {
-          "comment": "LLM, typed metaprogramming, and checked networking",
-          "name": "support.function.stdlib.iris",
-          "match": "\\b(llm_client|llm_message|llm_chat|llm_chat_with_tools|llm_embed|local_onnx_model|local_model_run|meta_available|meta_program|meta_analyze|meta_emit_ir|meta_apply|tcp_connect_checked|tcp_listen_checked|tcp_accept_checked|tcp_write_all_checked|tcp_read_bounded|tcp_shutdown_checked|tcp_close_checked)\\b"
-        },
-        {
-          "comment": "Transactional speculative effects builtins",
-          "name": "support.function.builtin.iris",
-          "match": "\\b(transaction_begin|transaction_commit|transaction_rollback|transaction_depth)\\b"
-        },
-        {
-          "comment": "Set, WeakRef, GC, and Reflection builtins",
-          "name": "support.function.builtin.iris",
-          "match": "\\b(set_new|set_add|set_contains|set_remove|set_len|set_to_list|weak_ref|weak_alive|weak_upgrade|gc_stats_map|gc_collect_call|reflection_available|validate|eval|eval_i64)\\b"
-        },
-        {
-          "comment": "AIS Autonomy v2 and std.ros2 (rclcpp-backed) robotics stdlib",
-          "name": "support.function.stdlib.iris",
-          "match": "\\b(autonomy_v2_step|active_inference_select|viability_bound_new|viability_predict|viability_assess|expected_free_energy|agent_runtime_new|agent_record_outcome|agent_production_step|qos_sensor_data|qos_control|qos_latched|context_create|node_create|lifecycle_node_create|spin_once|publisher_create|subscription_create|publish_msg|take_msg|msg_new|msg_from_json|msg_free|msg_f64|msg_i64|msg_str|msg_json|service_create|client_create|client_call|action_server_create|action_client_create|action_send_goal|param_declare_f64|param_f64|lifecycle_configure|lifecycle_activate|lifecycle_deactivate|lifecycle_state|tf_buffer_create|tf_lookup|tf_broadcaster_create|tf_send|timer_create|transform_point|transform_inverse|transform_buffer_new|transform_buffer_set|transform_buffer_lookup)\\b"
-        }
-      ]
-    },
-    "operators": {
-      "patterns": [
-        {
-          "name": "keyword.operator.arithmetic.iris",
-          "match": "(\\+|(?!->)-|\\*|/|%)"
-        },
-        {
-          "name": "keyword.operator.comparison.iris",
-          "match": "(==|!=|<=|>=|<|>)"
-        },
-        {
-          "name": "keyword.operator.logical.iris",
-          "match": "(&&|\\|\\||(?!=)!)"
-        },
-        {
-          "name": "keyword.operator.assignment.iris",
-          "match": "="
-        },
-        {
-          "name": "keyword.operator.arrow.iris",
-          "match": "->"
-        },
-        {
-          "name": "keyword.operator.range.iris",
-          "match": "\\.\\."
-        },
-        {
-          "name": "keyword.operator.question.iris",
-          "match": "\\?"
-        }
-      ]
-    },
-    "functions": {
-      "patterns": [
-        {
-          "name": "meta.function.call.iris",
-          "match": "\\b([a-z_][a-zA-Z0-9_]*)\\s*(?=\\()",
-          "captures": {
-            "1": { "name": "entity.name.function.call.iris" }
-          }
         }
       ]
     },

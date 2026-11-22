@@ -56,23 +56,20 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      - name: Install cross-compilation tools (Linux ARM64)
-        if: matrix.target == 'aarch64-unknown-linux-gnu'
+      - name: Install cross-compilation & UI host dev libraries (Linux)
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
-          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
+          sudo apt-get install -y libx11-dev libxkbcommon-dev libwayland-dev
+          if [ "${{ matrix.target }}" = "aarch64-unknown-linux-gnu" ]; then
+            sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+            echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
+          fi
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
-
-      - name: Build release binary
-        run: cargo build --release --target ${{ matrix.target }}
-
-      # Tests are run by the CI workflow; skip in release to avoid long
-      # compilation time in --release mode.
 
       - name: Download LLVM toolchain
         shell: bash
@@ -131,7 +128,7 @@ jobs:
             echo "Expected LLVM ${LLVM_VER} (target archive: ${LLVM_ARCHIVE:-installed})"
           fi
 
-          # Extract only the binaries we need: clang, lld (and their symlinks)
+          # Extract only the binaries & shared libs we need: clang, lld, LLVM-C/libLLVM
           mkdir -p toolchain/llvm/bin
           if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
             cp toolchain-dl/llvm/bin/clang.exe    toolchain/llvm/bin/ 2>/dev/null || true
@@ -141,22 +138,28 @@ jobs:
             cp toolchain-dl/llvm/bin/ld.lld.exe    toolchain/llvm/bin/ 2>/dev/null || true
             cp toolchain-dl/llvm/bin/lld-link.exe  toolchain/llvm/bin/ 2>/dev/null || true
             cp toolchain-dl/llvm/bin/llvm-ar.exe   toolchain/llvm/bin/ 2>/dev/null || true
+            cp toolchain-dl/llvm/bin/LLVM-C.dll    toolchain/llvm/bin/ 2>/dev/null || true
             # Copy required DLLs if present
             cp toolchain-dl/llvm/bin/*.dll          toolchain/llvm/bin/ 2>/dev/null || true
+            for vc in VCRUNTIME140.dll VCRUNTIME140_1.dll MSVCP140.dll; do
+              if [[ -f "C:/Windows/System32/$vc" ]]; then
+                cp "C:/Windows/System32/$vc" toolchain/llvm/bin/ 2>/dev/null || true
+              fi
+            done
           else
-            cp toolchain-dl/llvm/bin/clang      toolchain/llvm/bin/ 2>/dev/null || true
-            cp toolchain-dl/llvm/bin/clang++    toolchain/llvm/bin/ 2>/dev/null || true
-            cp "toolchain-dl/llvm/bin/clang-${LLVM_MAJOR}" toolchain/llvm/bin/ 2>/dev/null || true
-            cp toolchain-dl/llvm/bin/lld        toolchain/llvm/bin/ 2>/dev/null || true
-            cp toolchain-dl/llvm/bin/ld.lld     toolchain/llvm/bin/ 2>/dev/null || true
-            cp toolchain-dl/llvm/bin/llvm-ar    toolchain/llvm/bin/ 2>/dev/null || true
+            cp -L toolchain-dl/llvm/bin/clang      toolchain/llvm/bin/ 2>/dev/null || true
+            cp -L toolchain-dl/llvm/bin/clang++    toolchain/llvm/bin/ 2>/dev/null || true
+            cp -L "toolchain-dl/llvm/bin/clang-${LLVM_MAJOR}" toolchain/llvm/bin/ 2>/dev/null || true
+            cp -L toolchain-dl/llvm/bin/lld        toolchain/llvm/bin/ 2>/dev/null || true
+            cp -L toolchain-dl/llvm/bin/ld.lld     toolchain/llvm/bin/ 2>/dev/null || true
+            cp -L toolchain-dl/llvm/bin/llvm-ar    toolchain/llvm/bin/ 2>/dev/null || true
             # Copy required shared libs
             mkdir -p toolchain/llvm/lib
-            cp toolchain-dl/llvm/lib/libLLVM*.so*  toolchain/llvm/lib/ 2>/dev/null || true
-            cp toolchain-dl/llvm/lib/libclang*.so* toolchain/llvm/lib/ 2>/dev/null || true
-            cp toolchain-dl/llvm/lib/liblld*.so*   toolchain/llvm/lib/ 2>/dev/null || true
-            cp toolchain-dl/llvm/lib/libLLVM*.dylib  toolchain/llvm/lib/ 2>/dev/null || true
-            cp toolchain-dl/llvm/lib/libclang*.dylib toolchain/llvm/lib/ 2>/dev/null || true
+            cp -a toolchain-dl/llvm/lib/libLLVM*.so*  toolchain/llvm/lib/ 2>/dev/null || true
+            cp -a toolchain-dl/llvm/lib/libclang*.so* toolchain/llvm/lib/ 2>/dev/null || true
+            cp -a toolchain-dl/llvm/lib/liblld*.so*   toolchain/llvm/lib/ 2>/dev/null || true
+            cp -a toolchain-dl/llvm/lib/libLLVM*.dylib  toolchain/llvm/lib/ 2>/dev/null || true
+            cp -a toolchain-dl/llvm/lib/libclang*.dylib toolchain/llvm/lib/ 2>/dev/null || true
           fi
 
           # Copy LLVM headers/libs needed for linking (MinGW sysroot on Windows)
@@ -237,6 +240,69 @@ jobs:
           find toolchain -type f | head -30
           du -sh toolchain/
 
+      - name: Generate prebuilt C runtime objects (native hosts)
+        if: matrix.target != 'aarch64-unknown-linux-gnu' && matrix.target != 'aarch64-pc-windows-msvc'
+        shell: bash
+        run: |
+          export IRIS_CLANG="$PWD/toolchain/llvm/bin/clang${{ matrix.ext }}"
+          if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
+            export IRIS_MSYS2_INCLUDE="$PWD/toolchain/ucrt64/include"
+          else
+            export LD_LIBRARY_PATH="$PWD/toolchain/llvm/lib:${LD_LIBRARY_PATH:-}"
+            export DYLD_LIBRARY_PATH="$PWD/toolchain/llvm/lib:${DYLD_LIBRARY_PATH:-}"
+          fi
+          IRIS_GENERATE_PREBUILT=1 cargo check --target ${{ matrix.target }}
+
+      - name: Build release binary and UI host
+        shell: bash
+        run: |
+          IRIS_WATCH_GIT=1 cargo build --release --target ${{ matrix.target }}
+          if [[ "${{ matrix.target }}" == "aarch64-unknown-linux-gnu" ]]; then
+            cargo build --release -p iris_ui_host --target ${{ matrix.target }} || \
+              echo "Skipping iris_ui_host on cross ARM64 Linux target without ARM64 X11/Wayland dev sysroot"
+          else
+            cargo build --release -p iris_ui_host --target ${{ matrix.target }}
+          fi
+
+      - name: Sign Windows binaries (optional)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        env:
+          AZURE_TRUSTED_SIGNING_ENDPOINT: ${{ secrets.AZURE_TRUSTED_SIGNING_ENDPOINT }}
+          AZURE_TRUSTED_SIGNING_ACCOUNT: ${{ secrets.AZURE_TRUSTED_SIGNING_ACCOUNT }}
+          AZURE_TRUSTED_SIGNING_PROFILE: ${{ secrets.AZURE_TRUSTED_SIGNING_PROFILE }}
+          AZURE_TRUSTED_SIGNING_DLIB: ${{ secrets.AZURE_TRUSTED_SIGNING_DLIB }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          WINDOWS_CERT_PFX_BASE64: ${{ secrets.WINDOWS_CERT_PFX_BASE64 }}
+          WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+        run: |
+          & installer\windows\sign_windows.ps1 -Files `
+            "target\${{ matrix.target }}\release\iris.exe", `
+            "target\${{ matrix.target }}\release\iris_ui_host.dll"
+
+      - name: Sign macOS binaries (optional)
+        if: matrix.os == 'macos-latest'
+        shell: bash
+        env:
+          APPLE_CERT_P12_BASE64: ${{ secrets.APPLE_CERT_P12_BASE64 }}
+          APPLE_CERT_PASSWORD: ${{ secrets.APPLE_CERT_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: |
+          mkdir -p macos-sign-stage
+          cp -a "target/${{ matrix.target }}/release/iris" macos-sign-stage/
+          if [[ -f "target/${{ matrix.target }}/release/libiris_ui_host.dylib" ]]; then
+            cp -a "target/${{ matrix.target }}/release/libiris_ui_host.dylib" macos-sign-stage/
+          fi
+          chmod +x installer/macos/sign_and_notarize.sh
+          bash installer/macos/sign_and_notarize.sh sign-binaries macos-sign-stage
+          cp -a macos-sign-stage/* "target/${{ matrix.target }}/release/"
+          rm -rf macos-sign-stage
+          if [[ -d "toolchain" ]]; then
+            bash installer/macos/sign_and_notarize.sh sign-binaries toolchain
+          fi
+
       - name: Prepare artifact
         shell: bash
         run: |
@@ -245,13 +311,27 @@ jobs:
           ARCHIVE="iris-${TAG}-${{ matrix.target }}"
           LIGHT_ARCHIVE="iris-${TAG}-${{ matrix.target }}-lightweight"
 
-          # 1. Stage lightweight assets
-          mkdir -p staging-light
-          cp "target/${{ matrix.target }}/release/${BIN}" staging-light/
-          cp -r stdlib staging-light/ 2>/dev/null || true
+          # 1. Stage lightweight assets (relocatable bin/ + share/iris/ layout)
+          mkdir -p staging-light/bin staging-light/share/iris
+          cp "target/${{ matrix.target }}/release/${BIN}" staging-light/bin/
+          for ui_lib in iris_ui_host.dll libiris_ui_host.so libiris_ui_host.dylib; do
+            if [[ -f "target/${{ matrix.target }}/release/${ui_lib}" ]]; then
+              cp "target/${{ matrix.target }}/release/${ui_lib}" staging-light/bin/
+            fi
+          done
+          if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
+            for vc in VCRUNTIME140.dll VCRUNTIME140_1.dll MSVCP140.dll; do
+              if [[ -f "C:/Windows/System32/$vc" ]]; then
+                cp "C:/Windows/System32/$vc" staging-light/bin/
+              fi
+            done
+          fi
           cp -r examples staging-light/ 2>/dev/null || true
           cp LICENSE staging-light/
           cp LLVM_VERSION staging-light/
+          cp LLVM_VERSION staging-light/share/iris/
+          if [[ -f installer/icon.png ]]; then cp installer/icon.png staging-light/share/iris/iris.png; fi
+          if [[ -f installer/icon.ico ]]; then cp installer/icon.ico staging-light/share/iris/iris.ico; fi
 
           # 2. Stage full assets (with bundled toolchain if present)
           mkdir -p staging
@@ -404,6 +484,16 @@ jobs:
           cp "$BIN" "target/release/"
           chmod +x "target/release/iris" 2>/dev/null || true
 
+          # Copy bundled UI host library if present
+          for ui_name in iris_ui_host.dll libiris_ui_host.so libiris_ui_host.dylib; do
+            UI_FOUND=$(find extracted -name "$ui_name" -type f | head -1 || true)
+            if [ -n "$UI_FOUND" ]; then
+              cp "$UI_FOUND" "target/release/"
+              chmod 755 "target/release/$ui_name" 2>/dev/null || true
+              echo "  Copied $ui_name -> target/release/"
+            fi
+          done
+
           # Extract the bundled LLVM toolchain so installer scripts can package it.
           if [[ -d "extracted/toolchain" ]]; then
             cp -r extracted/toolchain toolchain
@@ -433,16 +523,63 @@ jobs:
       # ── macOS .pkg ──
       - name: Build .pkg installer
         if: matrix.format == 'pkg'
+        env:
+          APPLE_CERT_P12_BASE64: ${{ secrets.APPLE_CERT_P12_BASE64 }}
+          APPLE_CERT_PASSWORD: ${{ secrets.APPLE_CERT_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
         run: |
           chmod +x installer/macos/build-pkg.sh
           bash installer/macos/build-pkg.sh --version "$VERSION"
 
+      - name: Sign & notarize .pkg (optional)
+        if: matrix.format == 'pkg'
+        shell: bash
+        env:
+          APPLE_CERT_P12_BASE64: ${{ secrets.APPLE_CERT_P12_BASE64 }}
+          APPLE_CERT_PASSWORD: ${{ secrets.APPLE_CERT_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_INSTALLER_IDENTITY: ${{ secrets.APPLE_INSTALLER_IDENTITY }}
+          APPLE_NOTARY_KEY_BASE64: ${{ secrets.APPLE_NOTARY_KEY_BASE64 }}
+          APPLE_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
+          APPLE_NOTARY_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          chmod +x installer/macos/sign_and_notarize.sh
+          for pkg in installer/dist/*.pkg; do
+            [[ -f "$pkg" ]] && bash installer/macos/sign_and_notarize.sh notarize-installer "$pkg"
+          done
+
       # ── macOS .dmg ──
       - name: Build .dmg image
         if: matrix.format == 'dmg'
+        env:
+          APPLE_CERT_P12_BASE64: ${{ secrets.APPLE_CERT_P12_BASE64 }}
+          APPLE_CERT_PASSWORD: ${{ secrets.APPLE_CERT_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
         run: |
           chmod +x installer/macos/build-dmg.sh
           bash installer/macos/build-dmg.sh --version "$VERSION"
+
+      - name: Sign & notarize .dmg (optional)
+        if: matrix.format == 'dmg'
+        shell: bash
+        env:
+          APPLE_CERT_P12_BASE64: ${{ secrets.APPLE_CERT_P12_BASE64 }}
+          APPLE_CERT_PASSWORD: ${{ secrets.APPLE_CERT_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_NOTARY_KEY_BASE64: ${{ secrets.APPLE_NOTARY_KEY_BASE64 }}
+          APPLE_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
+          APPLE_NOTARY_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          chmod +x installer/macos/sign_and_notarize.sh
+          for dmg in installer/dist/*.dmg; do
+            [[ -f "$dmg" ]] && bash installer/macos/sign_and_notarize.sh notarize-installer "$dmg"
+          done
 
       # ── Windows portable .zip ──
       - name: Build portable .zip
@@ -459,6 +596,25 @@ jobs:
         run: |
           & installer\build_installer.ps1 `
             -Version $env:VERSION -SkipBuild
+
+      - name: Sign Windows .exe installer (optional)
+        if: matrix.format == 'installer'
+        shell: pwsh
+        env:
+          AZURE_TRUSTED_SIGNING_ENDPOINT: ${{ secrets.AZURE_TRUSTED_SIGNING_ENDPOINT }}
+          AZURE_TRUSTED_SIGNING_ACCOUNT: ${{ secrets.AZURE_TRUSTED_SIGNING_ACCOUNT }}
+          AZURE_TRUSTED_SIGNING_PROFILE: ${{ secrets.AZURE_TRUSTED_SIGNING_PROFILE }}
+          AZURE_TRUSTED_SIGNING_DLIB: ${{ secrets.AZURE_TRUSTED_SIGNING_DLIB }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          WINDOWS_CERT_PFX_BASE64: ${{ secrets.WINDOWS_CERT_PFX_BASE64 }}
+          WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+        run: |
+          $exes = @(Get-ChildItem installer\dist\*.exe -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName })
+          if ($exes.Count -gt 0) {
+            & installer\windows\sign_windows.ps1 -Files $exes
+          }
 
       - name: Collect installer output
         shell: bash
@@ -569,14 +725,14 @@ jobs:
             echo "code --install-extension iris-lang-*.vsix"
             echo "\`\`\`"
             echo ""
-            echo "### One-line install (downloads latest)"
-            echo "**Linux:**"
+            echo "### One-line install (downloads latest + bundled LLVM toolchain & UI host)"
+            echo "**Linux & macOS:**"
             echo "\`\`\`bash"
-            echo "curl -fsSL https://raw.githubusercontent.com/moon9t/iris/${TAG}/installer/linux/install.sh | bash"
+            echo "curl -fsSL https://raw.githubusercontent.com/Eclipse-Softworks/IRIS/${TAG}/installer/install.sh | bash"
             echo "\`\`\`"
-            echo "**macOS:**"
-            echo "\`\`\`bash"
-            echo "curl -fsSL https://raw.githubusercontent.com/moon9t/iris/${TAG}/installer/macos/install.sh | bash"
+            echo "**Windows (PowerShell):**"
+            echo "\`\`\`powershell"
+            echo "irm https://raw.githubusercontent.com/Eclipse-Softworks/IRIS/${TAG}/installer/install.ps1 | iex"
             echo "\`\`\`"
             echo ""
             echo "### Verify integrity"
@@ -588,9 +744,10 @@ jobs:
             echo "### Quick start"
             echo "\`\`\`"
             echo "iris --version"
+            echo "iris doctor"
             echo "\`\`\`"
             echo ""
-            echo "Full changelog: https://github.com/moon9t/iris/compare/...${TAG}"
+            echo "Full changelog: https://github.com/Eclipse-Softworks/IRIS/compare/...${TAG}"
           } > release_body.md
 
       - name: Generate artifact attestations
@@ -615,3 +772,174 @@ jobs:
           generate_release_notes: true
           draft: false
           prerelease: false
+
+      - name: Upload SHA256SUMS artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sha256sums
+          path: release-files/SHA256SUMS.txt
+
+  # ─────────────────────── Post-Release Publishing ─────────────────────────
+  publish-extension:
+    name: Publish VS Code Extension (Marketplace & Open VSX)
+    needs: [release]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Download VSIX artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: vsix
+          path: vsix
+
+      - name: Publish to VS Code Marketplace (optional)
+        shell: bash
+        env:
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+        run: |
+          if [[ -z "${VSCE_PAT:-}" ]]; then
+            echo "[skip] VSCE_PAT not configured."
+            exit 0
+          fi
+          VSIX_FILE="$(ls vsix/*.vsix | head -1)"
+          npx --yes @vscode/vsce publish --packagePath "$VSIX_FILE" -p "$VSCE_PAT"
+
+      - name: Publish to Open VSX (optional)
+        shell: bash
+        env:
+          OVSX_PAT: ${{ secrets.OVSX_PAT }}
+        run: |
+          if [[ -z "${OVSX_PAT:-}" ]]; then
+            echo "[skip] OVSX_PAT not configured."
+            exit 0
+          fi
+          VSIX_FILE="$(ls vsix/*.vsix | head -1)"
+          npx --yes ovsx publish "$VSIX_FILE" -p "$OVSX_PAT"
+
+  publish-package-managers:
+    name: Generate & Publish Package Manager Manifests
+    needs: [release]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download SHA256SUMS artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: sha256sums
+          path: sums
+
+      - name: Generate & validate manifests
+        shell: bash
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          VERSION="${TAG#v}"
+          echo "VERSION=${VERSION}" >> "$GITHUB_ENV"
+          echo "TAG=${TAG}" >> "$GITHUB_ENV"
+          python3 -c 'import yaml' 2>/dev/null || python3 -m pip install --quiet pyyaml
+          python3 packaging/generate_manifests.py \
+            --version "$VERSION" \
+            --sums sums/SHA256SUMS.txt \
+            --out dist-manifests \
+            --check
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: package-manifests
+          path: dist-manifests
+
+      - name: Publish Homebrew formula (optional)
+        shell: bash
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          if [[ -z "${HOMEBREW_TAP_TOKEN:-}" ]]; then
+            echo "[skip] HOMEBREW_TAP_TOKEN not configured."
+            exit 0
+          fi
+          git clone "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/Eclipse-Softworks/homebrew-tap.git" tap-repo
+          mkdir -p tap-repo/Formula
+          cp dist-manifests/homebrew/iris.rb tap-repo/Formula/iris.rb
+          cd tap-repo
+          git config user.name "iris-release-bot"
+          git config user.email "release-bot@eclipsesoftworks.dev"
+          git add Formula/iris.rb
+          git diff --cached --quiet || (git commit -m "iris ${TAG}" && git push origin HEAD)
+
+      - name: Publish Scoop manifest (optional)
+        shell: bash
+        env:
+          SCOOP_BUCKET_TOKEN: ${{ secrets.SCOOP_BUCKET_TOKEN }}
+        run: |
+          if [[ -z "${SCOOP_BUCKET_TOKEN:-}" ]]; then
+            echo "[skip] SCOOP_BUCKET_TOKEN not configured."
+            exit 0
+          fi
+          git clone "https://x-access-token:${SCOOP_BUCKET_TOKEN}@github.com/Eclipse-Softworks/scoop-bucket.git" scoop-repo
+          mkdir -p scoop-repo/bucket
+          cp dist-manifests/scoop/iris.json scoop-repo/bucket/iris.json
+          cd scoop-repo
+          git config user.name "iris-release-bot"
+          git config user.email "release-bot@eclipsesoftworks.dev"
+          git add bucket/iris.json
+          git diff --cached --quiet || (git commit -m "iris: Update to version ${VERSION}" && git push origin HEAD)
+
+      - name: Check Winget publish configuration
+        id: winget-cfg
+        shell: bash
+        env:
+          WINGET_TOKEN: ${{ secrets.WINGET_TOKEN }}
+        run: |
+          if [[ -n "${WINGET_TOKEN:-}" ]]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "[skip] WINGET_TOKEN not configured."
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Submit Winget PR (optional)
+        if: steps.winget-cfg.outputs.enabled == 'true'
+        uses: vedantmgoyal9/winget-releaser@main
+        with:
+          identifier: EclipseSoftworks.IRIS
+          installers-regex: '\.exe$'
+          token: ${{ secrets.WINGET_TOKEN }}
+
+  publish-linux-repos:
+    name: Build Static APT & RPM Repositories
+    needs: [release]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download Linux installer packages
+        uses: actions/download-artifact@v4
+        with:
+          pattern: installer-linux-*
+          path: linux-pkgs
+
+      - name: Install repository tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y dpkg-dev apt-utils createrepo-c gnupg
+
+      - name: Build APT & RPM repositories
+        shell: bash
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+          GPG_KEY_ID: ${{ secrets.GPG_KEY_ID }}
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+        run: |
+          if [[ -n "${GPG_PRIVATE_KEY:-}" && -n "${GPG_KEY_ID:-}" ]]; then
+            echo "$GPG_PRIVATE_KEY" | gpg --batch --import
+          fi
+          chmod +x packaging/linux-repo/build-repos.sh
+          bash packaging/linux-repo/build-repos.sh linux-pkgs linux-repo-out
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-apt-rpm-repo
+          path: linux-repo-out

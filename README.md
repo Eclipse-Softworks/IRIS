@@ -1,10 +1,10 @@
 # IRIS
 
-**Intermediate Representation for Intelligent Systems** — Version `1.0.0-rc2`
+**Intermediate Representation for Intelligent Systems** — Version `1.0.0-rc3`
 
-[![License: GPL v2+](https://img.shields.io/badge/License-GPL%20v2%2B-blue.svg)](LICENSE)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![Compiler](https://img.shields.io/badge/compiler-LLVM%2023.1.1%20%2B%20SSA%20IR-blueviolet.svg)](docs/REQUIREMENTS.md)
-[![VS Code Extension](https://img.shields.io/badge/vscode--iris-1.0.9-007ACC.svg)](vscode-iris/README.md)
+[![VS Code Extension](https://img.shields.io/badge/vscode--iris-1.0.10-007ACC.svg)](vscode-iris/README.md)
 
 IRIS is a statically typed, dual-backend programming language designed to build, train, verify, deploy, and safely evolve intelligent, concurrent, and cyber-physical software inside a single toolchain.
 
@@ -76,6 +76,45 @@ Import any standard library module with `bring std.<module>`. Full API details a
 ---
 
 ## Quick Start
+
+### Installing Prebuilt Toolchains
+
+Install the self-contained compiler, `iris_ui_host`, bundled LLVM `23.1.1` toolchain, and shell completions into `~/.iris` (no `sudo` or admin required):
+
+**Linux & macOS:**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Eclipse-Softworks/IRIS/main/installer/install.sh | bash
+```
+
+**Windows (PowerShell):**
+
+```powershell
+irm https://raw.githubusercontent.com/Eclipse-Softworks/IRIS/main/installer/install.ps1 | iex
+```
+
+**Package Managers:**
+
+```bash
+# Homebrew (macOS / Linux)
+brew install eclipse-softworks/tap/iris
+```
+
+```powershell
+# Windows (Winget / Scoop)
+winget install EclipseSoftworks.IRIS
+scoop bucket add iris https://github.com/Eclipse-Softworks/scoop-bucket
+scoop install iris
+```
+
+Verify everything on your machine or install optional components (`wasm`, `ml`, `vscode`, `ui`, `toolchain`):
+
+```bash
+iris doctor             # verify runtime, clang, lld, LLVM-C, sysroot, and UI host
+iris doctor --fix       # auto-install any missing required components
+iris setup list         # inspect optional components (iris setup all)
+iris completions zsh    # bash | zsh | fish | powershell
+```
 
 ### Prerequisites & Building from Source
 
@@ -245,4 +284,4 @@ cargo clippy --all-targets -- -D warnings
 ## Contributing & License
 
 See [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md) and [docs/CODE_OF_CONDUCT.md](docs/CODE_OF_CONDUCT.md).
-IRIS is licensed under the **GNU General Public License v2.0 or later** ([LICENSE](LICENSE)).
+IRIS is licensed under the **Apache License 2.0** ([LICENSE](LICENSE)).

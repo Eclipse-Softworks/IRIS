@@ -2,7 +2,7 @@
   "name": "iris-lang",
   "displayName": "IRIS Language",
   "description": "Complete IRIS RC2 developer experience: language server, formatter, Test Explorer, debugger, safety diagnostics, and REPL",
-  "version": "1.0.9",
+  "version": "1.0.10",
   "publisher": "iris-lang",
   "engines": {
     "vscode": "^1.85.0"
@@ -29,7 +29,7 @@
     "theme": "dark"
   },
   "icon": "icon.png",
-  "license": "GPL-2.0-or-later",
+  "license": "Apache-2.0",
   "repository": {
     "type": "git",
     "url": "https://github.com/Eclipse-Softworks/IRIS.git"
@@ -227,9 +227,15 @@
               "run",
               "build",
               "build-debug",
-              "test"
+              "build-gui",
+              "bundle",
+              "check",
+              "test",
+              "bench",
+              "profile",
+              "doctor"
             ],
-            "description": "The IRIS command to run: run, build, build-debug (native binary with DWARF debug info), or test."
+            "description": "The IRIS command to run: run, build, build-debug, build-gui, bundle, check, test, bench, profile, or doctor."
           }
         }
       }
@@ -357,6 +363,56 @@
         "command": "iris.diagnostics",
         "title": "IRIS: Diagnose Toolchain",
         "icon": "$(tools)"
+      },
+      {
+        "command": "iris.buildGui",
+        "title": "IRIS: Build GUI Binary",
+        "icon": "$(window)"
+      },
+      {
+        "command": "iris.bundleApp",
+        "title": "IRIS: Bundle Standalone Application...",
+        "icon": "$(archive)"
+      },
+      {
+        "command": "iris.newProject",
+        "title": "IRIS: New Project from Template...",
+        "icon": "$(new-folder)"
+      },
+      {
+        "command": "iris.checkWorkspace",
+        "title": "IRIS: Check Project",
+        "icon": "$(check-all)"
+      },
+      {
+        "command": "iris.watchFile",
+        "title": "IRIS: Watch File...",
+        "icon": "$(eye)"
+      },
+      {
+        "command": "iris.doctor",
+        "title": "IRIS: Run Toolchain Doctor",
+        "icon": "$(heart)"
+      },
+      {
+        "command": "iris.profileFile",
+        "title": "IRIS: Profile File",
+        "icon": "$(flame)"
+      },
+      {
+        "command": "iris.buildEmbedded",
+        "title": "IRIS: Build Embedded Bundle...",
+        "icon": "$(circuit-board)"
+      },
+      {
+        "command": "iris.bindgen",
+        "title": "IRIS: Generate FFI Bindings...",
+        "icon": "$(plug)"
+      },
+      {
+        "command": "iris.bugReport",
+        "title": "IRIS: Collect Bug Report",
+        "icon": "$(bug)"
       }
     ],
     "menus": {
@@ -455,6 +511,41 @@
         },
         {
           "command": "iris.diagnostics"
+        },
+        {
+          "command": "iris.buildGui",
+          "when": "resourceExtname == .iris"
+        },
+        {
+          "command": "iris.bundleApp"
+        },
+        {
+          "command": "iris.newProject"
+        },
+        {
+          "command": "iris.checkWorkspace"
+        },
+        {
+          "command": "iris.watchFile",
+          "when": "resourceExtname == .iris"
+        },
+        {
+          "command": "iris.doctor"
+        },
+        {
+          "command": "iris.profileFile",
+          "when": "resourceExtname == .iris"
+        },
+        {
+          "command": "iris.buildEmbedded",
+          "when": "resourceExtname == .iris"
+        },
+        {
+          "command": "iris.bindgen"
+        },
+        {
+          "command": "iris.bugReport",
+          "when": "resourceExtname == .iris"
         }
       ]
     },
@@ -569,6 +660,30 @@
           "default": "",
           "description": "Target preset or triple used by IRIS: Build Binary (e.g. linux-arm64). Empty means the host target.",
           "scope": "machine-overridable"
+        },
+        "iris.simd": {
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "Pass `--simd` to compile element-wise `par for` loops as explicit AVX2/NEON vector kernels and enable LLVM loop vectorization."
+        },
+        "iris.gpu": {
+          "type": "string",
+          "enum": [
+            "",
+            "cuda"
+          ],
+          "default": "",
+          "markdownDescription": "Pass `--gpu <api>` to offload numeric/tensor `par for` loops (currently `cuda` or empty to disable)."
+        },
+        "iris.build.gui": {
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "Pass `--gui` on **IRIS: Build Binary** so desktop applications link with the Windows GUI subsystem (no console window)."
+        },
+        "iris.bundle.release": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Prefer release-built `iris_ui_host` when running **IRIS: Bundle Standalone Application...**."
         }
       }
     },

@@ -13,6 +13,16 @@
       <item>continue</item>
       <item>return</item>
       <item>in</item>
+      <item>match</item>
+      <item>by</item>
+      <item>defer</item>
+      <item>yield</item>
+      <item>try</item>
+      <item>catch</item>
+      <item>raise</item>
+      <item>handle</item>
+      <item>resume</item>
+      <item>select</item>
     </list>
     <list name="keywords">
       <item>val</item>
@@ -40,6 +50,17 @@
       <item>and</item>
       <item>or</item>
       <item>not</item>
+      <item>let</item>
+      <item>mut</item>
+      <item>effect</item>
+      <item>with</item>
+      <item>dyn</item>
+      <item>move</item>
+      <item>unsafe</item>
+      <item>defmacro</item>
+      <item>mod</item>
+      <item>self</item>
+      <item>Self</item>
     </list>
     <list name="types">
       <item>i64</item>
@@ -66,6 +87,9 @@
       <item>deque</item>
       <item>bitset</item>
       <item>mutex</item>
+      <item>task</item>
+      <item>task_group</item>
+      <item>weak_ref</item>
     </list>
     <list name="constants">
       <item>true</item>
@@ -196,7 +220,6 @@
       <item>recv</item>
       <item>chan_try_recv</item>
       <item>chan_len</item>
-      <item>select</item>
       <item>timeout</item>
       <item>thread_count</item>
       <!-- Deque builtins -->
@@ -287,32 +310,142 @@
       <item>sha256</item>
       <item>hex_encode</item>
       <item>hex_decode</item>
+      <!-- Additional compiler & runtime builtins -->
+      <item>println</item>
+      <item>eprintln</item>
+      <item>args</item>
+      <item>exit</item>
+      <item>to_f64</item>
+      <item>wrapping_add</item>
+      <item>wrapping_sub</item>
+      <item>wrapping_mul</item>
+      <item>is_none</item>
+      <item>unwrap</item>
+      <item>unwrap_or</item>
+      <item>unwrap_err</item>
+      <item>list</item>
+      <item>list_new</item>
+      <item>list_push</item>
+      <item>list_concat</item>
+      <item>list_insert</item>
+      <item>list_remove</item>
+      <item>list_sort</item>
+      <item>map</item>
+      <item>map_new</item>
+      <item>map_entries</item>
+      <item>array_to_list</item>
+      <item>str_replace</item>
+      <item>sign</item>
+      <item>nnz</item>
+      <item>par_map</item>
+      <item>tape</item>
+      <item>backward</item>
+      <item>atomic_new</item>
+      <item>mutex_new</item>
+      <item>mutex_lock</item>
+      <item>mutex_unlock</item>
+      <item>barrier</item>
+      <item>chan_send</item>
+      <item>recv_timeout</item>
+      <item>task_group</item>
+      <item>task_group_join</item>
+      <item>task_group_cancel</item>
+      <item>cancellation_requested</item>
+      <item>transaction_begin</item>
+      <item>transaction_commit</item>
+      <item>transaction_rollback</item>
+      <item>transaction_depth</item>
+      <item>weak_ref</item>
+      <item>weak_upgrade</item>
+      <item>weak_alive</item>
+      <item>gc_stats</item>
+      <item>gc_collect</item>
+      <item>arange</item>
+      <item>matmul</item>
+      <item>mse_loss</item>
+      <item>cross_entropy</item>
+      <item>sgd_step</item>
+      <item>list_mean</item>
+      <item>list_std</item>
+      <item>list_norm</item>
+      <item>list_dot</item>
+      <item>list_add</item>
+      <item>list_sub</item>
+      <item>list_mul_elem</item>
+      <item>list_scale</item>
+      <item>list_relu</item>
+      <item>list_sigmoid</item>
+      <item>list_softmax</item>
+      <item>list_axpy</item>
+      <item>dtensor</item>
+      <item>dtensor_tape</item>
+      <item>dtensor_add</item>
+      <item>dtensor_sub</item>
+      <item>dtensor_mul</item>
+      <item>dtensor_div</item>
+      <item>dtensor_matmul</item>
+      <item>dtensor_relu</item>
+      <item>dtensor_sigmoid</item>
+      <item>dtensor_tanh</item>
+      <item>dtensor_sum</item>
+      <item>dtensor_grad</item>
+      <item>dtensor_backward</item>
+      <item>dtensor_item</item>
+      <item>dtensor_to_list</item>
+      <item>reflect_eval</item>
+      <item>reflect_eval_i64</item>
+      <item>reflect_validate</item>
+      <item>reflect_available</item>
+      <item>iris_eval</item>
+      <item>iris_eval_i64</item>
+      <item>iris_validate</item>
+      <item>iris_reflection_available</item>
+      <item>async_sleep</item>
+      <item>async_yield</item>
+      <item>async_readable</item>
+      <item>async_writable</item>
+      <item>async_any</item>
+      <item>task_done</item>
+      <item>task_cancel</item>
+      <item>task_cancelled</item>
+      <item>tcp_connect_async</item>
+      <item>tcp_write_async</item>
+      <item>http_get_async</item>
+      <item>regex_replace_all</item>
     </list>
 
     <contexts>
       <context name="Normal" attribute="Normal Text" lineEndContext="#stay">
+        <RegExpr attribute="Preprocessor" String="^\s*#\s*(?:define|undef|ifdef|ifndef|if|elif|else|endif|error|warning)\b.*$" context="#stay"/>
         <keyword attribute="Control Flow" String="controlflow" context="#stay"/>
         <keyword attribute="Keyword" String="keywords" context="#stay"/>
         <keyword attribute="Data Type" String="types" context="#stay"/>
         <keyword attribute="Constant" String="constants" context="#stay"/>
         <keyword attribute="Builtin" String="builtins" context="#stay"/>
-        
+        <RegExpr attribute="Macro" String="\b[a-zA-Z_][a-zA-Z0-9_]*!" context="#stay"/>
+
         <!-- Numbers -->
         <RegExpr attribute="Float" String="\b[0-9]+\.[0-9]+([eE][+-]?[0-9]+)?\b" context="#stay"/>
         <RegExpr attribute="Hex" String="\b0x[0-9a-fA-F]+\b" context="#stay"/>
         <RegExpr attribute="Integer" String="\b[0-9]+\b" context="#stay"/>
 
-        <!-- Strings -->
-        <DetectChar attribute="String" char="&quot;" context="String"/>
+        <!-- Character and String Literals -->
+        <RegExpr attribute="Char" String="'([^'\\]|\\.)'" context="#stay"/>
         <Detect2Chars attribute="String" char="f" char1="&quot;" context="FString"/>
+        <DetectChar attribute="String" char="&quot;" context="String"/>
 
         <!-- Comments -->
+        <RegExpr attribute="DocComment" String="///.*$" context="#stay"/>
         <Detect2Chars attribute="Comment" char="/" char1="/" context="CommentLine"/>
         <Detect2Chars attribute="Comment" char="/" char1="*" context="CommentBlock"/>
 
         <!-- Operators -->
-        <AnyChar attribute="Operator" String="+-*/%=&lt;&gt;!&amp;|?." context="#stay"/>
+        <StringDetect attribute="Operator" String="..=" context="#stay"/>
+        <StringDetect attribute="Operator" String="??" context="#stay"/>
+        <StringDetect attribute="Operator" String="::" context="#stay"/>
         <Detect2Chars attribute="Operator" char="-" char1="&gt;" context="#stay"/>
+        <Detect2Chars attribute="Operator" char="=" char1="&gt;" context="#stay"/>
+        <AnyChar attribute="Operator" String="+-*/%=&lt;&gt;!&amp;|?.@" context="#stay"/>
       </context>
 
       <context name="CommentLine" attribute="Comment" lineEndContext="#pop">
@@ -351,8 +484,12 @@
       <itemData name="String" defStyleNum="dsString"/>
       <itemData name="Escape" defStyleNum="dsSpecialChar"/>
       <itemData name="Comment" defStyleNum="dsComment"/>
+      <itemData name="DocComment" defStyleNum="dsDocumentation"/>
       <itemData name="Operator" defStyleNum="dsOperator"/>
       <itemData name="Brace" defStyleNum="dsControlFlow"/>
+      <itemData name="Preprocessor" defStyleNum="dsPreprocessor"/>
+      <itemData name="Char" defStyleNum="dsChar"/>
+      <itemData name="Macro" defStyleNum="dsExtension"/>
     </itemDatas>
   </highlighting>
 </language>

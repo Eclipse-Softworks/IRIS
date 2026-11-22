@@ -34,6 +34,7 @@ pub mod cache;
 pub mod cli;
 pub mod codegen;
 pub mod compiler;
+pub mod completions;
 pub mod dap;
 mod dap_native;
 pub mod debugger;

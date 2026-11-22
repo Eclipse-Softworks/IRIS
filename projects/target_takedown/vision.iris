@@ -1,0 +1,953 @@
+// Real-time CV target detection, adaptive background modeling, alpha-beta velocity
+// prediction, lock-on state machine, and synthetic camera bogey simulation.
+
+bring std.ffi
+bring std.math
+bring std.ui
+
+pub const GRID_W: i64 = 64
+pub const GRID_H: i64 = 36
+
+/// Computer-vision detection pipeline mode.
+pub choice DetectMode {
+    Motion,
+    SalientColor,
+    Hybrid,
+}
+
+/// Engagement lifecycle state of a tracked target.
+pub choice TargetStatus {
+    Acquired,
+    Tracking,
+    Locked,
+    Engaging,
+    Neutralized,
+}
+
+/// Pre-allocated FFI byte scratch buffers reused every frame outside `ui_frame_pool`.
+pub record VisionWorkspace {
+    grid_cell: i64 = 0,
+    bg_cell: i64 = 0,
+    sal_cell: i64 = 0,
+    bg_ready: bool = false,
+}
+
+/// Active CV parameters adjusted from the tactical control panel.
+pub record VisionConfig {
+    mode: DetectMode = DetectMode.Hybrid,
+    sensitivity: f64 = 0.68,
+    lock_speed: f64 = 1.0,
+    auto_engage: bool = true,
+    dt: f64 = 0.033,
+}
+
+/// Single frame cluster detection produced by the `8x6` block detector.
+pub record Detection {
+    nx: f64 = 0.5,
+    ny: f64 = 0.5,
+    nw: f64 = 0.08,
+    nh: f64 = 0.10,
+    score: f64 = 0.0,
+    sim_slot: i64 = -1,
+}
+
+/// Persistent multi-frame tracked target with lead prediction and lock-on progress.
+pub record TrackedTarget {
+    id: i64 = 1,
+    status: TargetStatus = TargetStatus.Acquired,
+    nx: f64 = 0.5,
+    ny: f64 = 0.5,
+    nw: f64 = 0.09,
+    nh: f64 = 0.12,
+    vx: f64 = 0.0,
+    vy: f64 = 0.0,
+    lead_nx: f64 = 0.5,
+    lead_ny: f64 = 0.5,
+    confidence: f64 = 0.5,
+    lock_progress: f64 = 0.0,
+    engage_timer: f64 = 0.0,
+    neutralize_timer: f64 = 0.0,
+    missed: i64 = 0,
+    sim_slot: i64 = -1,
+}
+
+/// Autonomous patrol bogey injected when running in synthetic tactical camera mode.
+pub record SimBogey {
+    slot: i64 = 0,
+    nx: f64 = 0.3,
+    ny: f64 = 0.4,
+    vx: f64 = 0.18,
+    vy: f64 = 0.11,
+    radius: f64 = 0.055,
+    alive: bool = true,
+    hit_flash: i64 = 0,
+    respawn_timer: f64 = 0.0,
+}
+
+/// Aggregate mission and CV performance counters displayed on the HUD and dashboard.
+pub record VisionStats {
+    active_count: i64 = 0,
+    primary_id: i64 = -1,
+    next_track_id: i64 = 1,
+    neutralized_total: i64 = 0,
+    shots_fired: i64 = 0,
+    motion_energy: f64 = 0.0,
+    hit_flash_hud: f64 = 0.0,
+}
+
+/// Allocate persistent FFI buffers (`64x36` RGBA, background luma, salience map).
+pub def vision_workspace_new() -> VisionWorkspace effect ffi, alloc {
+    return VisionWorkspace {
+        grid_cell: out_new(GRID_W * GRID_H * 4),
+        bg_cell: out_new(GRID_W * GRID_H),
+        sal_cell: out_new(GRID_W * GRID_H),
+        bg_ready: false,
+    }
+}
+
+/// Release persistent FFI scratch buffers.
+pub def vision_workspace_free(ws: VisionWorkspace) -> i64 effect ffi {
+    val _f1 = out_free(ws.grid_cell)
+    val _f2 = out_free(ws.bg_cell)
+    val _f3 = out_free(ws.sal_cell)
+    return 0
+}
+
+/// Create initial patrol bogeys for synthetic camera mode.
+pub def init_sim_bogeys() -> list<SimBogey> effect alloc {
+    return list(
+        SimBogey {
+            slot: 0,
+            nx: 0.30,
+            ny: 0.36,
+            vx: 0.17,
+            vy: 0.10,
+            radius: 0.058,
+            alive: true,
+        },
+        SimBogey {
+            slot: 1,
+            nx: 0.72,
+            ny: 0.62,
+            vx: -0.14,
+            vy: -0.12,
+            radius: 0.052,
+            alive: true,
+        },
+        SimBogey {
+            slot: 2,
+            nx: 0.48,
+            ny: 0.72,
+            vx: 0.12,
+            vy: -0.09,
+            radius: 0.048,
+            alive: true,
+        },
+    )
+}
+
+def clamp_unit(v: f64, lo: f64, hi: f64) -> f64 {
+    if v < lo {
+        return lo
+    }
+    if v > hi {
+        return hi
+    }
+    return v
+}
+
+def step_one_bogey(b: SimBogey, dt: f64) -> SimBogey {
+    val flash = if b.hit_flash > 18 { b.hit_flash - 18 } else { 0 }
+    if !b.alive {
+        val rem = b.respawn_timer - dt
+        if rem <= 0.0 {
+            val slot_f = to_f64(b.slot + 1)
+            val spawn_x = 0.22 + to_f64((b.slot * 23 + 17) % 55) * 0.01
+            val spawn_y = 0.24 + to_f64((b.slot * 31 + 11) % 50) * 0.01
+            return SimBogey {
+                slot: b.slot,
+                nx: spawn_x,
+                ny: spawn_y,
+                vx: if b.vx >= 0.0 { -0.15 - slot_f * 0.02 } else { 0.16 + slot_f * 0.02 },
+                vy: if b.vy >= 0.0 { -0.10 } else { 0.11 },
+                radius: b.radius,
+                alive: true,
+                hit_flash: 0,
+                respawn_timer: 0.0,
+            }
+        }
+        return SimBogey {
+            slot: b.slot,
+            nx: b.nx,
+            ny: b.ny,
+            vx: b.vx,
+            vy: b.vy,
+            radius: b.radius,
+            alive: false,
+            hit_flash: flash,
+            respawn_timer: rem,
+        }
+    }
+    var nx = b.nx + b.vx * dt
+    var ny = b.ny + b.vy * dt
+    var vx = b.vx
+    var vy = b.vy
+    if nx < 0.14 || nx > 0.86 {
+        vx = 0.0 - vx
+        nx = clamp_unit(nx, 0.14, 0.86)
+    }
+    if ny < 0.18 || ny > 0.82 {
+        vy = 0.0 - vy
+        ny = clamp_unit(ny, 0.18, 0.82)
+    }
+    return SimBogey {
+        slot: b.slot,
+        nx: nx,
+        ny: ny,
+        vx: vx,
+        vy: vy,
+        radius: b.radius,
+        alive: true,
+        hit_flash: flash,
+        respawn_timer: 0.0,
+    }
+}
+
+/// Advance synthetic bogeys and push their coordinates/flash into the host synthetic camera feed.
+pub def step_and_sync_bogeys(
+    lib: NativeUiLib,
+    cam_id: i64,
+    bogeys: list<SimBogey>,
+    dt: f64,
+) -> list<SimBogey> effect ffi, alloc {
+    val next: list<SimBogey> = list()
+    for i in 0..list_len(bogeys) {
+        val upd = step_one_bogey(list_get(bogeys, i), dt)
+        val _s = ui_native_camera_set_sim_target(
+            lib,
+            cam_id,
+            upd.slot,
+            upd.alive,
+            upd.hit_flash,
+            upd.nx,
+            upd.ny,
+            upd.radius,
+        )
+        list_push(next, upd)
+    }
+    return next
+}
+
+/// Mark the running background model dirty so the next frame captures a fresh reference backdrop.
+pub def vision_recalibrate(ws: VisionWorkspace) -> VisionWorkspace {
+    return VisionWorkspace {
+        grid_cell: ws.grid_cell,
+        bg_cell: ws.bg_cell,
+        sal_cell: ws.sal_cell,
+        bg_ready: false,
+    }
+}
+
+def iabs(v: i64) -> i64 {
+    if v < 0 {
+        return 0 - v
+    }
+    return v
+}
+
+def fabs_val(v: f64) -> f64 {
+    if v < 0.0 {
+        return 0.0 - v
+    }
+    return v
+}
+
+def compute_pixel_salience(r: i64, g: i64, b: i64, bg_luma: i64, mode: DetectMode) -> i64 {
+    val luma = (r * 77 + g * 150 + b * 29) / 256
+    val motion_diff = iabs(luma - bg_luma)
+    val max_rgb = if r >= g && r >= b {
+        r
+    } else if g >= b {
+        g
+    } else {
+        b
+    }
+    val min_rgb = if r <= g && r <= b {
+        r
+    } else if g <= b {
+        g
+    } else {
+        b
+    }
+    val chroma = max_rgb - min_rgb
+    val color_sal = chroma + (if luma > 135 { (luma - 135) * 2 } else { 0 })
+    val raw = when mode {
+        DetectMode.Motion => motion_diff * 3,
+        DetectMode.SalientColor => color_sal,
+        DetectMode.Hybrid => motion_diff * 2 + color_sal,
+    }
+    if raw < 0 {
+        return 0
+    }
+    if raw > 255 {
+        return 255
+    }
+    return raw
+}
+
+/// Update background luma + per-pixel salience map in FFI cells; return normalized motion energy.
+pub def update_salience_field(
+    ws: VisionWorkspace,
+    mode: DetectMode,
+) -> (VisionWorkspace, f64) effect ffi {
+    var energy_sum = 0
+    val total = GRID_W * GRID_H
+    for idx in 0..total {
+        val base = idx * 4
+        val r = out_u8(ws.grid_cell, base)
+        val g = out_u8(ws.grid_cell, base + 1)
+        val b = out_u8(ws.grid_cell, base + 2)
+        val luma = (r * 77 + g * 150 + b * 29) / 256
+        val prev_bg = if ws.bg_ready { out_u8(ws.bg_cell, idx) } else { luma }
+        val sal = compute_pixel_salience(r, g, b, prev_bg, mode)
+        val _ws = out_set_u8(ws.sal_cell, idx, sal)
+        // Adaptive slow background update, slowed on foreground pixels to prevent target ghosting.
+        val alpha = if sal > 48 { 2 } else { 14 }
+        val next_bg = (prev_bg * (256 - alpha) + luma * alpha) / 256
+        val _wb = out_set_u8(ws.bg_cell, idx, next_bg)
+        energy_sum = energy_sum + sal
+    }
+    val norm = clamp_unit(to_f64(energy_sum) / to_f64(total * 64), 0.0, 1.0)
+    val next_ws = VisionWorkspace {
+        grid_cell: ws.grid_cell,
+        bg_cell: ws.bg_cell,
+        sal_cell: ws.sal_cell,
+        bg_ready: true,
+    }
+    return (next_ws, norm)
+}
+
+def cluster_tile(
+    ws: VisionWorkspace,
+    tx: i64,
+    ty: i64,
+    threshold: i64,
+) -> option<Detection> effect ffi {
+    val x0 = tx * 8
+    val y0 = ty * 6
+    var peak = 0
+    var weight_sum = 0
+    var sx = 0
+    var sy = 0
+    for dy in 0..6 {
+        val py = y0 + dy
+        for dx in 0..8 {
+            val px = x0 + dx
+            val v = out_u8(ws.sal_cell, py * GRID_W + px)
+            if v > peak {
+                peak = v
+            }
+            if v > threshold / 2 {
+                val w = v - threshold / 2
+                weight_sum = weight_sum + w
+                sx = sx + px * w
+                sy = sy + py * w
+            }
+        }
+    }
+    if peak < threshold || weight_sum <= 0 {
+        return none
+    }
+    val cx = (to_f64(sx) / to_f64(weight_sum) + 0.5) / to_f64(GRID_W)
+    val cy = (to_f64(sy) / to_f64(weight_sum) + 0.5) / to_f64(GRID_H)
+    val score = clamp_unit(to_f64(peak) / 255.0, 0.25, 1.0)
+    return some(Detection { nx: cx, ny: cy, nw: 0.11, nh: 0.14, score: score, sim_slot: -1 })
+}
+
+def merge_detection(existing: list<Detection>, cand: Detection) -> list<Detection> effect alloc {
+    val merged: list<Detection> = list()
+    var combined = false
+    for i in 0..list_len(existing) {
+        val d = list_get(existing, i)
+        val dist = fabs_val(d.nx - cand.nx) + fabs_val(d.ny - cand.ny)
+        if !combined && dist < 0.18 {
+            val total_s = d.score + cand.score
+            val nx = (d.nx * d.score + cand.nx * cand.score) / total_s
+            val ny = (d.ny * d.score + cand.ny * cand.score) / total_s
+            val span_x = fabs_val(d.nx - cand.nx) + 0.10
+            val span_y = fabs_val(d.ny - cand.ny) + 0.13
+            val nw = clamp_unit(if span_x > d.nw { span_x } else { d.nw }, 0.08, 0.24)
+            val nh = clamp_unit(if span_y > d.nh { span_y } else { d.nh }, 0.10, 0.28)
+            val best_s = if cand.score > d.score { cand.score } else { d.score }
+            list_push(
+                merged,
+                Detection { nx: nx, ny: ny, nw: nw, nh: nh, score: best_s, sim_slot: -1 },
+            )
+            combined = true
+        } else {
+            list_push(merged, d)
+        }
+    }
+    if !combined && list_len(merged) < 6 {
+        list_push(merged, cand)
+    }
+    return merged
+}
+
+/// Extract clustered detections from `sal_cell` given sensitivity in `[0.0, 1.0]`.
+pub def extract_detections(
+    ws: VisionWorkspace,
+    sensitivity: f64,
+) -> list<Detection> effect ffi, alloc {
+    val thresh = (138.0 - sensitivity * 96.0) to i64
+    var out: list<Detection> = list()
+    for ty in 0..6 {
+        for tx in 0..8 {
+            when cluster_tile(ws, tx, ty, thresh) {
+                some(det) => {
+                    out = merge_detection(out, det)
+                },
+                none => {},
+            }
+        }
+    }
+    return out
+}
+
+def det_distance(ax: f64, ay: f64, bx: f64, by: f64) -> f64 {
+    val dx = ax - bx
+    val dy = ay - by
+    return sqrt(dx * dx + dy * dy)
+}
+
+/// Link detections in synthetic mode to active `SimBogey` slot indices for crisp takedowns.
+pub def attach_sim_slots(
+    dets: list<Detection>,
+    bogeys: list<SimBogey>,
+    mirror: bool,
+) -> list<Detection> effect alloc {
+    val out: list<Detection> = list()
+    for i in 0..list_len(dets) {
+        val d = list_get(dets, i)
+        var best_slot = -1
+        var best_dist = 0.22
+        for j in 0..list_len(bogeys) {
+            val b = list_get(bogeys, j)
+            if b.alive {
+                val bx = if mirror { 1.0 - b.nx } else { b.nx }
+                val dist = det_distance(d.nx, d.ny, bx, b.ny)
+                if dist < best_dist {
+                    best_dist = dist
+                    best_slot = b.slot
+                }
+            }
+        }
+        list_push(
+            out,
+            Detection {
+                nx: d.nx,
+                ny: d.ny,
+                nw: d.nw,
+                nh: d.nh,
+                score: d.score,
+                sim_slot: best_slot,
+            },
+        )
+    }
+    return out
+}
+
+def is_finished_status(st: TargetStatus) -> bool {
+    return when st {
+        TargetStatus.Neutralized => true,
+        _ => false,
+    }
+}
+
+def is_engaging_status(st: TargetStatus) -> bool {
+    return when st {
+        TargetStatus.Engaging => true,
+        _ => false,
+    }
+}
+
+def advance_target_status(
+    t: TrackedTarget,
+    is_primary: bool,
+    cfg: VisionConfig,
+) -> (TrackedTarget, i64, bool) {
+    val dt = cfg.dt
+    if is_finished_status(t.status) {
+        return (
+            TrackedTarget {
+                id: t.id,
+                status: TargetStatus.Neutralized,
+                nx: t.nx,
+                ny: t.ny,
+                nw: t.nw,
+                nh: t.nh,
+                vx: t.vx,
+                vy: t.vy,
+                lead_nx: t.lead_nx,
+                lead_ny: t.lead_ny,
+                confidence: t.confidence,
+                lock_progress: 1.0,
+                engage_timer: t.engage_timer,
+                neutralize_timer: t.neutralize_timer + dt,
+                missed: 0,
+                sim_slot: t.sim_slot,
+            },
+            -1,
+            false,
+        )
+    }
+    if is_engaging_status(t.status) {
+        val next_et = t.engage_timer + dt
+        if next_et >= 0.42 {
+            return (
+                TrackedTarget {
+                    id: t.id,
+                    status: TargetStatus.Neutralized,
+                    nx: t.nx,
+                    ny: t.ny,
+                    nw: t.nw,
+                    nh: t.nh,
+                    vx: 0.0,
+                    vy: 0.0,
+                    lead_nx: t.nx,
+                    lead_ny: t.ny,
+                    confidence: 1.0,
+                    lock_progress: 1.0,
+                    engage_timer: next_et,
+                    neutralize_timer: 0.0,
+                    missed: 0,
+                    sim_slot: t.sim_slot,
+                },
+                t.sim_slot,
+                true,
+            )
+        }
+        return (
+            TrackedTarget {
+                id: t.id,
+                status: TargetStatus.Engaging,
+                nx: t.nx,
+                ny: t.ny,
+                nw: t.nw,
+                nh: t.nh,
+                vx: t.vx,
+                vy: t.vy,
+                lead_nx: t.lead_nx,
+                lead_ny: t.lead_ny,
+                confidence: t.confidence,
+                lock_progress: 1.0,
+                engage_timer: next_et,
+                neutralize_timer: 0.0,
+                missed: t.missed,
+                sim_slot: t.sim_slot,
+            },
+            -1,
+            false,
+        )
+    }
+
+    val lock_delta = if is_primary {
+        dt * (1.25 * cfg.lock_speed)
+    } else {
+        dt * 0.45 * cfg.lock_speed
+    }
+    val next_lock = clamp_unit(t.lock_progress + lock_delta, 0.0, 1.0)
+    val next_status = if is_primary && next_lock >= 1.0 {
+        if cfg.auto_engage { TargetStatus.Engaging } else { TargetStatus.Locked }
+    } else if next_lock >= 0.99 {
+        TargetStatus.Locked
+    } else if t.confidence >= 0.45 {
+        TargetStatus.Tracking
+    } else {
+        TargetStatus.Acquired
+    }
+    return (
+        TrackedTarget {
+            id: t.id,
+            status: next_status,
+            nx: t.nx,
+            ny: t.ny,
+            nw: t.nw,
+            nh: t.nh,
+            vx: t.vx,
+            vy: t.vy,
+            lead_nx: t.lead_nx,
+            lead_ny: t.lead_ny,
+            confidence: t.confidence,
+            lock_progress: next_lock,
+            engage_timer: 0.0,
+            neutralize_timer: 0.0,
+            missed: t.missed,
+            sim_slot: t.sim_slot,
+        },
+        -1,
+        false,
+    )
+}
+
+def update_matched_track(t: TrackedTarget, det: Detection, dt: f64) -> TrackedTarget {
+    val safe_dt = if dt > 0.004 { dt } else { 0.016 }
+    val raw_vx = (det.nx - t.nx) / safe_dt
+    val raw_vy = (det.ny - t.ny) / safe_dt
+    val vx = t.vx * 0.58 + raw_vx * 0.42
+    val vy = t.vy * 0.58 + raw_vy * 0.42
+    val nx = t.nx * 0.45 + det.nx * 0.55
+    val ny = t.ny * 0.45 + det.ny * 0.55
+    val lead_x = clamp_unit(nx + vx * 0.22, 0.04, 0.96)
+    val lead_y = clamp_unit(ny + vy * 0.22, 0.06, 0.94)
+    val conf = clamp_unit(t.confidence * 0.70 + det.score * 0.40, 0.30, 1.0)
+    val slot = if det.sim_slot >= 0 { det.sim_slot } else { t.sim_slot }
+    return TrackedTarget {
+        id: t.id,
+        status: t.status,
+        nx: nx,
+        ny: ny,
+        nw: t.nw * 0.65 + det.nw * 0.35,
+        nh: t.nh * 0.65 + det.nh * 0.35,
+        vx: vx,
+        vy: vy,
+        lead_nx: lead_x,
+        lead_ny: lead_y,
+        confidence: conf,
+        lock_progress: t.lock_progress,
+        engage_timer: t.engage_timer,
+        neutralize_timer: t.neutralize_timer,
+        missed: 0,
+        sim_slot: slot,
+    }
+}
+
+def choose_primary_id(targets: list<TrackedTarget>, current_id: i64) -> i64 {
+    var has_cur = false
+    for i in 0..list_len(targets) {
+        val t = list_get(targets, i)
+        if t.id == current_id && !is_finished_status(t.status) {
+            has_cur = true
+        }
+    }
+    if has_cur {
+        return current_id
+    }
+    var best_id = -1
+    var best_score = -1.0
+    for i in 0..list_len(targets) {
+        val t = list_get(targets, i)
+        if !is_finished_status(t.status) {
+            val s = t.lock_progress * 1.5 + t.confidence
+            if s > best_score {
+                best_score = s
+                best_id = t.id
+            }
+        }
+    }
+    return best_id
+}
+
+def trigger_bogey_hit(bogeys: list<SimBogey>, slot: i64) -> list<SimBogey> effect alloc {
+    if slot < 0 {
+        return bogeys
+    }
+    val next: list<SimBogey> = list()
+    for i in 0..list_len(bogeys) {
+        val b = list_get(bogeys, i)
+        if b.slot == slot {
+            list_push(
+                next,
+                SimBogey {
+                    slot: b.slot,
+                    nx: b.nx,
+                    ny: b.ny,
+                    vx: b.vx,
+                    vy: b.vy,
+                    radius: b.radius,
+                    alive: false,
+                    hit_flash: 255,
+                    respawn_timer: 1.6,
+                },
+            )
+        } else {
+            list_push(next, b)
+        }
+    }
+    return next
+}
+
+def propagate_missed_track(t: TrackedTarget, dt: f64) -> TrackedTarget {
+    return TrackedTarget {
+        id: t.id,
+        status: t.status,
+        nx: clamp_unit(t.nx + t.vx * dt, 0.05, 0.95),
+        ny: clamp_unit(t.ny + t.vy * dt, 0.08, 0.92),
+        nw: t.nw,
+        nh: t.nh,
+        vx: t.vx,
+        vy: t.vy,
+        lead_nx: t.lead_nx,
+        lead_ny: t.lead_ny,
+        confidence: clamp_unit(t.confidence * 0.92, 0.1, 1.0),
+        lock_progress: t.lock_progress,
+        engage_timer: t.engage_timer,
+        neutralize_timer: t.neutralize_timer,
+        missed: t.missed + 1,
+        sim_slot: t.sim_slot,
+    }
+}
+
+def spawn_unmatched_tracks(
+    matched: list<TrackedTarget>,
+    dets: list<Detection>,
+    det_used: list<bool>,
+    start_id: i64,
+) -> (list<TrackedTarget>, i64) effect alloc {
+    var next_id = start_id
+    for j in 0..list_len(dets) {
+        if !list_get(det_used, j) && list_len(matched) < 6 {
+            val d = list_get(dets, j)
+            list_push(
+                matched,
+                TrackedTarget {
+                    id: next_id,
+                    status: TargetStatus.Acquired,
+                    nx: d.nx,
+                    ny: d.ny,
+                    nw: d.nw,
+                    nh: d.nh,
+                    lead_nx: d.nx,
+                    lead_ny: d.ny,
+                    confidence: d.score,
+                    sim_slot: d.sim_slot,
+                },
+            )
+            next_id = next_id + 1
+        }
+    }
+    return (matched, next_id)
+}
+
+def associate_detections(
+    tracks: list<TrackedTarget>,
+    dets: list<Detection>,
+    next_track_id: i64,
+    dt: f64,
+) -> (list<TrackedTarget>, i64) effect alloc {
+    val det_used: list<bool> = list()
+    for _i in 0..list_len(dets) {
+        list_push(det_used, false)
+    }
+    val matched: list<TrackedTarget> = list()
+    for i in 0..list_len(tracks) {
+        val t = list_get(tracks, i)
+        if is_finished_status(t.status) {
+            if t.neutralize_timer < 1.1 {
+                list_push(matched, t)
+            }
+        } else {
+            var best_idx = -1
+            var best_d = 0.24
+            for j in 0..list_len(dets) {
+                if !list_get(det_used, j) {
+                    val d = list_get(dets, j)
+                    val dist = det_distance(t.nx, t.ny, d.nx, d.ny)
+                    if dist < best_d {
+                        best_d = dist
+                        best_idx = j
+                    }
+                }
+            }
+            if best_idx >= 0 {
+                list_set(det_used, best_idx, true)
+                list_push(matched, update_matched_track(t, list_get(dets, best_idx), dt))
+            } else if t.missed < 6 || is_engaging_status(t.status) {
+                list_push(matched, propagate_missed_track(t, dt))
+            }
+        }
+    }
+    return spawn_unmatched_tracks(matched, dets, det_used, next_track_id)
+}
+
+/// Associate detections with `tracks`, advance lock/takedown states, and sync bogey neutralizations.
+pub def step_tracker(
+    tracks: list<TrackedTarget>,
+    dets: list<Detection>,
+    stats: VisionStats,
+    cfg: VisionConfig,
+    bogeys: list<SimBogey>,
+) -> (list<TrackedTarget>, VisionStats, list<SimBogey>) effect alloc {
+    val (matched, next_id) = associate_detections(tracks, dets, stats.next_track_id, cfg.dt)
+    val primary = choose_primary_id(matched, stats.primary_id)
+    val advanced: list<TrackedTarget> = list()
+    var next_bogeys = bogeys
+    var neut_total = stats.neutralized_total
+    var shots = stats.shots_fired
+    var flash_hud = if stats.hit_flash_hud > cfg.dt * 1.8 {
+        stats.hit_flash_hud - cfg.dt * 1.8
+    } else {
+        0.0
+    }
+    var active = 0
+    for i in 0..list_len(matched) {
+        val raw_t = list_get(matched, i)
+        val (upd_t, hit_slot, fired_hit) = advance_target_status(raw_t, raw_t.id == primary, cfg)
+        if fired_hit {
+            neut_total = neut_total + 1
+            shots = shots + 1
+            flash_hud = 1.0
+            next_bogeys = trigger_bogey_hit(next_bogeys, hit_slot)
+        }
+        if !is_finished_status(upd_t.status) {
+            active = active + 1
+        }
+        list_push(advanced, upd_t)
+    }
+
+    val next_stats = VisionStats {
+        active_count: active,
+        primary_id: choose_primary_id(advanced, primary),
+        next_track_id: next_id,
+        neutralized_total: neut_total,
+        shots_fired: shots,
+        motion_energy: stats.motion_energy,
+        hit_flash_hud: flash_hud,
+    }
+    return (advanced, next_stats, next_bogeys)
+}
+
+def coast_one_track(t: TrackedTarget, dt: f64) -> TrackedTarget {
+    if is_finished_status(t.status) {
+        return t
+    }
+    val nx = clamp_unit(t.nx + t.vx * dt, 0.04, 0.96)
+    val ny = clamp_unit(t.ny + t.vy * dt, 0.06, 0.94)
+    val lead_x = clamp_unit(nx + t.vx * 0.22, 0.04, 0.96)
+    val lead_y = clamp_unit(ny + t.vy * 0.22, 0.06, 0.94)
+    return TrackedTarget {
+        id: t.id,
+        status: t.status,
+        nx: nx,
+        ny: ny,
+        nw: t.nw,
+        nh: t.nh,
+        vx: t.vx,
+        vy: t.vy,
+        lead_nx: lead_x,
+        lead_ny: lead_y,
+        confidence: t.confidence,
+        lock_progress: t.lock_progress,
+        engage_timer: t.engage_timer,
+        neutralize_timer: t.neutralize_timer,
+        missed: t.missed,
+        sim_slot: t.sim_slot,
+    }
+}
+
+/// Smoothly advance target kinematics and lock/engage timers between live camera frames.
+pub def coast_tracker(
+    tracks: list<TrackedTarget>,
+    stats: VisionStats,
+    cfg: VisionConfig,
+) -> (list<TrackedTarget>, VisionStats) effect alloc {
+    val primary = choose_primary_id(tracks, stats.primary_id)
+    val advanced: list<TrackedTarget> = list()
+    var neut_total = stats.neutralized_total
+    var shots = stats.shots_fired
+    var flash_hud = if stats.hit_flash_hud > cfg.dt * 1.8 {
+        stats.hit_flash_hud - cfg.dt * 1.8
+    } else {
+        0.0
+    }
+    var active = 0
+    for i in 0..list_len(tracks) {
+        val raw_t = list_get(tracks, i)
+        if !(is_finished_status(raw_t.status) && raw_t.neutralize_timer >= 1.1) {
+            val coasted = coast_one_track(raw_t, cfg.dt)
+            val (
+                upd_t,
+                _hit_slot,
+                fired_hit,
+            ) = advance_target_status(coasted, coasted.id == primary, cfg)
+            if fired_hit {
+                neut_total = neut_total + 1
+                shots = shots + 1
+                flash_hud = 1.0
+            }
+            if !is_finished_status(upd_t.status) {
+                active = active + 1
+            }
+            list_push(advanced, upd_t)
+        }
+    }
+    val next_stats = VisionStats {
+        active_count: active,
+        primary_id: choose_primary_id(advanced, primary),
+        next_track_id: stats.next_track_id,
+        neutralized_total: neut_total,
+        shots_fired: shots,
+        motion_energy: stats.motion_energy,
+        hit_flash_hud: flash_hud,
+    }
+    return (advanced, next_stats)
+}
+
+/// Manually command engagement of the primary target (or designated locked target).
+pub def engage_primary_target(
+    tracks: list<TrackedTarget>,
+    primary_id: i64,
+) -> (list<TrackedTarget>, bool) effect alloc {
+    val out: list<TrackedTarget> = list()
+    var triggered = false
+    for i in 0..list_len(tracks) {
+        val t = list_get(tracks, i)
+        if t.id == primary_id && !is_finished_status(t.status) && !is_engaging_status(t.status) {
+            triggered = true
+            list_push(
+                out,
+                TrackedTarget {
+                    id: t.id,
+                    status: TargetStatus.Engaging,
+                    nx: t.nx,
+                    ny: t.ny,
+                    nw: t.nw,
+                    nh: t.nh,
+                    vx: t.vx,
+                    vy: t.vy,
+                    lead_nx: t.lead_nx,
+                    lead_ny: t.lead_ny,
+                    confidence: t.confidence,
+                    lock_progress: 1.0,
+                    engage_timer: 0.0,
+                    neutralize_timer: 0.0,
+                    missed: t.missed,
+                    sim_slot: t.sim_slot,
+                },
+            )
+        } else {
+            list_push(out, t)
+        }
+    }
+    return (out, triggered)
+}
+
+/// Designate whichever tracked target contains normalized pointer click `(nx, ny)`.
+pub def designate_target_at(tracks: list<TrackedTarget>, nx: f64, ny: f64) -> option<i64> {
+    var best_id = -1
+    var best_d = 0.14
+    for i in 0..list_len(tracks) {
+        val t = list_get(tracks, i)
+        if !is_finished_status(t.status) {
+            val d = det_distance(t.nx, t.ny, nx, ny)
+            if d < best_d {
+                best_d = d
+                best_id = t.id
+            }
+        }
+    }
+    if best_id >= 0 {
+        return some(best_id)
+    }
+    return none
+}

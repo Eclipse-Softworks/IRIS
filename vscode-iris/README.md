@@ -5,9 +5,9 @@
 Full-featured IDE support for the [IRIS programming language](https://github.com/Eclipse-Softworks/IRIS) — syntax highlighting, Language Server Protocol, debugging, REPL, and more.
 
 ![VS Code](https://img.shields.io/badge/VS%20Code-1.85+-blue?logo=visualstudiocode)
-![License](https://img.shields.io/badge/license-GPL--2.0--or--later-green)
-![Extension](https://img.shields.io/badge/extension-1.0.9-orange)
-![Compiler](https://img.shields.io/badge/compiler-1.0.0--rc2-purple)
+![License](https://img.shields.io/badge/license-Apache--2.0-blue)
+![Extension](https://img.shields.io/badge/extension-1.0.10-orange)
+![Compiler](https://img.shields.io/badge/compiler-1.0.0--rc3-purple)
 
 ---
 
@@ -15,7 +15,7 @@ Full-featured IDE support for the [IRIS programming language](https://github.com
 
 ### Syntax Highlighting
 
-Rich TextMate grammar for `.iris` files — keywords, types, strings, f-strings, comments, operators, and builtins are all highlighted accurately.
+Rich TextMate grammar for `.iris` files — preprocessor directives (`#ifdef`/`#define`), comments (`///`, `//`, `/* ... */`), strings, f-strings, char literals, attributes, model DSL blocks, keywords (including logical `and`/`or`/`not`, `mut`, `self`, `Self`), macros (`name!`), all built-in types and compiler builtins, and all 58 embedded stdlib modules (including `std.ui*` native GUI, camera, SQLite, crypto, ROS 2, AIS, and ML modules).
 
 ### Language Server Protocol (LSP)
 
@@ -70,27 +70,37 @@ UI; CodeLens actions use the same compiler and named-entry debugger.
 |---------|------------|-------------|
 | **IRIS: Run File** | `Ctrl+F5` | Run the current `.iris` file |
 | **IRIS: Build Binary** | — | Compile to a native executable |
+| **IRIS: Build GUI Binary** | — | Compile with `--gui` (Windows GUI subsystem, no console window) |
+| **IRIS: Bundle Standalone Application...** | — | Package icons, assets, and `iris_ui_host` via `iris bundle` (`dir`/`zip`/`inno`/`app`/`appimage`/`--install`) |
 | **IRIS: Debug File** | `F5` | Launch the current `.iris` file under the trace-based DAP debugger (or natively, with `iris.debug.native`) |
 | **IRIS: Debug Native Binary** | — | Build with debug info and debug the native executable under GDB |
+| **IRIS: Check Project** | — | Run static type, borrow, and effect checks without linking (`iris check`) |
+| **IRIS: Watch File...** | — | Re-run, test, or check on every save (`iris watch`) |
+| **IRIS: New Project from Template...** | — | Scaffold a new project (`ui`, `app`, `cli`, `server`, `ros2`, `controller`) |
 | **IRIS: Run Tests in File** | — | Run every `test_*` function in the file |
 | **IRIS: Run All Workspace Tests** | — | Run the workspace test suite |
 | **IRIS: Format Workspace** | — | Format workspace `.iris` files |
+| **IRIS: Check Formatting** | — | Verify formatting with `iris fmt --check` |
+| **IRIS: Run Benchmarks** | — | Run `iris bench` on the active `.iris` file |
+| **IRIS: Profile File** | — | Instrument and profile per-function timing (`iris profile`) |
+| **IRIS: Generate Documentation** | — | Generate HTML API documentation from `///` comments (`iris docs`) |
+| **IRIS: Build Embedded Bundle...** | — | Emit allocation-free bare-metal bundles (`cortex-m4f`, `cortex-m33`, `esp32-c3`, `esp32`, `arduino-uno`) |
+| **IRIS: Generate FFI Bindings...** | — | Generate `.iris` bindings from C/C++ `.h`/`.hpp` headers (`iris bindgen`) |
+| **IRIS: Package Manager...** | — | Run `iris pkg` commands (`init`, `add`, `remove`, `install`, `update`, `vendor`, `publish`, ...) |
+| **IRIS: Run Toolchain Doctor** | — | Diagnose compiler, LLVM-C, linker, debugger, and SDK setup (`iris doctor`) |
+| **IRIS: Collect Bug Report** | — | Package minimal compiler diagnostics locally (`iris bug-report`) |
 | **IRIS: Open REPL** | — | Launch an interactive IRIS session |
 | **IRIS: Restart Language Server** | — | Restart the LSP server |
 | **IRIS: Stop Language Server** | — | Stop the LSP server |
 | **IRIS: Show IR Output** | — | Display the compiler's SSA IR |
 | **IRIS: Show LLVM IR Output** | — | Display the generated LLVM IR |
+| **IRIS: Show Graph / CUDA / SIMD / Compiler Output...** | — | Inspect any `--emit` output side-by-side |
+| **IRIS: Explain Error Code** | — | Look up `E0xxx` explanations with `iris explain` |
 | **IRIS: Show Version Info** | — | Show compiler version, git commit, build date, and target |
 
 ### Snippets
 
-Scaffold current language patterns including ownership/borrowing, traits and
-trait objects, effects/handlers, async/await and structured task groups,
-differentiable tensors, AIS, ROS 2, LLM clients, typed metaprogramming, checked
-networking, FFI, and assertion-backed tests. Idiom snippets cover `try`/`?`
-(`try`, `resultfn`), `iflet`, `whenval`, `recorddefault`, extension methods
-(`ext`), effect-pure functions (`pure`, `withpure`), `fstr`, generators (`gen`),
-`constdef`, `mod`, `parsum`, `worker`, `loopbreak`, `forby` and `unsafe`.
+Scaffold current language patterns including native desktop UI apps (`uiapp`, `uisvg`, `uicard`, `uimodal`, `uispring`, `uicamera`, `uicanvas`), ownership/borrowing (`move`, `ref`, `refmut`, `derefmut`), const generics (`constgen`), traits and trait objects (`trait`, `traitg`, `impl`, `dyn`), effects/handlers (`handle`, `handleresume`, `pure`, `withpure`), speculation (`speculate`, `tx`), wrapping arithmetic (`wrap`), async/await and structured task groups, differentiable tensors, SQLite/JSON/HTTP (`sql`, `json`, `httpserv`), uncertainty (`uncertainty`), preprocessor (`ifdef`), ROS 2, LLM clients, typed metaprogramming, checked networking, FFI, embedded firmware (`embedded`), GC inspection (`gcstats`), and assertion-backed tests.
 
 ### Code Lens & Status Bar
 
@@ -103,11 +113,11 @@ networking, FFI, and assertion-backed tests. Idiom snippets cover `try`/`?`
 - **VS Code** ≥ 1.85
 - **IRIS compiler** installed and available on `PATH` (or configure `iris.executablePath`)
 
-Install IRIS from [github.com/moon9t/iris/releases](https://github.com/moon9t/iris/releases) or build from source:
+Install IRIS from [github.com/Eclipse-Softworks/IRIS/releases](https://github.com/Eclipse-Softworks/IRIS/releases) or build from source:
 
 ```bash
-git clone https://github.com/moon9t/iris.git
-cd iris
+git clone https://github.com/Eclipse-Softworks/IRIS.git
+cd IRIS
 cargo build --release
 ```
 
@@ -134,6 +144,10 @@ cargo build --release
 | `iris.noCache` | `false` | Pass `--no-cache` |
 | `iris.strictEffects` | `false` | Pass `--strict-effects` |
 | `iris.target` | `""` | Target preset/triple for **IRIS: Build Binary** |
+| `iris.simd` | `false` | Pass `--simd` (AVX2/NEON vector kernels & loop vectorization) |
+| `iris.gpu` | `""` | Pass `--gpu <api>` (`cuda` or empty) |
+| `iris.build.gui` | `false` | Pass `--gui` on **IRIS: Build Binary** |
+| `iris.bundle.release` | `true` | Prefer release `iris_ui_host` when bundling apps |
 
 ---
 
@@ -211,4 +225,4 @@ Contributions welcome! See [CONTRIBUTING.md](../docs/CONTRIBUTING.md).
 
 ## License
 
-[GPL-2.0-or-later](../LICENSE)
+[Apache-2.0](../LICENSE)

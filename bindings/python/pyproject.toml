@@ -4,11 +4,11 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "iris-evolution"
-version = "1.0.0rc1"
+version = "1.0.0rc3"
 description = "Python bindings for the IRIS Autonomous Code Genome Evolution Engine"
 readme = "README.md"
 requires-python = ">=3.8"
-license = { text = "GPL-2.0-or-later" }
+license = { text = "Apache-2.0" }
 authors = [{ name = "IRIS Intelligent Systems Group" }]
 keywords = ["evolution", "genetic-programming", "cybernetics", "homeostasis", "hot-swap", "systems-ai"]
 classifiers = [

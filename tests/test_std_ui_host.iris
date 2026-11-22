@@ -218,7 +218,10 @@ def check_extended_draw_opcodes() -> i64 {
     val opened = ui_open_native_host(UiHostMode.Headless, "IRIS Extended Opcodes", 320, 240, "")
     val lib = when opened {
         ok(l) => l,
-        err(msg) => { println(f"host open error: {msg}"); return 1 },
+        err(msg) => {
+            println(f"host open error: {msg}");
+            return 1
+        },
     }
     var buf = draw_buf_new(16384)
     val r = UiRect { x: 10.0, y: 10.0, w: 100.0, h: 60.0 }
@@ -233,14 +236,21 @@ def check_extended_draw_opcodes() -> i64 {
         b,
         UiRect { x: 10.0, y: 80.0, w: 100.0, h: 40.0 },
         UiRadii {},
-        10.0, 80.0, 110.0, 80.0, 0,
+        10.0,
+        80.0,
+        110.0,
+        80.0,
+        0,
         stops,
     )
     b = draw_cmd_radial_gradient(
         b,
         UiRect { x: 120.0, y: 10.0, w: 80.0, h: 80.0 },
         UiRadii {},
-        160.0, 50.0, 40.0, 0,
+        160.0,
+        50.0,
+        40.0,
+        0,
         list(
             UiGradientStop { offset: 0.0, color: rgb(255, 255, 255) },
             UiGradientStop { offset: 1.0, color: rgb(0, 0, 0) },
@@ -250,7 +260,10 @@ def check_extended_draw_opcodes() -> i64 {
         b,
         UiRect { x: 10.0, y: 140.0, w: 100.0, h: 40.0 },
         UiRadii { tl: 4.0, tr: 4.0, br: 4.0, bl: 4.0 },
-        4.0, 4.0, 4.0, 0.0,
+        4.0,
+        4.0,
+        4.0,
+        0.0,
         rgba(0, 0, 0, 200),
     )
     b = draw_cmd_round_rect(
@@ -297,10 +310,193 @@ def check_extended_draw_opcodes() -> i64 {
     return 0
 }
 
+def check_mature_host_opcodes_and_controls() -> i64 {
+    val opened = ui_open_native_host(UiHostMode.Headless, "IRIS Controls & Phase2", 360, 260, "")
+    val lib = when opened {
+        ok(l) => l,
+        err(msg) => {
+            println(f"host open error: {msg}");
+            return 1
+        },
+    }
+    val t0 = ui_native_clock_secs(lib)
+    assert(t0 >= 0.0)
+    assert(ui_native_set_cursor(lib, UiCursor.Hand) == 0)
+    assert(ui_native_set_title(lib, "IRIS Updated Title") == 0)
+    assert(ui_native_set_size_constraints(lib, 200, 160, 1920, 1080) == 0)
+    assert(ui_native_set_resizable(lib, true) == 0)
+
+    assert(ui_native_clipboard_set(lib, "IRIS-Clipboard-OK") == 0)
+    assert(ui_native_clipboard_get(lib) == "IRIS-Clipboard-OK")
+
+    val _inj = ui_native_inject_event(
+        lib,
+        HostEvent {
+            window_id: 1,
+            kind: UiEventKind.FileDropped,
+            text: "demo/scene.iris",
+        },
+    )
+    assert(ui_native_take_dropped_file(lib) == "demo/scene.iris")
+    val polled = ui_native_poll(lib, 0)
+    assert(list_len(polled) == 1)
+    assert(list_get(polled, 0).text == "demo/scene.iris")
+
+    var buf = draw_buf_new(16384)
+    var b = draw_buf_begin(buf, rgb(16, 18, 28))
+    b = draw_cmd_push_round_clip(
+        b,
+        UiRect { x: 20.0, y: 20.0, w: 80.0, h: 80.0 },
+        UiRadii { tl: 16.0, tr: 16.0, br: 16.0, bl: 16.0 },
+    )
+    b = draw_cmd_round_rect(
+        b,
+        UiRect { x: 10.0, y: 10.0, w: 100.0, h: 100.0 },
+        0.0,
+        UiStyle { bg: rgb(255, 0, 0) },
+    )
+    b = draw_cmd_pop_clip(b)
+    b = draw_cmd_push_opacity(b, 0.5)
+    b = draw_cmd_round_rect(
+        b,
+        UiRect { x: 120.0, y: 20.0, w: 50.0, h: 50.0 },
+        0.0,
+        UiStyle { bg: rgb(0, 255, 0) },
+    )
+    b = draw_cmd_pop_opacity(b)
+    b = draw_cmd_arc(b, 240.0, 70.0, 32.0, -1.5707963, 3.1415926, rgb(56, 189, 248), 6.0, true)
+    b = draw_icon(
+        b,
+        UiIcon.Rocket,
+        UiRect { x: 40.0, y: 140.0, w: 48.0, h: 48.0 },
+        rgb(250, 204, 21),
+    )
+    val done = draw_buf_finish(b)
+    assert(ui_native_submit(lib, done) == 0)
+
+    val in_clip = ui_native_sample_pixel(lib, 60, 60)
+    assert(in_clip.r > 240 && in_clip.g < 20)
+    val out_corner = ui_native_sample_pixel(lib, 21, 21)
+    assert(out_corner.r < 32)
+    val semi_green = ui_native_sample_pixel(lib, 145, 45)
+    assert(semi_green.g > 110 && semi_green.g < 170)
+    val arc_px = ui_native_sample_pixel(lib, 272, 70)
+    assert(arc_px.b > 200)
+
+    val _f = draw_buf_free(done)
+    val _c = ui_close_native_host(lib)
+    return 0
+}
+
+def render_app_smoke(st: UiState, tree: UiTree) -> i64 effect alloc {
+    val body = ui_grid(
+        tree,
+        "g",
+        2,
+        12.0,
+        list(
+            ui_stat_card(
+                tree,
+                "s1",
+                StatSpec { title: "Render", value: "60 FPS", delta: "+2%", icon: UiIcon.Rocket },
+            ),
+            ui_progress_ring(tree, "pr", "78%", 0.78, 1.0, UiTone.Accent),
+        ),
+    )
+    val chart = ui_bar_chart(
+        tree,
+        "bc",
+        BarChartSpec { title: "Load", labels: list("A", "B", "C"), values: list(40.0, 85.0, 65.0) },
+    )
+    return ui_col(tree, "root", UiStyle { padding: 16.0, gap: 12.0 }, list(body, chart))
+}
+
+def check_mature_ui_app_runner() -> i64 {
+    val cfg = UiAppConfig {
+        title: "Mature UI Smoke",
+        width: 520,
+        height: 360,
+        theme: nord_theme(),
+        headless: true,
+        max_frames: 25,
+        snapshot_path: "target/test_std_ui_mature.png",
+    }
+    val res = ui_run_app(cfg, ui_state_new(), |s: UiState, t: UiTree| render_app_smoke(s, t))
+    assert(when res {
+        ok(_) => true,
+        err(_) => false
+    })
+    assert(path_exists("target/test_std_ui_mature.png"))
+    return 0
+}
+
+def check_frame_pool_multiframe_draw_buf_reuse() -> i64 {
+    val opened = ui_open_native_host(UiHostMode.Headless, "IRIS Pool Stress", 640, 480, "")
+    val lib = when opened {
+        ok(l) => l,
+        err(_) => {
+            return 1
+        },
+    }
+    var st = ui_state_new()
+    var buf = draw_buf_new(16384)
+    var clicked = false
+    var i = 0
+    while i < 30 {
+        val pool = ui_frame_pool_begin()
+        val ticked = ui_state_tick(st, to_f64(i) * 0.016)
+        val raw = ui_with_theme(obsidian_theme())
+        val btn = ui_button_tone(raw, "stress_btn", "Pulse", "pulse_act", UiTone.Accent)
+        val inner = render_app_smoke(ticked, raw)
+        val root = ui_col(raw, "wrap", UiStyle { gap: 10.0 }, list(btn, inner))
+        val laid_out = ui_layout_with_state(ui_set_root(raw, root), ticked, 640.0, 480.0)
+        buf = ui_paint(laid_out, ticked, buf)
+        assert(draw_buf_cmd_count(buf) > 0)
+        val _sub = ui_native_submit(lib, buf)
+        if i == 1 {
+            val found = ui_find_node_key(laid_out, "stress_btn")
+            assert(is_some(found))
+            val r = list_get(laid_out.nodes, unwrap(found)).layout
+            val cx = r.x + r.w * 0.5
+            val cy = r.y + r.h * 0.5
+            val _m = ui_native_inject_event(
+                lib,
+                HostEvent { kind: UiEventKind.PointerMove, x: cx, y: cy },
+            )
+            val _d = ui_native_inject_event(
+                lib,
+                HostEvent { kind: UiEventKind.PointerDown, x: cx, y: cy },
+            )
+            val _u = ui_native_inject_event(
+                lib,
+                HostEvent { kind: UiEventKind.PointerUp, x: cx, y: cy },
+            )
+        }
+        val evs = ui_native_poll(lib, 0)
+        val next_st = ui_process_events(laid_out, ui_clear_events(ticked), evs)
+        val _p = ui_frame_pool_pause()
+        st = ui_state_detach(next_st)
+        val _r = ui_frame_pool_resume(pool)
+        val _des = ui_frame_pool_destroy(pool)
+        if st.dispatched_action == "pulse_act" {
+            clicked = true
+            st = ui_state_spring_from(st, "stress.pulse", 0.0, 1.0, spring_bouncy())
+        }
+        i = i + 1
+    }
+    assert(clicked)
+    val _fb = draw_buf_free(buf)
+    val _cl = ui_close_native_host(lib)
+    return 0
+}
+
 def main() -> i64 {
     assert(check_raw_draw_protocol() == 0)
     assert(check_extended_draw_opcodes() == 0)
     assert(check_pump_and_run_loop() == 0)
+    assert(check_mature_host_opcodes_and_controls() == 0)
+    assert(check_mature_ui_app_runner() == 0)
+    assert(check_frame_pool_multiframe_draw_buf_reuse() == 0)
     println("std ui host ok")
     return 0
 }

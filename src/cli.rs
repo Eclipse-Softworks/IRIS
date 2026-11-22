@@ -192,7 +192,12 @@ pub enum Command {
         /// Target triple (or native/wasm32/cortex-m4f/...)
         #[arg(long)]
         target: Option<String>,
+        /// Build as a standalone Windows GUI executable (hides console window)
+        #[arg(long)]
+        gui: bool,
     },
+    /// Compile, bundle icons/native UI runtime, package, or install a standalone application
+    Bundle(BundleArgs),
     /// Build and run the binary
     Run {
         /// Input file
@@ -526,14 +531,29 @@ pub enum Command {
         /// Force reinstall even if up-to-date
         #[arg(short = 'f', long = "force")]
         force: bool,
+        /// Also download and refresh the bundled LLVM toolchain
+        #[arg(long = "full")]
+        full: bool,
     },
     /// Install a package or all dependencies from iris.toml
     Install {
         /// Git URL of the package to install (omit to install all from iris.toml)
         url: Option<String>,
     },
-    /// Download and configure toolchain dependencies
-    Setup,
+    /// Download and configure toolchain dependencies (base, toolchain, ui, vscode, wasm, ml, all, list)
+    Setup {
+        /// Components to install: base (default), toolchain, ui, vscode, wasm, ml, all, list
+        components: Vec<String>,
+        /// Target IRIS install root (defaults to ~/.iris or IRIS_HOME)
+        #[arg(long = "dir")]
+        dir: Option<PathBuf>,
+        /// Skip confirmation prompts
+        #[arg(short = 'y', long = "yes")]
+        yes: bool,
+        /// Reinstall even if already present
+        #[arg(short = 'f', long = "force")]
+        force: bool,
+    },
     /// Generate HTML documentation from doc comments
     Docs {
         /// Input file
@@ -560,10 +580,14 @@ pub enum Command {
         check: bool,
     },
     /// Check the toolchain IRIS needs, end to end, and say how to fix what is missing
-    Doctor,
-    /// Create a project from a template: app, cli, server, ros2, controller
+    Doctor {
+        /// Automatically install missing toolchain or UI components via `iris setup`
+        #[arg(long = "fix")]
+        fix: bool,
+    },
+    /// Create a project from a template: app, cli, server, ros2, controller, ui
     New {
-        /// Template (app, cli, server, ros2, controller); default app
+        /// Template (app, cli, server, ros2, controller, ui); default app
         #[arg(default_value = "app")]
         template: String,
         /// Project name: the directory to create
@@ -589,6 +613,38 @@ pub enum Command {
         #[arg(short = 'c', long = "check")]
         check: bool,
     },
+    /// Generate shell completion scripts for bash, zsh, fish, or powershell
+    Completions {
+        /// Target shell: bash, zsh, fish, or powershell
+        #[arg(value_enum)]
+        shell: CompletionShellCli,
+    },
+}
+
+/// Target shell for `iris completions`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum CompletionShellCli {
+    Bash,
+    Zsh,
+    Fish,
+    #[clap(name = "powershell")]
+    PowerShell,
+}
+
+impl From<CompletionShellCli> for crate::completions::ShellKind {
+    fn from(val: CompletionShellCli) -> Self {
+        match val {
+            CompletionShellCli::Bash => crate::completions::ShellKind::Bash,
+            CompletionShellCli::Zsh => crate::completions::ShellKind::Zsh,
+            CompletionShellCli::Fish => crate::completions::ShellKind::Fish,
+            CompletionShellCli::PowerShell => crate::completions::ShellKind::PowerShell,
+        }
+    }
+}
+
+/// Expose the underlying `clap::Command` definition for completion generation.
+pub fn cli_command() -> clap::Command {
+    Cli::command()
 }
 
 // ---------------------------------------------------------------------------
@@ -616,8 +672,52 @@ pub struct CliArgs {
     pub gpu: Option<String>,
     pub error_format: ErrorFormatCli,
     pub debug: bool,
+    pub gui_subsystem: bool,
     /// Arguments passed to the program itself (after `--`).
     pub program_args: Vec<String>,
+}
+
+/// Options for `iris bundle` (standalone compilation, packaging, and native installation).
+#[derive(Args, Debug, Clone)]
+pub struct BundleArgs {
+    /// Entry `.iris` file or project directory containing `iris.toml` (defaults to `.`)
+    pub file: Option<PathBuf>,
+    /// Output bundle directory, `.zip`, `.iss`, `.app`, or `.AppDir` path
+    #[arg(short = 'o', long = "output")]
+    pub output: Option<PathBuf>,
+    /// Package format (`auto`, `dir`, `zip`, `inno`, `app`, `appimage`)
+    #[arg(long, default_value = "auto")]
+    pub format: String,
+    /// Custom application icon file (`.png`, `.ico`, or `.icns`)
+    #[arg(long)]
+    pub icon: Option<PathBuf>,
+    /// Override display application title
+    #[arg(long)]
+    pub title: Option<String>,
+    /// Override reverse-DNS application identifier
+    #[arg(long)]
+    pub identifier: Option<String>,
+    /// Force GUI subsystem (no console window on Windows)
+    #[arg(long, conflicts_with = "console")]
+    pub gui: bool,
+    /// Keep console subsystem even for UI applications
+    #[arg(long)]
+    pub console: bool,
+    /// Install the bundled application onto the host system
+    #[arg(long)]
+    pub install: bool,
+    /// Uninstall an installed IRIS application from `--install-dir` or default OS location
+    #[arg(long)]
+    pub uninstall: bool,
+    /// Target directory when using `--install` or `--uninstall`
+    #[arg(long = "install-dir")]
+    pub install_dir: Option<PathBuf>,
+    /// Skip creating OS Start Menu / Registry / `.desktop` shortcuts during `--install` / `--uninstall`
+    #[arg(long = "no-register")]
+    pub no_register: bool,
+    /// Prefer release-built `iris_ui_host` library when staging
+    #[arg(long)]
+    pub release: bool,
 }
 
 /// Hardening options for evolution audit checkpoints (`--audit-head`).
@@ -793,7 +893,9 @@ pub enum ParseArgsResult {
         test: bool,
         check: bool,
     },
-    Doctor,
+    Doctor {
+        fix: bool,
+    },
     New {
         template: String,
         name: Option<String>,
@@ -838,6 +940,7 @@ pub enum ParseArgsResult {
     },
     EvolveLive(EvolveLiveArgs),
     EvolveServe(EvolveServeArgs),
+    Bundle(BundleArgs),
     EvolveSearch {
         baseline: Option<PathBuf>,
         cases: PathBuf,
@@ -898,11 +1001,17 @@ pub enum ParseArgsResult {
         check: bool,
         yes: bool,
         force: bool,
+        full: bool,
     },
     Install {
         url: Option<String>,
     },
-    Setup,
+    Setup {
+        components: Vec<String>,
+        dir: Option<PathBuf>,
+        yes: bool,
+        force: bool,
+    },
     Fmt {
         file: Option<PathBuf>,
         check: bool,
@@ -911,6 +1020,7 @@ pub enum ParseArgsResult {
         file: Option<PathBuf>,
         output: Option<PathBuf>,
     },
+    Completions(crate::completions::ShellKind),
     ServiceDaemon {
         upstream: String,
         listen: u16,
@@ -961,6 +1071,7 @@ pub fn parse_args(args: &[String]) -> Result<ParseArgsResult, String> {
             file,
             output,
             target,
+            gui,
         }) => {
             let path = file
                 .or(cli.file)
@@ -984,9 +1095,11 @@ pub fn parse_args(args: &[String]) -> Result<ParseArgsResult, String> {
                 gpu: cli.gpu.clone(),
                 error_format: cli.error_format,
                 debug: cli.debug,
+                gui_subsystem: gui,
                 program_args: cli.program_args.clone(),
             }))
         }
+        Some(Command::Bundle(bundle)) => Ok(ParseArgsResult::Bundle(bundle)),
         Some(Command::Run {
             file,
             output,
@@ -1020,6 +1133,7 @@ pub fn parse_args(args: &[String]) -> Result<ParseArgsResult, String> {
                 gpu: cli.gpu.clone(),
                 error_format: cli.error_format,
                 debug: cli.debug,
+                gui_subsystem: false,
                 program_args,
             }))
         }
@@ -1177,6 +1291,7 @@ pub fn parse_args(args: &[String]) -> Result<ParseArgsResult, String> {
                     gpu: cli.gpu.clone(),
                     error_format: cli.error_format,
                     debug: cli.debug,
+                    gui_subsystem: false,
                     program_args: cli.program_args.clone(),
                 }))
             } else {
@@ -1193,10 +1308,28 @@ pub fn parse_args(args: &[String]) -> Result<ParseArgsResult, String> {
             no_color,
         }),
         Some(Command::Explain { code }) => Ok(ParseArgsResult::Explain(code)),
-        Some(Command::Upgrade { check, yes, force }) => {
-            Ok(ParseArgsResult::Upgrade { check, yes, force })
-        }
-        Some(Command::Setup) => Ok(ParseArgsResult::Setup),
+        Some(Command::Upgrade {
+            check,
+            yes,
+            force,
+            full,
+        }) => Ok(ParseArgsResult::Upgrade {
+            check,
+            yes,
+            force,
+            full,
+        }),
+        Some(Command::Setup {
+            components,
+            dir,
+            yes,
+            force,
+        }) => Ok(ParseArgsResult::Setup {
+            components,
+            dir,
+            yes,
+            force,
+        }),
         Some(Command::Check { paths }) => Ok(ParseArgsResult::Check {
             paths: if paths.is_empty() {
                 cli.file.into_iter().collect()
@@ -1208,7 +1341,7 @@ pub fn parse_args(args: &[String]) -> Result<ParseArgsResult, String> {
         Some(Command::Watch { file, test, check }) => {
             Ok(ParseArgsResult::Watch { file, test, check })
         }
-        Some(Command::Doctor) => Ok(ParseArgsResult::Doctor),
+        Some(Command::Doctor { fix }) => Ok(ParseArgsResult::Doctor { fix }),
         Some(Command::New { template, name }) => Ok(ParseArgsResult::New { template, name }),
         Some(Command::BugReport { file, output, run }) => {
             Ok(ParseArgsResult::BugReport { file, output, run })
@@ -1216,6 +1349,7 @@ pub fn parse_args(args: &[String]) -> Result<ParseArgsResult, String> {
         Some(Command::Install { url }) => Ok(ParseArgsResult::Install { url }),
         Some(Command::Fmt { file, check }) => Ok(ParseArgsResult::Fmt { file, check }),
         Some(Command::Docs { file, output }) => Ok(ParseArgsResult::Docs { file, output }),
+        Some(Command::Completions { shell }) => Ok(ParseArgsResult::Completions(shell.into())),
         Some(Command::ServiceDaemon {
             upstream,
             listen,
@@ -1265,6 +1399,7 @@ pub fn parse_args(args: &[String]) -> Result<ParseArgsResult, String> {
                 gpu: cli.gpu.clone(),
                 error_format: cli.error_format,
                 debug: cli.debug,
+                gui_subsystem: false,
                 program_args: cli.program_args.clone(),
             }))
         }
@@ -1302,9 +1437,8 @@ pub fn version_text() -> String {
         "iris {version} ({git_hash_short} {build_date}){dirty}\n\
          IRIS — Intermediate Representation for Intelligent Systems\n\
          Copyright (C) 2024-2026 Moon & IRIS Project Contributors\n\
-         License: GPL-2.0-or-later <https://www.gnu.org/licenses/old-licenses/gpl-2.0.html>\n\
-         This is free software; you can redistribute it and/or modify it under\n\
-         the terms of the GNU General Public License v2 (or later).\n\
+         License: Apache-2.0 <https://www.apache.org/licenses/LICENSE-2.0>\n\
+         Licensed under the Apache License, Version 2.0.\n\
          There is NO WARRANTY, to the extent permitted by law.\n\
          \n\
          Compiler:\n\
@@ -1346,8 +1480,10 @@ pub fn help_text() -> String {
         .about("IRIS compiler: build, run, test and check IRIS programs")
         .after_help(
             "Examples:\n  \
-             iris new app hello         start a project (templates: app, cli, server, ros2, controller)\n  \
+             iris new app hello         start a project (templates: app, cli, server, ros2, controller, ui)\n  \
              iris run main.iris         build and run\n  \
+             iris build --gui main.iris build a GUI desktop executable\n  \
+             iris bundle --install      package and install a standalone UI application\n  \
              iris test                  run the test_ functions in this directory\n  \
              iris check                 find errors without building\n  \
              iris watch main.iris       run again on every save\n  \

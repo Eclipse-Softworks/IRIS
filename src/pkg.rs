@@ -86,6 +86,37 @@ const VENDOR_DIR: &str = ".iris/vendor";
 
 // ── Manifest types ────────────────────────────────────────────────────────────
 
+/// Desktop application packaging metadata from `[app]` in `iris.toml`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct AppManifest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identifier: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub publisher: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gui: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window_width: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window_height: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_width: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_height: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resizable: Option<bool>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub assets: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub categories: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bundle_ui_host: Option<bool>,
+}
+
 /// Parsed `iris.toml` manifest.
 #[derive(Debug, Clone)]
 pub struct Manifest {
@@ -98,6 +129,8 @@ pub struct Manifest {
     /// Default registry URL for registry deps (optional).
     pub registry: Option<String>,
     pub deps: BTreeMap<String, Dep>,
+    /// Standalone desktop application bundling configuration (`[app]`).
+    pub app: Option<AppManifest>,
 }
 
 /// A dependency source.
@@ -164,6 +197,8 @@ struct TomlManifest {
     package: TomlPackage,
     #[serde(default)]
     dependencies: BTreeMap<String, TomlDep>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    app: Option<AppManifest>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -267,6 +302,7 @@ impl Manifest {
             repository: pkg.repository.unwrap_or_default(),
             registry: pkg.registry,
             deps,
+            app: toml_manifest.app,
         })
     }
 
@@ -326,6 +362,7 @@ impl Manifest {
                 registry: self.registry.clone(),
             },
             dependencies: toml_deps,
+            app: self.app.clone(),
         };
 
         toml::to_string_pretty(&toml_manifest).unwrap_or_else(|_| {
@@ -732,6 +769,7 @@ pub fn cmd_init() -> Result<(), String> {
         repository: String::new(),
         registry: None,
         deps: BTreeMap::new(),
+        app: None,
     };
 
     save_manifest(&manifest_path, &manifest)?;

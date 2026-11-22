@@ -1,3 +1,4 @@
+pub mod app_bundle;
 pub mod build;
 pub mod cuda;
 pub(crate) mod debug_info;
@@ -29,8 +30,9 @@ pub mod tensorrt;
 
 pub use build::{
     build_binary, build_binary_for_eval, build_binary_for_eval_with_target,
-    build_binary_with_target, emit_binary_ir, execute_binary_for_eval,
-    execute_binary_for_eval_with_target, runtime_c_source, runtime_h_source,
+    build_binary_with_options, build_binary_with_security_and_options, build_binary_with_target,
+    emit_binary_ir, execute_binary_for_eval, execute_binary_for_eval_with_target, runtime_c_source,
+    runtime_h_source, NativeBuildOptions,
 };
 pub use cuda::{emit_cuda, emit_cuda_ptx};
 pub use graph_printer::emit_graph_text;

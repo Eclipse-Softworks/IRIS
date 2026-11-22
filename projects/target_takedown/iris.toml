@@ -1,0 +1,16 @@
+[package]
+name = "target_takedown"
+version = "0.1.0"
+entry = "main.iris"
+
+[dependencies]
+
+[app]
+title = "IRIS Aegis Target Takedown"
+identifier = "io.iris.target_takedown"
+gui = true
+bundle_ui_host = true
+window_width = 1360
+window_height = 840
+min_width = 860
+min_height = 560

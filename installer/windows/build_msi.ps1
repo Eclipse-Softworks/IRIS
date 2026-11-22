@@ -1,4 +1,4 @@
-# build_msi.ps1 — Build a Windows .msi installer for IRIS using WiX Toolset
+﻿# build_msi.ps1 — Build a Windows .msi installer for IRIS using WiX Toolset
 # ──────────────────────────────────────────────────────────────────────────
 # Usage:
 #   powershell -ExecutionPolicy Bypass -File installer\windows\build_msi.ps1
@@ -8,7 +8,7 @@
 # ──────────────────────────────────────────────────────────────────────────
 
 param(
-    [string]$Version = "1.0.0-rc2",
+    [string]$Version = "1.0.0-rc3",
     [switch]$SkipBuild
 )
 
@@ -50,6 +50,12 @@ if (-not (Test-Path $IrisExe)) { throw "iris.exe not found at $IrisExe" }
 Copy-Item $IrisExe $StageDir -Force
 Copy-Item (Join-Path $Root "LICENSE") $StageDir -Force
 Copy-Item (Join-Path $Root "README.md") $StageDir -Force
+$MsiIconSrc = Join-Path $Root "installer\icon.ico"
+$MsiIconXml = ""
+if (Test-Path $MsiIconSrc) {
+    Copy-Item $MsiIconSrc (Join-Path $StageDir "icon.ico") -Force
+    $MsiIconXml = "`n    <Icon Id=`"IrisIcon`" SourceFile=`"icon.ico`" />`n    <Property Id=`"ARPPRODUCTICON`" Value=`"IrisIcon`" />"
+}
 
 # Stdlib
 $StdlibSrc = Join-Path $Root "stdlib"
@@ -86,7 +92,7 @@ $MsiFile = "IRIS-${Version}-windows-x64.msi"
     <MajorUpgrade
       DowngradeErrorMessage="A newer version of IRIS is already installed." />
 
-    <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+    <MediaTemplate EmbedCab="yes" CompressionLevel="high" />${MsiIconXml}
 
     <StandardDirectory Id="LocalAppDataFolder">
       <Directory Id="PROGRAMSDIR" Name="Programs">

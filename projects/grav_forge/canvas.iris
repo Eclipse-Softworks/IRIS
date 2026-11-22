@@ -1,0 +1,607 @@
+// Vector renderer for the GravForge cosmos canvas: spacetime curvature grid,
+// stars/black-holes/planets, orbital trails, rubber-band orbit preview, and AD splines.
+
+bring std.math
+bring std.ui
+bring "physics.iris"
+bring "autodiff.iris"
+
+/// Pointer slingshot / brush gesture state tracked on `grav_canvas`.
+pub record DragState {
+    active: bool = false,
+    start_nx: f64 = 0.0,
+    start_ny: f64 = 0.0,
+    cur_nx: f64 = 0.0,
+    cur_ny: f64 = 0.0,
+    preview_xs: list<f64> = list(),
+    preview_ys: list<f64> = list(),
+}
+
+/// Visual layer toggles and animated state passed to `paint_grav_canvas`.
+pub record CanvasConfig {
+    show_grid: bool = true,
+    show_trails: bool = true,
+    show_vectors: bool = false,
+    tool: ToolMode = ToolMode.SlingshotPlanet,
+    paused: bool = false,
+    beacon_pulse: f64 = 1.0,
+    sim_time: f64 = 0.0,
+    theme: UiTheme = obsidian_theme(),
+}
+
+/// Bundled immutable snapshot passed cleanly to canvas sub-painters.
+pub record CanvasView {
+    vp: UiRect = UiRect {},
+    world: WorldState = WorldState {},
+    solver: AdSolverState = AdSolverState {},
+    drag: DragState = DragState {},
+    cfg: CanvasConfig = CanvasConfig {},
+}
+
+def to_px_x(vp: UiRect, nx: f64) -> f64 {
+    return vp.x + nx * vp.w
+}
+
+def to_px_y(vp: UiRect, ny: f64) -> f64 {
+    return vp.y + ny * vp.h
+}
+
+def min_dim(vp: UiRect) -> f64 {
+    return if vp.w < vp.h { vp.w } else { vp.h }
+}
+
+def body_palette_color(color_idx: i64, alpha: i64) -> UiColor {
+    if color_idx == 1 {
+        return rgba(251, 191, 36, alpha)
+    }
+    if color_idx == 2 {
+        return rgba(56, 189, 248, alpha)
+    }
+    if color_idx == 3 {
+        return rgba(52, 211, 153, alpha)
+    }
+    if color_idx == 4 {
+        return rgba(244, 114, 182, alpha)
+    }
+    if color_idx == 5 {
+        return rgba(167, 139, 250, alpha)
+    }
+    return rgba(248, 113, 113, alpha)
+}
+
+def tool_label(tool: ToolMode) -> str {
+    return when tool {
+        ToolMode.SlingshotPlanet => "TOOL: SLINGSHOT PLANET",
+        ToolMode.SlingshotStar => "TOOL: SLINGSHOT STAR",
+        ToolMode.MoveBeacon => "TOOL: MOVE BEACON",
+        ToolMode.GravityBrush => "TOOL: GRAVITY BRUSH",
+    }
+}
+
+def paint_cosmos_backdrop(
+    buf: DrawBuffer,
+    vp: UiRect,
+    sim_time: f64,
+) -> DrawBuffer effect ffi, alloc {
+    var b = draw_cmd_round_rect(buf, vp, 12.0, UiStyle { bg: rgba(10, 15, 29, 255) })
+    val cx = vp.x + vp.w * 0.50
+    val cy = vp.y + vp.h * 0.48
+    val rad = 195.0
+    val stops = list(
+        UiGradientStop { offset: 0.0, color: rgba(44, 62, 122, 82) },
+        UiGradientStop { offset: 0.55, color: rgba(26, 36, 76, 34) },
+        UiGradientStop { offset: 1.0, color: rgba(10, 15, 29, 0) },
+    )
+    b = draw_cmd_radial_gradient(
+        b,
+        UiRect { x: cx - rad, y: cy - rad, w: rad * 2.0, h: rad * 2.0 },
+        UiRadii { tl: rad, tr: rad, br: rad, bl: rad },
+        cx,
+        cy,
+        rad,
+        0,
+        stops,
+    )
+    for i in 0..26 {
+        val fx = 0.03 + 0.94 * (to_f64((i * 73 + 19) % 97) / 97.0)
+        val fy = 0.03 + 0.94 * (to_f64((i * 41 + 29) % 89) / 89.0)
+        val tw = 0.55 + 0.45 * sin(sim_time * 1.4 + to_f64(i) * 0.9)
+        val alpha = (52.0 + tw * 96.0) to i64
+        val r_px = if i % 4 == 0 { 1.6 } else { 1.0 }
+        b = draw_cmd_circle(
+            b,
+            to_px_x(vp, fx),
+            to_px_y(vp, fy),
+            r_px,
+            UiStyle { bg: rgba(203, 213, 225, alpha) },
+        )
+    }
+    return b
+}
+
+def displaced_grid_point(world: WorldState, gx: f64, gy: f64) -> Vec2 {
+    var px = gx
+    var py = gy
+    for i in 0..list_len(world.bodies) {
+        val body = list_get(world.bodies, i)
+        if body.mass >= 0.25 {
+            val dx = body.x - gx
+            val dy = body.y - gy
+            val d2 = dx * dx + dy * dy + 0.0085
+            val pull = clamp_f(body.mass * 0.00055 / d2, 0.0, 0.042)
+            px = px + dx * pull
+            py = py + dy * pull
+        }
+    }
+    return Vec2 { x: px, y: py }
+}
+
+def paint_grid_rows(
+    buf: DrawBuffer,
+    pxs: list<f64>,
+    pys: list<f64>,
+    cols: i64,
+    rows: i64,
+) -> DrawBuffer effect ffi, alloc {
+    val col = rgba(99, 102, 241, 36)
+    val stride = cols + 1
+    var b = buf
+    for r in 1..rows {
+        val rxs: list<f64> = list()
+        val rys: list<f64> = list()
+        val row_off = r * stride
+        for c in 0..stride {
+            list_push(rxs, list_get(pxs, row_off + c))
+            list_push(rys, list_get(pys, row_off + c))
+        }
+        b = draw_cmd_polyline(b, rxs, rys, col, rgba(0, 0, 0, 0))
+    }
+    return b
+}
+
+def paint_grid_cols(
+    buf: DrawBuffer,
+    pxs: list<f64>,
+    pys: list<f64>,
+    cols: i64,
+    rows: i64,
+) -> DrawBuffer effect ffi, alloc {
+    val col = rgba(99, 102, 241, 36)
+    val stride = cols + 1
+    var b = buf
+    for c in 1..cols {
+        val cxs: list<f64> = list()
+        val cys: list<f64> = list()
+        for r in 0..(rows + 1) {
+            val idx = r * stride + c
+            list_push(cxs, list_get(pxs, idx))
+            list_push(cys, list_get(pys, idx))
+        }
+        b = draw_cmd_polyline(b, cxs, cys, col, rgba(0, 0, 0, 0))
+    }
+    return b
+}
+
+def paint_spacetime_grid(
+    buf: DrawBuffer,
+    vp: UiRect,
+    world: WorldState,
+) -> DrawBuffer effect ffi, alloc {
+    val cols = 10
+    val rows = 6
+    val pxs: list<f64> = list()
+    val pys: list<f64> = list()
+    for r in 0..(rows + 1) {
+        val ny = 0.03 + 0.94 * to_f64(r) / to_f64(rows)
+        for c in 0..(cols + 1) {
+            val nx = 0.02 + 0.96 * to_f64(c) / to_f64(cols)
+            val pt = displaced_grid_point(world, nx, ny)
+            list_push(pxs, to_px_x(vp, pt.x))
+            list_push(pys, to_px_y(vp, pt.y))
+        }
+    }
+    var b = paint_grid_rows(buf, pxs, pys, cols, rows)
+    b = paint_grid_cols(b, pxs, pys, cols, rows)
+    return b
+}
+
+def paint_norm_polyline(
+    buf: DrawBuffer,
+    vp: UiRect,
+    xs: list<f64>,
+    ys: list<f64>,
+    stroke: UiColor,
+) -> DrawBuffer effect ffi, alloc {
+    val n = list_len(xs)
+    if n < 2 || list_len(ys) < 2 {
+        return buf
+    }
+    val pxs: list<f64> = list()
+    val pys: list<f64> = list()
+    for i in 0..n {
+        list_push(pxs, to_px_x(vp, list_get(xs, i)))
+        list_push(pys, to_px_y(vp, list_get(ys, i)))
+    }
+    return draw_cmd_polyline(buf, pxs, pys, stroke, rgba(0, 0, 0, 0))
+}
+
+def paint_ad_splines(
+    buf: DrawBuffer,
+    vp: UiRect,
+    solver: AdSolverState,
+) -> DrawBuffer effect ffi, alloc {
+    var b = paint_norm_polyline(buf, vp, solver.ghost_xs, solver.ghost_ys, rgba(148, 163, 184, 72))
+    val main_col = if solver.best_miss < 0.045 {
+        rgba(52, 211, 153, 225)
+    } else if solver.best_miss < 0.14 {
+        rgba(250, 204, 21, 220)
+    } else {
+        rgba(217, 70, 239, 215)
+    }
+    val glow_col = if solver.best_miss < 0.045 {
+        rgba(52, 211, 153, 70)
+    } else {
+        rgba(56, 189, 248, 55)
+    }
+    b = paint_norm_polyline(b, vp, solver.path_xs, solver.path_ys, glow_col)
+    b = paint_norm_polyline(b, vp, solver.path_xs, solver.path_ys, main_col)
+    return b
+}
+
+def paint_beacon_and_pad(buf: DrawBuffer, view: CanvasView) -> DrawBuffer effect ffi, alloc {
+    val vp = view.vp
+    val w = view.world
+    val s = view.solver
+    val lx = to_px_x(vp, w.launch_x)
+    val ly = to_px_y(vp, w.launch_y)
+    var b = draw_cmd_circle(
+        buf,
+        lx,
+        ly,
+        14.0,
+        UiStyle { bg: rgba(56, 189, 248, 36), border: rgba(56, 189, 248, 220), border_width: 1.8 },
+    )
+    b = draw_cmd_line(
+        b,
+        UiRect { x: lx, y: ly, w: lx + s.best_vx * 56.0, h: ly + s.best_vy * 56.0 },
+        rgba(56, 189, 248, 225),
+        2.0,
+        false,
+    )
+    b = draw_cmd_text(
+        b,
+        UiRect { x: lx - 24.0, y: ly + 17.0, w: 68.0, h: 14.0 },
+        "LAUNCH",
+        UiStyle { fg: rgba(125, 211, 252, 220), font_size: 10.0, bold: true, monospace: true },
+    )
+
+    val bx = to_px_x(vp, w.beacon_x)
+    val by = to_px_y(vp, w.beacon_y)
+    val stops = list(
+        UiGradientStop { offset: 0.0, color: rgba(52, 211, 153, 130) },
+        UiGradientStop { offset: 0.65, color: rgba(16, 185, 129, 42) },
+        UiGradientStop { offset: 1.0, color: rgba(16, 185, 129, 0) },
+    )
+    b = draw_cmd_radial_gradient(
+        b,
+        UiRect { x: bx - 36.0, y: by - 36.0, w: 72.0, h: 72.0 },
+        UiRadii { tl: 36.0, tr: 36.0, br: 36.0, bl: 36.0 },
+        bx,
+        by,
+        36.0,
+        0,
+        stops,
+    )
+    val pulse_r = 16.0 * view.cfg.beacon_pulse
+    b = draw_cmd_circle(
+        b,
+        bx,
+        by,
+        pulse_r,
+        UiStyle { border: rgba(52, 211, 153, 215), border_width: 1.8 },
+    )
+    b = draw_cmd_arc(
+        b,
+        bx,
+        by,
+        24.0,
+        view.cfg.sim_time * 2.4,
+        2.2,
+        rgba(110, 231, 183, 230),
+        2.2,
+        true,
+    )
+    b = draw_cmd_circle(b, bx, by, 5.5, UiStyle { bg: rgba(167, 243, 208, 255) })
+    b = draw_cmd_text(
+        b,
+        UiRect { x: bx - 22.0, y: by + 26.0, w: 68.0, h: 14.0 },
+        "BEACON",
+        UiStyle { fg: rgba(110, 231, 183, 235), font_size: 10.0, bold: true, monospace: true },
+    )
+    return b
+}
+
+def paint_single_body(
+    buf: DrawBuffer,
+    vp: UiRect,
+    body: Body,
+    cfg: CanvasConfig,
+) -> DrawBuffer effect ffi, alloc {
+    var b = buf
+    if cfg.show_trails && list_len(body.trail_x) >= 2 {
+        val trail_col = body_palette_color(body.color_idx, 128)
+        b = paint_norm_polyline(b, vp, body.trail_x, body.trail_y, trail_col)
+    }
+    val cx = to_px_x(vp, body.x)
+    val cy = to_px_y(vp, body.y)
+    val r_px = clamp_f(body.radius * min_dim(vp), 4.5, 28.0)
+    if cfg.show_vectors {
+        b = draw_cmd_line(
+            b,
+            UiRect { x: cx, y: cy, w: cx + body.vx * 44.0, h: cy + body.vy * 44.0 },
+            rgba(250, 204, 21, 195),
+            1.6,
+            true,
+        )
+    }
+    val is_bh = when body.kind {
+        BodyKind.BlackHole => true,
+        _ => false,
+    }
+    val is_star = when body.kind {
+        BodyKind.Star => true,
+        _ => false,
+    }
+    if is_bh {
+        val glow_r = r_px * 2.5
+        val bh_stops = list(
+            UiGradientStop { offset: 0.0, color: rgba(168, 85, 247, 175) },
+            UiGradientStop { offset: 0.55, color: rgba(244, 63, 94, 80) },
+            UiGradientStop { offset: 1.0, color: rgba(0, 0, 0, 0) },
+        )
+        b = draw_cmd_radial_gradient(
+            b,
+            UiRect { x: cx - glow_r, y: cy - glow_r, w: glow_r * 2.0, h: glow_r * 2.0 },
+            UiRadii { tl: glow_r, tr: glow_r, br: glow_r, bl: glow_r },
+            cx,
+            by_safe(cy),
+            glow_r,
+            0,
+            bh_stops,
+        )
+        b = draw_cmd_circle(
+            b,
+            cx,
+            cy,
+            r_px,
+            UiStyle {
+                bg: rgba(4, 6, 12, 255),
+                border: rgba(216, 180, 254, 240),
+                border_width: 2.2,
+            },
+        )
+        return b
+    }
+    val core = body_palette_color(body.color_idx, 255)
+    if is_star {
+        val glow_r = r_px * 2.6
+        val stops = list(
+            UiGradientStop { offset: 0.0, color: body_palette_color(body.color_idx, 145) },
+            UiGradientStop { offset: 1.0, color: body_palette_color(body.color_idx, 0) },
+        )
+        b = draw_cmd_radial_gradient(
+            b,
+            UiRect { x: cx - glow_r, y: cy - glow_r, w: glow_r * 2.0, h: glow_r * 2.0 },
+            UiRadii { tl: glow_r, tr: glow_r, br: glow_r, bl: glow_r },
+            cx,
+            cy,
+            glow_r,
+            0,
+            stops,
+        )
+    } else {
+        b = draw_cmd_circle(
+            b,
+            cx,
+            cy,
+            r_px * 1.65,
+            UiStyle { bg: body_palette_color(body.color_idx, 42) },
+        )
+    }
+    b = draw_cmd_circle(
+        b,
+        cx,
+        cy,
+        r_px,
+        UiStyle { bg: core, border: rgba(255, 255, 255, 165), border_width: 1.1 },
+    )
+    return b
+}
+
+def by_safe(v: f64) -> f64 {
+    return v
+}
+
+def paint_drag_overlay(buf: DrawBuffer, view: CanvasView) -> DrawBuffer effect ffi, alloc {
+    val d = view.drag
+    if !d.active {
+        return buf
+    }
+    val vp = view.vp
+    val cx = to_px_x(vp, d.cur_nx)
+    val cy = to_px_y(vp, d.cur_ny)
+    val is_brush = when view.cfg.tool {
+        ToolMode.GravityBrush => true,
+        _ => false,
+    }
+    if is_brush {
+        var b = draw_cmd_arc(
+            buf,
+            cx,
+            cy,
+            24.0,
+            view.cfg.sim_time * 3.8,
+            4.2,
+            rgba(56, 189, 248, 225),
+            2.2,
+            true,
+        )
+        b = draw_cmd_arc(
+            b,
+            cx,
+            cy,
+            40.0,
+            0.0 - view.cfg.sim_time * 2.7,
+            3.6,
+            rgba(168, 85, 247, 200),
+            1.8,
+            true,
+        )
+        return b
+    }
+    val sx = to_px_x(vp, d.start_nx)
+    val sy = to_px_y(vp, d.start_ny)
+    val aim_x = sx + (sx - cx)
+    val aim_y = sy + (sy - cy)
+    var b = paint_norm_polyline(buf, vp, d.preview_xs, d.preview_ys, rgba(56, 189, 248, 225))
+    b = draw_cmd_line(b, UiRect { x: cx, y: cy, w: sx, h: sy }, rgba(248, 113, 113, 210), 1.8, true)
+    b = draw_cmd_line(
+        b,
+        UiRect { x: sx, y: sy, w: aim_x, h: aim_y },
+        rgba(52, 211, 153, 235),
+        2.4,
+        false,
+    )
+    b = draw_cmd_circle(
+        b,
+        sx,
+        sy,
+        10.0,
+        UiStyle {
+            bg: rgba(251, 191, 36, 120),
+            border: rgba(255, 255, 255, 230),
+            border_width: 1.5,
+        },
+    )
+    return b
+}
+
+def paint_hud_pills(buf: DrawBuffer, view: CanvasView) -> DrawBuffer effect ffi, alloc {
+    val vp = view.vp
+    val status_txt = if view.cfg.paused { "PAUSED" } else { "LIVE SYMPLECTIC" }
+    val top_txt = scenario_label(view.world.scenario) + "  |  " + tool_label(view.cfg.tool)
+    var b = draw_cmd_round_rect(
+        buf,
+        UiRect { x: vp.x + 14.0, y: vp.y + 14.0, w: 374.0, h: 28.0 },
+        7.0,
+        UiStyle { bg: rgba(15, 23, 42, 208), border: rgba(56, 189, 248, 190), border_width: 1.0 },
+    )
+    b = draw_cmd_text(
+        b,
+        UiRect { x: vp.x + 24.0, y: vp.y + 20.0, w: 356.0, h: 16.0 },
+        top_txt,
+        UiStyle {
+            fg: rgba(226, 232, 240, 245),
+            font_size: 11.5,
+            bold: true,
+            monospace: true,
+            ellipsis: true,
+        },
+    )
+    b = draw_cmd_round_rect(
+        b,
+        UiRect { x: vp.x + vp.w - 134.0, y: vp.y + 14.0, w: 120.0, h: 28.0 },
+        7.0,
+        UiStyle {
+            bg: rgba(15, 23, 42, 208),
+            border: if view.cfg.paused { rgba(250, 204, 21, 210) } else { rgba(52, 211, 153, 210) },
+            border_width: 1.0,
+        },
+    )
+    b = draw_cmd_text(
+        b,
+        UiRect { x: vp.x + vp.w - 126.0, y: vp.y + 20.0, w: 104.0, h: 16.0 },
+        status_txt,
+        UiStyle {
+            fg: if view.cfg.paused { rgba(250, 204, 21, 245) } else { rgba(110, 231, 183, 245) },
+            font_size: 11.0,
+            bold: true,
+            monospace: true,
+            ellipsis: true,
+        },
+    )
+    val miss_centi = (view.solver.best_miss * 1000.0) to i64
+    val state_tag = if view.solver.running {
+        "AD SOLVING: "
+    } else if view.solver.best_miss < 0.045 {
+        "AD LOCKED: "
+    } else {
+        "AD READY: "
+    }
+    val ad_msg = state_tag
+        + to_str(miss_centi)
+        + "m  (iter "
+        + to_str(view.solver.iter)
+        + "/"
+        + to_str(view.solver.max_iters)
+        + ")"
+    b = draw_cmd_round_rect(
+        b,
+        UiRect { x: vp.x + vp.w - 284.0, y: vp.y + vp.h - 40.0, w: 270.0, h: 26.0 },
+        6.0,
+        UiStyle { bg: rgba(15, 23, 42, 212), border: rgba(192, 132, 252, 205), border_width: 1.0 },
+    )
+    b = draw_cmd_text(
+        b,
+        UiRect { x: vp.x + vp.w - 274.0, y: vp.y + vp.h - 35.0, w: 252.0, h: 16.0 },
+        ad_msg,
+        UiStyle {
+            fg: rgba(233, 213, 255, 245),
+            font_size: 11.0,
+            bold: true,
+            monospace: true,
+            ellipsis: true,
+        },
+    )
+    return b
+}
+
+/// Paint the entire interactive GravForge cosmos viewport into `buf` cleanly.
+pub def paint_grav_canvas(buf: DrawBuffer, view: CanvasView) -> DrawBuffer effect ffi, alloc {
+    val vp = view.vp
+    if vp.w <= 8.0 || vp.h <= 8.0 {
+        return buf
+    }
+    var b = paint_cosmos_backdrop(buf, vp, view.cfg.sim_time)
+    val inner_clip = UiRect { x: vp.x + 2.0, y: vp.y + 2.0, w: vp.w - 4.0, h: vp.h - 4.0 }
+    b = draw_cmd_push_clip(b, inner_clip)
+    if view.cfg.show_grid {
+        b = paint_spacetime_grid(b, vp, view.world)
+    }
+    b = paint_ad_splines(b, vp, view.solver)
+    b = paint_beacon_and_pad(b, view)
+    for i in 0..list_len(view.world.bodies) {
+        b = paint_single_body(b, vp, list_get(view.world.bodies, i), view.cfg)
+    }
+    for j in 0..list_len(view.world.waves) {
+        val sw = list_get(view.world.waves, j)
+        val alpha = clamp_f(sw.life * 220.0, 12.0, 220.0) to i64
+        b = draw_cmd_circle(
+            b,
+            to_px_x(vp, sw.x),
+            to_px_y(vp, sw.y),
+            sw.radius * min_dim(vp),
+            UiStyle { border: body_palette_color(sw.tone_idx, alpha), border_width: 2.0 },
+        )
+    }
+    b = paint_drag_overlay(b, view)
+    b = paint_hud_pills(b, view)
+    b = draw_cmd_pop_clip(b)
+    b = draw_cmd_round_rect(
+        b,
+        vp,
+        12.0,
+        UiStyle { border: view.cfg.theme.border, border_width: 1.5 },
+    )
+    return draw_buf_finish(b)
+}

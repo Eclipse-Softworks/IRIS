@@ -23,6 +23,8 @@ pub choice UiEventKind {
     FocusChanged,
     RedrawRequested,
     ScaleChanged,
+    FileDropped,
+    PointerLeave,
     Unknown,
 }
 
@@ -52,6 +54,15 @@ pub record TextMetrics {
     width: f64 = 0.0,
     height: f64 = 18.0,
     lines: i64 = 1,
+}
+
+/// Active camera stream metadata queried from `iris_ui_host`.
+pub record UiCameraInfo {
+    width: i64 = 0,
+    height: i64 = 0,
+    mode: i64 = 0,
+    seq: i64 = 0,
+    device_name: str = "",
 }
 
 /// Four independent corner radii, ordered top-left, top-right, bottom-right, bottom-left.
@@ -114,7 +125,7 @@ def host_mode_code(mode: UiHostMode) -> i64 {
     }
 }
 
-def text_style_flags(style: UiStyle) -> i64 {
+pub def text_style_flags(style: UiStyle) -> i64 {
     var flags = 0
     if style.bold {
         flags = flags + 1
@@ -124,6 +135,16 @@ def text_style_flags(style: UiStyle) -> i64 {
     }
     if style.italic {
         flags = flags + 4
+    }
+    val align_bits = when style.align {
+        UiAlign.Center => 8,
+        UiAlign.End => 16,
+        UiAlign.Start => 0,
+        UiAlign.Stretch => 0,
+    }
+    flags = flags + align_bits
+    if style.ellipsis {
+        flags = flags + 32
     }
     return flags
 }
@@ -318,6 +339,14 @@ pub def draw_buf_begin(buf: DrawBuffer, clear: UiColor) -> DrawBuffer effect ffi
     return DrawBuffer { cell: b.cell, byte_cap: b.byte_cap, word_len: 4, cmd_count: 0 }
 }
 
+/// Read the current command count from a `DrawBuffer`, reading shared `meta` when pooled.
+pub def draw_buf_cmd_count(buf: DrawBuffer) -> i64 effect ffi {
+    if buf.meta != 0 {
+        return out_i64(buf.meta, 3)
+    }
+    return buf.cmd_count
+}
+
 /// Finalize command count header in word `3`.
 pub def draw_buf_finish(buf: DrawBuffer) -> DrawBuffer effect ffi {
     if buf.meta != 0 {
@@ -326,6 +355,11 @@ pub def draw_buf_finish(buf: DrawBuffer) -> DrawBuffer effect ffi {
         val wlen = out_i64(buf.meta, 2)
         val cmds = out_i64(buf.meta, 3)
         val _n = out_set_i32(cell, 3, cmds)
+        val paused = ui_frame_pool_pause()
+        if paused != 0 {
+            val _r = ui_frame_pool_resume(paused)
+            return buf
+        }
         return DrawBuffer {
             cell: cell,
             byte_cap: cap,
@@ -479,6 +513,29 @@ pub def draw_cmd_image_rgba(
     return bump_cmd(b)
 }
 
+/// Append an `AccessKit` accessibility node descriptor with explicit parent and state flags (`1=disabled, 2=checked, 4=focused`).
+pub def draw_cmd_a11y_state(
+    buf: DrawBuffer,
+    id: i64,
+    parent_id: i64,
+    role: i64,
+    r: UiRect,
+    state_flags: i64,
+    label: str,
+) -> DrawBuffer effect ffi, alloc {
+    var b = push_i32(buf, 9)
+    b = push_i32(b, id)
+    b = push_i32(b, parent_id)
+    b = push_i32(b, role)
+    b = push_f32(b, r.x)
+    b = push_f32(b, r.y)
+    b = push_f32(b, r.w)
+    b = push_f32(b, r.h)
+    b = push_i32(b, state_flags)
+    b = push_padded_str(b, label)
+    return bump_cmd(b)
+}
+
 /// Append an `AccessKit` accessibility node descriptor (`state_flags`: 1=disabled, 2=checked, 4=focused).
 pub def draw_cmd_a11y(
     buf: DrawBuffer,
@@ -487,17 +544,7 @@ pub def draw_cmd_a11y(
     r: UiRect,
     label: str,
 ) -> DrawBuffer effect ffi, alloc {
-    var b = push_i32(buf, 9)
-    b = push_i32(b, id)
-    b = push_i32(b, 0)
-    b = push_i32(b, role)
-    b = push_f32(b, r.x)
-    b = push_f32(b, r.y)
-    b = push_f32(b, r.w)
-    b = push_f32(b, r.h)
-    b = push_i32(b, 0)
-    b = push_padded_str(b, label)
-    return bump_cmd(b)
+    return draw_cmd_a11y_state(buf, id, 0, role, r, 0, label)
 }
 
 def push_radii(buf: DrawBuffer, r: UiRadii) -> DrawBuffer effect ffi, alloc {
@@ -665,7 +712,10 @@ pub def draw_cmd_path(
 }
 
 /// Push an affine transform applied to subsequent vector commands.
-pub def draw_cmd_push_transform(buf: DrawBuffer, transform: UiTransform) -> DrawBuffer effect ffi, alloc {
+pub def draw_cmd_push_transform(
+    buf: DrawBuffer,
+    transform: UiTransform,
+) -> DrawBuffer effect ffi, alloc {
     return bump_cmd(push_transform(push_i32(buf, 15), transform))
 }
 
@@ -700,30 +750,178 @@ pub def draw_cmd_svg_path(
     return bump_cmd(b)
 }
 
+/// Push a rounded-corner clip rectangle onto the renderer clip stack.
+pub def draw_cmd_push_round_clip(
+    buf: DrawBuffer,
+    r: UiRect,
+    radii: UiRadii,
+) -> DrawBuffer effect ffi, alloc {
+    var b = push_i32(buf, 18)
+    b = push_f32(b, r.x)
+    b = push_f32(b, r.y)
+    b = push_f32(b, r.w)
+    b = push_f32(b, r.h)
+    b = push_radii(b, radii)
+    return bump_cmd(b)
+}
+
+/// Push an opacity multiplier layer (`0.0..1.0`) onto the renderer opacity stack.
+pub def draw_cmd_push_opacity(buf: DrawBuffer, opacity: f64) -> DrawBuffer effect ffi, alloc {
+    var b = push_i32(buf, 19)
+    b = push_f32(b, opacity)
+    return bump_cmd(b)
+}
+
+/// Pop the top opacity layer from the renderer opacity stack.
+pub def draw_cmd_pop_opacity(buf: DrawBuffer) -> DrawBuffer effect ffi, alloc {
+    return bump_cmd(push_i32(buf, 20))
+}
+
+/// Draw a stroked circular arc centered at `(cx, cy)` with `start_angle` and `sweep_angle` (radians).
+pub def draw_cmd_arc(
+    buf: DrawBuffer,
+    cx: f64,
+    cy: f64,
+    radius: f64,
+    start_angle: f64,
+    sweep_angle: f64,
+    color: UiColor,
+    stroke_w: f64,
+    round_cap: bool,
+) -> DrawBuffer effect ffi, alloc {
+    var b = push_i32(buf, 21)
+    b = push_f32(b, cx)
+    b = push_f32(b, cy)
+    b = push_f32(b, radius)
+    b = push_f32(b, start_angle)
+    b = push_f32(b, sweep_angle)
+    b = push_i32(b, pack_rgba(color))
+    b = push_f32(b, stroke_w)
+    b = push_i32(b, if round_cap { 1 } else { 0 })
+    return bump_cmd(b)
+}
+
+/// Blit the latest frame from camera `cam_id` into `r` (`tint_mode`: 0=RGB, 1=NVG, 2=FLIR, 3=Slate).
+pub def draw_cmd_camera_frame(
+    buf: DrawBuffer,
+    r: UiRect,
+    cam_id: i64,
+    mirror: bool,
+    tint_mode: i64,
+) -> DrawBuffer effect ffi, alloc {
+    val mirror_bit = if mirror { 1 } else { 0 }
+    val tint_bits = (tint_mode % 4) * 2
+    var b = push_i32(buf, 22)
+    b = push_f32(b, r.x)
+    b = push_f32(b, r.y)
+    b = push_f32(b, r.w)
+    b = push_f32(b, r.h)
+    b = push_i32(b, cam_id)
+    b = push_i32(b, mirror_bit + tint_bits)
+    return bump_cmd(b)
+}
+
+/// Construct a pure 2D translation `UiTransform`.
+pub def ui_transform_translate(dx: f64, dy: f64) -> UiTransform {
+    return UiTransform { a: 1.0, b: 0.0, c: 0.0, d: 1.0, e: dx, f: dy }
+}
+
+/// Construct a `UiTransform` scaling by `(sx, sy)` around pivot `(cx, cy)`.
+pub def ui_transform_scale_about(sx: f64, sy: f64, cx: f64, cy: f64) -> UiTransform {
+    return UiTransform {
+        a: sx,
+        b: 0.0,
+        c: 0.0,
+        d: sy,
+        e: cx - sx * cx,
+        f: cy - sy * cy,
+    }
+}
+
+/// Construct a `UiTransform` rotating by `rad` radians around pivot `(cx, cy)`.
+pub def ui_transform_rotate_about(rad: f64, cx: f64, cy: f64) -> UiTransform {
+    val cs = cos(rad)
+    val sn = sin(rad)
+    return UiTransform {
+        a: cs,
+        b: sn,
+        c: -sn,
+        d: cs,
+        e: cx - cs * cx + sn * cy,
+        f: cy - sn * cx - cs * cy,
+    }
+}
+
 def candidate_host_paths(dll_override: str) -> list<str> effect alloc {
     val paths: list<str> = list()
     if len(dll_override) > 0 {
         list_push(paths, dll_override)
     }
-    list_push(paths, "iris_ui_host.dll")
+    val env_lib = env_get("IRIS_UI_HOST_LIB")
+    if len(env_lib) > 0 {
+        list_push(paths, env_lib)
+    }
+    // Bundled / standalone app paths checked before workspace target/ dirs.
     list_push(paths, "./iris_ui_host.dll")
-    list_push(paths, "./target/debug/iris_ui_host.dll")
-    list_push(paths, "./target/release/iris_ui_host.dll")
-    list_push(paths, "./debug/iris_ui_host.dll")
-    list_push(paths, "./release/iris_ui_host.dll")
-    list_push(paths, "../target/debug/iris_ui_host.dll")
-    list_push(paths, "../target/release/iris_ui_host.dll")
-    list_push(paths, "../../target/debug/iris_ui_host.dll")
-    list_push(paths, "../../target/release/iris_ui_host.dll")
+    list_push(paths, "./lib/iris_ui_host.dll")
+    list_push(paths, "./libiris_ui_host.so")
+    list_push(paths, "./lib/libiris_ui_host.so")
+    list_push(paths, "../lib/libiris_ui_host.so")
+    list_push(paths, "./libiris_ui_host.dylib")
+    list_push(paths, "../Frameworks/libiris_ui_host.dylib")
+    // Installed IRIS prefix paths ($IRIS_HOME, ~/.iris, %LOCALAPPDATA%\Programs\IRIS, system)
+    val iris_home = env_get("IRIS_HOME")
+    if len(iris_home) > 0 {
+        list_push(paths, iris_home + "/bin/iris_ui_host.dll")
+        list_push(paths, iris_home + "/iris_ui_host.dll")
+        list_push(paths, iris_home + "/bin/libiris_ui_host.so")
+        list_push(paths, iris_home + "/lib/libiris_ui_host.so")
+        list_push(paths, iris_home + "/bin/libiris_ui_host.dylib")
+        list_push(paths, iris_home + "/lib/libiris_ui_host.dylib")
+    }
+    val userprofile = env_get("USERPROFILE")
+    if len(userprofile) > 0 {
+        list_push(paths, userprofile + "/.iris/bin/iris_ui_host.dll")
+        list_push(paths, userprofile + "/.iris/iris_ui_host.dll")
+    }
+    val localappdata = env_get("LOCALAPPDATA")
+    if len(localappdata) > 0 {
+        list_push(paths, localappdata + "/Programs/IRIS/iris_ui_host.dll")
+        list_push(paths, localappdata + "/Programs/IRIS/bin/iris_ui_host.dll")
+    }
+    val unix_home = env_get("HOME")
+    if len(unix_home) > 0 {
+        list_push(paths, unix_home + "/.iris/bin/libiris_ui_host.so")
+        list_push(paths, unix_home + "/.iris/lib/libiris_ui_host.so")
+        list_push(paths, unix_home + "/.iris/bin/libiris_ui_host.dylib")
+        list_push(paths, unix_home + "/.iris/lib/libiris_ui_host.dylib")
+    }
+    list_push(paths, "/usr/local/lib/libiris_ui_host.so")
+    list_push(paths, "/usr/local/lib/libiris_ui_host.dylib")
+    list_push(paths, "/usr/share/iris/libiris_ui_host.so")
+    list_push(paths, "/usr/local/share/iris/libiris_ui_host.dylib")
+    list_push(paths, "iris_ui_host.dll")
     list_push(paths, "libiris_ui_host.so")
-    list_push(paths, "./target/debug/libiris_ui_host.so")
-    list_push(paths, "./target/release/libiris_ui_host.so")
-    list_push(paths, "./debug/libiris_ui_host.so")
-    list_push(paths, "./release/libiris_ui_host.so")
-    list_push(paths, "../target/debug/libiris_ui_host.so")
-    list_push(paths, "../../target/debug/libiris_ui_host.so")
     list_push(paths, "libiris_ui_host.dylib")
+    list_push(paths, "./target/release/iris_ui_host.dll")
+    list_push(paths, "./target/debug/iris_ui_host.dll")
+    list_push(paths, "./release/iris_ui_host.dll")
+    list_push(paths, "./debug/iris_ui_host.dll")
+    list_push(paths, "../target/release/iris_ui_host.dll")
+    list_push(paths, "../target/debug/iris_ui_host.dll")
+    list_push(paths, "../../target/release/iris_ui_host.dll")
+    list_push(paths, "../../target/debug/iris_ui_host.dll")
+    list_push(paths, "./target/release/libiris_ui_host.so")
+    list_push(paths, "./target/debug/libiris_ui_host.so")
+    list_push(paths, "./release/libiris_ui_host.so")
+    list_push(paths, "./debug/libiris_ui_host.so")
+    list_push(paths, "../target/release/libiris_ui_host.so")
+    list_push(paths, "../target/debug/libiris_ui_host.so")
+    list_push(paths, "../../target/release/libiris_ui_host.so")
+    list_push(paths, "../../target/debug/libiris_ui_host.so")
+    list_push(paths, "./target/release/libiris_ui_host.dylib")
     list_push(paths, "./target/debug/libiris_ui_host.dylib")
+    list_push(paths, "./release/libiris_ui_host.dylib")
     list_push(paths, "./debug/libiris_ui_host.dylib")
     return paths
 }
@@ -780,6 +978,12 @@ def decode_event_kind(code: i64) -> UiEventKind {
     if code == 12 {
         return UiEventKind.ScaleChanged
     }
+    if code == 13 {
+        return UiEventKind.FileDropped
+    }
+    if code == 14 {
+        return UiEventKind.PointerLeave
+    }
     return UiEventKind.Unknown
 }
 
@@ -797,6 +1001,8 @@ def encode_event_kind(kind: UiEventKind) -> i64 {
         UiEventKind.FocusChanged => 10,
         UiEventKind.RedrawRequested => 11,
         UiEventKind.ScaleChanged => 12,
+        UiEventKind.FileDropped => 13,
+        UiEventKind.PointerLeave => 14,
         UiEventKind.Unknown => 0,
     }
 }
@@ -811,7 +1017,9 @@ pub def ui_open_native_host(
 ) -> result<NativeUiLib, str> effect ffi, alloc {
     val dll = probe_ui_host_dll(dll_override)
     if dll == 0 {
-        return err("iris_ui_host shared library not found; run `cargo build -p iris_ui_host`")
+        return err(
+            "iris_ui_host shared library not found; run `iris setup ui` or `cargo build -p iris_ui_host`",
+        )
     }
     val host = ffi_call_i64(dll, "iris_ui_host_create", host_mode_code(mode), title, w, h, 0)
     if host == 0 {
@@ -907,7 +1115,7 @@ pub def ui_native_poll(lib: NativeUiLib, timeout_ms: i64) -> list<HostEvent> eff
         val raw_kind = out_i32(lib.scratch_ev, base)
         val kind = decode_event_kind(raw_kind)
         val mods_or_len = out_i32(lib.scratch_ev, base + 2)
-        val is_text = raw_kind == 9
+        val is_text = raw_kind == 9 || raw_kind == 13
         val txt = if is_text {
             out_str_range(lib.scratch_ev, (base + 6) * 4, mods_or_len)
         } else {
@@ -945,7 +1153,7 @@ pub def ui_native_inject_event(lib: NativeUiLib, ev: HostEvent) -> i64 effect ff
     val _k4 = out_set_f32(cell, 4, ev.x)
     val _k5 = out_set_f32(cell, 5, ev.y)
     val _k14 = out_set_i32(cell, 14, if ev.window_id > 0 { ev.window_id } else { 1 })
-    if kind_code == 9 {
+    if kind_code == 9 || kind_code == 13 {
         val written = out_write_bytes(cell, 24, ev.text)
         val _k2 = out_set_i32(cell, 2, written)
     } else {
@@ -968,12 +1176,7 @@ pub def ui_native_metrics(lib: NativeUiLib) -> WindowMetrics effect ffi {
 }
 
 /// Open an additional native window in the same host session (1-based id).
-pub def ui_native_window_create(
-    lib: NativeUiLib,
-    title: str,
-    w: i64,
-    h: i64,
-) -> i64 effect ffi {
+pub def ui_native_window_create(lib: NativeUiLib, title: str, w: i64, h: i64) -> i64 effect ffi {
     return ffi_call_i64(lib.dll, "iris_ui_window_create", lib.host, title, w, h)
 }
 
@@ -1032,7 +1235,7 @@ pub def ui_native_poll_window(
         val raw_kind = out_i32(lib.scratch_ev, base)
         val kind = decode_event_kind(raw_kind)
         val mods_or_len = out_i32(lib.scratch_ev, base + 2)
-        val is_text = raw_kind == 9
+        val is_text = raw_kind == 9 || raw_kind == 13
         val txt = if is_text {
             out_str_range(lib.scratch_ev, (base + 6) * 4, mods_or_len)
         } else {
@@ -1070,6 +1273,251 @@ pub def ui_native_sample_pixel(lib: NativeUiLib, x_px: i64, y_px: i64) -> UiColo
 /// Export the current rendered host framebuffer to a PNG image file.
 pub def ui_native_save_png(lib: NativeUiLib, path: str) -> i64 effect ffi {
     return ffi_call_i64(lib.dll, "iris_ui_save_png", lib.host, path)
+}
+
+/// Map a logical `UiCursor` hint to the host's numeric `CursorKind` code (`0..=9`).
+pub def cursor_kind_code(cursor: UiCursor) -> i64 {
+    return when cursor {
+        UiCursor.Default => 0,
+        UiCursor.Hand => 1,
+        UiCursor.Text => 2,
+        UiCursor.Crosshair => 1,
+        UiCursor.Move => 3,
+        UiCursor.Grab => 4,
+        UiCursor.Grabbing => 5,
+        UiCursor.ResizeEw => 6,
+        UiCursor.ResizeNs => 7,
+        UiCursor.ResizeNesw => 6,
+        UiCursor.ResizeNwse => 7,
+        UiCursor.NotAllowed => 8,
+        UiCursor.Wait => 9,
+    }
+}
+
+/// Read monotonic elapsed seconds since the host session was opened.
+pub def ui_native_clock_secs(lib: NativeUiLib) -> f64 effect ffi {
+    val us = ffi_call_i64(lib.dll, "iris_ui_now_micros", lib.host)
+    if us <= 0 {
+        return 0.0
+    }
+    return to_f64(us) / 1000000.0
+}
+
+/// Update the OS cursor shape on the primary window.
+pub def ui_native_set_cursor(lib: NativeUiLib, cursor: UiCursor) -> i64 effect ffi {
+    return ffi_call_i64(lib.dll, "iris_ui_set_cursor", lib.host, 1, cursor_kind_code(cursor))
+}
+
+/// Update the OS cursor shape on a specific window id.
+pub def ui_native_set_cursor_window(lib: NativeUiLib, id: i64, cursor: UiCursor) -> i64 effect ffi {
+    return ffi_call_i64(lib.dll, "iris_ui_set_cursor", lib.host, id, cursor_kind_code(cursor))
+}
+
+/// Update the native window title string on the primary window.
+pub def ui_native_set_title(lib: NativeUiLib, title: str) -> i64 effect ffi {
+    return ffi_call_i64(lib.dll, "iris_ui_set_title", lib.host, 1, title)
+}
+
+/// Constrain primary window minimum and maximum logical dimensions (`0` disables that axis bound).
+pub def ui_native_set_size_constraints(
+    lib: NativeUiLib,
+    min_w: i64,
+    min_h: i64,
+    max_w: i64,
+    max_h: i64,
+) -> i64 effect ffi {
+    return ffi_call_i64(
+        lib.dll,
+        "iris_ui_set_size_constraints",
+        lib.host,
+        1,
+        min_w,
+        min_h,
+        max_w,
+        max_h,
+    )
+}
+
+/// Enable or disable user window resizing on the primary window.
+pub def ui_native_set_resizable(lib: NativeUiLib, resizable: bool) -> i64 effect ffi {
+    return ffi_call_i64(
+        lib.dll,
+        "iris_ui_set_resizable",
+        lib.host,
+        1,
+        if resizable { 1 } else { 0 },
+    )
+}
+
+/// Enter or exit borderless fullscreen mode on the primary window.
+pub def ui_native_set_fullscreen(lib: NativeUiLib, fullscreen: bool) -> i64 effect ffi {
+    return ffi_call_i64(
+        lib.dll,
+        "iris_ui_set_fullscreen",
+        lib.host,
+        1,
+        if fullscreen { 1 } else { 0 },
+    )
+}
+
+/// Maximize or restore the primary window.
+pub def ui_native_set_maximized(lib: NativeUiLib, maximized: bool) -> i64 effect ffi {
+    return ffi_call_i64(
+        lib.dll,
+        "iris_ui_set_maximized",
+        lib.host,
+        1,
+        if maximized { 1 } else { 0 },
+    )
+}
+
+/// Set the primary window taskbar/titlebar icon from raw RGBA8 bytes in `rgba_cell[..rgba_len]`.
+pub def ui_native_set_icon_rgba(
+    lib: NativeUiLib,
+    w: i64,
+    h: i64,
+    rgba_cell: i64,
+    rgba_len: i64,
+) -> i64 effect ffi {
+    return ffi_call_i64(lib.dll, "iris_ui_set_icon_rgba", lib.host, 1, w, h, rgba_cell, rgba_len)
+}
+
+/// Read UTF-8 text from the clipboard (isolated in Headless mode, OS clipboard in Desktop mode).
+pub def ui_native_clipboard_get(lib: NativeUiLib) -> str effect ffi, alloc {
+    val cap = out_len(lib.scratch_ev)
+    val n = ffi_call_i64(lib.dll, "iris_ui_clipboard_get", lib.host, lib.scratch_ev, cap)
+    if n <= 0 {
+        return ""
+    }
+    return out_str_range(lib.scratch_ev, 0, n)
+}
+
+/// Write UTF-8 text to the clipboard (isolated in Headless mode, OS clipboard in Desktop mode).
+pub def ui_native_clipboard_set(lib: NativeUiLib, text: str) -> i64 effect ffi {
+    return ffi_call_i64(lib.dll, "iris_ui_clipboard_set", lib.host, text)
+}
+
+/// Pop the next OS-dropped file path queued on the host (empty string when none remain).
+pub def ui_native_take_dropped_file(lib: NativeUiLib) -> str effect ffi, alloc {
+    val cap = out_len(lib.scratch_ev)
+    val n = ffi_call_i64(lib.dll, "iris_ui_take_dropped_file", lib.host, lib.scratch_ev, cap)
+    if n <= 0 {
+        return ""
+    }
+    return out_str_range(lib.scratch_ev, 0, n)
+}
+
+/// Open a live laptop camera (`synthetic_only = false`) or synthetic sensor stream (`true`).
+/// Returns a positive 1-based `cam_id`, or negative on failure.
+pub def ui_native_camera_open(
+    lib: NativeUiLib,
+    device_index: i64,
+    req_w: i64,
+    req_h: i64,
+    synthetic_only: bool,
+) -> i64 effect ffi {
+    return ffi_call_i64(
+        lib.dll,
+        "iris_ui_camera_open",
+        lib.host,
+        device_index,
+        req_w,
+        req_h,
+        if synthetic_only { 1 } else { 0 },
+    )
+}
+
+/// Close and stop background capture for camera `cam_id`.
+pub def ui_native_camera_close(lib: NativeUiLib, cam_id: i64) -> i64 effect ffi {
+    return ffi_call_i64(lib.dll, "iris_ui_camera_close", lib.host, cam_id)
+}
+
+/// Read dimensions, live/synthetic mode, sequence counter, and device name for camera `cam_id`.
+pub def ui_native_camera_info(lib: NativeUiLib, cam_id: i64) -> UiCameraInfo effect ffi, alloc {
+    val cap = out_len(lib.scratch_ev)
+    val n = ffi_call_i64(lib.dll, "iris_ui_camera_info", lib.host, cam_id, lib.scratch_ev, cap)
+    if n < 16 {
+        return UiCameraInfo {}
+    }
+    val w = out_i32(lib.scratch_ev, 0)
+    val h = out_i32(lib.scratch_ev, 1)
+    val mode = out_i32(lib.scratch_ev, 2)
+    val seq = out_i32(lib.scratch_ev, 3)
+    val name = if n > 16 { out_str_range(lib.scratch_ev, 16, n - 16) } else { "" }
+    return UiCameraInfo { width: w, height: h, mode: mode, seq: seq, device_name: name }
+}
+
+/// Downsample camera `cam_id` into `out_cell` (`grid_w * grid_h * 4` RGBA8 bytes). Return frame seq.
+pub def ui_native_camera_sample_grid(
+    lib: NativeUiLib,
+    cam_id: i64,
+    grid_w: i64,
+    grid_h: i64,
+    mirror: bool,
+    out_cell: i64,
+) -> i64 effect ffi {
+    val gw = if grid_w < 4 {
+        4
+    } else if grid_w > 512 {
+        512
+    } else {
+        grid_w
+    }
+    val gh = if grid_h < 4 {
+        4
+    } else if grid_h > 512 {
+        512
+    } else {
+        grid_h
+    }
+    val mbit = if mirror { 1 } else { 0 }
+    val packed = gw + gh * 65536 + mbit * 4294967296
+    val cap = out_len(out_cell)
+    return ffi_call_i64(
+        lib.dll,
+        "iris_ui_camera_sample_grid",
+        lib.host,
+        cam_id,
+        packed,
+        out_cell,
+        cap,
+    )
+}
+
+/// Drive a moving/flash target in synthetic camera feed `cam_id` for deterministic simulation tests.
+pub def ui_native_camera_set_sim_target(
+    lib: NativeUiLib,
+    cam_id: i64,
+    slot: i64,
+    alive: bool,
+    hit_flash: i64,
+    nx: f64,
+    ny: f64,
+    radius: f64,
+) -> i64 effect ffi {
+    val s = if slot < 0 { 0 } else { slot % 256 }
+    val af = if alive { 1 } else { 0 }
+    val fl = if hit_flash < 0 {
+        0
+    } else if hit_flash > 255 {
+        255
+    } else {
+        hit_flash
+    }
+    val packed = s + af * 256 + fl * 65536
+    val nx_e4 = (nx * 10000.0) to i64
+    val ny_e4 = (ny * 10000.0) to i64
+    val rad_e4 = (radius * 10000.0) to i64
+    return ffi_call_i64(
+        lib.dll,
+        "iris_ui_camera_set_sim_target",
+        lib.host,
+        cam_id,
+        packed,
+        nx_e4,
+        ny_e4,
+        rad_e4,
+    )
 }
 
 extern def iris_ui_pool_begin() -> i64 effect ffi, alloc

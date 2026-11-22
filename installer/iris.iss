@@ -1,7 +1,7 @@
 ; iris.iss — Inno Setup 6 script for IRIS Language Windows installer
 ; Produces a single self-extracting EXE with all dependencies bundled:
 ;   - iris.exe  (the compiler / REPL / LSP / DAP)
-;   - clang.exe + ld.lld.exe  (LLVM 17)
+;   - clang.exe + ld.lld.exe + LLVM-C.dll (LLVM 23.1.1)
 ;   - MinGW ucrt64 sysroot (headers + static libraries)
 ;   - VSCode extension (.vsix)
 ;
@@ -10,7 +10,7 @@
 
 #define AppName      "IRIS Language"
 #ifndef AppVersion
-  #define AppVersion "1.0.0-rc2"
+  #define AppVersion "1.0.0-rc3"
 #endif
 #define AppPublisher "IRIS Language Project"
 #define AppURL       "https://github.com/Eclipse-Softworks/IRIS"
@@ -35,15 +35,16 @@ DefaultGroupName={#AppName}
 AllowNoIcons=yes
 OutputDir=dist
 OutputBaseFilename=IRIS-{#AppVersion}-windows-x64-setup
-; v1.0.0-rc2: bundles iris.exe + clang + lld + ucrt64 sysroot + VSCode extension
+; v1.0.0-rc3: bundles iris.exe + clang + lld + ucrt64 sysroot + VSCode extension
 SetupIconFile=icon.ico
+LicenseFile=..\LICENSE
 Compression=lzma2/ultra64
 SolidCompression=yes
 WizardStyle=modern
 PrivilegesRequired=lowest
 PrivilegesRequiredOverridesAllowed=dialog
 ChangesEnvironment=yes
-UninstallDisplayIcon={app}\{#AppExeName}
+UninstallDisplayIcon={app}\icon.ico
 UninstallDisplayName={#AppName}
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
@@ -66,7 +67,7 @@ Name: "vscode";     Description: "VSCode extension (.vsix)";                  Ty
 Name: "addtopath";     Description: "Add IRIS to the user PATH";                         GroupDescription: "Environment:"
 Name: "addllvmpath";   Description: "Add LLVM to the user PATH";                         GroupDescription: "Environment:"; Components: llvm
 Name: "installvscode"; Description: "Install VSCode extension (if VSCode is detected)";   GroupDescription: "Extras:";      Components: vscode
-Name: "installdeps";     Description: "Check and download missing dependencies (LLVM, MinGW, Git, MSVC)"; GroupDescription: "Dependencies:"
+Name: "installdeps";   Description: "Download external LLVM/MinGW dependencies (for Compact installs)"; GroupDescription: "Dependencies:"; Components: compact; Flags: unchecked
 
 
 ; ---------------------------------------------------------------------------
@@ -75,6 +76,7 @@ Name: "installdeps";     Description: "Check and download missing dependencies (
 [Files]
 ; Core compiler
 Source: "{#StageDir}\iris.exe";               DestDir: "{app}";                              Flags: ignoreversion;             Components: main
+Source: "{#StageDir}\iris_ui_host.dll";       DestDir: "{app}";                              Flags: ignoreversion skipifsourcedoesntexist; Components: main
 
 ; Visual C++ Runtime DLLs (app-local deployment — iris.exe and clang.exe both need these)
 ; Listed in Microsoft's official redistribution list (redist.txt).
@@ -84,7 +86,9 @@ Source: "{#StageDir}\MSVCP140.dll";           DestDir: "{app}";  Flags: ignoreve
 
 ; Documentation / readme
 Source: "{#StageDir}\README.md";              DestDir: "{app}";                              Flags: ignoreversion isreadme;    Components: main
+Source: "{#StageDir}\icon.ico";               DestDir: "{app}";                              Flags: ignoreversion skipifsourcedoesntexist; Components: main
 Source: "{#StageDir}\icon.png";               DestDir: "{app}";                              Flags: ignoreversion skipifsourcedoesntexist; Components: main
+Source: "{#StageDir}\LLVM_VERSION";           DestDir: "{app}";                              Flags: ignoreversion skipifsourcedoesntexist; Components: main
 Source: "{#StageDir}\setup_dependencies.ps1";  DestDir: "{app}";                              Flags: ignoreversion;             Components: main
 
 
@@ -104,7 +108,7 @@ Source: "{#StageDir}\iris-lang-*.vsix";       DestDir: "{app}";                 
 ; Shortcuts
 ; ---------------------------------------------------------------------------
 [Icons]
-Name: "{group}\IRIS REPL";          Filename: "{app}\{#AppExeName}"; Parameters: "repl"; WorkingDir: "{userdocs}"
+Name: "{group}\IRIS REPL";          Filename: "{app}\{#AppExeName}"; Parameters: "repl"; WorkingDir: "{userdocs}"; IconFilename: "{app}\icon.ico"
 Name: "{group}\IRIS Documentation"; Filename: "{app}\README.md"
 Name: "{group}\Uninstall IRIS";     Filename: "{uninstallexe}"
 

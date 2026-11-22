@@ -10,7 +10,7 @@
 # ──────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
-VERSION="1.0.0-rc1"
+VERSION="1.0.0-rc3"
 ARCH="$(uname -m)"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
@@ -37,14 +37,14 @@ DIST_DIR="$ROOT/installer/dist"
 STAGE_DIR="$DIST_DIR/pkg-staging"
 SCRIPTS_DIR="$DIST_DIR/pkg-scripts"
 RESOURCES_DIR="$DIST_DIR/pkg-resources"
-PKG_ID="dev.moon9t.iris"
+PKG_ID="dev.eclipsesoftworks.iris"
 PKG_FILE="IRIS-${VERSION}-macos-${ARCH_LABEL}.pkg"
 COMP_PKG="$DIST_DIR/iris-component.pkg"
 
 # ── Clean ─────────────────────────────────────────────────────────────────
 rm -rf "$STAGE_DIR" "$SCRIPTS_DIR" "$RESOURCES_DIR" "$COMP_PKG"
 mkdir -p "$STAGE_DIR/usr/local/bin"
-mkdir -p "$STAGE_DIR/usr/local/share/iris/stdlib"
+mkdir -p "$STAGE_DIR/usr/local/lib"
 mkdir -p "$STAGE_DIR/usr/local/share/iris/examples"
 mkdir -p "$STAGE_DIR/usr/local/share/iris/toolchain"
 mkdir -p "$STAGE_DIR/usr/local/share/doc/iris"
@@ -60,19 +60,31 @@ if [[ ! -f "$IRIS_BIN" ]]; then
 else
     echo "[1/6] Using existing release binary."
 fi
+UI_HOST_LIB="$ROOT/target/release/libiris_ui_host.dylib"
+if [[ ! -f "$UI_HOST_LIB" ]]; then
+    (cd "$ROOT" && cargo build --release -p iris_ui_host) || true
+fi
 
 # ── Stage files ───────────────────────────────────────────────────────────
 echo "[2/6] Staging files..."
 
 cp "$IRIS_BIN" "$STAGE_DIR/usr/local/bin/iris"
 chmod 755 "$STAGE_DIR/usr/local/bin/iris"
-strip "$STAGE_DIR/usr/local/bin/iris" 2>/dev/null || true
+if ! codesign -dv "$STAGE_DIR/usr/local/bin/iris" 2>&1 | grep -q 'Authority='; then
+    strip "$STAGE_DIR/usr/local/bin/iris" 2>/dev/null || true
+fi
 
 # Strip quarantine
 xattr -cr "$STAGE_DIR/usr/local/bin/iris" 2>/dev/null || true
 
-# Stdlib
-cp -R "$ROOT/stdlib/"* "$STAGE_DIR/usr/local/share/iris/stdlib/" 2>/dev/null || true
+if [[ -f "$UI_HOST_LIB" ]]; then
+    cp "$UI_HOST_LIB" "$STAGE_DIR/usr/local/lib/libiris_ui_host.dylib"
+    chmod 755 "$STAGE_DIR/usr/local/lib/libiris_ui_host.dylib"
+    cp "$UI_HOST_LIB" "$STAGE_DIR/usr/local/share/iris/libiris_ui_host.dylib"
+    chmod 755 "$STAGE_DIR/usr/local/share/iris/libiris_ui_host.dylib"
+    xattr -cr "$STAGE_DIR/usr/local/lib/libiris_ui_host.dylib" "$STAGE_DIR/usr/local/share/iris/libiris_ui_host.dylib" 2>/dev/null || true
+    echo "  Bundled libiris_ui_host.dylib"
+fi
 
 # Examples
 cp -R "$ROOT/examples/"* "$STAGE_DIR/usr/local/share/iris/examples/" 2>/dev/null || true
@@ -84,9 +96,16 @@ if [[ -d "$TOOLCHAIN_SRC" ]]; then
     echo "  Bundled LLVM toolchain"
 fi
 
-# Docs
+# Docs, logo & LLVM_VERSION
+cp "$ROOT/LLVM_VERSION" "$STAGE_DIR/usr/local/share/iris/" 2>/dev/null || true
 cp "$ROOT/LICENSE" "$STAGE_DIR/usr/local/share/doc/iris/"
 cp "$ROOT/README.md" "$STAGE_DIR/usr/local/share/doc/iris/"
+ICON_SRC="$ROOT/installer/icon.png"
+if [[ ! -f "$ICON_SRC" ]]; then ICON_SRC="$ROOT/logo/iris-logo.png"; fi
+if [[ -f "$ICON_SRC" ]]; then
+    cp "$ICON_SRC" "$STAGE_DIR/usr/local/share/iris/iris.png"
+    cp "$ICON_SRC" "$RESOURCES_DIR/logo.png"
+fi
 
 # ── Post-install script ──────────────────────────────────────────────────
 echo "[3/6] Creating installer scripts..."
@@ -101,37 +120,17 @@ echo "  The iris command is available at /usr/local/bin/iris"
 echo "  Run: iris --version"
 echo ""
 
-# Create shell completion for zsh
-COMP_DIR="/usr/local/share/zsh/site-functions"
-if [[ -d "$(dirname "$COMP_DIR")" ]]; then
-    mkdir -p "$COMP_DIR"
-    cat > "$COMP_DIR/_iris" << 'COMPEOF'
-#compdef iris
-_iris() {
-    local -a commands
-    commands=(
-        'run:Run an IRIS source file'
-        'build:Compile to native binary'
-        'repl:Start interactive REPL'
-        'lsp:Start Language Server'
-        'dap:Start Debug Adapter'
-        'bench:Run benchmarks'
-        'check:Check source for errors'
-        'fmt:Format source files'
-    )
-    _arguments \
-        '--version[Print version]' \
-        '--help[Print help]' \
-        '--emit[Emit type]:emit type:(ir llvm asm jit eval)' \
-        '-o[Output file]:output file:_files' \
-        '1:command:->cmds' \
-        '*:file:_files -g "*.iris"'
-    case "$state" in
-        cmds) _describe 'command' commands ;;
-    esac
-}
-_iris
-COMPEOF
+# Generate dynamic shell completions from the installed iris binary
+if [[ -x "/usr/local/bin/iris" ]]; then
+    COMP_DIR="/usr/local/share/zsh/site-functions"
+    mkdir -p "$COMP_DIR" 2>/dev/null || true
+    /usr/local/bin/iris completions zsh > "$COMP_DIR/_iris" 2>/dev/null || true
+    if [[ -d "/usr/local/etc/bash_completion.d" ]]; then
+        /usr/local/bin/iris completions bash > "/usr/local/etc/bash_completion.d/iris" 2>/dev/null || true
+    fi
+    if [[ -d "/usr/local/share/fish/vendor_completions.d" ]]; then
+        /usr/local/bin/iris completions fish > "/usr/local/share/fish/vendor_completions.d/iris.fish" 2>/dev/null || true
+    fi
 fi
 POSTEOF
 chmod 755 "$SCRIPTS_DIR/postinstall"
@@ -142,6 +141,7 @@ echo "[4/6] Creating package resources..."
 cat > "$RESOURCES_DIR/welcome.html" << EOF
 <html>
 <body style="font-family: -apple-system, Helvetica, Arial; padding: 20px;">
+<p><img src="logo.png" width="72" height="72" alt="IRIS Logo" /></p>
 <h1>IRIS Language v${VERSION}</h1>
 <p><strong>Intermediate Representation for Intelligent Systems</strong></p>
 <p>This installer will install the IRIS programming language toolchain to
@@ -164,6 +164,7 @@ cp "$ROOT/LICENSE" "$RESOURCES_DIR/license.txt"
 cat > "$RESOURCES_DIR/conclusion.html" << EOF
 <html>
 <body style="font-family: -apple-system, Helvetica, Arial; padding: 20px;">
+<p><img src="logo.png" width="72" height="72" alt="IRIS Logo" /></p>
 <h1>Installation Complete! 🎉</h1>
 <p>IRIS has been installed to <code>/usr/local/bin/iris</code>.</p>
 <h3>Quick Start</h3>
@@ -180,10 +181,15 @@ cat > "$RESOURCES_DIR/conclusion.html" << EOF
   <li>Search for "IRIS" in the Extensions Marketplace</li>
   <li>Or install from terminal: <code>code --install-extension iris-lang-*.vsix</code></li>
 </ol>
-<p>Documentation: <a href="https://github.com/moon9t/iris">github.com/moon9t/iris</a></p>
+<p>Documentation: <a href="https://github.com/Eclipse-Softworks/IRIS">github.com/Eclipse-Softworks/IRIS</a></p>
 </body>
 </html>
 EOF
+
+# Optionally sign all Mach-O binaries/libraries before building .pkg
+if [[ -f "$SCRIPT_DIR/sign_and_notarize.sh" ]]; then
+    bash "$SCRIPT_DIR/sign_and_notarize.sh" sign-binaries "$STAGE_DIR"
+fi
 
 # ── Build component package ──────────────────────────────────────────────
 echo "[5/6] Building component package..."

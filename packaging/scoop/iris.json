@@ -1,0 +1,38 @@
+{
+  "version": "1.0.0-rc3",
+  "description": "IRIS: A compiled systems, AI/ML, and UI programming language with bundled LLVM toolchain",
+  "homepage": "https://github.com/Eclipse-Softworks/IRIS",
+  "license": "Apache-2.0",
+  "architecture": {
+    "64bit": {
+      "url": "https://github.com/Eclipse-Softworks/IRIS/releases/download/v1.0.0-rc3/iris-v1.0.0-rc3-x86_64-pc-windows-msvc.zip",
+      "hash": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    "arm64": {
+      "url": "https://github.com/Eclipse-Softworks/IRIS/releases/download/v1.0.0-rc3/iris-v1.0.0-rc3-aarch64-pc-windows-msvc.zip",
+      "hash": "0000000000000000000000000000000000000000000000000000000000000000"
+    }
+  },
+  "bin": [
+    "bin\\iris.exe"
+  ],
+  "post_install": [
+    "& \"$dir\\bin\\iris.exe\" completions powershell | Set-Content -Path \"$dir\\share\\iris\\completions\\_iris.ps1\" -Encoding UTF8"
+  ],
+  "checkver": {
+    "github": "https://github.com/Eclipse-Softworks/IRIS"
+  },
+  "autoupdate": {
+    "architecture": {
+      "64bit": {
+        "url": "https://github.com/Eclipse-Softworks/IRIS/releases/download/v$version/iris-v$version-x86_64-pc-windows-msvc.zip"
+      },
+      "arm64": {
+        "url": "https://github.com/Eclipse-Softworks/IRIS/releases/download/v$version/iris-v$version-aarch64-pc-windows-msvc.zip"
+      }
+    },
+    "hash": {
+      "url": "https://github.com/Eclipse-Softworks/IRIS/releases/download/v$version/SHA256SUMS.txt"
+    }
+  }
+}

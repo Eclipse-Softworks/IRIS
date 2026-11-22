@@ -132,6 +132,8 @@ export async function showServerMenu(
           description: isLspRunning ? 'Stop the IRIS LSP server' : 'Start the IRIS LSP server' },
         { label: '$(output) Show Server Output', description: 'Open the language server output channel' },
         { label: '$(terminal) Open REPL', description: 'Open an interactive IRIS session' },
+        { label: '$(check-all) Check Project', description: 'Run static type, borrow, and effect checks across workspace' },
+        { label: '$(heart) Run Toolchain Doctor', description: 'Verify compiler, LLVM-C, linker, debugger, and optional stacks' },
         { label: '$(info) Show Version Info', description: 'Display full IRIS compiler version information' },
         { label: '$(gear) Open Settings', description: 'Configure IRIS extension settings' },
     ];
@@ -149,6 +151,10 @@ export async function showServerMenu(
         actions.showServerOutput();
     } else if (pick.label.includes('REPL')) {
         actions.openRepl();
+    } else if (pick.label.includes('Check Project')) {
+        vscode.commands.executeCommand('iris.checkWorkspace');
+    } else if (pick.label.includes('Doctor')) {
+        vscode.commands.executeCommand('iris.doctor');
     } else if (pick.label.includes('Version')) {
         actions.showFullVersion();
     } else if (pick.label.includes('Settings')) {

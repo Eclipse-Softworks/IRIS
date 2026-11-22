@@ -13,7 +13,7 @@ use std::cmp::Ordering;
 use std::env;
 use std::fs;
 use std::io::{self, Read, Write};
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 
 /// The repository whose releases are IRIS's.
@@ -153,27 +153,87 @@ pub fn fetch_latest_release() -> Result<GitHubRelease, String> {
     serde_json::from_slice(&json).map_err(|e| format!("unexpected GitHub release JSON: {e}"))
 }
 
-/// The file `name` (by its last path component) inside a `.tar.gz`.
-fn from_tar_gz(archive: &[u8], name: &str) -> Result<Vec<u8>, String> {
-    let mut tar = tar::Archive::new(flate2::read::GzDecoder::new(archive));
-    for entry in tar.entries().map_err(|e| e.to_string())? {
-        let mut entry = entry.map_err(|e| e.to_string())?;
-        let path = entry.path().map_err(|e| e.to_string())?.into_owned();
-        if path.file_name().and_then(|f| f.to_str()) == Some(name)
-            && entry.header().entry_type().is_file()
-        {
-            let mut data = Vec::new();
-            entry.read_to_end(&mut data).map_err(|e| e.to_string())?;
-            return Ok(data);
-        }
-    }
-    Err(format!("no `{name}` in the archive"))
+/// The full archive for `triple`: `iris-vX-TRIPLE.{zip,tar.gz}` (includes toolchain).
+pub fn select_full_asset<'a>(assets: &'a [GitHubAsset], triple: &str) -> Option<&'a GitHubAsset> {
+    let archive = |n: &str| n.ends_with(".zip") || n.ends_with(".tar.gz");
+    let full = format!("-{triple}.");
+    assets
+        .iter()
+        .find(|a| a.name.contains(&full) && !a.name.contains("-lightweight") && archive(&a.name))
 }
 
-/// The file `name` (by its last path component) inside a `.zip`: the
-/// central directory names it, its local header precedes its data, stored
-/// or deflated.
-pub fn from_zip(archive: &[u8], name: &str) -> Result<Vec<u8>, String> {
+/// The VS Code extension package (`iris-lang-*.vsix`) attached to a release.
+pub fn select_vsix_asset<'a>(assets: &'a [GitHubAsset]) -> Option<&'a GitHubAsset> {
+    assets
+        .iter()
+        .find(|a| a.name.starts_with("iris-lang-") && a.name.ends_with(".vsix"))
+}
+
+/// Download raw bytes from `url` via system curl.
+pub fn download_url(url: &str, api: bool) -> Result<Vec<u8>, String> {
+    curl(url, api)
+}
+
+/// Sanitize a relative archive path to reject absolute roots, drive letters, and `..`.
+fn sanitize_rel_path(raw: &str) -> Option<PathBuf> {
+    let normalized = raw.replace('\\', "/");
+    let trimmed = normalized.trim_start_matches("./").trim_end_matches('/');
+    if trimmed.is_empty() || trimmed.starts_with('/') {
+        return None;
+    }
+    let mut out = PathBuf::new();
+    for comp in Path::new(trimmed).components() {
+        match comp {
+            Component::Normal(part) => {
+                let s = part.to_string_lossy();
+                if s.contains(':') || s.contains('\0') {
+                    return None;
+                }
+                out.push(part);
+            }
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => return None,
+        }
+    }
+    if out.as_os_str().is_empty() {
+        None
+    } else {
+        Some(out)
+    }
+}
+
+/// Resolve the relative output path for an archive entry matching an optional directory prefix.
+/// Accepts `<prefix>/...` as well as `<top-wrapper>/<prefix>/...` so archives with or without a
+/// top-level container folder extract cleanly into `dest_dir`.
+fn match_subdir_entry(raw_entry: &str, subdir_prefix: Option<&str>) -> Option<PathBuf> {
+    let normalized = raw_entry.replace('\\', "/");
+    if normalized.ends_with('/') {
+        return None;
+    }
+    let clean = sanitize_rel_path(&normalized)?;
+    let Some(prefix) = subdir_prefix
+        .map(|p| p.trim_matches('/'))
+        .filter(|p| !p.is_empty())
+    else {
+        return Some(clean);
+    };
+    let clean_str = clean.to_string_lossy().replace('\\', "/");
+    let prefix_slash = format!("{prefix}/");
+    if let Some(rest) = clean_str.strip_prefix(&prefix_slash) {
+        return sanitize_rel_path(rest);
+    }
+    if let Some((_top, tail)) = clean_str.split_once('/') {
+        if let Some(rest) = tail.strip_prefix(&prefix_slash) {
+            return sanitize_rel_path(rest);
+        }
+    }
+    None
+}
+
+fn iter_zip_entries<F>(archive: &[u8], mut visitor: F) -> Result<(), String>
+where
+    F: FnMut(&str, &[u8]) -> Result<bool, String>,
+{
     let u16_at = |at: usize| {
         archive
             .get(at..at + 2)
@@ -208,11 +268,11 @@ pub fn from_zip(archive: &[u8], name: &str) -> Result<Vec<u8>, String> {
             String::from_utf8_lossy(archive.get(at + 46..at + 46 + name_len).ok_or_else(bad)?)
                 .into_owned();
         at += 46 + name_len + extra_len + comment_len;
-        if entry_name.rsplit(['/', '\\']).next() != Some(name) {
-            continue;
-        }
         if compressed == 0xFFFF_FFFF || size == 0xFFFF_FFFF {
             return Err(format!("`{entry_name}` is a zip64 entry"));
+        }
+        if entry_name.ends_with('/') || entry_name.ends_with('\\') {
+            continue;
         }
         if u32_at(local) != Some(0x0403_4b50) {
             return Err(bad());
@@ -239,19 +299,135 @@ pub fn from_zip(archive: &[u8], name: &str) -> Result<Vec<u8>, String> {
                 data.len()
             ));
         }
-        return Ok(data);
+        if !visitor(&entry_name, &data)? {
+            break;
+        }
+    }
+    Ok(())
+}
+
+/// The file `name` (by its last path component) inside a `.tar.gz`.
+fn from_tar_gz(archive: &[u8], name: &str) -> Result<Vec<u8>, String> {
+    let mut tar = tar::Archive::new(flate2::read::GzDecoder::new(archive));
+    for entry in tar.entries().map_err(|e| e.to_string())? {
+        let mut entry = entry.map_err(|e| e.to_string())?;
+        let path = entry.path().map_err(|e| e.to_string())?.into_owned();
+        if path.file_name().and_then(|f| f.to_str()) == Some(name)
+            && entry.header().entry_type().is_file()
+        {
+            let mut data = Vec::new();
+            entry.read_to_end(&mut data).map_err(|e| e.to_string())?;
+            return Ok(data);
+        }
     }
     Err(format!("no `{name}` in the archive"))
+}
+
+/// The file `name` (by its last path component) inside a `.zip`.
+pub fn from_zip(archive: &[u8], name: &str) -> Result<Vec<u8>, String> {
+    let mut found: Option<Vec<u8>> = None;
+    iter_zip_entries(archive, |entry_name, data| {
+        if entry_name.rsplit(['/', '\\']).next() == Some(name) {
+            found = Some(data.to_vec());
+            return Ok(false);
+        }
+        Ok(true)
+    })?;
+    found.ok_or_else(|| format!("no `{name}` in the archive"))
+}
+
+/// Extract a single file matching `target_filename` (by basename) from a `.zip` or `.tar.gz`.
+pub fn extract_file(
+    archive: &[u8],
+    asset_name: &str,
+    target_filename: &str,
+) -> Result<Vec<u8>, String> {
+    if asset_name.ends_with(".zip") {
+        from_zip(archive, target_filename)
+    } else {
+        from_tar_gz(archive, target_filename)
+    }
+}
+
+/// Safely extract all files inside `subdir_prefix` (or all files if `None`) from `.zip` or `.tar.gz`
+/// into `dest_dir`, rejecting path traversal entries. Returns the number of extracted files.
+pub fn extract_archive_subdir(
+    archive: &[u8],
+    asset_name: &str,
+    subdir_prefix: Option<&str>,
+    dest_dir: &Path,
+) -> Result<usize, String> {
+    let mut extracted = 0usize;
+    let write_entry = |rel: PathBuf, data: &[u8], executable_hint: bool| -> Result<(), String> {
+        let out_path = dest_dir.join(&rel);
+        if let Some(parent) = out_path.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|e| format!("failed to create directory {}: {e}", parent.display()))?;
+        }
+        fs::write(&out_path, data)
+            .map_err(|e| format!("failed to write {}: {e}", out_path.display()))?;
+        #[cfg(unix)]
+        if executable_hint
+            || rel
+                .components()
+                .any(|c| matches!(c, Component::Normal(s) if s == "bin"))
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(&out_path, fs::Permissions::from_mode(0o755));
+        }
+        #[cfg(not(unix))]
+        let _ = executable_hint;
+        Ok(())
+    };
+
+    if asset_name.ends_with(".zip") {
+        iter_zip_entries(archive, |entry_name, data| {
+            // Check raw safety first so traversal entries outside subdir_prefix are still spotted cleanly.
+            if Path::new(&entry_name.replace('\\', "/"))
+                .components()
+                .any(|c| matches!(c, Component::ParentDir))
+            {
+                return Err(format!("unsafe archive entry path rejected: {entry_name}"));
+            }
+            if let Some(rel) = match_subdir_entry(entry_name, subdir_prefix) {
+                let exec = entry_name.contains("/bin/")
+                    || entry_name.ends_with(".so")
+                    || entry_name.ends_with(".dylib");
+                write_entry(rel, data, exec)?;
+                extracted += 1;
+            }
+            Ok(true)
+        })?;
+    } else {
+        let mut tar = tar::Archive::new(flate2::read::GzDecoder::new(archive));
+        for entry in tar.entries().map_err(|e| e.to_string())? {
+            let mut entry = entry.map_err(|e| e.to_string())?;
+            let path = entry.path().map_err(|e| e.to_string())?.into_owned();
+            let raw = path.to_string_lossy().into_owned();
+            if path.components().any(|c| matches!(c, Component::ParentDir)) {
+                return Err(format!("unsafe archive entry path rejected: {raw}"));
+            }
+            if !entry.header().entry_type().is_file() {
+                continue;
+            }
+            let Some(rel) = match_subdir_entry(&raw, subdir_prefix) else {
+                continue;
+            };
+            let mode = entry.header().mode().unwrap_or(0o644);
+            let mut data = Vec::new();
+            entry.read_to_end(&mut data).map_err(|e| e.to_string())?;
+            write_entry(rel, &data, (mode & 0o111) != 0)?;
+            extracted += 1;
+        }
+    }
+
+    Ok(extracted)
 }
 
 /// The `iris` executable inside a release archive called `asset_name`.
 pub fn extract_executable(archive: &[u8], asset_name: &str) -> Result<Vec<u8>, String> {
     let exe = if cfg!(windows) { "iris.exe" } else { "iris" };
-    if asset_name.ends_with(".zip") {
-        from_zip(archive, exe)
-    } else {
-        from_tar_gz(archive, exe)
-    }
+    extract_file(archive, asset_name, exe)
 }
 
 /// Put `new_bin_path` where `current_exe_path` is, keeping the old one
@@ -288,6 +464,34 @@ fn perform_swap(new_bin_path: &Path, current_exe_path: &Path) -> Result<(), Stri
 }
 
 pub fn run_upgrade_command(check: bool, yes: bool, force: bool) -> Result<(), String> {
+    run_upgrade_command_with_options(check, yes, force, false)
+}
+
+fn install_prefix_for_exe(exe_path: &Path) -> Option<PathBuf> {
+    let dir = exe_path.parent()?;
+    if dir.file_name().and_then(|s| s.to_str()) == Some("bin") {
+        dir.parent().map(Path::to_path_buf)
+    } else {
+        Some(dir.to_path_buf())
+    }
+}
+
+fn ui_host_filename() -> &'static str {
+    if cfg!(target_os = "windows") {
+        "iris_ui_host.dll"
+    } else if cfg!(target_os = "macos") {
+        "libiris_ui_host.dylib"
+    } else {
+        "libiris_ui_host.so"
+    }
+}
+
+pub fn run_upgrade_command_with_options(
+    check: bool,
+    yes: bool,
+    force: bool,
+    full: bool,
+) -> Result<(), String> {
     let current_ver_str = env!("CARGO_PKG_VERSION");
     let current = SemVer::parse(current_ver_str)
         .ok_or_else(|| format!("invalid current version: {current_ver_str}"))?;
@@ -314,8 +518,12 @@ pub fn run_upgrade_command(check: bool, yes: bool, force: bool) -> Result<(), St
             env::consts::OS
         )
     })?;
-    let asset = select_asset(&release.assets, triple)
-        .ok_or_else(|| format!("release {} has no archive for {triple}", release.tag_name))?;
+    let asset = if full {
+        select_full_asset(&release.assets, triple).or_else(|| select_asset(&release.assets, triple))
+    } else {
+        select_asset(&release.assets, triple)
+    }
+    .ok_or_else(|| format!("release {} has no archive for {triple}", release.tag_name))?;
 
     if !yes {
         print!("Upgrade to v{latest} from {}? [y/N]: ", asset.name);
@@ -360,6 +568,66 @@ pub fn run_upgrade_command(check: bool, yes: bool, force: bool) -> Result<(), St
         let _ = fs::remove_file(&staged);
         return Err(e);
     }
+
+    // Update sibling iris_ui_host shared library if bundled in the release archive.
+    let ui_name = ui_host_filename();
+    if let Ok(ui_bytes) = extract_file(&archive, &asset.name, ui_name) {
+        if let Some(exe_dir) = current_exe.parent() {
+            let ui_dest = exe_dir.join(ui_name);
+            let ui_staged = exe_dir.join(format!("{ui_name}.new"));
+            if fs::write(&ui_staged, &ui_bytes).is_ok() {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let _ = fs::set_permissions(&ui_staged, fs::Permissions::from_mode(0o755));
+                }
+                if fs::rename(&ui_staged, &ui_dest).is_err() {
+                    let _ = fs::remove_file(&ui_staged);
+                } else {
+                    println!("Updated {ui_name}.");
+                }
+            }
+        }
+    }
+
+    // Refresh or notify on bundled LLVM toolchain changes.
+    if let Some(prefix) = install_prefix_for_exe(&current_exe) {
+        let remote_llvm = extract_file(&archive, &asset.name, "LLVM_VERSION")
+            .ok()
+            .and_then(|b| String::from_utf8(b).ok())
+            .map(|s| s.trim().to_owned())
+            .filter(|s| !s.is_empty());
+        let local_llvm = fs::read_to_string(prefix.join("share/iris/LLVM_VERSION"))
+            .or_else(|_| fs::read_to_string(prefix.join("LLVM_VERSION")))
+            .ok()
+            .map(|s| s.trim().to_owned())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| crate::setup::LLVM_VERSION.trim().to_owned());
+
+        if full {
+            let tc_dest = prefix.join("toolchain");
+            match extract_archive_subdir(&archive, &asset.name, Some("toolchain"), &tc_dest) {
+                Ok(n) if n > 0 => {
+                    if let Some(ver) = &remote_llvm {
+                        let share = prefix.join("share").join("iris");
+                        let _ = fs::create_dir_all(&share);
+                        let _ = fs::write(share.join("LLVM_VERSION"), format!("{ver}\n"));
+                    }
+                    println!("Refreshed toolchain/ ({n} files).");
+                }
+                Ok(_) => println!("No toolchain directory present in {}.", asset.name),
+                Err(e) => eprintln!("warning: could not update toolchain: {e}"),
+            }
+        } else if let Some(new_ver) = remote_llvm {
+            if new_ver != local_llvm {
+                println!(
+                    "Note: this release uses LLVM {new_ver} (installed: {local_llvm}). \
+                     Run `iris setup toolchain` or `iris upgrade --full` to refresh your toolchain."
+                );
+            }
+        }
+    }
+
     println!("Upgraded IRIS to v{latest}.");
     Ok(())
 }

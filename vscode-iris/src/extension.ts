@@ -19,6 +19,15 @@ import {
     runBenchmarks,
     generateDocs,
     pkgCommand,
+    bundleApp,
+    newProjectFromTemplate,
+    checkProject,
+    watchFile,
+    runDoctor,
+    profileFile,
+    buildEmbedded,
+    runBindgen,
+    collectBugReport,
     IrisEmitProvider,
     runDiagCollection,
 } from './commands';
@@ -63,6 +72,16 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         vscode.commands.registerCommand('iris.runBench', () => runBenchmarks(getIrisExe)),
         vscode.commands.registerCommand('iris.generateDocs', () => generateDocs(getIrisExe)),
         vscode.commands.registerCommand('iris.pkg', () => pkgCommand(getIrisExe)),
+        vscode.commands.registerCommand('iris.buildGui', () => runIrisFile(context, 'build', getIrisExe, outputChannel, true)),
+        vscode.commands.registerCommand('iris.bundleApp', () => bundleApp(getIrisExe)),
+        vscode.commands.registerCommand('iris.newProject', () => newProjectFromTemplate(getIrisExe)),
+        vscode.commands.registerCommand('iris.checkWorkspace', () => checkProject(getIrisExe)),
+        vscode.commands.registerCommand('iris.watchFile', () => watchFile(getIrisExe)),
+        vscode.commands.registerCommand('iris.doctor', () => runDoctor(getIrisExe)),
+        vscode.commands.registerCommand('iris.profileFile', () => profileFile(getIrisExe)),
+        vscode.commands.registerCommand('iris.buildEmbedded', () => buildEmbedded(getIrisExe)),
+        vscode.commands.registerCommand('iris.bindgen', () => runBindgen(getIrisExe)),
+        vscode.commands.registerCommand('iris.bugReport', () => collectBugReport(getIrisExe)),
         vscode.commands.registerCommand('iris.diagnostics', () => {
             outputChannel.clear();
             outputChannel.appendLine('=== IRIS executable resolution ===');

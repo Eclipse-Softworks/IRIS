@@ -321,28 +321,26 @@ pub(crate) fn llvm_library_candidates(default_name: &str) -> Vec<PathBuf> {
         candidates.push(PathBuf::from(path));
     }
 
-    if let Ok(executable) = std::env::current_exe() {
-        if let Some(directory) = executable.parent() {
-            #[cfg(target_os = "windows")]
-            candidates.push(directory.join("toolchain/llvm/bin/LLVM-C.dll"));
-            #[cfg(target_os = "macos")]
-            candidates.push(directory.join("toolchain/llvm/lib/libLLVM.dylib"));
-            #[cfg(target_os = "linux")]
-            {
-                candidates.push(directory.join("toolchain/llvm/lib/libLLVM.so.23.1"));
-                candidates.push(directory.join("toolchain/llvm/lib/libLLVM.so.23"));
-                candidates.push(directory.join("toolchain/llvm/lib/libLLVM.so"));
-            }
+    for prefix in crate::codegen::build::install_prefix_dirs() {
+        #[cfg(target_os = "windows")]
+        {
+            candidates.push(prefix.join("toolchain/llvm/bin/LLVM-C.dll"));
+            candidates.push(prefix.join("bin/LLVM-C.dll"));
+        }
+        #[cfg(target_os = "macos")]
+        {
+            candidates.push(prefix.join("toolchain/llvm/lib/libLLVM.dylib"));
+        }
+        #[cfg(target_os = "linux")]
+        {
+            candidates.push(prefix.join("toolchain/llvm/lib/libLLVM.so.23.1"));
+            candidates.push(prefix.join("toolchain/llvm/lib/libLLVM.so.23"));
+            candidates.push(prefix.join("toolchain/llvm/lib/libLLVM.so"));
         }
     }
 
     #[cfg(target_os = "windows")]
     {
-        if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
-            candidates.push(
-                PathBuf::from(local_app_data).join("Programs/IRIS/toolchain/llvm/bin/LLVM-C.dll"),
-            );
-        }
         for directory in [
             r"C:\llvm-23.1.1\bin",
             r"C:\llvm-23\bin",

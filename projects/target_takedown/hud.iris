@@ -1,0 +1,322 @@
+// Tactical HUD painter: blits live/synthetic camera frames (RGB / NVG / FLIR / Slate),
+// motion salience heatmap, boresight reticle, target lock-on brackets, lead vectors,
+// intercept laser beams, and neutralization shockwaves into `DrawBuffer`.
+
+bring std.ffi
+bring std.ui
+bring "vision.iris"
+
+/// Render options passed from `AppModel` to `paint_takedown_hud`.
+pub record HudConfig {
+    cam_id: i64 = 0,
+    mirror: bool = true,
+    tint_mode: i64 = 0,
+    show_heatmap: bool = false,
+    show_lead: bool = true,
+    is_live: bool = false,
+    device_name: str = "",
+    reticle_scale: f64 = 1.0,
+    primary_id: i64 = -1,
+    hit_flash_hud: f64 = 0.0,
+    theme: UiTheme = obsidian_theme(),
+}
+
+def status_color(st: TargetStatus, is_primary: bool, theme: UiTheme) -> UiColor {
+    return when st {
+        TargetStatus.Acquired => rgba(250, 204, 21, 235),
+        TargetStatus.Tracking => if is_primary { rgba(56, 189, 248, 245) } else { theme.teal },
+        TargetStatus.Locked => rgba(249, 115, 22, 255),
+        TargetStatus.Engaging => rgba(239, 68, 68, 255),
+        TargetStatus.Neutralized => rgba(52, 211, 153, 245),
+    }
+}
+
+def status_short(st: TargetStatus) -> str {
+    return when st {
+        TargetStatus.Acquired => "ACQ",
+        TargetStatus.Tracking => "TRK",
+        TargetStatus.Locked => "LOCK",
+        TargetStatus.Engaging => "ENG",
+        TargetStatus.Neutralized => "KILL",
+    }
+}
+
+def paint_heatmap_tiles(
+    buf: DrawBuffer,
+    vp: UiRect,
+    ws: VisionWorkspace,
+) -> DrawBuffer effect ffi, alloc {
+    var b = buf
+    val cw = vp.w / 16.0
+    val ch = vp.h / 9.0
+    for gy in 0..9 {
+        for gx in 0..16 {
+            val sx = gx * 4 + 1
+            val sy = gy * 4 + 1
+            val v = out_u8(ws.sal_cell, sy * GRID_W + sx)
+            if v > 42 {
+                val a = if v > 180 { 115 } else { v / 2 }
+                val col = if v > 150 { rgba(249, 115, 22, a) } else { rgba(56, 189, 248, a) }
+                b = draw_cmd_round_rect(
+                    b,
+                    UiRect {
+                        x: vp.x + to_f64(gx) * cw + 1.0,
+                        y: vp.y + to_f64(gy) * ch + 1.0,
+                        w: cw - 2.0,
+                        h: ch - 2.0,
+                    },
+                    2.0,
+                    UiStyle { bg: col },
+                )
+            }
+        }
+    }
+    return b
+}
+
+def draw_corner_brackets(
+    buf: DrawBuffer,
+    box: UiRect,
+    color: UiColor,
+    thick: f64,
+) -> DrawBuffer effect ffi, alloc {
+    val seg = if box.w < box.h { box.w * 0.28 } else { box.h * 0.28 }
+    val x0 = box.x
+    val y0 = box.y
+    val x1 = box.x + box.w
+    val y1 = box.y + box.h
+    var b = draw_cmd_line(buf, UiRect { x: x0, y: y0, w: x0 + seg, h: y0 }, color, thick, false)
+    b = draw_cmd_line(b, UiRect { x: x0, y: y0, w: x0, h: y0 + seg }, color, thick, false)
+    b = draw_cmd_line(b, UiRect { x: x1 - seg, y: y0, w: x1, h: y0 }, color, thick, false)
+    b = draw_cmd_line(b, UiRect { x: x1, y: y0, w: x1, h: y0 + seg }, color, thick, false)
+    b = draw_cmd_line(b, UiRect { x: x0, y: y1, w: x0 + seg, h: y1 }, color, thick, false)
+    b = draw_cmd_line(b, UiRect { x: x0, y: y1 - seg, w: x0, h: y1 }, color, thick, false)
+    b = draw_cmd_line(b, UiRect { x: x1 - seg, y: y1, w: x1, h: y1 }, color, thick, false)
+    b = draw_cmd_line(b, UiRect { x: x1, y: y1 - seg, w: x1, h: y1 }, color, thick, false)
+    return b
+}
+
+def paint_boresight_reticle(
+    buf: DrawBuffer,
+    vp: UiRect,
+    scale_mul: f64,
+    flash: f64,
+) -> DrawBuffer effect ffi, alloc {
+    val cx = vp.x + vp.w * 0.5
+    val cy = vp.y + vp.h * 0.5
+    val rad = 34.0 * scale_mul
+    val col = if flash > 0.1 { rgba(248, 113, 113, 230) } else { rgba(148, 226, 213, 165) }
+    var b = draw_cmd_circle(buf, cx, cy, rad, UiStyle { border: col, border_width: 1.5 })
+    b = draw_cmd_line(
+        b,
+        UiRect { x: cx - rad - 10.0, y: cy, w: cx - rad * 0.45, h: cy },
+        col,
+        1.5,
+        false,
+    )
+    b = draw_cmd_line(
+        b,
+        UiRect { x: cx + rad * 0.45, y: cy, w: cx + rad + 10.0, h: cy },
+        col,
+        1.5,
+        false,
+    )
+    b = draw_cmd_line(
+        b,
+        UiRect { x: cx, y: cy - rad - 10.0, w: cx, h: cy - rad * 0.45 },
+        col,
+        1.5,
+        false,
+    )
+    b = draw_cmd_line(
+        b,
+        UiRect { x: cx, y: cy + rad * 0.45, w: cx, h: cy + rad + 10.0 },
+        col,
+        1.5,
+        false,
+    )
+
+    // Subtle compass ruler ticks along top edge of camera viewport
+    val y_top = vp.y + 10.0
+    var tick_x = vp.x + 28.0
+    while tick_x < vp.x + vp.w - 28.0 {
+        b = draw_cmd_line(
+            b,
+            UiRect { x: tick_x, y: y_top, w: tick_x, h: y_top + 6.0 },
+            rgba(203, 213, 225, 110),
+            1.0,
+            false,
+        )
+        tick_x = tick_x + 32.0
+    }
+    return b
+}
+
+def paint_single_target(
+    buf: DrawBuffer,
+    vp: UiRect,
+    t: TrackedTarget,
+    cfg: HudConfig,
+) -> DrawBuffer effect ffi, alloc {
+    val is_primary = t.id == cfg.primary_id
+    val cx = vp.x + t.nx * vp.w
+    val cy = vp.y + t.ny * vp.h
+    val bw = t.nw * vp.w
+    val bh = t.nh * vp.h
+    val box = UiRect { x: cx - bw * 0.5, y: cy - bh * 0.5, w: bw, h: bh }
+    val col = status_color(t.status, is_primary, cfg.theme)
+    var b = draw_corner_brackets(buf, box, col, if is_primary { 2.5 } else { 1.8 })
+
+    val ring_r = (if bw > bh { bw } else { bh }) * 0.62
+    val is_done = status_short(t.status) == "KILL"
+    val is_eng = status_short(t.status) == "ENG"
+    if !is_done {
+        val sweep = 6.28318 * t.lock_progress
+        if sweep > 0.08 {
+            b = draw_cmd_arc(b, cx, cy, ring_r, -1.5707963, sweep, col, 2.8, true)
+        }
+        if cfg.show_lead {
+            val lx = vp.x + t.lead_nx * vp.w
+            val ly = vp.y + t.lead_ny * vp.h
+            b = draw_cmd_line(
+                b,
+                UiRect { x: cx, y: cy, w: lx, h: ly },
+                rgba(250, 204, 21, 185),
+                1.5,
+                true,
+            )
+            b = draw_cmd_circle(
+                b,
+                lx,
+                ly,
+                5.0,
+                UiStyle {
+                    bg: rgba(250, 204, 21, 90),
+                    border: rgba(250, 204, 21, 240),
+                    border_width: 1.5,
+                },
+            )
+        }
+    }
+
+    if is_eng {
+        val p = t.engage_timer / 0.42
+        val beam_col = rgba(248, 113, 113, 235)
+        b = draw_cmd_line(
+            b,
+            UiRect { x: vp.x, y: vp.y + vp.h, w: cx, h: cy },
+            beam_col,
+            2.4 + p * 2.0,
+            false,
+        )
+        b = draw_cmd_line(
+            b,
+            UiRect { x: vp.x + vp.w, y: vp.y + vp.h, w: cx, h: cy },
+            beam_col,
+            2.4 + p * 2.0,
+            false,
+        )
+        b = draw_cmd_circle(
+            b,
+            cx,
+            cy,
+            8.0 + (1.0 - p) * 26.0,
+            UiStyle { border: beam_col, border_width: 2.2 },
+        )
+    }
+
+    if is_done {
+        val burst = 14.0 + t.neutralize_timer * 64.0
+        val fade = ((1.0 - t.neutralize_timer / 1.1) * 240.0) to i64
+        val alpha = if fade < 20 {
+            20
+        } else if fade > 240 {
+            240
+        } else {
+            fade
+        }
+        val kill_col = rgba(52, 211, 153, alpha)
+        b = draw_cmd_circle(b, cx, cy, burst, UiStyle { border: kill_col, border_width: 3.0 })
+        b = draw_cmd_line(
+            b,
+            UiRect { x: cx - 14.0, y: cy - 14.0, w: cx + 14.0, h: cy + 14.0 },
+            kill_col,
+            2.5,
+            false,
+        )
+        b = draw_cmd_line(
+            b,
+            UiRect { x: cx + 14.0, y: cy - 14.0, w: cx - 14.0, h: cy + 14.0 },
+            kill_col,
+            2.5,
+            false,
+        )
+    }
+
+    val conf_pct = to_str((t.confidence * 100.0) to i64)
+    val st_code = status_short(t.status)
+    val tag = "TGT-0" + to_str(t.id) + " [" + st_code + " " + conf_pct + "%]"
+    b = draw_cmd_round_rect(
+        b,
+        UiRect { x: box.x, y: box.y - 20.0, w: 138.0, h: 17.0 },
+        4.0,
+        UiStyle { bg: rgba(15, 23, 42, 210), border: col, border_width: 1.0 },
+    )
+    b = draw_cmd_text(
+        b,
+        UiRect { x: box.x + 5.0, y: box.y - 19.0, w: 128.0, h: 15.0 },
+        tag,
+        UiStyle { fg: col, font_size: 11.0, bold: true, monospace: true, ellipsis: true },
+    )
+    return b
+}
+
+/// Render the clipped camera frame, optional salience heatmap, boresight reticle, and target overlays.
+pub def paint_takedown_hud(
+    buf: DrawBuffer,
+    vp: UiRect,
+    ws: VisionWorkspace,
+    tracks: list<TrackedTarget>,
+    cfg: HudConfig,
+) -> DrawBuffer effect ffi, alloc {
+    if vp.w <= 8.0 || vp.h <= 8.0 {
+        return buf
+    }
+    val clip_radii = UiRadii { tl: 10.0, tr: 10.0, br: 10.0, bl: 10.0 }
+    var b = draw_cmd_push_round_clip(buf, vp, clip_radii)
+    if cfg.cam_id > 0 {
+        b = draw_cmd_camera_frame(b, vp, cfg.cam_id, cfg.mirror, cfg.tint_mode)
+    }
+    if cfg.show_heatmap {
+        b = paint_heatmap_tiles(b, vp, ws)
+    }
+    b = paint_boresight_reticle(b, vp, cfg.reticle_scale, cfg.hit_flash_hud)
+    for i in 0..list_len(tracks) {
+        b = paint_single_target(b, vp, list_get(tracks, i), cfg)
+    }
+
+    val sensor_txt = if cfg.is_live {
+        "LIVE CAM: " + cfg.device_name
+    } else {
+        "SIM SENSOR [640x360]"
+    }
+    val pill_col = if cfg.is_live { rgba(52, 211, 153, 240) } else { rgba(56, 189, 248, 240) }
+    b = draw_cmd_round_rect(
+        b,
+        UiRect { x: vp.x + 12.0, y: vp.y + 22.0, w: 228.0, h: 24.0 },
+        6.0,
+        UiStyle { bg: rgba(15, 23, 42, 200), border: pill_col, border_width: 1.0 },
+    )
+    b = draw_cmd_text(
+        b,
+        UiRect { x: vp.x + 20.0, y: vp.y + 26.0, w: 212.0, h: 16.0 },
+        sensor_txt,
+        UiStyle { fg: pill_col, font_size: 11.5, bold: true, monospace: true, ellipsis: true },
+    )
+    if cfg.hit_flash_hud > 0.08 {
+        val fa = (cfg.hit_flash_hud * 68.0) to i64
+        b = draw_cmd_round_rect(b, vp, 10.0, UiStyle { bg: rgba(248, 113, 113, fa) })
+    }
+    b = draw_cmd_pop_clip(b)
+    return draw_buf_finish(b)
+}

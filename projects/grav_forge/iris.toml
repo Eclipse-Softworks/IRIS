@@ -1,0 +1,16 @@
+[package]
+name = "grav_forge"
+version = "1.0.0"
+entry = "main.iris"
+
+[dependencies]
+
+[app]
+title = "IRIS GravForge"
+identifier = "io.iris.grav_forge"
+gui = true
+bundle_ui_host = true
+window_width = 1400
+window_height = 860
+min_width = 920
+min_height = 580

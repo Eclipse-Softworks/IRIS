@@ -1,0 +1,312 @@
+name: Install Smoke
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'installer/**'
+      - 'packaging/**'
+      - 'src/completions.rs'
+      - 'src/setup.rs'
+      - 'src/upgrade.rs'
+      - 'src/devtools.rs'
+      - 'src/codegen/build.rs'
+      - 'src/codegen/llvm_c_api.rs'
+      - 'src/codegen/app_bundle.rs'
+      - 'LLVM_VERSION'
+      - '.github/workflows/release.yml'
+      - '.github/workflows/install-smoke.yml'
+  push:
+    branches: [main, master]
+    paths:
+      - 'installer/**'
+      - 'packaging/**'
+      - 'src/completions.rs'
+      - 'src/setup.rs'
+      - 'src/upgrade.rs'
+      - 'src/devtools.rs'
+      - 'src/codegen/build.rs'
+      - 'src/codegen/llvm_c_api.rs'
+      - 'src/codegen/app_bundle.rs'
+      - 'LLVM_VERSION'
+      - '.github/workflows/release.yml'
+      - '.github/workflows/install-smoke.yml'
+
+jobs:
+  manifests-and-scripts:
+    name: Package Manifests & Installer Scripts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate manifests & repository scripts
+        run: |
+          python3 -c 'import yaml' 2>/dev/null || python3 -m pip install --quiet pyyaml
+          python3 packaging/generate_manifests.py --version 1.0.0-rc3 --placeholder --out packaging --check
+          ruby -c packaging/homebrew/iris.rb
+          python3 -m json.tool packaging/scoop/iris.json > /dev/null
+          python3 -c 'import glob, yaml; [yaml.safe_load(open(f, encoding="utf-8")) for f in glob.glob("packaging/winget/*.yaml")]'
+          bash -n \
+            installer/install.sh \
+            installer/linux/build-deb.sh \
+            installer/linux/build-rpm.sh \
+            installer/macos/build-pkg.sh \
+            installer/macos/build-dmg.sh \
+            installer/macos/install.sh \
+            installer/macos/uninstall.sh \
+            installer/macos/sign_and_notarize.sh \
+            packaging/linux-repo/build-repos.sh
+
+  windows-clean-path:
+    name: Windows Clean-PATH Install Smoke
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: install-smoke-win
+
+      - name: Fetch LLVM toolchain + MinGW sysroot and build IRIS
+        shell: bash
+        run: |
+          LLVM_VER="$(tr -d '\r\n' < LLVM_VERSION)"
+          LLVM_MAJOR="${LLVM_VER%%.*}"
+          mkdir -p bundle-stage/bin bundle-stage/toolchain/llvm/bin
+          curl -fSL "https://github.com/llvm/llvm-project/releases/download/llvmorg-${LLVM_VER}/clang+llvm-${LLVM_VER}-x86_64-pc-windows-msvc.tar.xz" -o llvm.tar.xz
+          tar xf llvm.tar.xz -C bundle-stage
+          LLVM_ROOT="$(find bundle-stage -mindepth 1 -maxdepth 1 -type d -name 'clang+llvm-*' | head -1)"
+          cp "$LLVM_ROOT/bin/clang.exe" bundle-stage/toolchain/llvm/bin/
+          cp "$LLVM_ROOT/bin/ld.lld.exe" bundle-stage/toolchain/llvm/bin/
+          cp "$LLVM_ROOT/bin/LLVM-C.dll" bundle-stage/toolchain/llvm/bin/ 2>/dev/null || true
+          if [[ -d "$LLVM_ROOT/lib/clang/${LLVM_MAJOR}/include" ]]; then
+            mkdir -p "bundle-stage/toolchain/llvm/lib/clang/${LLVM_MAJOR}"
+            cp -r "$LLVM_ROOT/lib/clang/${LLVM_MAJOR}/include" "bundle-stage/toolchain/llvm/lib/clang/${LLVM_MAJOR}/"
+          fi
+          rm -rf "$LLVM_ROOT" llvm.tar.xz
+
+          mkdir -p bundle-stage/toolchain/ucrt64/include bundle-stage/toolchain/ucrt64/lib
+          robocopy.exe "C:\\msys64\\ucrt64\\include" "bundle-stage\\toolchain\\ucrt64\\include" /E /NFL /NDL /NP /NJH /NJS 2>&1 || true
+          for f in libmingw32.a libmingwex.a libmsvcrt.a libucrt.a libpthread.a libm.a \
+                   libkernel32.a libuser32.a libadvapi32.a libshell32.a libws2_32.a \
+                   libole32.a liboleaut32.a libuuid.a libmoldname.a crt2.o crtbegin.o \
+                   crtend.o gcrt2.o dllcrt2.o libntdll.a libshlwapi.a libversion.a \
+                   libgdi32.a libbcrypt.a libuserenv.a libiphlpapi.a; do
+            cp "C:/msys64/ucrt64/lib/$f" bundle-stage/toolchain/ucrt64/lib/ 2>/dev/null || true
+          done
+          GCC_LIB_DIR=$(find "C:/msys64/ucrt64/lib/gcc/x86_64-w64-mingw32" -maxdepth 1 -type d | sort -rV | head -1)
+          if [[ -n "$GCC_LIB_DIR" ]]; then
+            GCC_VER=$(basename "$GCC_LIB_DIR")
+            mkdir -p "bundle-stage/toolchain/ucrt64/lib/gcc/x86_64-w64-mingw32/$GCC_VER"
+            find "$GCC_LIB_DIR" -maxdepth 1 \( -name '*.o' -o -name '*.a' \) \
+              -exec cp {} "bundle-stage/toolchain/ucrt64/lib/gcc/x86_64-w64-mingw32/$GCC_VER/" \;
+          fi
+
+          IRIS_CLANG="$PWD/bundle-stage/toolchain/llvm/bin/clang.exe" \
+          IRIS_MSYS2_INCLUDE="$PWD/bundle-stage/toolchain/ucrt64/include" \
+          IRIS_GENERATE_PREBUILT=1 \
+            cargo build --release --bin iris
+          cargo build --release -p iris_ui_host
+
+          cp target/release/iris.exe bundle-stage/bin/
+          cp target/release/iris_ui_host.dll bundle-stage/bin/
+          cp installer/install.ps1 bundle-stage/
+          cp LLVM_VERSION bundle-stage/
+
+      - name: Install into clean prefix and verify with stripped PATH
+        shell: pwsh
+        run: |
+          $prefix = Join-Path $env:TEMP "iris-clean-install"
+          if (Test-Path $prefix) { Remove-Item $prefix -Recurse -Force }
+          & ".\bundle-stage\install.ps1" -InstallDir $prefix -NoModifyPath -NoVscode -Yes
+
+          # Verify inside a clean PATH containing ONLY IRIS bin + Windows system dirs
+          $env:PATH = "$prefix\bin;C:\Windows\System32;C:\Windows"
+          Remove-Item Env:\IRIS_CLANG -ErrorAction SilentlyContinue
+          Remove-Item Env:\IRIS_LD -ErrorAction SilentlyContinue
+
+          & "$prefix\bin\iris.exe" --version
+          $psComp = & "$prefix\bin\iris.exe" completions powershell | Out-String
+          if ($LASTEXITCODE -ne 0 -or $psComp -notmatch "Register-ArgumentCompleter") {
+            throw "iris completions powershell failed"
+          }
+          $parseErrs = $null
+          [void][System.Management.Automation.Language.Parser]::ParseInput($psComp, [ref]$null, [ref]$parseErrs)
+          if ($parseErrs.Count -gt 0) {
+            throw "Generated PowerShell completion has syntax errors: $($parseErrs | Out-String)"
+          }
+
+          & "$prefix\bin\iris.exe" setup list
+          if ($LASTEXITCODE -ne 0) { throw "iris setup list failed under clean PATH" }
+
+          & "$prefix\bin\iris.exe" doctor
+          if ($LASTEXITCODE -ne 0) { throw "iris doctor failed under clean PATH" }
+
+          $hello = Join-Path $env:TEMP "hello_smoke.iris"
+          @'
+          def main() -> i64 {
+              println("clean-path-ok")
+              return 0
+          }
+          '@ | Set-Content -Path $hello -Encoding UTF8
+
+          $exe = Join-Path $env:TEMP "hello_smoke.exe"
+          & "$prefix\bin\iris.exe" build $hello -o $exe
+          if ($LASTEXITCODE -ne 0) { throw "iris build failed under clean PATH" }
+          $out = & $exe
+          if ($out -notmatch "clean-path-ok") { throw "Unexpected native output: $out" }
+
+          $bundleDir = Join-Path $env:TEMP "hello_bundle_dir"
+          if (Test-Path $bundleDir) { Remove-Item $bundleDir -Recurse -Force }
+          & "$prefix\bin\iris.exe" bundle $hello --format dir --console -o $bundleDir
+          if ($LASTEXITCODE -ne 0) { throw "iris bundle --format dir failed under clean PATH" }
+          $bundledExe = Get-ChildItem -Path $bundleDir -Filter *.exe | Select-Object -First 1
+          if (-not $bundledExe) { throw "Expected bundled executable in $bundleDir" }
+          $bundledOut = & $bundledExe.FullName
+          if ($bundledOut -notmatch "clean-path-ok") { throw "Unexpected bundled output: $bundledOut" }
+
+          & "$prefix\bin\iris.exe" check projects\ui_studio\main.iris
+          if ($LASTEXITCODE -ne 0) { throw "iris check failed on std.ui project" }
+
+  linux-clean-container:
+    name: Linux Clean-Container Install Smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: install-smoke-linux
+
+      - name: Install UI build dependencies and LLVM bundle
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libx11-dev libxkbcommon-dev libwayland-dev rpm
+
+          LLVM_VER="$(tr -d '\r\n' < LLVM_VERSION)"
+          mkdir -p bundle-stage/bin bundle-stage/toolchain/llvm/bin bundle-stage/toolchain/llvm/lib
+          curl -fSL "https://github.com/llvm/llvm-project/releases/download/llvmorg-${LLVM_VER}/LLVM-${LLVM_VER}-Linux-X64.tar.xz" -o llvm.tar.xz
+          tar xf llvm.tar.xz -C bundle-stage
+          LLVM_ROOT="$(find bundle-stage -mindepth 1 -maxdepth 1 -type d -name 'LLVM-*' | head -1)"
+          cp -L "$LLVM_ROOT/bin/clang" "$LLVM_ROOT/bin/ld.lld" "$LLVM_ROOT/bin/lld" bundle-stage/toolchain/llvm/bin/ 2>/dev/null || true
+          cp -a "$LLVM_ROOT/lib/libLLVM"*.so* bundle-stage/toolchain/llvm/lib/ 2>/dev/null || true
+          rm -rf "$LLVM_ROOT" llvm.tar.xz
+
+          export IRIS_CLANG="$PWD/bundle-stage/toolchain/llvm/bin/clang"
+          export LD_LIBRARY_PATH="$PWD/bundle-stage/toolchain/llvm/lib:${LD_LIBRARY_PATH:-}"
+          IRIS_GENERATE_PREBUILT=1 cargo build --release --bin iris
+          cargo build --release -p iris_ui_host
+
+          cp target/release/iris bundle-stage/bin/
+          cp target/release/libiris_ui_host.so bundle-stage/bin/
+          cp installer/install.sh bundle-stage/
+          cp LLVM_VERSION bundle-stage/
+
+          mkdir -p toolchain
+          cp -r bundle-stage/toolchain/* toolchain/
+          chmod +x installer/linux/build-deb.sh installer/linux/build-rpm.sh
+          bash installer/linux/build-deb.sh --version 1.0.0-rc3 --arch x86_64
+          bash installer/linux/build-rpm.sh --version 1.0.0-rc3 --arch x86_64
+
+      - name: Test local installer inside bare debian:bookworm-slim container
+        run: |
+          docker run --rm -v "$PWD/bundle-stage:/bundle:ro" debian:bookworm-slim bash -euo pipefail -c '
+            cp -r /bundle /tmp/bundle
+            bash /tmp/bundle/install.sh --dir /tmp/iris-clean --no-modify-path --no-vscode --yes
+            PATH="/tmp/iris-clean/bin:/usr/bin:/bin"
+            export PATH
+            iris --version
+            iris completions bash > /tmp/iris.bash
+            bash -n /tmp/iris.bash
+            iris setup list
+            iris doctor
+            printf "def main() -> i64 {\n    println(\"container-ok\")\n    return 0\n}\n" > /tmp/hi.iris
+            iris build /tmp/hi.iris -o /tmp/hi
+            /tmp/hi | grep -q "container-ok"
+          '
+
+      - name: Test .deb package inside bare debian:bookworm-slim container
+        run: |
+          docker run --rm -v "$PWD/installer/dist:/dist:ro" debian:bookworm-slim bash -euo pipefail -c '
+            dpkg -i /dist/iris_*_amd64.deb
+            PATH="/usr/bin:/bin"
+            export PATH
+            /usr/bin/iris --version
+            /usr/bin/iris doctor
+            printf "def main() -> i64 {\n    println(\"deb-ok\")\n    return 0\n}\n" > /tmp/hi_deb.iris
+            /usr/bin/iris build /tmp/hi_deb.iris -o /tmp/hi_deb
+            /tmp/hi_deb | grep -q "deb-ok"
+          '
+
+      - name: Test .rpm package inside bare fedora:40 container
+        run: |
+          docker run --rm -v "$PWD/installer/dist:/dist:ro" fedora:40 bash -euo pipefail -c '
+            rpm -ivh /dist/iris-*.x86_64.rpm
+            PATH="/usr/bin:/bin"
+            export PATH
+            /usr/bin/iris --version
+            /usr/bin/iris doctor
+            /usr/bin/iris completions bash > /tmp/iris.bash
+            bash -n /tmp/iris.bash
+            printf "def main() -> i64 {\n    println(\"rpm-ok\")\n    return 0\n}\n" > /tmp/hi_rpm.iris
+            /usr/bin/iris build /tmp/hi_rpm.iris -o /tmp/hi_rpm
+            /tmp/hi_rpm | grep -q "rpm-ok"
+          '
+
+  macos-clean-path:
+    name: macOS Clean-PATH Install Smoke
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: install-smoke-macos
+
+      - name: Fetch LLVM toolchain and build IRIS
+        run: |
+          LLVM_VER="$(tr -d '\r\n' < LLVM_VERSION)"
+          mkdir -p bundle-stage/bin bundle-stage/toolchain/llvm/bin bundle-stage/toolchain/llvm/lib
+          curl -fSL "https://github.com/llvm/llvm-project/releases/download/llvmorg-${LLVM_VER}/LLVM-${LLVM_VER}-macOS-ARM64.tar.xz" -o llvm.tar.xz
+          tar xf llvm.tar.xz -C bundle-stage
+          LLVM_ROOT="$(find bundle-stage -mindepth 1 -maxdepth 1 -type d -name 'LLVM-*' | head -1)"
+          cp -L "$LLVM_ROOT/bin/clang" "$LLVM_ROOT/bin/ld.lld" "$LLVM_ROOT/bin/lld" bundle-stage/toolchain/llvm/bin/ 2>/dev/null || true
+          cp -a "$LLVM_ROOT/lib/libLLVM"*.dylib bundle-stage/toolchain/llvm/lib/ 2>/dev/null || true
+          rm -rf "$LLVM_ROOT" llvm.tar.xz
+
+          export IRIS_CLANG="$PWD/bundle-stage/toolchain/llvm/bin/clang"
+          export DYLD_LIBRARY_PATH="$PWD/bundle-stage/toolchain/llvm/lib:${DYLD_LIBRARY_PATH:-}"
+          IRIS_GENERATE_PREBUILT=1 cargo build --release --bin iris
+          cargo build --release -p iris_ui_host
+
+          cp target/release/iris bundle-stage/bin/
+          cp target/release/libiris_ui_host.dylib bundle-stage/bin/
+          cp installer/install.sh bundle-stage/
+          cp LLVM_VERSION bundle-stage/
+
+      - name: Install into clean prefix and verify with stripped PATH
+        run: |
+          bash bundle-stage/install.sh --dir /tmp/iris-clean --no-modify-path --no-vscode --yes
+          PATH="/tmp/iris-clean/bin:/usr/bin:/bin"
+          export PATH
+          unset IRIS_CLANG IRIS_LD IRIS_LLVM_SYS_PREFIX || true
+
+          iris --version
+          iris completions zsh > /tmp/_iris
+          head -n 1 /tmp/_iris | grep -q "#compdef iris"
+          iris setup list
+          iris doctor
+
+          printf 'def main() -> i64 {\n    println("macos-clean-ok")\n    return 0\n}\n' > /tmp/hello_smoke.iris
+          iris build /tmp/hello_smoke.iris -o /tmp/hello_smoke
+          /tmp/hello_smoke | grep -q "macos-clean-ok"
+
+          rm -rf /tmp/HelloSmoke.app
+          iris bundle /tmp/hello_smoke.iris --format app -o /tmp/HelloSmoke.app
+          test -d /tmp/HelloSmoke.app/Contents/MacOS

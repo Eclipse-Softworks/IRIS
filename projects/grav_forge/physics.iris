@@ -1,0 +1,1046 @@
+// Core N-body astrophysics engine, ADTs, trait metrics, algebraic effect telemetry,
+// curated multi-body orbital scenarios, and RFC 8259 JSON snapshot codec.
+
+bring std.json
+bring std.math
+bring std.string
+
+extern def grav_audit_hook(code: i64, energy_milli: i64) -> i64
+
+/// Classification of simulated orbital entities and gravity-well attractors.
+pub choice BodyKind {
+    Star,
+    Planet,
+    Comet,
+    BlackHole,
+    Probe,
+}
+
+/// Interactive canvas tool selected from the Mission Control bar.
+pub choice ToolMode {
+    SlingshotPlanet,
+    SlingshotStar,
+    MoveBeacon,
+    GravityBrush,
+}
+
+/// Curated orbital presets selectable from tabs or CLI flags.
+pub choice ScenarioId {
+    BinarySlingshot,
+    FigureEight,
+    SolarNursery,
+    BlackHoleCollider,
+}
+
+/// Domain events emitted by each physics step and scored via algebraic effect handlers.
+pub choice SimEvent {
+    Merger(f64, f64, f64),
+    BeaconDocked(i64, f64),
+    ProbeLaunched(f64),
+}
+
+/// 2D simulation vector in normalized workspace coordinates (`[0..1]`).
+pub record Vec2 {
+    x: f64 = 0.0,
+    y: f64 = 0.0,
+}
+
+impl Vec2 {
+    def len_sq(self) -> f64 {
+        return self.x * self.x + self.y * self.y
+    }
+
+    def norm(self) -> f64 {
+        return sqrt(self.len_sq())
+    }
+
+    def dist_to(self, other: Vec2) -> f64 {
+        val dx = self.x - other.x
+        val dy = self.y - other.y
+        return sqrt(dx * dx + dy * dy)
+    }
+
+    def add(self, other: Vec2) -> Vec2 {
+        return Vec2 { x: self.x + other.x, y: self.y + other.y }
+    }
+
+    def sub(self, other: Vec2) -> Vec2 {
+        return Vec2 { x: self.x - other.x, y: self.y - other.y }
+    }
+
+    def scale(self, k: f64) -> Vec2 {
+        return Vec2 { x: self.x * k, y: self.y * k }
+    }
+}
+
+/// Dynamic celestial body with integrated position, velocity, mass, and orbital trail.
+pub record Body {
+    id: i64 = 1,
+    kind: BodyKind = BodyKind.Planet,
+    x: f64 = 0.5,
+    y: f64 = 0.5,
+    vx: f64 = 0.0,
+    vy: f64 = 0.0,
+    mass: f64 = 0.25,
+    radius: f64 = 0.015,
+    color_idx: i64 = 0,
+    trail_x: list<f64> = list(),
+    trail_y: list<f64> = list(),
+    age: f64 = 0.0,
+}
+
+/// Shared contract for computing physical energy and display radius of bodies.
+pub trait CelestialMetric {
+    def kinetic_energy(self) -> f64
+    def visual_radius(self) -> f64
+}
+
+impl CelestialMetric for Body {
+    def kinetic_energy(self) -> f64 {
+        val v2 = self.vx * self.vx + self.vy * self.vy
+        return 0.5 * self.mass * v2
+    }
+
+    def visual_radius(self) -> f64 {
+        return when self.kind {
+            BodyKind.BlackHole => clamp_f(0.022 + sqrt(self.mass) * 0.005, 0.018, 0.042),
+            BodyKind.Star => clamp_f(0.017 + sqrt(self.mass) * 0.006, 0.016, 0.038),
+            BodyKind.Planet => clamp_f(0.009 + sqrt(self.mass) * 0.006, 0.008, 0.022),
+            BodyKind.Comet => 0.007,
+            BodyKind.Probe => 0.0085,
+        }
+    }
+}
+
+/// Compute kinetic energy using the `CelestialMetric` trait implementation.
+pub def body_kinetic_energy(b: Body) -> f64 {
+    return b.kinetic_energy()
+}
+
+/// Expanding ring shockwave produced by probe dockings, launches, and body mergers.
+pub record Shockwave {
+    x: f64 = 0.5,
+    y: f64 = 0.5,
+    radius: f64 = 0.01,
+    max_radius: f64 = 0.14,
+    life: f64 = 1.0,
+    tone_idx: i64 = 0,
+}
+
+/// Live simulation parameters tuned from the UI control panel.
+pub record SimConfig {
+    gravity_g: f64 = 0.021,
+    time_scale: f64 = 1.0,
+    softening: f64 = 0.032,
+    merge_collisions: bool = true,
+    paused: bool = false,
+}
+
+/// Interactive tractor-beam gravity brush state driven by pointer drag.
+pub record BrushInput {
+    active: bool = false,
+    x: f64 = 0.5,
+    y: f64 = 0.5,
+    strength: f64 = 0.36,
+}
+
+/// Real-time energy balance and algebraic-effect mission score counters.
+pub record SimTelemetry {
+    kinetic: f64 = 0.0,
+    potential: f64 = 0.0,
+    total_energy: f64 = 0.0,
+    mergers: i64 = 0,
+    dockings: i64 = 0,
+    audit_score: i64 = 0,
+}
+
+/// Complete physical simulation state for one orbital sandbox session.
+pub record WorldState {
+    bodies: list<Body> = list(),
+    waves: list<Shockwave> = list(),
+    launch_x: f64 = 0.13,
+    launch_y: f64 = 0.80,
+    beacon_x: f64 = 0.86,
+    beacon_y: f64 = 0.22,
+    next_id: i64 = 1,
+    sim_time: f64 = 0.0,
+    telemetry: SimTelemetry = SimTelemetry {},
+    scenario: ScenarioId = ScenarioId.BinarySlingshot,
+}
+
+/// Clamp `v` into `[lo, hi]`.
+pub def clamp_f(v: f64, lo: f64, hi: f64) -> f64 {
+    if v < lo {
+        return lo
+    }
+    if v > hi {
+        return hi
+    }
+    return v
+}
+
+/// Readable short name of `ScenarioId`.
+pub def scenario_label(sc: ScenarioId) -> str {
+    return when sc {
+        ScenarioId.BinarySlingshot => "Binary Slingshot",
+        ScenarioId.FigureEight => "Chenciner Fig-8",
+        ScenarioId.SolarNursery => "Solar Nursery",
+        ScenarioId.BlackHoleCollider => "Black Hole Collider",
+    }
+}
+
+/// Integer encoding (`0..=3`) for `ScenarioId`.
+pub def scenario_index(sc: ScenarioId) -> i64 {
+    return when sc {
+        ScenarioId.BinarySlingshot => 0,
+        ScenarioId.FigureEight => 1,
+        ScenarioId.SolarNursery => 2,
+        ScenarioId.BlackHoleCollider => 3,
+    }
+}
+
+/// Reconstruct `ScenarioId` from tab index `0..=3`.
+pub def scenario_from_index(idx: i64) -> ScenarioId {
+    if idx == 1 {
+        return ScenarioId.FigureEight
+    }
+    if idx == 2 {
+        return ScenarioId.SolarNursery
+    }
+    if idx == 3 {
+        return ScenarioId.BlackHoleCollider
+    }
+    return ScenarioId.BinarySlingshot
+}
+
+/// Score simulation events through an intercepted algebraic effect handler (`handle ... with`).
+pub def score_sim_events(events: list<SimEvent>) -> i64 {
+    var total = 0
+    for i in 0..list_len(events) {
+        val ev = list_get(events, i)
+        val delta = when ev {
+            SimEvent.Merger(_x, _y, mass) => handle {
+                grav_audit_hook(1, (mass * 100.0) to i64)
+            } with {
+                grav_audit_hook(_c, m) => 100 + m
+            },
+            SimEvent.BeaconDocked(_id, speed) => handle {
+                grav_audit_hook(2, (speed * 200.0) to i64)
+            } with {
+                grav_audit_hook(_c, m) => 350 + m
+            },
+            SimEvent.ProbeLaunched(speed) => handle {
+                grav_audit_hook(3, (speed * 40.0) to i64)
+            } with {
+                grav_audit_hook(_c, m) => 25 + m
+            },
+        }
+        total = total + delta
+    }
+    return total
+}
+
+def make_body_with_seed(id: i64, spec: Body) -> Body effect alloc {
+    val tx: list<f64> = list(spec.x)
+    val ty: list<f64> = list(spec.y)
+    return Body {
+        id: id,
+        kind: spec.kind,
+        x: spec.x,
+        y: spec.y,
+        vx: spec.vx,
+        vy: spec.vy,
+        mass: spec.mass,
+        radius: spec.visual_radius(),
+        color_idx: spec.color_idx,
+        trail_x: tx,
+        trail_y: ty,
+        age: 0.0,
+    }
+}
+
+def build_binary_bodies() -> list<Body> effect alloc {
+    return list(
+        make_body_with_seed(
+            1,
+            Body {
+                kind: BodyKind.Star,
+                x: 0.40,
+                y: 0.48,
+                vx: 0.063,
+                vy: -0.316,
+                mass: 2.6,
+                color_idx: 1,
+            },
+        ),
+        make_body_with_seed(
+            2,
+            Body {
+                kind: BodyKind.Star,
+                x: 0.60,
+                y: 0.52,
+                vx: -0.075,
+                vy: 0.373,
+                mass: 2.2,
+                color_idx: 2,
+            },
+        ),
+        make_body_with_seed(
+            3,
+            Body {
+                kind: BodyKind.Planet,
+                x: 0.50,
+                y: 0.18,
+                vx: 0.56,
+                vy: 0.0,
+                mass: 0.35,
+                color_idx: 3,
+            },
+        ),
+        make_body_with_seed(
+            4,
+            Body {
+                kind: BodyKind.Comet,
+                x: 0.74,
+                y: 0.74,
+                vx: -0.38,
+                vy: 0.34,
+                mass: 0.08,
+                color_idx: 4,
+            },
+        ),
+    )
+}
+
+def build_figure_eight_bodies() -> list<Body> effect alloc {
+    val scale_l = 0.19
+    val gm = 0.021 * 1.6
+    val vel_k = sqrt(gm / scale_l)
+    val vx1 = 0.466203685 * vel_k
+    val vy1 = 0.432365730 * vel_k
+    return list(
+        make_body_with_seed(
+            1,
+            Body {
+                kind: BodyKind.Star,
+                x: 0.50 - 0.97000436 * scale_l,
+                y: 0.50 + 0.24308753 * scale_l,
+                vx: vx1,
+                vy: vy1,
+                mass: 1.6,
+                color_idx: 2,
+            },
+        ),
+        make_body_with_seed(
+            2,
+            Body {
+                kind: BodyKind.Star,
+                x: 0.50 + 0.97000436 * scale_l,
+                y: 0.50 - 0.24308753 * scale_l,
+                vx: vx1,
+                vy: vy1,
+                mass: 1.6,
+                color_idx: 1,
+            },
+        ),
+        make_body_with_seed(
+            3,
+            Body {
+                kind: BodyKind.Star,
+                x: 0.50,
+                y: 0.50,
+                vx: -2.0 * vx1,
+                vy: -2.0 * vy1,
+                mass: 1.6,
+                color_idx: 5,
+            },
+        ),
+    )
+}
+
+def build_solar_bodies() -> list<Body> effect alloc {
+    return list(
+        make_body_with_seed(
+            1,
+            Body { kind: BodyKind.Star, x: 0.50, y: 0.50, mass: 5.2, color_idx: 1 },
+        ),
+        make_body_with_seed(
+            2,
+            Body { kind: BodyKind.Planet, x: 0.62, y: 0.50, vy: -0.94, mass: 0.22, color_idx: 4 },
+        ),
+        make_body_with_seed(
+            3,
+            Body { kind: BodyKind.Planet, x: 0.50, y: 0.30, vx: -0.73, mass: 0.34, color_idx: 2 },
+        ),
+        make_body_with_seed(
+            4,
+            Body { kind: BodyKind.Planet, x: 0.21, y: 0.50, vy: 0.61, mass: 0.44, color_idx: 3 },
+        ),
+        make_body_with_seed(
+            5,
+            Body { kind: BodyKind.Planet, x: 0.50, y: 0.87, vx: 0.54, mass: 0.28, color_idx: 5 },
+        ),
+        make_body_with_seed(
+            6,
+            Body {
+                kind: BodyKind.Comet,
+                x: 0.26,
+                y: 0.24,
+                vx: 0.52,
+                vy: -0.35,
+                mass: 0.06,
+                color_idx: 3,
+            },
+        ),
+    )
+}
+
+def build_black_hole_bodies() -> list<Body> effect alloc {
+    return list(
+        make_body_with_seed(
+            1,
+            Body {
+                kind: BodyKind.BlackHole,
+                x: 0.37,
+                y: 0.48,
+                vx: 0.04,
+                vy: 0.31,
+                mass: 3.6,
+                color_idx: 6,
+            },
+        ),
+        make_body_with_seed(
+            2,
+            Body {
+                kind: BodyKind.BlackHole,
+                x: 0.63,
+                y: 0.52,
+                vx: -0.04,
+                vy: -0.31,
+                mass: 3.6,
+                color_idx: 6,
+            },
+        ),
+        make_body_with_seed(
+            3,
+            Body { kind: BodyKind.Planet, x: 0.50, y: 0.16, vx: 0.64, mass: 0.26, color_idx: 2 },
+        ),
+        make_body_with_seed(
+            4,
+            Body { kind: BodyKind.Comet, x: 0.50, y: 0.84, vx: -0.64, mass: 0.09, color_idx: 4 },
+        ),
+        make_body_with_seed(
+            5,
+            Body {
+                kind: BodyKind.Comet,
+                x: 0.20,
+                y: 0.28,
+                vx: 0.46,
+                vy: -0.44,
+                mass: 0.08,
+                color_idx: 5,
+            },
+        ),
+        make_body_with_seed(
+            6,
+            Body {
+                kind: BodyKind.Comet,
+                x: 0.80,
+                y: 0.72,
+                vx: -0.46,
+                vy: 0.44,
+                mass: 0.08,
+                color_idx: 1,
+            },
+        ),
+    )
+}
+
+/// Build an initialized `WorldState` for one of the four showcase orbital presets.
+pub def make_scenario(sc: ScenarioId) -> WorldState effect alloc {
+    val bodies = when sc {
+        ScenarioId.BinarySlingshot => build_binary_bodies(),
+        ScenarioId.FigureEight => build_figure_eight_bodies(),
+        ScenarioId.SolarNursery => build_solar_bodies(),
+        ScenarioId.BlackHoleCollider => build_black_hole_bodies(),
+    }
+    return WorldState {
+        bodies: bodies,
+        waves: list(),
+        launch_x: 0.13,
+        launch_y: 0.80,
+        beacon_x: 0.86,
+        beacon_y: 0.22,
+        next_id: list_len(bodies) + 1,
+        sim_time: 0.0,
+        telemetry: compute_telemetry(bodies, SimConfig {}, SimTelemetry {}),
+        scenario: sc,
+    }
+}
+
+def color_for_kind(kind: BodyKind) -> i64 {
+    return when kind {
+        BodyKind.Star => 1,
+        BodyKind.Planet => 2,
+        BodyKind.Comet => 4,
+        BodyKind.BlackHole => 6,
+        BodyKind.Probe => 3,
+    }
+}
+
+/// Spawn a new body with launch shockwave into `world`.
+pub def spawn_body(
+    world: WorldState,
+    kind: BodyKind,
+    pos: Vec2,
+    vel: Vec2,
+    mass: f64,
+) -> WorldState effect alloc {
+    val next: list<Body> = list()
+    for i in 0..list_len(world.bodies) {
+        list_push(next, list_get(world.bodies, i))
+    }
+    val spec = Body {
+        kind: kind,
+        x: pos.x,
+        y: pos.y,
+        vx: vel.x,
+        vy: vel.y,
+        mass: mass,
+        color_idx: color_for_kind(kind),
+    }
+    list_push(next, make_body_with_seed(world.next_id, spec))
+    val next_waves: list<Shockwave> = list()
+    for j in 0..list_len(world.waves) {
+        list_push(next_waves, list_get(world.waves, j))
+    }
+    list_push(
+        next_waves,
+        Shockwave { x: pos.x, y: pos.y, radius: 0.01, max_radius: 0.08, life: 1.0, tone_idx: 2 },
+    )
+    return WorldState {
+        bodies: next,
+        waves: next_waves,
+        launch_x: world.launch_x,
+        launch_y: world.launch_y,
+        beacon_x: world.beacon_x,
+        beacon_y: world.beacon_y,
+        next_id: world.next_id + 1,
+        sim_time: world.sim_time,
+        telemetry: world.telemetry,
+        scenario: world.scenario,
+    }
+}
+
+def is_heavy_anchor(kind: BodyKind) -> bool {
+    return when kind {
+        BodyKind.Star => true,
+        BodyKind.BlackHole => true,
+        _ => false,
+    }
+}
+
+/// Keep primary stars and black holes while clearing transient planets, comets, and probes.
+pub def clear_debris(world: WorldState) -> WorldState effect alloc {
+    val kept: list<Body> = list()
+    for i in 0..list_len(world.bodies) {
+        val b = list_get(world.bodies, i)
+        if is_heavy_anchor(b.kind) {
+            list_push(kept, b)
+        }
+    }
+    return WorldState {
+        bodies: kept,
+        waves: list(),
+        launch_x: world.launch_x,
+        launch_y: world.launch_y,
+        beacon_x: world.beacon_x,
+        beacon_y: world.beacon_y,
+        next_id: world.next_id,
+        sim_time: world.sim_time,
+        telemetry: world.telemetry,
+        scenario: world.scenario,
+    }
+}
+
+def accel_on_body(idx: i64, bodies: list<Body>, cfg: SimConfig, brush: BrushInput) -> Vec2 {
+    val b = list_get(bodies, idx)
+    val eps2 = cfg.softening * cfg.softening + 0.0004
+    var ax = 0.0
+    var ay = 0.0
+    for j in 0..list_len(bodies) {
+        if j != idx {
+            val other = list_get(bodies, j)
+            val dx = other.x - b.x
+            val dy = other.y - b.y
+            val r2 = dx * dx + dy * dy + eps2
+            val inv_r = 1.0 / sqrt(r2)
+            val factor = cfg.gravity_g * other.mass * inv_r * inv_r * inv_r
+            ax = ax + dx * factor
+            ay = ay + dy * factor
+        }
+    }
+    if brush.active {
+        val bdx = brush.x - b.x
+        val bdy = brush.y - b.y
+        val br2 = bdx * bdx + bdy * bdy + 0.004
+        val b_inv = 1.0 / sqrt(br2)
+        val bf = brush.strength * b_inv * b_inv * b_inv
+        ax = ax + bdx * bf
+        ay = ay + bdy * bf
+    }
+    return Vec2 { x: ax, y: ay }
+}
+
+def append_trail_point(
+    xs: list<f64>,
+    ys: list<f64>,
+    x: f64,
+    y: f64,
+) -> (list<f64>, list<f64>) effect alloc {
+    val n = list_len(xs)
+    if n > 0 {
+        val lx = list_get(xs, n - 1)
+        val ly = list_get(ys, n - 1)
+        val moved = abs_f64(x - lx) + abs_f64(y - ly)
+        if moved < 0.005 {
+            return (xs, ys)
+        }
+    }
+    val start = if n >= 44 { n - 43 } else { 0 }
+    val nx: list<f64> = list()
+    val ny: list<f64> = list()
+    for i in start..n {
+        list_push(nx, list_get(xs, i))
+        list_push(ny, list_get(ys, i))
+    }
+    list_push(nx, x)
+    list_push(ny, y)
+    return (nx, ny)
+}
+
+def integrate_substep(
+    bodies: list<Body>,
+    cfg: SimConfig,
+    brush: BrushInput,
+    sub_dt: f64,
+    record_trail: bool,
+) -> list<Body> effect alloc {
+    val out: list<Body> = list()
+    for i in 0..list_len(bodies) {
+        val b = list_get(bodies, i)
+        val acc = accel_on_body(i, bodies, cfg, brush)
+        val nvx = clamp_f(b.vx + acc.x * sub_dt, -2.6, 2.6)
+        val nvy = clamp_f(b.vy + acc.y * sub_dt, -2.6, 2.6)
+        val nx = b.x + nvx * sub_dt
+        val ny = b.y + nvy * sub_dt
+        if nx > -0.35 && nx < 1.35 && ny > -0.35 && ny < 1.35 {
+            val (tx, ty) = if record_trail {
+                append_trail_point(b.trail_x, b.trail_y, nx, ny)
+            } else {
+                (b.trail_x, b.trail_y)
+            }
+            list_push(
+                out,
+                Body {
+                    id: b.id,
+                    kind: b.kind,
+                    x: nx,
+                    y: ny,
+                    vx: nvx,
+                    vy: nvy,
+                    mass: b.mass,
+                    radius: b.radius,
+                    color_idx: b.color_idx,
+                    trail_x: tx,
+                    trail_y: ty,
+                    age: b.age + sub_dt,
+                },
+            )
+        }
+    }
+    return out
+}
+
+def kind_rank(kind: BodyKind) -> i64 {
+    return when kind {
+        BodyKind.BlackHole => 4,
+        BodyKind.Star => 3,
+        BodyKind.Planet => 2,
+        BodyKind.Comet => 1,
+        BodyKind.Probe => 0,
+    }
+}
+
+def combine_bodies(a: Body, b: Body) -> Body {
+    val total_m = a.mass + b.mass
+    val keep_a = kind_rank(a.kind) > kind_rank(b.kind)
+        || (kind_rank(a.kind) == kind_rank(b.kind) && a.mass >= b.mass)
+    val dom = if keep_a { a } else { b }
+    val merged = Body {
+        id: dom.id,
+        kind: dom.kind,
+        x: (a.x * a.mass + b.x * b.mass) / total_m,
+        y: (a.y * a.mass + b.y * b.mass) / total_m,
+        vx: (a.vx * a.mass + b.vx * b.mass) / total_m,
+        vy: (a.vy * a.mass + b.vy * b.mass) / total_m,
+        mass: clamp_f(total_m, 0.05, 16.0),
+        color_idx: dom.color_idx,
+        trail_x: dom.trail_x,
+        trail_y: dom.trail_y,
+        age: dom.age,
+    }
+    return Body {
+        id: merged.id,
+        kind: merged.kind,
+        x: merged.x,
+        y: merged.y,
+        vx: merged.vx,
+        vy: merged.vy,
+        mass: merged.mass,
+        radius: merged.visual_radius(),
+        color_idx: merged.color_idx,
+        trail_x: merged.trail_x,
+        trail_y: merged.trail_y,
+        age: merged.age,
+    }
+}
+
+def is_probe_kind(kind: BodyKind) -> bool {
+    return when kind {
+        BodyKind.Probe => true,
+        _ => false,
+    }
+}
+
+def resolve_mergers(
+    bodies: list<Body>,
+    waves: list<Shockwave>,
+    events: list<SimEvent>,
+    merge_enabled: bool,
+) -> list<Body> effect alloc {
+    if !merge_enabled {
+        return bodies
+    }
+    val alive: list<bool> = list()
+    val n = list_len(bodies)
+    for _k in 0..n {
+        list_push(alive, true)
+    }
+    val out: list<Body> = list()
+    for i in 0..n {
+        if list_get(alive, i) {
+            var cur = list_get(bodies, i)
+            for j in (i + 1)..n {
+                if list_get(alive, j) {
+                    val other = list_get(bodies, j)
+                    val both_real = !is_probe_kind(cur.kind) && !is_probe_kind(other.kind)
+                    val d = Vec2 { x: cur.x, y: cur.y }.dist_to(Vec2 { x: other.x, y: other.y })
+                    if both_real && d < (cur.radius + other.radius) * 0.72 {
+                        cur = combine_bodies(cur, other)
+                        list_set(alive, j, false)
+                        list_push(
+                            waves,
+                            Shockwave {
+                                x: cur.x,
+                                y: cur.y,
+                                radius: cur.radius,
+                                max_radius: 0.13,
+                                life: 1.0,
+                                tone_idx: 1,
+                            },
+                        )
+                        list_push(events, SimEvent.Merger(cur.x, cur.y, cur.mass))
+                    }
+                }
+            }
+            list_push(out, cur)
+        }
+    }
+    return out
+}
+
+def check_beacon_docking(
+    bodies: list<Body>,
+    beacon: Vec2,
+    waves: list<Shockwave>,
+    events: list<SimEvent>,
+) -> list<Body> effect alloc {
+    val out: list<Body> = list()
+    for i in 0..list_len(bodies) {
+        val b = list_get(bodies, i)
+        val dist = Vec2 { x: b.x, y: b.y }.dist_to(beacon)
+        if is_probe_kind(b.kind) && dist < 0.044 {
+            val spd = Vec2 { x: b.vx, y: b.vy }.norm()
+            list_push(
+                waves,
+                Shockwave {
+                    x: beacon.x,
+                    y: beacon.y,
+                    radius: 0.012,
+                    max_radius: 0.16,
+                    life: 1.0,
+                    tone_idx: 3,
+                },
+            )
+            list_push(events, SimEvent.BeaconDocked(b.id, spd))
+        } else {
+            list_push(out, b)
+        }
+    }
+    return out
+}
+
+def step_waves(waves: list<Shockwave>, dt: f64) -> list<Shockwave> effect alloc {
+    val out: list<Shockwave> = list()
+    for i in 0..list_len(waves) {
+        val w = list_get(waves, i)
+        val rem = w.life - dt * 1.45
+        if rem > 0.02 {
+            list_push(
+                out,
+                Shockwave {
+                    x: w.x,
+                    y: w.y,
+                    radius: w.max_radius * (1.0 - rem * 0.85),
+                    max_radius: w.max_radius,
+                    life: rem,
+                    tone_idx: w.tone_idx,
+                },
+            )
+        }
+    }
+    return out
+}
+
+def compute_telemetry(bodies: list<Body>, cfg: SimConfig, prev: SimTelemetry) -> SimTelemetry {
+    val n = list_len(bodies)
+    var ke = 0.0
+    var pe = 0.0
+    for i in 0..n {
+        val bi = list_get(bodies, i)
+        ke = ke + bi.kinetic_energy()
+        for j in (i + 1)..n {
+            val bj = list_get(bodies, j)
+            val dist = Vec2 { x: bi.x, y: bi.y }.dist_to(Vec2 { x: bj.x, y: bj.y })
+            pe = pe
+                - (cfg.gravity_g * bi.mass * bj.mass)
+                    / sqrt(dist * dist + cfg.softening * cfg.softening)
+        }
+    }
+    return SimTelemetry {
+        kinetic: ke,
+        potential: pe,
+        total_energy: ke + pe,
+        mergers: prev.mergers,
+        dockings: prev.dockings,
+        audit_score: prev.audit_score,
+    }
+}
+
+def tally_event_counters(prev: SimTelemetry, events: list<SimEvent>) -> SimTelemetry {
+    var mergers = prev.mergers
+    var dockings = prev.dockings
+    for i in 0..list_len(events) {
+        val is_m = when list_get(events, i) {
+            SimEvent.Merger(_x, _y, _m) => 1,
+            _ => 0,
+        }
+        val is_d = when list_get(events, i) {
+            SimEvent.BeaconDocked(_id, _s) => 1,
+            _ => 0,
+        }
+        mergers = mergers + is_m
+        dockings = dockings + is_d
+    }
+    val bonus = score_sim_events(events)
+    return SimTelemetry {
+        kinetic: prev.kinetic,
+        potential: prev.potential,
+        total_energy: prev.total_energy,
+        mergers: mergers,
+        dockings: dockings,
+        audit_score: prev.audit_score + bonus,
+    }
+}
+
+/// Advance N-body physics, collision mergers, shockwaves, and beacon docking by `dt` seconds.
+pub def step_world(
+    world: WorldState,
+    cfg: SimConfig,
+    brush: BrushInput,
+    dt: f64,
+) -> (WorldState, list<SimEvent>) effect alloc {
+    val events: list<SimEvent> = list()
+    if cfg.paused {
+        return (world, events)
+    }
+    val sub_dt = clamp_f(dt * cfg.time_scale, 0.001, 0.06) * 0.5
+    val b1 = integrate_substep(world.bodies, cfg, brush, sub_dt, false)
+    val b2 = integrate_substep(b1, cfg, brush, sub_dt, true)
+    val next_waves = step_waves(world.waves, dt * cfg.time_scale)
+    val merged = resolve_mergers(b2, next_waves, events, cfg.merge_collisions)
+    val docked = check_beacon_docking(
+        merged,
+        Vec2 { x: world.beacon_x, y: world.beacon_y },
+        next_waves,
+        events,
+    )
+    val next_tel = compute_telemetry(docked, cfg, tally_event_counters(world.telemetry, events))
+    val next_world = WorldState {
+        bodies: docked,
+        waves: next_waves,
+        launch_x: world.launch_x,
+        launch_y: world.launch_y,
+        beacon_x: world.beacon_x,
+        beacon_y: world.beacon_y,
+        next_id: world.next_id,
+        sim_time: world.sim_time + sub_dt * 2.0,
+        telemetry: next_tel,
+        scenario: world.scenario,
+    }
+    return (next_world, events)
+}
+
+def body_kind_code(kind: BodyKind) -> i64 {
+    return when kind {
+        BodyKind.Star => 0,
+        BodyKind.Planet => 1,
+        BodyKind.Comet => 2,
+        BodyKind.BlackHole => 3,
+        BodyKind.Probe => 4,
+    }
+}
+
+def body_kind_from_code(code: i64) -> BodyKind {
+    if code == 0 {
+        return BodyKind.Star
+    }
+    if code == 2 {
+        return BodyKind.Comet
+    }
+    if code == 3 {
+        return BodyKind.BlackHole
+    }
+    if code == 4 {
+        return BodyKind.Probe
+    }
+    return BodyKind.Planet
+}
+
+/// Serialize a `WorldState` snapshot into structured JSON using `std.json`.
+pub def world_to_json(w: WorldState) -> str effect alloc {
+    val body_objs: list<str> = list()
+    for i in 0..list_len(w.bodies) {
+        val b = list_get(w.bodies, i)
+        val obj = json_obj(
+            list("k", "x", "y", "vx", "vy", "m", "c"),
+            list(
+                json_num_i64(body_kind_code(b.kind)),
+                json_num_f64(b.x),
+                json_num_f64(b.y),
+                json_num_f64(b.vx),
+                json_num_f64(b.vy),
+                json_num_f64(b.mass),
+                json_num_i64(b.color_idx),
+            ),
+        )
+        list_push(body_objs, obj)
+    }
+    return json_obj(
+        list("scenario", "beacon_x", "beacon_y", "launch_x", "launch_y", "bodies"),
+        list(
+            json_num_i64(scenario_index(w.scenario)),
+            json_num_f64(w.beacon_x),
+            json_num_f64(w.beacon_y),
+            json_num_f64(w.launch_x),
+            json_num_f64(w.launch_y),
+            json_arr(body_objs),
+        ),
+    )
+}
+
+def query_f64_field(raw: str, path: str) -> result<f64, str> effect alloc {
+    val tok = trim(json_query(raw, path))
+    if len(tok) == 0 {
+        return err(f"missing JSON field '{path}'")
+    }
+    return when parse_f64(tok) {
+        some(v) => ok(v),
+        none => err(f"invalid float at '{path}'"),
+    }
+}
+
+def query_i64_field(raw: str, path: str) -> result<i64, str> effect alloc {
+    val tok = trim(json_query(raw, path))
+    if len(tok) == 0 {
+        return err(f"missing JSON integer '{path}'")
+    }
+    return when parse_i64(tok) {
+        some(v) => ok(v),
+        none => err(f"invalid integer at '{path}'"),
+    }
+}
+
+def parse_body_entry(raw: str, idx: i64, body_id: i64) -> result<Body, str> effect alloc {
+    val kind_code = query_i64_field(raw, f"bodies.{idx}.k")?
+    val x = query_f64_field(raw, f"bodies.{idx}.x")?
+    val y = query_f64_field(raw, f"bodies.{idx}.y")?
+    val vx = query_f64_field(raw, f"bodies.{idx}.vx")?
+    val vy = query_f64_field(raw, f"bodies.{idx}.vy")?
+    val m = query_f64_field(raw, f"bodies.{idx}.m")?
+    val c_str = trim(json_query(raw, f"bodies.{idx}.c"))
+    val c = parse_i64(c_str) ?? 2
+    val kind = body_kind_from_code(kind_code)
+    return ok(
+        make_body_with_seed(
+            body_id,
+            Body {
+                kind: kind,
+                x: x,
+                y: y,
+                vx: vx,
+                vy: vy,
+                mass: clamp_f(m, 0.02, 20.0),
+                color_idx: c,
+            },
+        ),
+    )
+}
+
+/// Deserialize a JSON snapshot produced by `world_to_json` with explicit `result` validation.
+pub def world_from_json(raw: str) -> result<WorldState, str> effect alloc {
+    val sc_str = trim(json_query(raw, "scenario"))
+    if len(sc_str) == 0 {
+        return err("clipboard text is not a GravForge JSON snapshot")
+    }
+    val sc_idx = query_i64_field(raw, "scenario")?
+    val bx = query_f64_field(raw, "beacon_x")?
+    val by = query_f64_field(raw, "beacon_y")?
+    val lx = query_f64_field(raw, "launch_x")?
+    val ly = query_f64_field(raw, "launch_y")?
+    val bodies: list<Body> = list()
+    var i = 0
+    while len(trim(json_query(raw, f"bodies.{i}.x"))) > 0 && i < 32 {
+        val body = parse_body_entry(raw, i, i + 1)?
+        list_push(bodies, body)
+        i = i + 1
+    }
+    if list_len(bodies) == 0 {
+        return err("JSON snapshot contains zero bodies")
+    }
+    return ok(
+        WorldState {
+            bodies: bodies,
+            waves: list(),
+            launch_x: lx,
+            launch_y: ly,
+            beacon_x: bx,
+            beacon_y: by,
+            next_id: list_len(bodies) + 1,
+            sim_time: 0.0,
+            telemetry: compute_telemetry(bodies, SimConfig {}, SimTelemetry {}),
+            scenario: scenario_from_index(sc_idx),
+        },
+    )
+}

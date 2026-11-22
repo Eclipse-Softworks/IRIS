@@ -1,0 +1,801 @@
+// IRIS UI Studio — flagship standalone desktop showcase demonstrating the mature
+// `std.ui` toolkit: responsive layouts, 6 curated themes, split panes, navigation,
+// data charts, rich input widgets, 24x24 vector SVG icons, spring physics motion,
+// modals, slide-over drawers, and toast notifications.
+
+bring std.ui
+
+record StudioModel {
+    section: i64 = 0,
+    theme_idx: i64 = 0,
+    seg_idx: i64 = 0,
+    preset_idx: i64 = 0,
+    radio_idx: i64 = 0,
+    stepper_val: f64 = 4.0,
+    slider_val: f64 = 72.0,
+    live_sync: bool = true,
+    high_dpi: bool = true,
+    accordion_open: bool = true,
+    chip_gpu: bool = true,
+    chip_motion: bool = true,
+    chip_a11y: bool = false,
+    modal_open: bool = false,
+    drawer_open: bool = false,
+    search_query: str = "",
+    notes_text: str = "Smooth 24x24 vector icons + spring physics.",
+    action_count: i64 = 0,
+}
+
+def studio_theme(idx: i64) -> UiTheme {
+    val m = idx % 6
+    if m == 1 {
+        return daylight_theme()
+    }
+    if m == 2 {
+        return midnight_theme()
+    }
+    if m == 3 {
+        return nord_theme()
+    }
+    if m == 4 {
+        return emerald_studio_theme()
+    }
+    if m == 5 {
+        return high_contrast_theme()
+    }
+    return obsidian_theme()
+}
+
+def theme_label(idx: i64) -> str {
+    val m = idx % 6
+    if m == 1 {
+        return "Daylight"
+    }
+    if m == 2 {
+        return "Midnight"
+    }
+    if m == 3 {
+        return "Nord"
+    }
+    if m == 4 {
+        return "Emerald Studio"
+    }
+    if m == 5 {
+        return "High Contrast"
+    }
+    return "Obsidian"
+}
+
+def parse_snapshot_path(argv: list<str>) -> str {
+    var i = 1
+    while i < list_len(argv) {
+        if list_get(argv, i) == "--headless-snapshot" {
+            if i + 1 < list_len(argv) {
+                return list_get(argv, i + 1)
+            }
+            return "ui_studio_snapshot.png"
+        }
+        i = i + 1
+    }
+    return ""
+}
+
+def breakpoint_name(vw: f64) -> str {
+    val bp = ui_breakpoint(vw)
+    if bp == UiBreakpoint.Compact {
+        return "Compact"
+    }
+    if bp == UiBreakpoint.Medium {
+        return "Medium"
+    }
+    if bp == UiBreakpoint.Expanded {
+        return "Expanded"
+    }
+    return "Wide"
+}
+
+def build_header(tree: UiTree, model: StudioModel, vw: f64) -> i64 effect alloc {
+    val cols = ui_responsive_cols(vw, 1, 2, 4)
+    val bp_txt = breakpoint_name(vw) + " (" + to_str(cols) + "c)"
+    return ui_row(
+        tree,
+        "header_bar",
+        UiStyle { gap: 10.0, padding: 6.0 },
+        list(
+            ui_icon(tree, "brand_ic", UiIcon.Spark, 22.0, UiTone.Accent),
+            ui_heading(tree, "brand_title", "IRIS UI Studio", UiTone.Primary),
+            ui_badge(tree, "bp_badge", bp_txt, UiTone.Secondary),
+            ui_spacer(tree, 1.0, 12.0, 0.0),
+            ui_menu(
+                tree,
+                "quick_menu",
+                "Actions",
+                list("Spring Boost", "Open Modal", "Toggle Inspector", "Reset Stats"),
+                list("spring_boost", "open_modal", "toggle_drawer", "reset_stats"),
+            ),
+            ui_button_tone(tree, "drawer_btn", "Inspector", "toggle_drawer", UiTone.Primary),
+            ui_button_tone(tree, "modal_btn", "About", "open_modal", UiTone.Neutral),
+            ui_avatar(tree, "user_av", "IR", model.live_sync, UiTone.Accent),
+        ),
+    )
+}
+
+def build_sidebar(tree: UiTree, model: StudioModel) -> i64 effect alloc {
+    val sec_nav = ui_col(
+        tree,
+        "nav_list",
+        UiStyle { gap: 6.0 },
+        list(
+            ui_nav_item(
+                tree,
+                "nav_0",
+                UiIcon.Activity,
+                "Dashboard",
+                model.section == 0,
+                "Live",
+                "sec_0",
+            ),
+            ui_nav_item(
+                tree,
+                "nav_1",
+                UiIcon.Sliders,
+                "Controls",
+                model.section == 1,
+                "14",
+                "sec_1",
+            ),
+            ui_nav_item(
+                tree,
+                "nav_2",
+                UiIcon.Grid,
+                "Icon Gallery",
+                model.section == 2,
+                "24px",
+                "sec_2",
+            ),
+            ui_nav_item(
+                tree,
+                "nav_3",
+                UiIcon.Bolt,
+                "Motion Lab",
+                model.section == 3,
+                "Spring",
+                "sec_3",
+            ),
+        ),
+    )
+
+    val theme_row = ui_row(
+        tree,
+        "theme_switcher",
+        UiStyle { gap: 8.0 },
+        list(
+            ui_icon(tree, "pal_ic", UiIcon.Palette, 18.0, UiTone.Accent),
+            ui_button_tone(
+                tree,
+                "next_theme",
+                "Theme: " + theme_label(model.theme_idx),
+                "cycle_theme",
+                UiTone.Secondary,
+            ),
+        ),
+    )
+
+    return ui_card(
+        tree,
+        "sidebar_card",
+        UiStyle { padding: 12.0, gap: 10.0 },
+        list(
+            ui_label(tree, "nav_cap", "WORKSPACE", UiStyle { font_size: 11.0, bold: true }),
+            sec_nav,
+            ui_divider(tree, "Appearance"),
+            theme_row,
+            ui_select(
+                tree,
+                "theme_select",
+                list("Obsidian", "Daylight", "Midnight", "Nord", "Emerald", "High Contrast"),
+                model.theme_idx % 6,
+                "Choose theme...",
+                "pick_theme",
+            ),
+            ui_toggle(tree, "live_toggle", "Live Telemetry", model.live_sync, UiTone.Accent),
+        ),
+    )
+}
+
+def build_dashboard_section(
+    tree: UiTree,
+    st: UiState,
+    model: StudioModel,
+    vw: f64,
+) -> i64 effect alloc {
+    val cols = ui_responsive_cols(vw, 1, 2, 4)
+    val pulse = ui_state_spring_value(st, "studio.pulse", 1.0)
+    val fps_val = to_str((60.0 * pulse) to i64) + " Hz"
+
+    val stats_grid = ui_grid(
+        tree,
+        "dash_stats",
+        cols,
+        12.0,
+        list(
+            ui_stat_card(
+                tree,
+                "st_rate",
+                StatSpec {
+                    title: "Frame Pacing",
+                    value: fps_val,
+                    delta: "VSync",
+                    positive: true,
+                    icon: UiIcon.Activity,
+                    tone: UiTone.Accent,
+                },
+            ),
+            ui_stat_card(
+                tree,
+                "st_slider",
+                StatSpec {
+                    title: "Render Scale",
+                    value: to_str(model.slider_val to i64) + "%",
+                    delta: "+4%",
+                    positive: true,
+                    icon: UiIcon.Cpu,
+                    tone: UiTone.Primary,
+                },
+            ),
+            ui_stat_card(
+                tree,
+                "st_actions",
+                StatSpec {
+                    title: "Events Dispatched",
+                    value: to_str(model.action_count),
+                    delta: "Active",
+                    positive: true,
+                    icon: UiIcon.Rocket,
+                    tone: UiTone.Secondary,
+                },
+            ),
+            ui_stat_card(
+                tree,
+                "st_workers",
+                StatSpec {
+                    title: "Worker Threads",
+                    value: to_str(model.stepper_val to i64),
+                    delta: "Ready",
+                    positive: true,
+                    icon: UiIcon.Layers,
+                    tone: UiTone.Accent,
+                },
+            ),
+        ),
+    )
+
+    val charts_row = ui_row(
+        tree,
+        "charts_row",
+        UiStyle { gap: 12.0, flex: 1.0 },
+        list(
+            ui_bar_chart(
+                tree,
+                "frame_bars",
+                BarChartSpec {
+                    title: "Subsystem Budget (ms)",
+                    labels: list("Layout", "Icons", "Text", "Blur", "Blit"),
+                    values: list(18.0, 24.0, 32.0, 14.0, 22.0),
+                    tone: UiTone.Accent,
+                },
+            ),
+            ui_line_chart(
+                tree,
+                "latency_line",
+                ChartSeries {
+                    label: "Frame Smoothness",
+                    xs: list(0.0, 1.0, 2.0, 3.0, 4.0, 5.0),
+                    ys: list(42.0, 58.0, 64.0, 61.0, 74.0, 88.0),
+                    tone: UiTone.Primary,
+                    fill: true,
+                },
+                UiStyle { min_h: 160.0, flex: 1.0 },
+            ),
+        ),
+    )
+
+    val rings_card = ui_card(
+        tree,
+        "rings_card",
+        UiStyle { padding: 12.0, gap: 10.0 },
+        list(
+            ui_row(
+                tree,
+                "rings_row",
+                UiStyle { gap: 16.0 },
+                list(
+                    ui_progress_ring(tree, "ring_gpu", "78%", 0.78, 1.0, UiTone.Accent),
+                    ui_progress_ring(tree, "ring_cache", "92%", 0.92, 1.0, UiTone.Secondary),
+                    ui_spinner(tree, "live_spin", 32.0, UiTone.Primary),
+                    ui_col(
+                        tree,
+                        "bars_col",
+                        UiStyle { gap: 8.0, flex: 1.0 },
+                        list(
+                            ui_progress_bar(
+                                tree,
+                                "pb_scale",
+                                "Surface Resolution",
+                                model.slider_val,
+                                100.0,
+                                UiTone.Accent,
+                            ),
+                            ui_progress_bar(
+                                tree,
+                                "pb_mem",
+                                "Glyph Cache Utilization",
+                                64.0,
+                                100.0,
+                                UiTone.Primary,
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+        ),
+    )
+
+    return ui_col(
+        tree,
+        "sec_dashboard",
+        UiStyle { gap: 12.0, flex: 1.0 },
+        list(stats_grid, charts_row, rings_card),
+    )
+}
+
+def build_controls_section(tree: UiTree, model: StudioModel) -> i64 effect alloc {
+    val seg = ui_segmented(
+        tree,
+        "density_seg",
+        list("Compact", "Balanced", "Comfortable"),
+        model.seg_idx,
+        UiTone.Accent,
+        "seg_change",
+    )
+    val radios = ui_row(
+        tree,
+        "radios_row",
+        UiStyle { gap: 10.0 },
+        list(
+            ui_radio(tree, "r_0", "Soft AA", model.radio_idx == 0, 0, UiTone.Accent, "radio_0"),
+            ui_radio(tree, "r_1", "Sharp Hint", model.radio_idx == 1, 1, UiTone.Accent, "radio_1"),
+            ui_radio(tree, "r_2", "Subpixel", model.radio_idx == 2, 2, UiTone.Accent, "radio_2"),
+        ),
+    )
+    val chips = ui_wrap(
+        tree,
+        "chips_wrap",
+        UiStyle { gap: 8.0 },
+        list(
+            ui_chip(tree, "ch_gpu", "Vector SVG", model.chip_gpu, UiTone.Accent, "toggle_gpu"),
+            ui_chip(
+                tree,
+                "ch_motion",
+                "Spring Physics",
+                model.chip_motion,
+                UiTone.Primary,
+                "toggle_motion",
+            ),
+            ui_chip(tree, "ch_a11y", "AccessKit", model.chip_a11y, UiTone.Secondary, "toggle_a11y"),
+        ),
+    )
+
+    val left_card = ui_card(
+        tree,
+        "ctrl_left",
+        UiStyle { padding: 14.0, gap: 10.0, flex: 1.0 },
+        list(
+            ui_heading(tree, "c_h1", "Selection & Tuning", UiTone.Primary),
+            seg,
+            radios,
+            ui_slider(tree, "scale_slider", "Target Percentage", model.slider_val, 100.0),
+            ui_stepper(tree, "worker_step", model.stepper_val, 1.0, 16.0, 1.0, "worker_step_act"),
+            ui_checkbox(tree, "chk_dpi", "Enable HiDPI Scaling", model.high_dpi, UiTone.Accent),
+            chips,
+        ),
+    )
+
+    val right_card = ui_card(
+        tree,
+        "ctrl_right",
+        UiStyle { padding: 14.0, gap: 10.0, flex: 1.0 },
+        list(
+            ui_heading(tree, "c_h2", "Text & Disclosure", UiTone.Secondary),
+            ui_text_input(
+                tree,
+                "search_inp",
+                model.search_query,
+                "Filter components...",
+                UiStyle { min_h: 36.0 },
+            ),
+            ui_text_area(tree, "notes_area", model.notes_text, "Multi-line notes...", 96.0),
+            ui_accordion(
+                tree,
+                "adv_acc",
+                "Packaging & Distribution",
+                model.accordion_open,
+                "toggle_acc",
+                list(
+                    ui_label(
+                        tree,
+                        "acc_l1",
+                        "Compile standalone binaries via `iris bundle .`",
+                        UiStyle {},
+                    ),
+                    ui_icon_button(
+                        tree,
+                        "toast_btn",
+                        UiIcon.Bell,
+                        "Trigger Toast",
+                        UiTone.Accent,
+                        "push_toast",
+                    ),
+                ),
+            ),
+        ),
+    )
+
+    return ui_row(
+        tree,
+        "sec_controls",
+        UiStyle { gap: 12.0, flex: 1.0 },
+        list(left_card, right_card),
+    )
+}
+
+def build_icon_tile(tree: UiTree, key: str, icon: UiIcon, name: str) -> i64 effect alloc {
+    return ui_card(
+        tree,
+        "tile_" + key,
+        UiStyle { padding: 10.0, gap: 6.0, min_w: 112.0, min_h: 76.0 },
+        list(
+            ui_icon(tree, "ic_" + key, icon, 24.0, UiTone.Accent),
+            ui_label(tree, "lbl_" + key, name, UiStyle { font_size: 12.0 }),
+        ),
+    )
+}
+
+def build_icons_section(tree: UiTree) -> i64 effect alloc {
+    val tiles = list(
+        build_icon_tile(tree, "spark", UiIcon.Spark, "Spark"),
+        build_icon_tile(tree, "rocket", UiIcon.Rocket, "Rocket"),
+        build_icon_tile(tree, "layers", UiIcon.Layers, "Layers"),
+        build_icon_tile(tree, "cpu", UiIcon.Cpu, "Cpu"),
+        build_icon_tile(tree, "database", UiIcon.Database, "Database"),
+        build_icon_tile(tree, "globe", UiIcon.Globe, "Globe"),
+        build_icon_tile(tree, "cloud", UiIcon.Cloud, "Cloud"),
+        build_icon_tile(tree, "shield", UiIcon.Shield, "Shield"),
+        build_icon_tile(tree, "compass", UiIcon.Compass, "Compass"),
+        build_icon_tile(tree, "terminal", UiIcon.Terminal, "Terminal"),
+        build_icon_tile(tree, "palette", UiIcon.Palette, "Palette"),
+        build_icon_tile(tree, "settings", UiIcon.Settings, "Settings"),
+    )
+    return ui_card(
+        tree,
+        "icons_card",
+        UiStyle { padding: 14.0, gap: 12.0, flex: 1.0 },
+        list(
+            ui_heading(tree, "ic_hdr", "24x24 Crisp SVG Vector Icons", UiTone.Accent),
+            ui_wrap(tree, "icons_wrap", UiStyle { gap: 10.0 }, tiles),
+        ),
+    )
+}
+
+def build_motion_section(tree: UiTree, st: UiState) -> i64 effect alloc {
+    val spring_val = ui_state_spring_value(st, "lab.spring", 0.5)
+    val pct = to_f64((spring_val * 100.0) to i64)
+    return ui_card(
+        tree,
+        "motion_card",
+        UiStyle { padding: 16.0, gap: 12.0, flex: 1.0 },
+        list(
+            ui_heading(tree, "m_hdr", "Spring Physics & Overlays", UiTone.Accent),
+            ui_progress_bar(tree, "m_bar", "Spring Displacement", pct, 150.0, UiTone.Accent),
+            ui_row(
+                tree,
+                "m_btns",
+                UiStyle { gap: 10.0 },
+                list(
+                    ui_button_tone(
+                        tree,
+                        "sp_bouncy",
+                        "Bouncy Impulse",
+                        "spring_bouncy",
+                        UiTone.Accent,
+                    ),
+                    ui_button_tone(
+                        tree,
+                        "sp_snappy",
+                        "Snappy Impulse",
+                        "spring_snappy",
+                        UiTone.Primary,
+                    ),
+                    ui_button_tone(
+                        tree,
+                        "m_toast",
+                        "Push Notification",
+                        "push_toast",
+                        UiTone.Secondary,
+                    ),
+                ),
+            ),
+        ),
+    )
+}
+
+def build_studio_tree(tree: UiTree, st: UiState, model: StudioModel, vw: f64) -> i64 effect alloc {
+    val header = build_header(tree, model, vw)
+    val tabs = ui_tabs(
+        tree,
+        "top_tabs",
+        list("Dashboard", "Controls", "Icons", "Motion"),
+        model.section,
+        UiTone.Accent,
+        "tab_switch",
+    )
+    val crumb = ui_breadcrumb(
+        tree,
+        "studio_crumb",
+        list("IRIS", "UI Studio", theme_label(model.theme_idx)),
+        "crumb_nav",
+    )
+
+    val main_panel = if model.section == 0 {
+        build_dashboard_section(tree, st, model, vw)
+    } else if model.section == 1 {
+        build_controls_section(tree, model)
+    } else if model.section == 2 {
+        build_icons_section(tree)
+    } else {
+        build_motion_section(tree, st)
+    }
+
+    val content_col = ui_col(
+        tree,
+        "main_col",
+        UiStyle { gap: 10.0, padding: 6.0, flex: 1.0 },
+        list(crumb, tabs, main_panel),
+    )
+
+    val body = if vw < 760.0 {
+        ui_col(tree, "compact_body", UiStyle { gap: 12.0, flex: 1.0 }, list(content_col))
+    } else {
+        ui_split_pane(tree, "workspace_split", 0.24, build_sidebar(tree, model), content_col)
+    }
+
+    val modal = ui_modal(
+        tree,
+        "about_modal",
+        "About IRIS UI Studio",
+        model.modal_open,
+        "close_modal",
+        list(
+            ui_label(
+                tree,
+                "mod_desc",
+                "Standalone native GUI built with std.ui and iris_ui_host.",
+                UiStyle {},
+            ),
+            ui_button_tone(tree, "mod_ok", "Dismiss", "close_modal", UiTone.Accent),
+        ),
+    )
+
+    val drawer = ui_drawer(
+        tree,
+        "inspector_drawer",
+        "Runtime Inspector",
+        model.drawer_open,
+        "close_drawer",
+        list(
+            ui_label(tree, "drw_theme", "Theme: " + theme_label(model.theme_idx), UiStyle {}),
+            ui_label(
+                tree,
+                "drw_ev",
+                "Dispatched actions: " + to_str(model.action_count),
+                UiStyle {},
+            ),
+            ui_button_tone(tree, "drw_close", "Close", "close_drawer", UiTone.Primary),
+        ),
+    )
+
+    return ui_col(
+        tree,
+        "studio_root",
+        UiStyle { padding: 14.0, gap: 10.0, flex: 1.0 },
+        list(header, body, modal, drawer),
+    )
+}
+
+def main() -> i64 effect ffi, alloc {
+    val snap_path = parse_snapshot_path(args())
+    val headless = len(snap_path) > 0
+    val mode = if headless { UiHostMode.Headless } else { UiHostMode.Desktop }
+
+    val opened = ui_open_native_host(mode, "IRIS UI Studio", 1280, 800, "")
+    val lib = when opened {
+        ok(l) => l,
+        err(msg) => {
+            println("failed to open native host: " + msg)
+            return 1
+        },
+    }
+
+    val _min = ui_native_set_size_constraints(lib, 480, 360, 0, 0)
+    var ui_st = ui_state_new()
+    var model = StudioModel {}
+    var buf = draw_buf_new(32768)
+    var frame = 0
+    var fake_now = 0.0
+    var running = true
+
+    while running {
+        val m = ui_native_metrics(lib)
+        if !m.is_open {
+            running = false
+        } else {
+            val vw = if m.width > 64.0 { m.width } else { 1280.0 }
+            val vh = if m.height > 64.0 { m.height } else { 800.0 }
+            val now = if headless {
+                fake_now = fake_now + 0.016
+                fake_now
+            } else {
+                ui_native_clock_secs(lib)
+            }
+
+            val pool = ui_frame_pool_begin()
+            val ticked = ui_state_tick(ui_st, now)
+            val raw_tree = ui_with_theme(studio_theme(model.theme_idx))
+            val root_id = build_studio_tree(raw_tree, ticked, model, vw)
+            val laid_out = ui_layout_with_state(ui_set_root(raw_tree, root_id), ticked, vw, vh)
+
+            val painted = ui_paint(laid_out, ticked, buf)
+            val _sub = ui_native_submit(lib, painted)
+            val wait_ms = if headless {
+                0
+            } else if ui_state_has_active_transitions(ticked) {
+                4
+            } else {
+                16
+            }
+            val evs = ui_native_poll(lib, wait_ms)
+            val next_st = ui_process_events(laid_out, ui_clear_events(ticked), evs)
+
+            val _cur = ui_native_set_cursor(lib, ui_state_cursor(next_st))
+            val _p = ui_frame_pool_pause()
+            ui_st = ui_state_detach(next_st)
+            val _r = ui_frame_pool_resume(pool)
+            val _d = ui_frame_pool_destroy(pool)
+
+            val act = ui_st.dispatched_action
+            if len(act) > 0 {
+                model.action_count = model.action_count + 1
+            }
+            if act == "sec_0" {
+                model.section = 0
+            } else if act == "sec_1" {
+                model.section = 1
+            } else if act == "sec_2" {
+                model.section = 2
+            } else if act == "sec_3" {
+                model.section = 3
+            } else if act == "cycle_theme" {
+                model.theme_idx = (model.theme_idx + 1) % 6
+            } else if act == "open_modal" {
+                model.modal_open = true
+            } else if act == "close_modal" {
+                model.modal_open = false
+            } else if act == "toggle_drawer" {
+                model.drawer_open = !model.drawer_open
+            } else if act == "close_drawer" {
+                model.drawer_open = false
+            } else if act == "radio_0" {
+                model.radio_idx = 0
+            } else if act == "radio_1" {
+                model.radio_idx = 1
+            } else if act == "radio_2" {
+                model.radio_idx = 2
+            } else if act == "reset_stats" {
+                model.action_count = 0
+                model.slider_val = 72.0
+                model.stepper_val = 4.0
+            } else if act == "spring_boost" {
+                ui_st = ui_state_spring_from(ui_st, "studio.pulse", 1.35, 1.0, spring_bouncy())
+            } else if act == "spring_bouncy" {
+                ui_st = ui_state_spring_from(ui_st, "lab.spring", 0.0, 1.0, spring_bouncy())
+            } else if act == "spring_snappy" {
+                ui_st = ui_state_spring_from(ui_st, "lab.spring", 0.0, 1.0, spring_snappy())
+            } else if act == "push_toast" {
+                ui_st = ui_state_push_toast(
+                    ui_st,
+                    "IRIS UI Studio",
+                    "Stand-alone vector UI & spring engine active.",
+                    UiTone.Accent,
+                    3.0,
+                )
+            }
+
+            if ui_state_tab_changed(ui_st, "top_tabs") && ui_st.extras.last_tab_idx >= 0 {
+                model.section = ui_st.extras.last_tab_idx % 4
+            } else if ui_state_tab_changed(ui_st, "density_seg") && ui_st.extras.last_tab_idx >= 0 {
+                model.seg_idx = ui_st.extras.last_tab_idx % 3
+            }
+            if ui_state_select_changed(ui_st, "theme_select") && ui_st.extras.last_select_idx >= 0 {
+                model.theme_idx = ui_st.extras.last_select_idx % 6
+            }
+            if ui_st.has_slider_change {
+                if ui_st.last_slider_key == "scale_slider" {
+                    model.slider_val = ui_st.last_slider_val
+                } else if ui_st.last_slider_key == "worker_step" {
+                    model.stepper_val = ui_st.last_slider_val
+                }
+            }
+            if ui_st.has_toggle_change {
+                if ui_st.last_toggle_key == "live_toggle" {
+                    model.live_sync = ui_st.last_toggle_val
+                } else if ui_st.last_toggle_key == "chk_dpi" {
+                    model.high_dpi = ui_st.last_toggle_val
+                } else if ui_st.last_toggle_key == "adv_acc" {
+                    model.accordion_open = ui_st.last_toggle_val
+                } else if ui_st.last_toggle_key == "ch_gpu" {
+                    model.chip_gpu = ui_st.last_toggle_val
+                } else if ui_st.last_toggle_key == "ch_motion" {
+                    model.chip_motion = ui_st.last_toggle_val
+                } else if ui_st.last_toggle_key == "ch_a11y" {
+                    model.chip_a11y = ui_st.last_toggle_val
+                }
+            }
+            if ui_st.last_text_key == "search_inp" {
+                model.search_query = ui_st.last_text_val
+            } else if ui_st.last_text_key == "notes_area" {
+                model.notes_text = ui_st.last_text_val
+            }
+
+            if ui_st.close_requested {
+                running = false
+            }
+            frame = frame + 1
+            if headless && frame >= 4 {
+                val _png = ui_native_save_png(lib, snap_path)
+                running = false
+            }
+        }
+    }
+
+    val _fb = draw_buf_free(buf)
+    val _cl = ui_close_native_host(lib)
+    return 0
+}
+
+def test_studio_layout() -> i64 {
+    val st = ui_state_new()
+    var buf = draw_buf_new(32768)
+
+    var sec = 0
+    while sec < 4 {
+        val model = StudioModel { section: sec, theme_idx: sec }
+        val raw = ui_with_theme(studio_theme(model.theme_idx))
+        val root = build_studio_tree(raw, st, model, 1280.0)
+        val wide = ui_layout_with_state(ui_set_root(raw, root), st, 1280.0, 800.0)
+        assert(is_some(ui_find_node_key(wide, "brand_title")))
+        buf = ui_paint(wide, st, buf)
+        assert(buf.cmd_count > 10)
+        sec = sec + 1
+    }
+
+    val compact_model = StudioModel { section: 0, theme_idx: 1 }
+    val c_raw = ui_with_theme(daylight_theme())
+    val c_root = build_studio_tree(c_raw, st, compact_model, 640.0)
+    val compact = ui_layout_with_state(ui_set_root(c_raw, c_root), st, 640.0, 480.0)
+    assert(is_some(ui_find_node_key(compact, "compact_body")))
+    buf = ui_paint(compact, st, buf)
+    assert(buf.cmd_count > 10)
+
+    val _fb = draw_buf_free(buf)
+    return 0
+}

@@ -9,7 +9,7 @@
 # ──────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
-VERSION="1.0.0-rc1"
+VERSION="1.0.0-rc3"
 ARCH="amd64"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
@@ -42,11 +42,12 @@ DEB_FILE="${PKG_NAME}_${VERSION}_${DEB_ARCH}.deb"
 rm -rf "$PKG_DIR"
 mkdir -p "$PKG_DIR/DEBIAN"
 mkdir -p "$PKG_DIR/usr/bin"
-mkdir -p "$PKG_DIR/usr/share/iris/stdlib"
 mkdir -p "$PKG_DIR/usr/share/iris/examples"
 mkdir -p "$PKG_DIR/usr/share/iris/toolchain"
 mkdir -p "$PKG_DIR/usr/share/doc/iris"
 mkdir -p "$PKG_DIR/usr/share/man/man1"
+mkdir -p "$PKG_DIR/usr/share/pixmaps"
+mkdir -p "$PKG_DIR/usr/share/icons/hicolor/256x256/apps"
 mkdir -p "$DIST_DIR"
 
 # ── Build release binary (if not already built) ──────────────────────────
@@ -57,6 +58,10 @@ if [[ ! -f "$IRIS_BIN" ]]; then
 else
     echo "[1/5] Using existing release binary."
 fi
+UI_HOST_LIB="$ROOT/target/release/libiris_ui_host.so"
+if [[ ! -f "$UI_HOST_LIB" && "$ARCH" == "$(uname -m)" ]]; then
+    (cd "$ROOT" && cargo build --release -p iris_ui_host) || true
+fi
 
 # ── Stage files ───────────────────────────────────────────────────────────
 echo "[2/5] Staging files..."
@@ -66,11 +71,15 @@ cp "$IRIS_BIN" "$PKG_DIR/usr/bin/iris"
 chmod 755 "$PKG_DIR/usr/bin/iris"
 strip "$PKG_DIR/usr/bin/iris" 2>/dev/null || true
 
+# UI host shared library (if available)
+if [[ -f "$UI_HOST_LIB" ]]; then
+    cp "$UI_HOST_LIB" "$PKG_DIR/usr/share/iris/libiris_ui_host.so"
+    chmod 755 "$PKG_DIR/usr/share/iris/libiris_ui_host.so"
+    echo "  Bundled libiris_ui_host.so"
+fi
+
 # Get installed size in KB
 INSTALLED_SIZE=$(du -sk "$PKG_DIR" | awk '{print $1}')
-
-# Stdlib
-cp -r "$ROOT/stdlib/"* "$PKG_DIR/usr/share/iris/stdlib/" 2>/dev/null || true
 
 # Examples
 cp -r "$ROOT/examples/"* "$PKG_DIR/usr/share/iris/examples/" 2>/dev/null || true
@@ -82,15 +91,33 @@ if [[ -d "$TOOLCHAIN_SRC" ]]; then
     echo "  Bundled LLVM toolchain"
 fi
 
-# Documentation
+# Documentation & logo
 cp "$ROOT/LICENSE" "$PKG_DIR/usr/share/doc/iris/copyright"
 cp "$ROOT/README.md" "$PKG_DIR/usr/share/doc/iris/"
 cp "$ROOT/LLVM_VERSION" "$PKG_DIR/usr/share/iris/" 2>/dev/null || true
+ICON_SRC="$ROOT/installer/icon.png"
+if [[ ! -f "$ICON_SRC" ]]; then ICON_SRC="$ROOT/logo/iris-logo.png"; fi
+if [[ -f "$ICON_SRC" ]]; then
+    cp "$ICON_SRC" "$PKG_DIR/usr/share/iris/iris.png"
+    cp "$ICON_SRC" "$PKG_DIR/usr/share/pixmaps/iris.png"
+    cp "$ICON_SRC" "$PKG_DIR/usr/share/icons/hicolor/256x256/apps/iris.png"
+fi
+
+# Shell completions (when target binary is runnable on the build host)
+if "$IRIS_BIN" completions bash >/dev/null 2>&1; then
+    mkdir -p "$PKG_DIR/usr/share/bash-completion/completions" \
+             "$PKG_DIR/usr/share/zsh/vendor-completions" \
+             "$PKG_DIR/usr/share/fish/vendor_completions.d"
+    "$IRIS_BIN" completions bash > "$PKG_DIR/usr/share/bash-completion/completions/iris" || true
+    "$IRIS_BIN" completions zsh  > "$PKG_DIR/usr/share/zsh/vendor-completions/_iris" || true
+    "$IRIS_BIN" completions fish > "$PKG_DIR/usr/share/fish/vendor_completions.d/iris.fish" || true
+    echo "  Generated bash/zsh/fish completions"
+fi
 
 # ── Generate man page ────────────────────────────────────────────────────
 echo "[3/5] Generating man page..."
 cat > "$PKG_DIR/usr/share/man/man1/iris.1" << 'MANEOF'
-.TH IRIS 1 "2026" "iris 1.0.0-rc1" "IRIS Language"
+.TH IRIS 1 "2026" "iris 1.0.0-rc3" "IRIS Language"
 .SH NAME
 iris \- IRIS programming language compiler and toolchain
 .SH SYNOPSIS
@@ -136,15 +163,15 @@ iris --emit ir hello.iris
 .fi
 .SH FILES
 .TP
-.I /usr/share/iris/stdlib/
-Standard library modules.
+.I /usr/share/iris/toolchain/
+Bundled LLVM/clang + lld toolchain (when included).
 .TP
 .I /usr/share/iris/examples/
 Example programs.
 .SH AUTHOR
-IRIS Language Project <https://github.com/moon9t/iris>
+IRIS Language Project <https://github.com/Eclipse-Softworks/IRIS>
 .SH SEE ALSO
-.UR https://github.com/moon9t/iris
+.UR https://github.com/Eclipse-Softworks/IRIS
 IRIS on GitHub
 .UE
 MANEOF
@@ -161,8 +188,8 @@ Section: devel
 Priority: optional
 Architecture: ${DEB_ARCH}
 Installed-Size: ${INSTALLED_SIZE}
-Maintainer: IRIS Language Project <iris@moon9t.dev>
-Homepage: https://github.com/moon9t/iris
+Maintainer: Eclipse Softworks <dev@eclipsesoftworks.io>
+Homepage: https://github.com/Eclipse-Softworks/IRIS
 Description: IRIS programming language compiler and toolchain
  IRIS (Intermediate Representation for Intelligent Systems) is a
  programming language designed for machine learning and systems
@@ -197,6 +224,9 @@ echo "[5/5] Building .deb package..."
 find "$PKG_DIR" -type d -exec chmod 755 {} \;
 find "$PKG_DIR" -type f -exec chmod 644 {} \;
 chmod 755 "$PKG_DIR/usr/bin/iris"
+if [[ -f "$PKG_DIR/usr/share/iris/libiris_ui_host.so" ]]; then
+    chmod 755 "$PKG_DIR/usr/share/iris/libiris_ui_host.so"
+fi
 chmod 755 "$PKG_DIR/DEBIAN/postinst"
 chmod 755 "$PKG_DIR/DEBIAN/prerm"
 

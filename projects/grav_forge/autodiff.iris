@@ -1,0 +1,311 @@
+// Reverse-mode automatic differentiation orbital burn solver (`tape` / `backward` / `grad`)
+// plus forward symplectic trajectory predictor for live slingshot rubber-band previews.
+
+bring std.math
+bring "physics.iris"
+
+/// Compact gravity-well table (up to 6 dominant attractors) shared by rollout & AD.
+pub record WellTable {
+    xs: list<f64> = list(),
+    ys: list<f64> = list(),
+    gms: list<f64> = list(),
+    soft2: f64 = 0.0022,
+}
+
+/// Live Adam optimizer state converging a launch velocity vector `(vx, vy)` onto the beacon.
+pub record AdSolverState {
+    vx: f64 = 0.0,
+    vy: f64 = 0.0,
+    m_vx: f64 = 0.0,
+    m_vy: f64 = 0.0,
+    v_vx: f64 = 0.0,
+    v_vy: f64 = 0.0,
+    iter: i64 = 0,
+    max_iters: i64 = 32,
+    running: bool = false,
+    best_vx: f64 = 0.0,
+    best_vy: f64 = 0.0,
+    best_miss: f64 = 9.0,
+    last_loss: f64 = 9.0,
+    loss_xs: list<f64> = list(),
+    loss_ys: list<f64> = list(),
+    path_xs: list<f64> = list(),
+    path_ys: list<f64> = list(),
+    ghost_xs: list<f64> = list(),
+    ghost_ys: list<f64> = list(),
+}
+
+def is_attractor(kind: BodyKind) -> bool {
+    return when kind {
+        BodyKind.BlackHole => true,
+        BodyKind.Star => true,
+        BodyKind.Planet => true,
+        _ => false,
+    }
+}
+
+/// Extract up to 6 dominant gravitational attractors from `world`.
+pub def extract_well_table(world: WorldState, cfg: SimConfig) -> WellTable effect alloc {
+    val xs: list<f64> = list()
+    val ys: list<f64> = list()
+    val gms: list<f64> = list()
+    val n = list_len(world.bodies)
+    for pass in 0..n {
+        if list_len(xs) < 6 {
+            val b = list_get(world.bodies, pass)
+            if is_attractor(b.kind) {
+                list_push(xs, b.x)
+                list_push(ys, b.y)
+                list_push(gms, b.mass * cfg.gravity_g)
+            }
+        }
+    }
+    return WellTable {
+        xs: xs,
+        ys: ys,
+        gms: gms,
+        soft2: cfg.softening * cfg.softening + 0.0012,
+    }
+}
+
+def step_well_accel(wells: WellTable, px: f64, py: f64) -> Vec2 {
+    var ax = 0.0
+    var ay = 0.0
+    val nw = list_len(wells.xs)
+    for i in 0..nw {
+        val dx = list_get(wells.xs, i) - px
+        val dy = list_get(wells.ys, i) - py
+        val r2 = dx * dx + dy * dy + wells.soft2
+        val inv_r = 1.0 / sqrt(r2)
+        val f = list_get(wells.gms, i) * inv_r * inv_r * inv_r
+        ax = ax + dx * f
+        ay = ay + dy * f
+    }
+    return Vec2 { x: ax, y: ay }
+}
+
+/// Predict `steps` forward trajectory coordinates `(xs, ys)` from `start` and `vel`.
+pub def predict_trajectory(
+    world: WorldState,
+    cfg: SimConfig,
+    start: Vec2,
+    vel: Vec2,
+    steps: i64,
+) -> (list<f64>, list<f64>) effect alloc {
+    val wells = extract_well_table(world, cfg)
+    val dt = 0.042
+    var px = start.x
+    var py = start.y
+    var vx = vel.x
+    var vy = vel.y
+    val xs: list<f64> = list(px)
+    val ys: list<f64> = list(py)
+    for _k in 0..steps {
+        val acc = step_well_accel(wells, px, py)
+        vx = clamp_f(vx + acc.x * dt, -2.5, 2.5)
+        vy = clamp_f(vy + acc.y * dt, -2.5, 2.5)
+        px = px + vx * dt
+        py = py + vy * dt
+        list_push(xs, px)
+        list_push(ys, py)
+    }
+    return (xs, ys)
+}
+
+def eval_closest_miss(wells: WellTable, launch: Vec2, target: Vec2, ivx: f64, ivy: f64) -> f64 {
+    val dt = 0.042
+    var px = launch.x
+    var py = launch.y
+    var vx = ivx
+    var vy = ivy
+    var min_d2 = (px - target.x) * (px - target.x) + (py - target.y) * (py - target.y)
+    for _step in 0..44 {
+        val acc = step_well_accel(wells, px, py)
+        vx = vx + acc.x * dt
+        vy = vy + acc.y * dt
+        px = px + vx * dt
+        py = py + vy * dt
+        val d2 = (px - target.x) * (px - target.x) + (py - target.y) * (py - target.y)
+        min_d2 = if d2 < min_d2 { d2 } else { min_d2 }
+    }
+    return sqrt(min_d2)
+}
+
+def ad_eval_burn_grad(
+    wells: WellTable,
+    launch: Vec2,
+    target: Vec2,
+    ivx: f64,
+    ivy: f64,
+) -> (f64, f64, f64) {
+    val dt = 0.042
+    val nw = list_len(wells.xs)
+    val vx0 = tape(ivx)
+    val vy0 = tape(ivy)
+    val zero_t = tape(0.0)
+    var px = tape(launch.x)
+    var py = tape(launch.y)
+    var vx = vx0
+    var vy = vy0
+    var min_d2 = tape(100.0)
+    for _step in 0..44 {
+        var ax = zero_t
+        var ay = zero_t
+        for i in 0..nw {
+            val dx = list_get(wells.xs, i) - px
+            val dy = list_get(wells.ys, i) - py
+            val r2 = dx * dx + dy * dy + wells.soft2
+            val inv_r = 1.0 / sqrt(r2)
+            val f = list_get(wells.gms, i) * inv_r * inv_r * inv_r
+            ax = ax + dx * f
+            ay = ay + dy * f
+        }
+        vx = vx + ax * dt
+        vy = vy + ay * dt
+        px = px + vx * dt
+        py = py + vy * dt
+        val d2 = (px - target.x) * (px - target.x) + (py - target.y) * (py - target.y)
+        min_d2 = if d2 < min_d2 { d2 } else { min_d2 }
+    }
+    val end_d2 = (px - target.x) * (px - target.x) + (py - target.y) * (py - target.y)
+    val loss = min_d2 * 0.85 + end_d2 * 0.15 + (vx0 * vx0 + vy0 * vy0) * 0.005
+    val _b = backward(loss)
+    return (grad(vx0), grad(vy0), loss)
+}
+
+def append_loss_point(
+    xs: list<f64>,
+    ys: list<f64>,
+    step_idx: i64,
+    miss: f64,
+) -> (list<f64>, list<f64>) effect alloc {
+    val nx: list<f64> = list()
+    val ny: list<f64> = list()
+    for i in 0..list_len(xs) {
+        list_push(nx, list_get(xs, i))
+        list_push(ny, list_get(ys, i))
+    }
+    list_push(nx, to_f64(step_idx))
+    list_push(ny, miss * 100.0)
+    return (nx, ny)
+}
+
+/// Initialize an AD slingshot solver aimed from `world`'s launch pad toward its target beacon.
+pub def ad_start_solver(world: WorldState, cfg: SimConfig) -> AdSolverState effect alloc {
+    val launch = Vec2 { x: world.launch_x, y: world.launch_y }
+    val target = Vec2 { x: world.beacon_x, y: world.beacon_y }
+    val diff = target.sub(launch)
+    val dist = diff.norm()
+    val inv_d = if dist > 0.05 { 1.0 / dist } else { 1.0 }
+    // Seed with a slight transverse offset so gravity well bending is vivid before convergence.
+    val seed_vx = clamp_f(diff.x * inv_d * 0.44 - diff.y * inv_d * 0.14, -1.4, 1.4)
+    val seed_vy = clamp_f(diff.y * inv_d * 0.44 + diff.x * inv_d * 0.14, -1.4, 1.4)
+    val wells = extract_well_table(world, cfg)
+    val init_miss = eval_closest_miss(wells, launch, target, seed_vx, seed_vy)
+    val (gxs, gys) = predict_trajectory(world, cfg, launch, Vec2 { x: seed_vx, y: seed_vy }, 44)
+    return AdSolverState {
+        vx: seed_vx,
+        vy: seed_vy,
+        best_vx: seed_vx,
+        best_vy: seed_vy,
+        best_miss: init_miss,
+        last_loss: init_miss,
+        running: true,
+        loss_xs: list(0.0),
+        loss_ys: list(init_miss * 100.0),
+        path_xs: gxs,
+        path_ys: gys,
+        ghost_xs: gxs,
+        ghost_ys: gys,
+    }
+}
+
+def adam_one_step(
+    s: AdSolverState,
+    wells: WellTable,
+    launch: Vec2,
+    target: Vec2,
+) -> AdSolverState effect alloc {
+    val (raw_gx, raw_gy, loss_val) = ad_eval_burn_grad(wells, launch, target, s.vx, s.vy)
+    val gx = clamp_f(raw_gx, -18.0, 18.0)
+    val gy = clamp_f(raw_gy, -18.0, 18.0)
+    val next_m_vx = 0.82 * s.m_vx + 0.18 * gx
+    val next_m_vy = 0.82 * s.m_vy + 0.18 * gy
+    val next_v_vx = 0.96 * s.v_vx + 0.04 * gx * gx
+    val next_v_vy = 0.96 * s.v_vy + 0.04 * gy * gy
+    val lr = 0.085
+    val nvx = clamp_f(s.vx - lr * next_m_vx / (sqrt(next_v_vx) + 0.000001), -1.55, 1.55)
+    val nvy = clamp_f(s.vy - lr * next_m_vy / (sqrt(next_v_vy) + 0.000001), -1.55, 1.55)
+    val miss = eval_closest_miss(wells, launch, target, nvx, nvy)
+    val improved = miss < s.best_miss
+    val best_vx = if improved { nvx } else { s.best_vx }
+    val best_vy = if improved { nvy } else { s.best_vy }
+    val best_miss = if improved { miss } else { s.best_miss }
+    val next_iter = s.iter + 1
+    val (lxs, lys) = append_loss_point(s.loss_xs, s.loss_ys, next_iter, best_miss)
+    val keep_going = next_iter < s.max_iters && best_miss >= 0.014
+    return AdSolverState {
+        vx: nvx,
+        vy: nvy,
+        m_vx: next_m_vx,
+        m_vy: next_m_vy,
+        v_vx: next_v_vx,
+        v_vy: next_v_vy,
+        iter: next_iter,
+        max_iters: s.max_iters,
+        running: keep_going,
+        best_vx: best_vx,
+        best_vy: best_vy,
+        best_miss: best_miss,
+        last_loss: loss_val,
+        loss_xs: lxs,
+        loss_ys: lys,
+        path_xs: s.path_xs,
+        path_ys: s.path_ys,
+        ghost_xs: s.ghost_xs,
+        ghost_ys: s.ghost_ys,
+    }
+}
+
+/// Advance active reverse-mode AD optimization by up to 2 Adam steps and refresh spline preview.
+pub def ad_step_solver(
+    solver: AdSolverState,
+    world: WorldState,
+    cfg: SimConfig,
+) -> AdSolverState effect alloc {
+    val wells = extract_well_table(world, cfg)
+    val launch = Vec2 { x: world.launch_x, y: world.launch_y }
+    val target = Vec2 { x: world.beacon_x, y: world.beacon_y }
+    var cur = solver
+    if cur.running && cur.iter < cur.max_iters {
+        cur = adam_one_step(cur, wells, launch, target)
+    }
+    if cur.running && cur.iter < cur.max_iters {
+        cur = adam_one_step(cur, wells, launch, target)
+    }
+    val (
+        pxs,
+        pys,
+    ) = predict_trajectory(world, cfg, launch, Vec2 { x: cur.best_vx, y: cur.best_vy }, 44)
+    return AdSolverState {
+        vx: cur.vx,
+        vy: cur.vy,
+        m_vx: cur.m_vx,
+        m_vy: cur.m_vy,
+        v_vx: cur.v_vx,
+        v_vy: cur.v_vy,
+        iter: cur.iter,
+        max_iters: cur.max_iters,
+        running: cur.running,
+        best_vx: cur.best_vx,
+        best_vy: cur.best_vy,
+        best_miss: cur.best_miss,
+        last_loss: cur.last_loss,
+        loss_xs: cur.loss_xs,
+        loss_ys: cur.loss_ys,
+        path_xs: pxs,
+        path_ys: pys,
+        ghost_xs: cur.ghost_xs,
+        ghost_ys: cur.ghost_ys,
+    }
+}

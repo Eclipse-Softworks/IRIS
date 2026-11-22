@@ -109,6 +109,17 @@ pub const ML_KERNELS_C_SRC: &str = include_str!("../runtime/iris_ml_kernels.c");
 ///
 /// Returns the `PathBuf` of the output binary on success, or a `CodegenError`
 /// if no compiler can be found or any compilation/link step fails.
+/// Additional platform linking options for standalone executables and GUI apps.
+#[derive(Debug, Clone, Default)]
+pub struct NativeBuildOptions {
+    /// On Windows, set PE Subsystem to Windows GUI (`2`) instead of Console (`3`).
+    pub gui_subsystem: bool,
+    /// Extra native object or COFF resource files (`.o` / `.res`) linked into the executable.
+    pub extra_objects: Vec<PathBuf>,
+    /// Shared-library runtime search paths (`-rpath` on Linux/macOS).
+    pub rpaths: Vec<String>,
+}
+
 /// Requires at least one zero-argument function (preferably named `main`) as the entry point.
 pub fn build_binary(module: &IrModule, output_path: &Path) -> Result<PathBuf, CodegenError> {
     build_binary_with_target(module, output_path, None)
@@ -136,6 +147,39 @@ pub fn build_binary_with_security(
     target: Option<&str>,
     policy: &crate::security::SecurityPolicy,
 ) -> Result<PathBuf, CodegenError> {
+    build_binary_with_security_and_options(
+        module,
+        output_path,
+        target,
+        policy,
+        &NativeBuildOptions::default(),
+    )
+}
+
+/// Build a native binary using extra subsystem, resource object, and rpath options.
+pub fn build_binary_with_options(
+    module: &IrModule,
+    output_path: &Path,
+    target: Option<&str>,
+    opts: &NativeBuildOptions,
+) -> Result<PathBuf, CodegenError> {
+    build_binary_with_security_and_options(
+        module,
+        output_path,
+        target,
+        &crate::security::get_security_policy(),
+        opts,
+    )
+}
+
+/// Like `build_binary_with_security` with explicit [`NativeBuildOptions`].
+pub fn build_binary_with_security_and_options(
+    module: &IrModule,
+    output_path: &Path,
+    target: Option<&str>,
+    policy: &crate::security::SecurityPolicy,
+    opts: &NativeBuildOptions,
+) -> Result<PathBuf, CodegenError> {
     let link_libs: Vec<String> = module
         .extern_fns
         .iter()
@@ -143,7 +187,7 @@ pub fn build_binary_with_security(
         .collect();
     let llvm_ir =
         crate::codegen::llvm_ir::emit_llvm_ir_for_binary_with_security(module, target, policy)?;
-    build_binary_impl(llvm_ir, output_path, target, link_libs)
+    build_binary_impl_with_options(llvm_ir, output_path, target, link_libs, false, false, opts)
 }
 
 /// Build a native executable whose `main` performs `calls` and prints one
@@ -438,6 +482,55 @@ fn prebuilt_object_dir(pre: &'static PrebuiltRuntime) -> Option<PathBuf> {
     Some(dir)
 }
 
+/// Deduplicated candidate IRIS installation roots in lookup priority order.
+///
+/// Supports both flat layouts (`<prefix>/iris.exe`, portable zip, Inno Setup)
+/// and FHS/prefix layouts (`<prefix>/bin/iris`, `~/.iris/bin/iris`, Homebrew, Linux packages).
+pub(crate) fn install_prefix_dirs() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    let mut push_unique = |p: PathBuf| {
+        if !p.as_os_str().is_empty() && !dirs.contains(&p) {
+            dirs.push(p);
+        }
+    };
+
+    if let Some(home) = std::env::var_os("IRIS_HOME").filter(|v| !v.is_empty()) {
+        push_unique(PathBuf::from(home));
+    }
+
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            push_unique(dir.to_path_buf());
+            if let Some(parent) = dir.parent() {
+                push_unique(parent.to_path_buf());
+            }
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(lad) = std::env::var_os("LOCALAPPDATA").filter(|v| !v.is_empty()) {
+            push_unique(PathBuf::from(lad).join("Programs").join("IRIS"));
+        }
+        if let Some(home) = std::env::var_os("USERPROFILE").filter(|v| !v.is_empty()) {
+            push_unique(PathBuf::from(home).join(".iris"));
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        if let Some(home) = std::env::var_os("HOME").filter(|v| !v.is_empty()) {
+            push_unique(PathBuf::from(home).join(".iris"));
+        }
+        #[cfg(target_os = "macos")]
+        push_unique(PathBuf::from("/usr/local/share/iris"));
+        #[cfg(target_os = "linux")]
+        push_unique(PathBuf::from("/usr/share/iris"));
+    }
+
+    dirs
+}
+
 /// What `iris doctor` reports about the native toolchain.
 pub struct ToolchainReport {
     /// A prebuilt runtime exists for the host target, so ordinary builds
@@ -446,6 +539,10 @@ pub struct ToolchainReport {
     /// The clang IRIS would run (a bare `clang` when none was found).
     pub clang: String,
     pub lld: Option<String>,
+    pub sysroot_include: Option<String>,
+    pub sysroot_lib: Option<String>,
+    pub sysroot_gcc: Option<String>,
+    pub ui_host: Option<PathBuf>,
 }
 
 pub fn toolchain_report() -> ToolchainReport {
@@ -453,6 +550,10 @@ pub fn toolchain_report() -> ToolchainReport {
         prebuilt_runtime: find_prebuilt_runtime(crate::codegen::native_target_triple()).is_some(),
         clang: find_clang(),
         lld: find_lld(),
+        sysroot_include: msys2_ucrt64_include(),
+        sysroot_lib: msys2_ucrt64_lib(),
+        sysroot_gcc: msys2_gcc_lib(),
+        ui_host: crate::codegen::app_bundle::find_installed_ui_host(),
     }
 }
 
@@ -718,6 +819,26 @@ fn build_binary_impl_with(
     link_libs: Vec<String>,
     debug: bool,
     self_contained: bool,
+) -> Result<PathBuf, CodegenError> {
+    build_binary_impl_with_options(
+        llvm_ir,
+        output_path,
+        target,
+        link_libs,
+        debug,
+        self_contained,
+        &NativeBuildOptions::default(),
+    )
+}
+
+fn build_binary_impl_with_options(
+    llvm_ir: String,
+    output_path: &Path,
+    target: Option<&str>,
+    link_libs: Vec<String>,
+    debug: bool,
+    self_contained: bool,
+    opts: &NativeBuildOptions,
 ) -> Result<PathBuf, CodegenError> {
     let output_path_buf = if output_path.is_relative() {
         std::env::current_dir()
@@ -1326,6 +1447,7 @@ fn build_binary_impl_with(
                 &openblas_dir,
                 use_blas,
                 &link_libs,
+                opts,
             )
         } else {
             Err(CodegenError::Unsupported {
@@ -1385,7 +1507,22 @@ fn build_binary_impl_with(
             for obj in &support_objs {
                 link_cmd.arg(path_str(obj)?);
             }
+            for obj in &opts.extra_objects {
+                link_cmd.arg(path_str(obj)?);
+            }
             link_cmd.args(["-o", path_str(output_path)?]);
+            if opts.gui_subsystem && resolved_target.contains("windows") {
+                if resolved_target.contains("msvc") {
+                    link_cmd.args(["-Wl,/SUBSYSTEM:WINDOWS", "-Wl,/ENTRY:mainCRTStartup"]);
+                } else {
+                    link_cmd.args(["-mwindows", "-Wl,-e,mainCRTStartup"]);
+                }
+            }
+            if !resolved_target.contains("windows") {
+                for rpath in &opts.rpaths {
+                    link_cmd.arg(format!("-Wl,-rpath,{rpath}"));
+                }
+            }
             if let Some(ref s) = sanitize {
                 link_cmd.arg(format!("-fsanitize={s}"));
             }
@@ -1883,16 +2020,31 @@ fn build_wasm_binary_impl(
     Ok(output_path.to_path_buf())
 }
 
-/// Locate `wasm-tools` executable by searching PATH.
+/// Locate `wasm-tools` executable by searching IRIS install prefixes and PATH.
 fn find_wasm_tools() -> Result<PathBuf, CodegenError> {
-    // Check environment override
     if let Ok(path) = std::env::var("IRIS_WASM_TOOLS") {
         let p = PathBuf::from(&path);
         if p.is_file() {
             return Ok(p);
         }
     }
-    // Search PATH using `where` (Windows) or `which` (Unix)
+    let exe_name = if cfg!(windows) {
+        "wasm-tools.exe"
+    } else {
+        "wasm-tools"
+    };
+    for prefix in install_prefix_dirs() {
+        for cand in [
+            prefix.join("bin").join(exe_name),
+            prefix.join("sdks").join("wasm").join(exe_name),
+            prefix.join("sdks").join("wasm").join("bin").join(exe_name),
+            prefix.join("toolchain").join(exe_name),
+        ] {
+            if cand.is_file() {
+                return Ok(cand);
+            }
+        }
+    }
     #[cfg(windows)]
     let search_cmd = "where";
     #[cfg(not(windows))]
@@ -1918,34 +2070,48 @@ fn find_wasm_tools() -> Result<PathBuf, CodegenError> {
     }
     Err(CodegenError::Unsupported {
         backend: "wasm".into(),
-        detail:
-            "wasm-tools not found. Install with: 'cargo install wasm-tools' or set IRIS_WASM_TOOLS"
-                .into(),
+        detail: "wasm-tools not found. Install via `iris setup wasm` or `cargo install wasm-tools` or set IRIS_WASM_TOOLS".into(),
     })
 }
 
 /// Locate the WASI P1→P2 adapter module.
 fn find_wasi_p2_adapter() -> Result<PathBuf, CodegenError> {
-    // Check environment override
     if let Ok(path) = std::env::var("IRIS_WASI_P2_ADAPTER") {
         let p = PathBuf::from(&path);
         if p.is_file() {
             return Ok(p);
         }
     }
-    // Check alongside wasm-tools or in well-known locations
+    let mut candidates = Vec::new();
+    for prefix in install_prefix_dirs() {
+        candidates.push(prefix.join("toolchain").join("wasi_snapshot_preview1.wasm"));
+        candidates.push(
+            prefix
+                .join("sdks")
+                .join("wasm")
+                .join("wasi_snapshot_preview1.wasm"),
+        );
+    }
     let home = std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))
         .unwrap_or_else(|_| ".".into());
-    let candidates = [
-        format!(r"{}\AppData\Local\Temp\wasi_snapshot_preview1.wasm", home),
-        format!(r"{}\~\.iris\toolchain\wasi_snapshot_preview1.wasm", home),
-        "wasi_snapshot_preview1.wasm".to_string(),
-    ];
+    candidates.push(
+        PathBuf::from(&home)
+            .join("AppData")
+            .join("Local")
+            .join("Temp")
+            .join("wasi_snapshot_preview1.wasm"),
+    );
+    candidates.push(
+        PathBuf::from(&home)
+            .join(".iris")
+            .join("toolchain")
+            .join("wasi_snapshot_preview1.wasm"),
+    );
+    candidates.push(PathBuf::from("wasi_snapshot_preview1.wasm"));
     for c in &candidates {
-        let p = Path::new(c);
-        if p.is_file() {
-            return Ok(p.to_path_buf());
+        if c.is_file() {
+            return Ok(c.clone());
         }
     }
     Err(CodegenError::Unsupported {
@@ -1958,28 +2124,15 @@ fn find_wasi_p2_adapter() -> Result<PathBuf, CodegenError> {
 fn find_wasi_sysroot() -> Result<PathBuf, CodegenError> {
     let candidates: Vec<PathBuf> = {
         let mut c = Vec::new();
-        // IRIS_WASI_SYSROOT env var
         if let Ok(v) = std::env::var("IRIS_WASI_SYSROOT") {
             if !v.is_empty() {
                 c.push(PathBuf::from(v));
             }
         }
-        // Next to the running executable
-        if let Ok(exe) = std::env::current_exe() {
-            if let Some(dir) = exe.parent() {
-                c.push(dir.join("toolchain").join("wasi-sysroot"));
-            }
-        }
-        // Inno Setup default install
-        if let Ok(lad) = std::env::var("LOCALAPPDATA") {
-            c.push(PathBuf::from(lad).join("Programs/IRIS/toolchain/wasi-sysroot"));
-        }
-        // User-local .iris install
-        if let Ok(home) = std::env::var("USERPROFILE") {
-            c.push(PathBuf::from(home).join(".iris/toolchain/wasi-sysroot"));
-        }
-        if let Ok(home) = std::env::var("HOME") {
-            c.push(PathBuf::from(home).join(".iris/toolchain/wasi-sysroot"));
+        for prefix in install_prefix_dirs() {
+            c.push(prefix.join("toolchain").join("wasi-sysroot"));
+            c.push(prefix.join("sdks").join("wasm").join("wasi-sysroot"));
+            c.push(prefix.join("sdks").join("wasm"));
         }
         c
     };
@@ -2041,32 +2194,27 @@ pub(crate) fn find_clang() -> String {
 
     let mut candidates: Vec<String> = Vec::new();
 
-    // 1. Relative to the running executable  (…/toolchain/llvm/bin/clang[.exe])
-    //    Works for both bundled release archives and local dev installs.
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            #[cfg(target_os = "windows")]
-            {
-                candidates.push(format!(r"{}\toolchain\llvm\bin\clang.exe", dir.display()));
-            }
-            #[cfg(not(target_os = "windows"))]
-            {
-                candidates.push(format!("{}/toolchain/llvm/bin/clang", dir.display()));
-            }
-        }
+    // 1. Installed / bundled IRIS prefixes (<prefix>/toolchain/llvm/bin/clang[.exe])
+    let clang_name = if cfg!(target_os = "windows") {
+        "clang.exe"
+    } else {
+        "clang"
+    };
+    for prefix in install_prefix_dirs() {
+        candidates.push(
+            prefix
+                .join("toolchain")
+                .join("llvm")
+                .join("bin")
+                .join(clang_name)
+                .to_string_lossy()
+                .into_owned(),
+        );
     }
 
     #[cfg(target_os = "windows")]
     {
-        // 2. Inno Setup default install dir  ({LOCALAPPDATA}\Programs\IRIS)
-        if let Ok(lad) = std::env::var("LOCALAPPDATA") {
-            candidates.push(format!(
-                r"{}\Programs\IRIS\toolchain\llvm\bin\clang.exe",
-                lad
-            ));
-        }
-
-        // 3. Standalone LLVM version directories, newest supported first.
+        // 2. Standalone LLVM version directories, newest supported first.
         candidates.push(r"C:\llvm-23.1.1\bin\clang.exe".into());
         candidates.push(r"C:\llvm-23\bin\clang.exe".into());
         candidates.push(r"C:\llvm-22\bin\clang.exe".into());
@@ -2175,23 +2323,23 @@ pub(crate) fn find_lld() -> Option<String> {
 
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
-            candidates.push(format!(r"{}\{}", dir.display(), exe_name));
-            candidates.push(format!(
-                r"{}\toolchain\llvm\bin\{}",
-                dir.display(),
-                exe_name
-            ));
+            candidates.push(dir.join(exe_name).to_string_lossy().into_owned());
         }
+    }
+    for prefix in install_prefix_dirs() {
+        candidates.push(
+            prefix
+                .join("toolchain")
+                .join("llvm")
+                .join("bin")
+                .join(exe_name)
+                .to_string_lossy()
+                .into_owned(),
+        );
     }
 
     #[cfg(target_os = "windows")]
     {
-        if let Ok(lad) = std::env::var("LOCALAPPDATA") {
-            candidates.push(format!(
-                r"{}\Programs\IRIS\toolchain\llvm\bin\{}",
-                lad, exe_name
-            ));
-        }
         // Standalone LLVM version directories, newest supported first.
         candidates.push(format!(r"C:\llvm-23.1.1\bin\{}", exe_name));
         candidates.push(format!(r"C:\llvm-23\bin\{}", exe_name));
@@ -2252,6 +2400,7 @@ fn link_with_lld(
     openblas_dir: &Option<PathBuf>,
     use_blas: bool,
     link_libs: &[String],
+    opts: &NativeBuildOptions,
 ) -> Result<(), CodegenError> {
     let mut cmd = std::process::Command::new(lld_path);
 
@@ -2260,6 +2409,9 @@ fn link_with_lld(
         // MinGW uses GNU-driver syntax. Startup and termination objects are
         // order-sensitive: crt2/crtbegin precede user objects and crtend is last.
         cmd.args(["-m", "i386pep", "-Bdynamic"]);
+        if opts.gui_subsystem {
+            cmd.args(["--subsystem", "windows", "-e", "mainCRTStartup"]);
+        }
         cmd.arg("-o").arg(path_str(output)?);
 
         if msys2_lib.is_none() || gcc_lib.is_none() {
@@ -2315,6 +2467,9 @@ fn link_with_lld(
         for obj in support_objs {
             cmd.arg(path_str(obj)?);
         }
+        for obj in &opts.extra_objects {
+            cmd.arg(path_str(obj)?);
+        }
         append_optional_lld_libraries(&mut cmd, openblas_dir, use_blas, link_libs);
         append_mingw_default_libraries(&mut cmd, msys2_lib);
 
@@ -2336,10 +2491,14 @@ fn link_with_lld(
         for obj in support_objs {
             cmd.arg(path_str(obj)?);
         }
+        for obj in &opts.extra_objects {
+            cmd.arg(path_str(obj)?);
+        }
         cmd.arg("-o").arg(path_str(output)?);
+        if opts.gui_subsystem {
+            cmd.args(["/SUBSYSTEM:WINDOWS", "/ENTRY:mainCRTStartup"]);
+        }
         // MSVC target — use lld-link compatible flags
-        // For MSVC, lld-link expects /NODEFAULTLIB etc.
-        // This is a best-effort path; the clang fallback handles this better.
         cmd.arg("/defaultlib:libcmt");
         cmd.arg("/defaultlib:oldnames");
     } else {
@@ -2347,7 +2506,13 @@ fn link_with_lld(
         for obj in support_objs {
             cmd.arg(path_str(obj)?);
         }
+        for obj in &opts.extra_objects {
+            cmd.arg(path_str(obj)?);
+        }
         cmd.arg("-o").arg(path_str(output)?);
+        for rpath in &opts.rpaths {
+            cmd.args(["-rpath", rpath]);
+        }
         // Linux/macOS: standard system libraries
         cmd.arg("-lm");
         cmd.arg("-lpthread");
@@ -2462,17 +2627,18 @@ pub(crate) fn msys2_ucrt64_include() -> Option<String> {
     {
         let mut candidates: Vec<String> = Vec::new();
 
-        if let Ok(exe) = std::env::current_exe() {
-            if let Some(dir) = exe.parent() {
-                candidates.push(format!(r"{}\toolchain\ucrt64\include", dir.display()));
-            }
-        }
-        if let Ok(lad) = std::env::var("LOCALAPPDATA") {
-            candidates.push(format!(r"{}\Programs\IRIS\toolchain\ucrt64\include", lad));
+        for prefix in install_prefix_dirs() {
+            candidates.push(
+                prefix
+                    .join("toolchain")
+                    .join("ucrt64")
+                    .join("include")
+                    .to_string_lossy()
+                    .into_owned(),
+            );
         }
         candidates.push(r"C:\msys64\ucrt64\include".into());
         if let Ok(home) = std::env::var("USERPROFILE") {
-            candidates.push(format!(r"{}\.iris\toolchain\ucrt64\include", home));
             candidates.push(format!(r"{}\.iris\ucrt64\include", home));
         }
         candidates.push("/c/msys64/ucrt64/include".into());
@@ -2497,17 +2663,18 @@ pub(crate) fn msys2_ucrt64_lib() -> Option<String> {
     {
         let mut candidates: Vec<String> = Vec::new();
 
-        if let Ok(exe) = std::env::current_exe() {
-            if let Some(dir) = exe.parent() {
-                candidates.push(format!(r"{}\toolchain\ucrt64\lib", dir.display()));
-            }
-        }
-        if let Ok(lad) = std::env::var("LOCALAPPDATA") {
-            candidates.push(format!(r"{}\Programs\IRIS\toolchain\ucrt64\lib", lad));
+        for prefix in install_prefix_dirs() {
+            candidates.push(
+                prefix
+                    .join("toolchain")
+                    .join("ucrt64")
+                    .join("lib")
+                    .to_string_lossy()
+                    .into_owned(),
+            );
         }
         candidates.push(r"C:\msys64\ucrt64\lib".into());
         if let Ok(home) = std::env::var("USERPROFILE") {
-            candidates.push(format!(r"{}\.iris\toolchain\ucrt64\lib", home));
             candidates.push(format!(r"{}\.iris\ucrt64\lib", home));
         }
         candidates.push("/c/msys64/ucrt64/lib".into());
@@ -2534,21 +2701,21 @@ pub(crate) fn msys2_gcc_lib() -> Option<String> {
         let triple = "x86_64-w64-mingw32";
         let mut base_dirs: Vec<String> = Vec::new();
 
-        // Next to the running executable
-        if let Ok(exe) = std::env::current_exe() {
-            if let Some(dir) = exe.parent() {
-                base_dirs.push(format!(r"{}\toolchain\ucrt64\lib\gcc", dir.display()));
-            }
-        }
-        // Inno Setup default install location
-        if let Ok(lad) = std::env::var("LOCALAPPDATA") {
-            base_dirs.push(format!(r"{}\Programs\IRIS\toolchain\ucrt64\lib\gcc", lad));
+        for prefix in install_prefix_dirs() {
+            base_dirs.push(
+                prefix
+                    .join("toolchain")
+                    .join("ucrt64")
+                    .join("lib")
+                    .join("gcc")
+                    .to_string_lossy()
+                    .into_owned(),
+            );
         }
         // System MSYS2
         base_dirs.push(r"C:\msys64\ucrt64\lib\gcc".into());
         // Legacy user-local
         if let Ok(home) = std::env::var("USERPROFILE") {
-            base_dirs.push(format!(r"{}\.iris\toolchain\ucrt64\lib\gcc", home));
             base_dirs.push(format!(r"{}\.iris\ucrt64\lib\gcc", home));
         }
         base_dirs.push("/c/msys64/ucrt64/lib/gcc".into());

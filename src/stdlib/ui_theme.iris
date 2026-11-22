@@ -28,6 +28,66 @@ pub choice UiAlign {
     Stretch,
 }
 
+/// Main-axis distribution rule for `Row` and `Col` containers.
+pub choice UiJustify {
+    Start,
+    Center,
+    End,
+    SpaceBetween,
+    SpaceAround,
+    SpaceEvenly,
+}
+
+/// Responsive layout viewport breakpoint.
+pub choice UiBreakpoint {
+    Compact,
+    Medium,
+    Expanded,
+    Wide,
+}
+
+/// Logical pointer cursor shape hint for native windows.
+pub choice UiCursor {
+    Default,
+    Hand,
+    Text,
+    Crosshair,
+    Move,
+    Grab,
+    Grabbing,
+    ResizeEw,
+    ResizeNs,
+    ResizeNesw,
+    ResizeNwse,
+    NotAllowed,
+    Wait,
+}
+
+/// Visual button/surface fill style.
+pub choice UiButtonVariant {
+    Solid,
+    Soft,
+    Outline,
+    Ghost,
+}
+
+/// Surface depth / drop-shadow elevation preset.
+pub choice UiElevation {
+    Flat,
+    Subtle,
+    Raised,
+    Floating,
+    Modal,
+}
+
+/// Per-edge padding or margin insets in logical pixels.
+pub record UiInsets {
+    top: f64 = 0.0,
+    right: f64 = 0.0,
+    bottom: f64 = 0.0,
+    left: f64 = 0.0,
+}
+
 /// Declarative box and text styling properties with defaults.
 pub record UiStyle {
     bg: UiColor = UiColor { r: 0, g: 0, b: 0, a: 0 },
@@ -50,6 +110,17 @@ pub record UiStyle {
     max_h: f64 = 0.0,
     // When true, the column scrolls its children by `UiTree.scroll_y`.
     scrollable: bool = false,
+    justify: UiJustify = UiJustify.Start,
+    wrap: bool = false,
+    ellipsis: bool = false,
+    opacity: f64 = 1.0,
+    elevation: UiElevation = UiElevation.Flat,
+    cursor: UiCursor = UiCursor.Default,
+    variant: UiButtonVariant = UiButtonVariant.Solid,
+    columns: i64 = 0,
+    pad_x: f64 = -1.0,
+    pad_y: f64 = -1.0,
+    overflow_clip: bool = false,
 }
 
 /// Two-dimensional extent in logical pixels.
@@ -93,6 +164,12 @@ pub record UiTheme {
     font_ui_size: f64 = 14.0,
     font_mono_size: f64 = 13.0,
     radius: f64 = 8.0,
+    is_dark: bool = true,
+    shadow: UiColor = UiColor { r: 0, g: 0, b: 0, a: 120 },
+    focus_ring: UiColor = UiColor { r: 79, g: 193, b: 255, a: 210 },
+    radius_sm: f64 = 5.0,
+    radius_lg: f64 = 12.0,
+    radius_pill: f64 = 999.0,
 }
 
 def clamp_channel(v: i64) -> i64 {
@@ -223,7 +300,187 @@ pub def daylight_theme() -> UiTheme {
         amber: rgb(168, 118, 14),
         coral: rgb(184, 72, 48),
         emerald: rgb(46, 125, 50),
+        is_dark: false,
+        shadow: UiColor { r: 15, g: 23, b: 42, a: 42 },
+        focus_ring: UiColor { r: 32, g: 104, b: 180, a: 210 },
     }
+}
+
+/// Create a deep midnight slate theme with electric cyan and cobalt highlights.
+pub def midnight_theme() -> UiTheme {
+    return UiTheme {
+        bg: rgb(12, 16, 28),
+        surface: rgb(18, 24, 42),
+        panel: rgb(25, 33, 56),
+        panel_alt: rgb(34, 45, 76),
+        fg: rgb(232, 238, 250),
+        fg_muted: rgb(138, 154, 186),
+        border: rgb(48, 63, 102),
+        primary: rgb(99, 102, 241),
+        azure: rgb(56, 189, 248),
+        teal: rgb(45, 212, 191),
+        cyan: rgb(34, 211, 238),
+        amber: rgb(251, 191, 36),
+        coral: rgb(248, 113, 113),
+        emerald: rgb(52, 211, 153),
+        is_dark: true,
+        shadow: UiColor { r: 4, g: 8, b: 18, a: 145 },
+        focus_ring: UiColor { r: 56, g: 189, b: 248, a: 220 },
+    }
+}
+
+/// Create a cool Arctic Nord-inspired dark theme.
+pub def nord_theme() -> UiTheme {
+    return UiTheme {
+        bg: rgb(46, 52, 64),
+        surface: rgb(52, 59, 73),
+        panel: rgb(59, 66, 82),
+        panel_alt: rgb(67, 76, 94),
+        fg: rgb(236, 239, 244),
+        fg_muted: rgb(172, 182, 200),
+        border: rgb(76, 86, 106),
+        primary: rgb(180, 142, 173),
+        azure: rgb(129, 161, 193),
+        teal: rgb(143, 188, 187),
+        cyan: rgb(136, 192, 208),
+        amber: rgb(235, 203, 139),
+        coral: rgb(191, 97, 106),
+        emerald: rgb(163, 190, 140),
+        is_dark: true,
+        shadow: UiColor { r: 16, g: 20, b: 28, a: 120 },
+        focus_ring: UiColor { r: 136, g: 192, b: 208, a: 220 },
+    }
+}
+
+/// Create an emerald forest studio theme tuned for long desktop authoring sessions.
+pub def emerald_studio_theme() -> UiTheme {
+    return UiTheme {
+        bg: rgb(16, 24, 22),
+        surface: rgb(22, 33, 30),
+        panel: rgb(29, 43, 39),
+        panel_alt: rgb(39, 58, 52),
+        fg: rgb(228, 240, 235),
+        fg_muted: rgb(138, 166, 156),
+        border: rgb(52, 77, 69),
+        primary: rgb(52, 211, 153),
+        azure: rgb(56, 189, 248),
+        teal: rgb(45, 212, 191),
+        cyan: rgb(103, 232, 249),
+        amber: rgb(250, 204, 21),
+        coral: rgb(251, 113, 133),
+        emerald: rgb(74, 222, 128),
+        is_dark: true,
+        shadow: UiColor { r: 5, g: 12, b: 10, a: 140 },
+        focus_ring: UiColor { r: 52, g: 211, b: 153, a: 220 },
+    }
+}
+
+/// Create a WCAG-AAA high-contrast accessibility theme.
+pub def high_contrast_theme() -> UiTheme {
+    return UiTheme {
+        bg: rgb(0, 0, 0),
+        surface: rgb(12, 12, 16),
+        panel: rgb(22, 22, 28),
+        panel_alt: rgb(38, 38, 48),
+        fg: rgb(255, 255, 255),
+        fg_muted: rgb(212, 220, 235),
+        border: rgb(255, 255, 255),
+        primary: rgb(255, 214, 0),
+        azure: rgb(92, 196, 255),
+        teal: rgb(64, 240, 192),
+        cyan: rgb(120, 235, 255),
+        amber: rgb(255, 214, 0),
+        coral: rgb(255, 110, 110),
+        emerald: rgb(90, 245, 130),
+        is_dark: true,
+        shadow: UiColor { r: 0, g: 0, b: 0, a: 0 },
+        focus_ring: UiColor { r: 255, g: 214, b: 0, a: 255 },
+    }
+}
+
+/// Lighten `c` toward white by `amount` (`0.0..1.0`), preserving alpha.
+pub def lighten(c: UiColor, amount: f64) -> UiColor {
+    val mixed = mix_color(c, rgb(255, 255, 255), clamp_unit(amount))
+    return with_alpha(mixed, c.a)
+}
+
+/// Darken `c` toward black by `amount` (`0.0..1.0`), preserving alpha.
+pub def darken(c: UiColor, amount: f64) -> UiColor {
+    val mixed = mix_color(c, rgb(0, 0, 0), clamp_unit(amount))
+    return with_alpha(mixed, c.a)
+}
+
+/// Choose a high-contrast foreground color (dark ink or light ink) against `bg`.
+pub def contrast_fg(bg: UiColor) -> UiColor {
+    val lum = 0.299 * to_f64(bg.r) + 0.587 * to_f64(bg.g) + 0.114 * to_f64(bg.b)
+    if lum >= 152.0 {
+        return rgb(18, 22, 30)
+    }
+    return rgb(250, 252, 255)
+}
+
+/// Decode a 24-bit `0xRRGGBB` integer literal into an opaque `UiColor`.
+pub def hex_rgb(code: i64) -> UiColor {
+    val safe = if code < 0 { 0 } else { code }
+    val r = (safe / 65536) % 256
+    val g = (safe / 256) % 256
+    val b = safe % 256
+    return rgb(r, g, b)
+}
+
+/// Clone `theme` with an updated `primary` accent and synchronized `focus_ring`.
+pub def theme_with_accent(theme: UiTheme, accent: UiColor) -> UiTheme {
+    return UiTheme {
+        bg: theme.bg,
+        surface: theme.surface,
+        panel: theme.panel,
+        panel_alt: theme.panel_alt,
+        fg: theme.fg,
+        fg_muted: theme.fg_muted,
+        border: theme.border,
+        primary: accent,
+        azure: theme.azure,
+        teal: theme.teal,
+        cyan: theme.cyan,
+        amber: theme.amber,
+        coral: theme.coral,
+        emerald: theme.emerald,
+        font_ui_size: theme.font_ui_size,
+        font_mono_size: theme.font_mono_size,
+        radius: theme.radius,
+        is_dark: theme.is_dark,
+        shadow: theme.shadow,
+        focus_ring: with_alpha(accent, 215),
+        radius_sm: theme.radius_sm,
+        radius_lg: theme.radius_lg,
+        radius_pill: theme.radius_pill,
+    }
+}
+
+/// Classify horizontal viewport `width` into a responsive `UiBreakpoint`.
+pub def ui_breakpoint(width: f64) -> UiBreakpoint {
+    if width < 640.0 {
+        return UiBreakpoint.Compact
+    }
+    if width < 1024.0 {
+        return UiBreakpoint.Medium
+    }
+    if width < 1440.0 {
+        return UiBreakpoint.Expanded
+    }
+    return UiBreakpoint.Wide
+}
+
+/// Select column count based on responsive viewport `width`.
+pub def ui_responsive_cols(width: f64, compact: i64, medium: i64, expanded: i64) -> i64 {
+    val bp = ui_breakpoint(width)
+    val cols = when bp {
+        UiBreakpoint.Compact => compact,
+        UiBreakpoint.Medium => medium,
+        UiBreakpoint.Expanded => expanded,
+        UiBreakpoint.Wide => expanded,
+    }
+    return if cols < 1 { 1 } else { cols }
 }
 
 /// Resolve a semantic `UiTone` into the theme's accent color.

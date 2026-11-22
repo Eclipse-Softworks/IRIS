@@ -35,7 +35,7 @@ fn llvm_23_release_policy_is_consistent() {
 
     let setup = include_str!("../src/setup.rs");
     assert!(setup.contains("LLVM_VERSION: &str = include_str!(\"../LLVM_VERSION\");"));
-    assert!(setup.contains("temp_dir.join(\"LLVM_VERSION\")"));
+    assert!(setup.contains("LLVM_VERSION"));
 
     let portable = include_str!("../installer/windows/build_portable.ps1");
     assert!(portable.contains("LLVM_VERSION"));

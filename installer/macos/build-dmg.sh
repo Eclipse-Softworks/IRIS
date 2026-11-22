@@ -9,7 +9,7 @@
 # ──────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
-VERSION="1.0.0-rc1"
+VERSION="1.0.0-rc3"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
@@ -47,21 +47,31 @@ if [[ ! -f "$IRIS_BIN" ]]; then
 else
     echo "[1/4] Using existing release binary."
 fi
+UI_HOST_LIB="$ROOT/target/release/libiris_ui_host.dylib"
+if [[ ! -f "$UI_HOST_LIB" ]]; then
+    (cd "$ROOT" && cargo build --release -p iris_ui_host)
+fi
 
 # ── Stage files ───────────────────────────────────────────────────────────
 echo "[2/4] Staging files..."
 
 cp "$IRIS_BIN" "$DMG_DIR/iris"
 chmod 755 "$DMG_DIR/iris"
-strip "$DMG_DIR/iris" 2>/dev/null || true
+if ! codesign -dv "$DMG_DIR/iris" 2>&1 | grep -q 'Authority='; then
+    strip "$DMG_DIR/iris" 2>/dev/null || true
+fi
 xattr -cr "$DMG_DIR/iris" 2>/dev/null || true
+if [[ -f "$UI_HOST_LIB" ]]; then
+    cp "$UI_HOST_LIB" "$DMG_DIR/libiris_ui_host.dylib"
+    chmod 755 "$DMG_DIR/libiris_ui_host.dylib"
+    xattr -cr "$DMG_DIR/libiris_ui_host.dylib" 2>/dev/null || true
+fi
 
 # Copy install script
 cp "$SCRIPT_DIR/install.sh" "$DMG_DIR/install.sh"
 chmod 755 "$DMG_DIR/install.sh"
 
-# Stdlib and examples
-cp -R "$ROOT/stdlib" "$DMG_DIR/stdlib" 2>/dev/null || true
+# Examples
 cp -R "$ROOT/examples" "$DMG_DIR/examples" 2>/dev/null || true
 
 # Bundled LLVM toolchain
@@ -73,6 +83,23 @@ fi
 cp "$ROOT/LICENSE" "$DMG_DIR/"
 cp "$ROOT/README.md" "$DMG_DIR/"
 cp "$ROOT/LLVM_VERSION" "$DMG_DIR/" 2>/dev/null || true
+
+ICON_SRC="$ROOT/installer/icon.png"
+if [[ ! -f "$ICON_SRC" ]]; then ICON_SRC="$ROOT/logo/iris-logo.png"; fi
+if [[ -f "$ICON_SRC" ]]; then
+    cp "$ICON_SRC" "$DMG_DIR/iris.png"
+    if command -v sips &>/dev/null && command -v iconutil &>/dev/null; then
+        ICONSET="$DIST_DIR/iris.iconset"
+        rm -rf "$ICONSET"
+        mkdir -p "$ICONSET"
+        for sz in 16 32 128 256; do
+            sips -z "$sz" "$sz" "$ICON_SRC" --out "$ICONSET/icon_${sz}x${sz}.png" >/dev/null 2>&1 || true
+        done
+        iconutil -c icns "$ICONSET" -o "$DMG_DIR/.VolumeIcon.icns" 2>/dev/null || true
+        rm -rf "$ICONSET"
+        SetFile -a C "$DMG_DIR" 2>/dev/null || true
+    fi
+fi
 
 # VSCode extension
 VSIX="$(find "$ROOT/vscode-iris" -name 'iris-lang-*.vsix' 2>/dev/null | sort -rV | head -1)"
@@ -98,8 +125,13 @@ Manual Install:
 For native compilation:
   xcode-select --install
 
-Documentation: https://github.com/moon9t/iris
+Documentation: https://github.com/Eclipse-Softworks/IRIS
 EOF
+
+# Optionally sign all Mach-O binaries/libraries before imaging
+if [[ -f "$SCRIPT_DIR/sign_and_notarize.sh" ]]; then
+    bash "$SCRIPT_DIR/sign_and_notarize.sh" sign-binaries "$DMG_DIR"
+fi
 
 # ── Create DMG ────────────────────────────────────────────────────────────
 echo "[3/4] Creating DMG..."

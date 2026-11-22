@@ -48,6 +48,22 @@ impl<'a> Parser<'a> {
         }
     }
 
+    fn flag(&mut self) -> Option<bool> {
+        self.skip_separators();
+        let bytes = self.src.as_bytes();
+        match bytes.get(self.pos) {
+            Some(b'0') => {
+                self.pos += 1;
+                Some(false)
+            }
+            Some(b'1') => {
+                self.pos += 1;
+                Some(true)
+            }
+            _ => None,
+        }
+    }
+
     fn number(&mut self) -> Option<f32> {
         self.skip_separators();
         let bytes = self.src.as_bytes();
@@ -240,21 +256,20 @@ pub fn parse_path_data(data: &str) -> Vec<PathVerb> {
                     p.number(),
                     p.number(),
                     p.number(),
-                    p.number(),
-                    p.number(),
+                    p.flag(),
+                    p.flag(),
                     p.number(),
                     p.number(),
                 ) else {
                     break;
                 };
-                cx += ox;
-                cy += oy;
-                let end = arc_samples(cx, cy, rx, ry, rot, large != 0.0, sweep != 0.0, x, y);
+                let (ex, ey) = (x + ox, y + oy);
+                let end = arc_samples(cx, cy, rx, ry, rot, large, sweep, ex, ey);
                 for (px, py) in end {
                     verbs.push(PathVerb::LineTo(px, py));
                 }
-                cx = x;
-                cy = y;
+                cx = ex;
+                cy = ey;
                 ctrl_kind = ' ';
             }
             _ => break,
@@ -266,7 +281,7 @@ pub fn parse_path_data(data: &str) -> Vec<PathVerb> {
 fn angle_between(ux: f32, uy: f32, vx: f32, vy: f32) -> f32 {
     let dot = ux * vx + uy * vy;
     let cross = ux * vy - uy * vx;
-    dot.atan2(cross)
+    cross.atan2(dot)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -326,6 +341,10 @@ fn arc_samples(
     let steps = ((delta.abs() / step_angle).ceil() as usize).clamp(4, 128);
     let mut out = Vec::with_capacity(steps);
     for i in 1..=steps {
+        if i == steps {
+            out.push((x1, y1));
+            continue;
+        }
         let t = delta * (i as f32) / (steps as f32);
         let (st, ct) = t.sin_cos();
         let px = rx * (ux * ct - uy * st) + cxp;
@@ -373,6 +392,26 @@ mod tests {
         assert!(
             lines >= 4,
             "arc should be sampled into several line segments"
+        );
+    }
+
+    #[test]
+    fn compact_arc_flags_and_semicircle_geometry() {
+        let verbs = parse_path_data("M2 12a10 10 0 0120 0");
+        assert!(verbs.len() >= 5, "compact flags should parse arc cleanly");
+        let last = verbs.last().copied();
+        assert_eq!(last, Some(PathVerb::LineTo(22.0, 12.0)));
+        // Sweep=1 upper semicircle from (2,12) to (22,12) passes through (12, 2).
+        let min_y = verbs
+            .iter()
+            .filter_map(|v| match *v {
+                PathVerb::MoveTo(_, y) | PathVerb::LineTo(_, y) => Some(y),
+                _ => None,
+            })
+            .fold(f32::INFINITY, f32::min);
+        assert!(
+            (min_y - 2.0).abs() < 0.5,
+            "expected apex near y=2, got {min_y}"
         );
     }
 }

@@ -104,6 +104,9 @@ fn every_template_checks_and_passes_its_tests() {
     let ros2 = new_project(&dir, "ros2", "rover");
     checks_and_tests(&ros2, Some("main.iris"));
 
+    let ui_app = new_project(&dir, "ui", "desk_app");
+    checks_and_tests(&ui_app, Some("main.iris"));
+
     let controller = new_project(&dir, "controller", "cart");
     checks_and_tests(&controller, None);
     let o = iris()
@@ -273,4 +276,24 @@ fn help_lists_every_command_and_each_command_has_its_own() {
         .output()
         .unwrap();
     assert_eq!(o.status.code(), Some(2), "{}", text(&o));
+}
+
+#[test]
+fn completions_generates_scripts_for_all_shells() {
+    for (shell, marker) in [
+        ("bash", "complete -o default -F _iris_completions iris"),
+        ("zsh", "#compdef iris"),
+        ("fish", "complete -c iris"),
+        ("powershell", "Register-ArgumentCompleter"),
+    ] {
+        let o = iris().args(["completions", shell]).output().unwrap();
+        assert!(
+            o.status.success(),
+            "iris completions {shell} failed:\n{}",
+            text(&o)
+        );
+        let out = String::from_utf8_lossy(&o.stdout);
+        assert!(out.contains(marker), "{shell} missing `{marker}`:\n{out}");
+        assert!(out.contains("doctor"), "{shell} missing `doctor`");
+    }
 }

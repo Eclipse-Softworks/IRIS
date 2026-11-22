@@ -3,17 +3,19 @@
 # IRIS Language Installer for macOS
 # ──────────────────────────────────────────────────────────────────────────
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/moon9t/iris/master/installer/macos/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/Eclipse-Softworks/IRIS/main/installer/macos/install.sh | bash
 #   # or
 #   bash install.sh
 #
-# Installs iris to ~/.iris/bin and adds it to PATH via shell profile.
+# Installs iris, libiris_ui_host.dylib, and bundled LLVM toolchain into ~/.iris.
 # ──────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
-VERSION="1.0.0-rc1"
+REPO="Eclipse-Softworks/IRIS"
+VERSION="${IRIS_VERSION:-}"
 INSTALL_DIR="${IRIS_INSTALL_DIR:-$HOME/.iris}"
 BIN_DIR="$INSTALL_DIR/bin"
+SHARE_DIR="$INSTALL_DIR/share/iris"
 
 # ── Colours ───────────────────────────────────────────────────────────────
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[0;33m'
@@ -50,42 +52,59 @@ detect_arch() {
     esac
 }
 
-# ── Find iris binary ─────────────────────────────────────────────────────
-find_iris_binary() {
-    local script_dir
-    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-
-    # 1. Next to this script
-    if [[ -f "$script_dir/iris" ]]; then
-        echo "$script_dir/iris"
-        return
+# ── Locate or download bundle root ────────────────────────────────────────
+find_iris_bundle_root() {
+    local script_path="${BASH_SOURCE[0]:-}"
+    if [[ -n "$script_path" && -f "$script_path" ]]; then
+        local script_dir
+        script_dir="$(cd "$(dirname "$script_path")" && pwd)"
+        if [[ -f "$script_dir/iris" || -f "$script_dir/bin/iris" ]]; then
+            echo "$script_dir"
+            return
+        fi
+        if [[ -f "$script_dir/../../target/release/iris" ]]; then
+            echo "$script_dir/../.."
+            return
+        fi
     fi
 
-    # 2. In parent's target/release
-    local release="$script_dir/../../target/release/iris"
-    if [[ -f "$release" ]]; then
-        echo "$release"
-        return
-    fi
-
-    # 3. Download from GitHub
-    local target
+    local target tag archive url sums_url tmp
     target="$(detect_arch)"
-    local tag="v${VERSION}"
-    local archive="iris-${tag}-${target}.tar.gz"
-    local url="https://github.com/moon9t/iris/releases/download/${tag}/${archive}"
-
-    step "Downloading IRIS ${tag} for ${target}..."
-    local tmp
-    tmp="$(mktemp -d)"
-    curl -fSL "$url" -o "$tmp/$archive"
-    tar xzf "$tmp/$archive" -C "$tmp"
-    if [[ -f "$tmp/iris" ]]; then
-        echo "$tmp/iris"
-    else
-        err "iris binary not found in downloaded archive."
+    if [[ -z "$VERSION" ]]; then
+        step "Resolving latest IRIS release..."
+        VERSION="$(curl -fsSL -H "Accept: application/vnd.github+json" "https://api.github.com/repos/${REPO}/releases/latest" \
+            | sed -n 's/.*"tag_name":[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
+    fi
+    if [[ -z "$VERSION" ]]; then
+        err "Could not resolve latest release tag from GitHub (set IRIS_VERSION=v1.0.0-rc3)."
         exit 1
     fi
+    tag="v${VERSION#v}"
+    archive="iris-${tag}-${target}.tar.gz"
+    url="https://github.com/${REPO}/releases/download/${tag}/${archive}"
+    sums_url="https://github.com/${REPO}/releases/download/${tag}/SHA256SUMS.txt"
+
+    step "Downloading IRIS ${tag} for ${target}..."
+    tmp="$(mktemp -d)"
+    curl -fSL "$url" -o "$tmp/$archive"
+    curl -fsSL "$sums_url" -o "$tmp/SHA256SUMS.txt" 2>/dev/null || true
+
+    if [[ -f "$tmp/SHA256SUMS.txt" ]] && command -v shasum &>/dev/null; then
+        local expected actual
+        expected="$(grep -F "  ${archive}" "$tmp/SHA256SUMS.txt" 2>/dev/null | awk '{print $1}' | head -1 || true)"
+        if [[ -n "$expected" ]]; then
+            actual="$(shasum -a 256 "$tmp/$archive" | awk '{print $1}')"
+            if [[ "$actual" != "$expected" ]]; then
+                err "SHA-256 checksum mismatch for ${archive}"
+                exit 1
+            fi
+            ok "Verified SHA-256 checksum for ${archive}"
+        fi
+    fi
+
+    mkdir -p "$tmp/unpack"
+    tar xzf "$tmp/$archive" -C "$tmp/unpack"
+    echo "$tmp/unpack"
 }
 
 # ── Add to shell profile ─────────────────────────────────────────────────
@@ -223,30 +242,55 @@ check_clang() {
 # ══════════════════════════════════════════════════════════════════════════
 banner
 
-# Step 1: Find binary
-step "Locating iris binary..."
-IRIS_BIN="$(find_iris_binary)"
-ok "Found: $IRIS_BIN"
+# Step 1: Locate or download bundle
+step "Locating IRIS bundle..."
+SRC_ROOT="$(find_iris_bundle_root)"
+ok "Bundle root: $SRC_ROOT"
 
 # Step 2: Create install directory
 step "Creating install directory: $BIN_DIR"
-mkdir -p "$BIN_DIR"
+mkdir -p "$BIN_DIR" "$SHARE_DIR"
 ok "Directory ready."
 
-# Step 3: Install binary
+# Step 3: Install iris + libiris_ui_host.dylib
+IRIS_BIN=""
+for cand in "$SRC_ROOT/bin/iris" "$SRC_ROOT/iris" "$SRC_ROOT/target/release/iris"; do
+    if [[ -f "$cand" ]]; then IRIS_BIN="$cand"; break; fi
+done
+if [[ -z "$IRIS_BIN" ]]; then
+    err "iris binary not found under $SRC_ROOT"
+    exit 1
+fi
 step "Installing iris -> $BIN_DIR/iris"
 cp "$IRIS_BIN" "$BIN_DIR/iris"
-chmod +x "$BIN_DIR/iris"
-
-# Remove quarantine attribute if present (Gatekeeper)
-xattr -d com.apple.quarantine "$BIN_DIR/iris" 2>/dev/null || true
+chmod 755 "$BIN_DIR/iris"
 ok "Binary installed."
 
-# Step 4: Install stdlib + examples + toolchain
-step "Installing standard library, examples, and toolchain..."
-install_stdlib
+for cand in "$SRC_ROOT/bin/libiris_ui_host.dylib" "$SRC_ROOT/libiris_ui_host.dylib" "$SRC_ROOT/target/release/libiris_ui_host.dylib"; do
+    if [[ -f "$cand" ]]; then
+        cp "$cand" "$BIN_DIR/libiris_ui_host.dylib"
+        chmod 755 "$BIN_DIR/libiris_ui_host.dylib"
+        ok "UI host installed -> $BIN_DIR/libiris_ui_host.dylib"
+        break
+    fi
+done
+
+if [[ -d "$SRC_ROOT/toolchain" ]]; then
+    rm -rf "$INSTALL_DIR/toolchain"
+    mkdir -p "$INSTALL_DIR/toolchain"
+    cp -R "$SRC_ROOT/toolchain/." "$INSTALL_DIR/toolchain/"
+    ok "Installed bundled LLVM toolchain -> $INSTALL_DIR/toolchain"
+fi
+for meta in LLVM_VERSION LICENSE README.md; do
+    if [[ -f "$SRC_ROOT/$meta" ]]; then cp "$SRC_ROOT/$meta" "$SHARE_DIR/"; fi
+done
+
+# Strip Gatekeeper quarantine from extracted binaries/dylibs/toolchain
+xattr -cr "$INSTALL_DIR" 2>/dev/null || true
+
+# Step 4: Install examples
+step "Installing examples..."
 install_examples
-install_toolchain
 
 # Step 5: Add to PATH
 step "Configuring PATH..."
@@ -255,19 +299,10 @@ add_to_path
 # Step 6: VSCode extension
 install_vscode_extension
 
-# Step 7: Check clang
+# Step 7: Verify via doctor
 echo ""
-step "Checking for clang..."
-check_clang
-
-# Step 8: Verify
-echo ""
-step "Verifying installation..."
-if "$BIN_DIR/iris" --version &>/dev/null; then
-    ok "iris responds: $("$BIN_DIR/iris" --version 2>&1)"
-else
-    warn "Could not run iris to verify. Try opening a new terminal and running: iris --version"
-fi
+step "Running iris doctor..."
+"$BIN_DIR/iris" doctor || warn "Run \`iris doctor --fix\` if any optional component needs setup."
 
 # Done
 echo ""

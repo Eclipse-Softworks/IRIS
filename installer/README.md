@@ -5,26 +5,31 @@ IRIS programming language.
 
 ## Quick Install
 
-### Linux
+### Linux & macOS
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/moon9t/iris/master/installer/linux/install.sh | bash
-```
-
-### macOS
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/moon9t/iris/master/installer/macos/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Eclipse-Softworks/IRIS/main/installer/install.sh | bash
 ```
 
 ### Windows
 
-Download `IRIS-1.0.0-rc1-windows-x64-setup.exe` from the
-[latest release](https://github.com/moon9t/iris/releases/latest), or use
-PowerShell:
-
 ```powershell
-powershell -ExecutionPolicy Bypass -File installer\install.ps1
+irm https://raw.githubusercontent.com/Eclipse-Softworks/IRIS/main/installer/install.ps1 | iex
+```
+
+Or download `IRIS-1.0.0-rc2-windows-x64-setup.exe` from the
+[latest release](https://github.com/Eclipse-Softworks/IRIS/releases/latest).
+
+### Managing Components, Diagnostics & Upgrades
+
+Once installed:
+
+```bash
+iris doctor             # inspect toolchain, UI host, LLVM-C, sysroot & native build
+iris doctor --fix       # auto-install missing toolchain or UI components
+iris setup list         # list component install status (toolchain, ui, vscode, wasm, ml)
+iris setup all          # install optional WASI sysroot + ONNX Runtime SDK
+iris upgrade --full     # update compiler, UI host, and bundled LLVM toolchain
 ```
 
 ---
@@ -61,34 +66,33 @@ installer/
 
 ### Linux
 
-**One-line install** — downloads the latest release, installs to `~/.iris/bin`,
-configures PATH in `.bashrc`/`.zshrc`/`.profile`:
+**One-line install** — downloads the latest release, installs the compiler, `libiris_ui_host.so`, and bundled LLVM toolchain into `~/.iris`, and configures PATH:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/moon9t/iris/master/installer/linux/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Eclipse-Softworks/IRIS/main/installer/install.sh | bash
 ```
 
 **Debian/Ubuntu (.deb):**
 
 ```bash
-sudo dpkg -i iris_1.0.0-rc1_x86_64.deb
+sudo dpkg -i iris_1.0.0-rc2_amd64.deb
 # or
-sudo apt install ./iris_1.0.0-rc1_x86_64.deb
+sudo apt install ./iris_1.0.0-rc2_amd64.deb
 ```
 
 **Fedora/RHEL (.rpm):**
 
 ```bash
-sudo rpm -i iris-1.0.0-rc1-1.x86_64.rpm
+sudo rpm -i iris-1.0.0.rc2-1.x86_64.rpm
 # or
-sudo dnf install ./iris-1.0.0-rc1-1.x86_64.rpm
+sudo dnf install ./iris-1.0.0.rc2-1.x86_64.rpm
 ```
 
 **AppImage (portable, no root):**
 
 ```bash
-chmod +x IRIS-1.0.0-rc1-x86_64.AppImage
-./IRIS-1.0.0-rc1-x86_64.AppImage --version
+chmod +x IRIS-1.0.0-rc2-x86_64.AppImage
+./IRIS-1.0.0-rc2-x86_64.AppImage --version
 ```
 
 **Uninstall:**
@@ -104,11 +108,10 @@ sudo rpm -e iris            # RPM
 
 ### macOS
 
-**One-line install** — downloads the latest release, installs to `~/.iris/bin`,
-configures PATH in `.zshrc`/`.bash_profile`:
+**One-line install** — downloads the latest release into `~/.iris`, strips Gatekeeper quarantine, configures PATH, and runs `iris doctor`:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/moon9t/iris/master/installer/macos/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Eclipse-Softworks/IRIS/main/installer/install.sh | bash
 ```
 
 **macOS Installer Package (.pkg):**
@@ -116,10 +119,10 @@ curl -fsSL https://raw.githubusercontent.com/moon9t/iris/master/installer/macos/
 Double-click the `.pkg` file, or from the terminal:
 
 ```bash
-sudo installer -pkg IRIS-1.0.0-rc1-macos-aarch64.pkg -target /
+sudo installer -pkg IRIS-1.0.0-rc2-macos-arm64.pkg -target /
 ```
 
-Installs to `/usr/local/bin/iris` with stdlib at `/usr/local/share/iris/`.
+Installs to `/usr/local/bin/iris` with `libiris_ui_host.dylib` in `/usr/local/lib/` and shared assets in `/usr/local/share/iris/`.
 
 **Disk Image (.dmg):**
 
@@ -132,29 +135,29 @@ Mount the DMG image and run the included `Install` script.
 bash installer/macos/uninstall.sh
 
 # .pkg install:
-sudo rm -rf /usr/local/bin/iris /usr/local/share/iris
-sudo pkgutil --forget dev.moon9t.iris
+sudo rm -rf /usr/local/bin/iris /usr/local/lib/libiris_ui_host.dylib /usr/local/share/iris
+sudo pkgutil --forget dev.eclipsesoftworks.iris
 ```
 
 ### Windows
 
-**Inno Setup installer (.exe)** — the recommended method:
-
-1. Download `IRIS-1.0.0-rc1-windows-x64-setup.exe` from the latest release.
-2. Run the installer (no admin required — per-user install).
-3. The installer includes a **Smart Dependency Downloader** (enabled by default). It automatically detects and installs missing compiler components (LLVM/clang, MinGW UCRT64 headers, Git, MSVC Build Tools) to guarantee a flawless native compilation experience right out of the box.
-
-**PowerShell installer:**
+**One-line PowerShell installer** (recommended, no admin required):
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File installer\install.ps1
+irm https://raw.githubusercontent.com/Eclipse-Softworks/IRIS/main/installer/install.ps1 | iex
 ```
 
-**Portable .zip** — extract and add to PATH:
+**Inno Setup GUI installer (.exe):**
+
+1. Download `IRIS-1.0.0-rc2-windows-x64-setup.exe` from the latest release.
+2. Run the installer (no admin required — per-user install).
+3. Bundles `iris.exe`, `iris_ui_host.dll`, VC++ runtime DLLs, LLVM `clang` + `ld.lld` + `LLVM-C.dll`, MinGW `ucrt64` sysroot, and the VS Code extension.
+
+**Portable .zip** — extract and add `bin\` to PATH:
 
 ```powershell
-Expand-Archive IRIS-1.0.0-rc1-windows-x86_64-portable.zip -DestinationPath C:\iris
-$env:PATH += ";C:\iris"
+Expand-Archive IRIS-1.0.0-rc2-windows-x64-portable.zip -DestinationPath C:\iris
+$env:PATH += ";C:\iris\bin"
 ```
 
 **Uninstall:**

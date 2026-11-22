@@ -407,16 +407,44 @@ def check_motion_icons_and_widgets() -> i64 {
 
     val box = draw_buf_new(32768)
     var b = draw_buf_begin(box, UiColor { r: 0, g: 0, b: 0, a: 255 })
-    b = draw_icon(b, UiIcon.Brain, UiRect { x: 0.0, y: 0.0, w: 24.0, h: 24.0 }, rgba(255, 255, 255, 255))
-    b = draw_neural_graph(b, UiRect { x: 0.0, y: 0.0, w: 300.0, h: 300.0 }, graph, UiClock { now: 1.0 }, list(rgba(255, 0, 0, 255)), UiColor { r: 0, g: 0, b: 0, a: 255 }, 1.0)
-    b = draw_segmented(b, UiRect { x: 0.0, y: 0.0, w: 120.0, h: 30.0 }, list("a", "b"), 1, 0, 0.5, obsidian_theme())
+    b = draw_icon(
+        b,
+        UiIcon.Brain,
+        UiRect { x: 0.0, y: 0.0, w: 24.0, h: 24.0 },
+        rgba(255, 255, 255, 255),
+    )
+    b = draw_neural_graph(
+        b,
+        UiRect { x: 0.0, y: 0.0, w: 300.0, h: 300.0 },
+        graph,
+        UiClock { now: 1.0 },
+        list(rgba(255, 0, 0, 255)),
+        UiColor { r: 0, g: 0, b: 0, a: 255 },
+        1.0,
+    )
+    b = draw_segmented(
+        b,
+        UiRect { x: 0.0, y: 0.0, w: 120.0, h: 30.0 },
+        list("a", "b"),
+        1,
+        0,
+        0.5,
+        obsidian_theme(),
+    )
     val done = draw_buf_finish(b)
     assert(done.cmd_count > 3)
     val _freed = draw_buf_free(done)
 
     val ev = HostEvent { kind: UiEventKind.PointerDown, x: 30.0, y: 70.0 }
     assert(nav_item_at(UiRect { x: 0.0, y: 0.0, w: 200.0, h: 300.0 }, ev, 7) == 0)
-    assert(segmented_at(UiRect { x: 0.0, y: 0.0, w: 120.0, h: 30.0 }, HostEvent { kind: UiEventKind.PointerDown, x: 90.0, y: 10.0 }, 3) == 2)
+    assert(
+        segmented_at(
+            UiRect { x: 0.0, y: 0.0, w: 120.0, h: 30.0 },
+            HostEvent { kind: UiEventKind.PointerDown, x: 90.0, y: 10.0 },
+            3,
+        )
+            == 2,
+    )
     return 0
 }
 
@@ -443,7 +471,11 @@ def check_state_transitions_and_interactions() -> i64 {
     val row = ui_node_rect(t, "tr")
     val rx = row.x + 8.0
     val ry = row.y + 8.0
-    st = ui_apply_event(t, st, HostEvent { kind: UiEventKind.PointerDown, x: rx, y: ry, modifiers: 2 })
+    st = ui_apply_event(
+        t,
+        st,
+        HostEvent { kind: UiEventKind.PointerDown, x: rx, y: ry, modifiers: 2 },
+    )
     assert(ui_state_is_selected(st, "tr"))
     assert(ui_state_selected_count(st) >= 1)
     st = ui_state_toggle_selection(st, "btn_reset")
@@ -453,7 +485,11 @@ def check_state_transitions_and_interactions() -> i64 {
 
     // Drag / drop lifecycle.
     assert(ui_state_is_dragging(st))
-    st = ui_apply_event(t, st, HostEvent { kind: UiEventKind.PointerMove, x: rx + 4.0, y: ry + 4.0 })
+    st = ui_apply_event(
+        t,
+        st,
+        HostEvent { kind: UiEventKind.PointerMove, x: rx + 4.0, y: ry + 4.0 },
+    )
     assert(ui_state_is_dragging(st))
     st = ui_apply_event(t, st, HostEvent { kind: UiEventKind.PointerUp, x: rx + 4.0, y: ry + 4.0 })
     assert(!ui_state_is_dragging(st))
@@ -467,7 +503,11 @@ def check_state_transitions_and_interactions() -> i64 {
 
     // Multi-line caret movement.
     val inp = ui_node_rect(t, "inp_flt")
-    st = ui_apply_event(t, st, HostEvent { kind: UiEventKind.PointerDown, x: inp.x + 5.0, y: inp.y + 5.0 })
+    st = ui_apply_event(
+        t,
+        st,
+        HostEvent { kind: UiEventKind.PointerDown, x: inp.x + 5.0, y: inp.y + 5.0 },
+    )
     assert(st.focused_key == "inp_flt")
     st = ui_state_set_text(st, "inp_flt", "one\ntwo\nthree")
     st = ui_state_set_multiline(st, true)
@@ -501,10 +541,247 @@ def check_extended_draw_encoders() -> i64 {
     b = draw_cmd_path(b, UiTransform {}, verbs, rgb(0, 255, 0), rgb(255, 255, 255), 1.0, 0)
     b = draw_cmd_push_transform(b, UiTransform { e: 5.0 })
     b = draw_cmd_pop_transform(b)
-    b = draw_cmd_svg_path(b, r, UiSize { w: 10.0, h: 10.0 }, UiTransform {}, "M0 0 L10 0 L10 10 Z", rgb(0, 255, 255), rgb(255, 255, 255), 1.0)
+    b = draw_cmd_svg_path(
+        b,
+        r,
+        UiSize { w: 10.0, h: 10.0 },
+        UiTransform {},
+        "M0 0 L10 0 L10 10 Z",
+        rgb(0, 255, 255),
+        rgb(255, 255, 255),
+        1.0,
+    )
     val done = draw_buf_finish(b)
     assert(done.cmd_count == 8)
     val _freed = draw_buf_free(done)
+    return 0
+}
+
+def check_mature_themes_and_responsive() -> i64 {
+    val obs = obsidian_theme()
+    val day = daylight_theme()
+    val mid = midnight_theme()
+    val nrd = nord_theme()
+    val emr = emerald_studio_theme()
+    val hic = high_contrast_theme()
+    assert(obs.is_dark && !day.is_dark && mid.is_dark && nrd.is_dark && emr.is_dark && hic.is_dark)
+
+    val c_hex = hex_rgb(0x38BDF8)
+    assert(c_hex.r == 56 && c_hex.g == 189 && c_hex.b == 248)
+    val c_lit = lighten(rgb(100, 100, 100), 0.5)
+    assert(c_lit.r > 150)
+    val c_drk = darken(rgb(200, 200, 200), 0.5)
+    assert(c_drk.r < 120)
+    assert(contrast_fg(rgb(250, 250, 250)).r < 40)
+    assert(contrast_fg(rgb(10, 10, 10)).r > 220)
+
+    val custom = theme_with_accent(mid, hex_rgb(0xF59E0B))
+    assert(custom.primary.r == 245 && custom.primary.g == 158)
+
+    val is_c = when ui_breakpoint(480.0) {
+        UiBreakpoint.Compact => true,
+        _ => false
+    }
+    val is_m = when ui_breakpoint(800.0) {
+        UiBreakpoint.Medium => true,
+        _ => false
+    }
+    val is_e = when ui_breakpoint(1200.0) {
+        UiBreakpoint.Expanded => true,
+        _ => false
+    }
+    val is_w = when ui_breakpoint(1600.0) {
+        UiBreakpoint.Wide => true,
+        _ => false
+    }
+    assert(is_c && is_m && is_e && is_w)
+    assert(ui_responsive_cols(500.0, 1, 2, 4) == 1)
+    assert(ui_responsive_cols(800.0, 1, 2, 4) == 2)
+    assert(ui_responsive_cols(1400.0, 1, 2, 4) == 4)
+    return 0
+}
+
+def check_springs_bezier_and_icons() -> i64 {
+    assert(motion_ease(0.0, UiEase.InCubic) == 0.0)
+    assert(motion_ease(1.0, UiEase.OutExpo) == 1.0)
+    assert(motion_ease(0.5, UiEase.OutQuart) > 0.5)
+    assert(motion_ease(0.5, UiEase.InOutExpo) > 0.45 && motion_ease(0.5, UiEase.InOutExpo) < 0.55)
+    val bz = motion_cubic_bezier(0.5, 0.25, 0.1, 0.25, 1.0)
+    assert(bz > 0.5 && bz <= 1.0)
+    val lr = motion_lerp_rect(
+        UiRect { x: 0.0, y: 0.0, w: 10.0, h: 20.0 },
+        UiRect { x: 10.0, y: 20.0, w: 30.0, h: 40.0 },
+        0.5,
+    )
+    assert(lr.x == 5.0 && lr.w == 20.0)
+
+    var m = ui_motion_new()
+    m = ui_motion_to_delayed(m, "dly", 10.0, 0.2, 0.1, UiEase.Linear, 0.0)
+    m = ui_motion_tick(m, 0.05)
+    assert(ui_motion_value(m, "dly", -1.0) == 0.0)
+    m = ui_motion_tick(m, 0.20)
+    val mid_d = ui_motion_value(m, "dly", 0.0)
+    assert(mid_d > 4.5 && mid_d < 5.5)
+    m = ui_motion_tick(m, 0.35)
+    assert(ui_motion_value(m, "dly", 0.0) == 10.0)
+
+    m = ui_motion_spring_from(m, "sp", 0.0, 100.0, spring_snappy())
+    assert(ui_motion_has_active(m))
+    var t_s = 0.35
+    for _step in 0..80 {
+        t_s = t_s + 0.016
+        m = ui_motion_tick(m, t_s)
+    }
+    val sp_final = ui_motion_value(m, "sp", 0.0)
+    assert(sp_final > 99.0 && sp_final < 101.0)
+    assert(!ui_motion_has_active(m))
+
+    val ic = ui_icon_from_name("rocket")
+    val is_rocket = when ic {
+        UiIcon.Rocket => true,
+        _ => false
+    }
+    assert(is_rocket)
+    assert(len(icon_svg_path(UiIcon.Palette)) > 10)
+    return 0
+}
+
+def check_mature_layouts_widgets_and_detach() -> i64 {
+    val tree = ui_with_theme(midnight_theme())
+    val n_title = ui_heading(tree, "h1", "Studio", UiTone.Primary)
+    val n_tabs = ui_tabs(
+        tree,
+        "tabs",
+        list("Overview", "Inspect", "Deploy"),
+        0,
+        UiTone.Accent,
+        "on_tab",
+    )
+    val n_seg = ui_segmented(tree, "seg", list("Day", "Week"), 1, UiTone.Primary, "on_seg")
+    val n_sel = ui_select(
+        tree,
+        "sel",
+        list("Obsidian", "Nord", "Daylight"),
+        0,
+        "Theme...",
+        "on_sel",
+    )
+    val n_stp = ui_stepper(tree, "stp", 4.0, 0.0, 10.0, 1.0, "on_stp")
+    val n_rad = ui_radio(tree, "rad0", "GPU Path", true, 0, UiTone.Success, "on_rad")
+    val n_ta = ui_text_area(tree, "ta", "line1", "Notes...", 80.0)
+    val n_grid = ui_grid(
+        tree,
+        "grid",
+        2,
+        10.0,
+        list(
+            ui_stat_card(tree, "st1", StatSpec { title: "FPS", value: "120", delta: "+4%" }),
+            ui_stat_card(tree, "st2", StatSpec { title: "Nodes", value: "64", delta: "ok" }),
+        ),
+    )
+    val n_left = ui_col(
+        tree,
+        "left_p",
+        UiStyle {},
+        list(ui_nav_item(tree, "nav1", UiIcon.Home, "Home", true, "3", "go_home")),
+    )
+    val n_right = ui_col(
+        tree,
+        "right_p",
+        UiStyle {},
+        list(n_tabs, n_seg, n_sel, n_stp, n_rad, n_ta, n_grid),
+    )
+    val n_split = ui_split_pane(tree, "split", 0.3, n_left, n_right)
+    val n_modal = ui_modal(
+        tree,
+        "dlg",
+        "Confirm",
+        false,
+        "close_dlg",
+        list(ui_button(tree, "dlg_ok", "OK", "ok_dlg")),
+    )
+    val root = ui_col(
+        tree,
+        "root",
+        UiStyle { padding: 12.0, gap: 10.0 },
+        list(n_title, n_split, n_modal),
+    )
+    val laid = ui_layout(ui_set_root(tree, root), 960.0, 720.0)
+
+    val r1 = ui_node_rect(laid, "st1")
+    val r2 = ui_node_rect(laid, "st2")
+    assert(r2.x > r1.x + r1.w * 0.5)
+    assert(ui_node_rect(laid, "dlg").w == 0.0)
+
+    var st = ui_state_new()
+    val tab_r = ui_node_rect(laid, "tabs")
+    st = ui_apply_event(
+        laid,
+        st,
+        HostEvent { kind: UiEventKind.PointerDown, x: tab_r.x + tab_r.w * 0.5, y: tab_r.y + 10.0 },
+    )
+    st = ui_apply_event(
+        laid,
+        st,
+        HostEvent { kind: UiEventKind.PointerUp, x: tab_r.x + tab_r.w * 0.5, y: tab_r.y + 10.0 },
+    )
+    assert(ui_state_tab_changed(st, "tabs") && st.extras.last_tab_idx == 1)
+
+    val sel_r = ui_node_rect(laid, "sel")
+    st = ui_apply_event(
+        laid,
+        st,
+        HostEvent { kind: UiEventKind.PointerDown, x: sel_r.x + 12.0, y: sel_r.y + 12.0 },
+    )
+    st = ui_apply_event(
+        laid,
+        st,
+        HostEvent { kind: UiEventKind.PointerUp, x: sel_r.x + 12.0, y: sel_r.y + 12.0 },
+    )
+    assert(st.extras.open_popup_key == "sel")
+    // Click 2nd option inside dropdown below select
+    st = ui_apply_event(
+        laid,
+        st,
+        HostEvent { kind: UiEventKind.PointerDown, x: sel_r.x + 16.0, y: sel_r.y + sel_r.h + 40.0 },
+    )
+    assert(ui_state_select_changed(st, "sel") && st.extras.last_select_idx == 1)
+    assert(st.extras.open_popup_key == "")
+
+    val ta_r = ui_node_rect(laid, "ta")
+    st = ui_apply_event(
+        laid,
+        st,
+        HostEvent { kind: UiEventKind.PointerMove, x: ta_r.x + 8.0, y: ta_r.y + 8.0 },
+    )
+    val cur_is_txt = when ui_state_cursor(st) {
+        UiCursor.Text => true,
+        _ => false
+    }
+    assert(cur_is_txt)
+
+    st = ui_apply_event(
+        laid,
+        st,
+        HostEvent { kind: UiEventKind.FileDropped, text: "workspace/demo.iris" },
+    )
+    assert(when ui_state_dropped_file(st) {
+        some(p) => p == "workspace/demo.iris",
+        none => false
+    })
+
+    st = ui_state_push_toast(st, "Saved", "Bundle exported", UiTone.Success, 1.0)
+    assert(list_len(st.extras.toasts) == 1)
+    st = ui_state_spring_from(st, "detached_sp", 0.0, 50.0, spring_gentle())
+    val det = ui_state_detach(st)
+    assert(ui_state_spring_value(det, "detached_sp", -1.0) >= 0.0)
+    assert(list_len(det.extras.toasts) == 1)
+    val ticked_out = ui_state_tick(det, det.motion.clock.now + 2.0)
+    assert(list_len(ticked_out.extras.toasts) == 0)
+
+    val buf = ui_paint(laid, st, draw_buf_new(32768))
+    assert(buf.cmd_count > 10)
+    val _fb = draw_buf_free(buf)
     return 0
 }
 
@@ -517,6 +794,9 @@ def main() -> i64 {
     assert(check_layout_and_events() == 0)
     assert(check_svg_mirror_and_effects() == 0)
     assert(check_low_level_tree_and_paint() == 0)
+    assert(check_mature_themes_and_responsive() == 0)
+    assert(check_springs_bezier_and_icons() == 0)
+    assert(check_mature_layouts_widgets_and_detach() == 0)
     println("std ui core ok")
     return 0
 }

@@ -13,17 +13,46 @@ pub record UiClock {
     dt: f64 = 0.016,
 }
 
+/// Normalized timing curve presets for declarative transitions.
 pub choice UiEase {
     Linear,
     InQuad,
     OutQuad,
     InOutQuad,
+    InCubic,
     InOutCubic,
     OutCubic,
+    OutQuart,
+    InOutQuart,
+    OutQuint,
+    OutExpo,
+    InOutExpo,
+    OutCirc,
+    InBack,
     OutBack,
     OutElastic,
     InOutSine,
     OutBounce,
+}
+
+/// Damped harmonic oscillator parameters for physical UI motion.
+pub record SpringConfig {
+    stiffness: f64 = 280.0,
+    damping: f64 = 24.0,
+    mass: f64 = 1.0,
+    precision: f64 = 0.002,
+}
+
+/// Live spring state tracked by `UiMotion`.
+pub record UiSpring {
+    key: str = "",
+    value: f64 = 0.0,
+    velocity: f64 = 0.0,
+    target: f64 = 0.0,
+    stiffness: f64 = 280.0,
+    damping: f64 = 24.0,
+    mass: f64 = 1.0,
+    precision: f64 = 0.002,
 }
 
 /// One named interpolation in flight.
@@ -34,14 +63,36 @@ pub record UiTween {
     started: f64 = 0.0,
     duration: f64 = 0.0,
     ease: UiEase = UiEase.OutCubic,
+    delay: f64 = 0.0,
 }
 
-/// Collection of live tweens plus the last known values of finished tweens.
+/// Collection of live tweens, active springs, and settled values.
 pub record UiMotion {
     clock: UiClock = UiClock {},
     tweens: list<UiTween> = list(),
     settled: list<f64> = list(),
     keys: list<str> = list(),
+    springs: list<UiSpring> = list(),
+}
+
+/// Crisp responsive spring suited for hover states, checkboxes, and toggles.
+pub def spring_snappy() -> SpringConfig {
+    return SpringConfig { stiffness: 380.0, damping: 28.0, mass: 1.0, precision: 0.002 }
+}
+
+/// Fluid balanced spring suited for tabs, drawers, and layout shifts.
+pub def spring_smooth() -> SpringConfig {
+    return SpringConfig { stiffness: 220.0, damping: 24.0, mass: 1.0, precision: 0.002 }
+}
+
+/// Expressive slightly underdamped spring suited for modals, badges, and cards.
+pub def spring_bouncy() -> SpringConfig {
+    return SpringConfig { stiffness: 300.0, damping: 16.0, mass: 1.0, precision: 0.002 }
+}
+
+/// Slow soft spring suited for ambient reveals and hero panels.
+pub def spring_gentle() -> SpringConfig {
+    return SpringConfig { stiffness: 140.0, damping: 20.0, mass: 1.0, precision: 0.002 }
 }
 
 pub def ui_motion_new() -> UiMotion effect alloc {
@@ -49,8 +100,12 @@ pub def ui_motion_new() -> UiMotion effect alloc {
 }
 
 def m_clamp(t: f64) -> f64 {
-    if t < 0.0 { return 0.0 }
-    if t > 1.0 { return 1.0 }
+    if t < 0.0 {
+        return 0.0
+    }
+    if t > 1.0 {
+        return 1.0
+    }
     return t
 }
 
@@ -72,6 +127,67 @@ pub def motion_lerp_color(a: UiColor, b: UiColor, t: f64) -> UiColor {
     }
 }
 
+def fabs_m(v: f64) -> f64 {
+    return if v < 0.0 { -v } else { v }
+}
+
+def bezier_sample(u: f64, p1: f64, p2: f64) -> f64 {
+    val c = 3.0 * p1
+    val b = 3.0 * (p2 - p1) - c
+    val a = 1.0 - c - b
+    return ((a * u + b) * u + c) * u
+}
+
+def bezier_deriv(u: f64, p1: f64, p2: f64) -> f64 {
+    val c = 3.0 * p1
+    val b = 3.0 * (p2 - p1) - c
+    val a = 1.0 - c - b
+    return (3.0 * a * u + 2.0 * b) * u + c
+}
+
+/// Evaluate a CSS-style cubic-bezier curve `cubic-bezier(x1, y1, x2, y2)` at normalized time `t`.
+pub def motion_cubic_bezier(t: f64, x1: f64, y1: f64, x2: f64, y2: f64) -> f64 {
+    val x = m_clamp(t)
+    if x <= 0.0 {
+        return 0.0
+    }
+    if x >= 1.0 {
+        return 1.0
+    }
+    var lo = 0.0
+    var hi = 1.0
+    var u = x
+    var iter = 0
+    while iter < 8 {
+        val bx = bezier_sample(u, x1, x2)
+        val err = bx - x
+        if err < 0.0 {
+            lo = u
+        } else {
+            hi = u
+        }
+        val d = bezier_deriv(u, x1, x2)
+        if fabs_m(d) > 0.00001 {
+            val cand = u - err / d
+            u = if cand > lo && cand < hi { cand } else { (lo + hi) * 0.5 }
+        } else {
+            u = (lo + hi) * 0.5
+        }
+        iter = iter + 1
+    }
+    return bezier_sample(u, y1, y2)
+}
+
+/// Linearly interpolate all components of rectangle `a` to `b` by `t` (`0..1`).
+pub def motion_lerp_rect(a: UiRect, b: UiRect, t: f64) -> UiRect {
+    return UiRect {
+        x: motion_lerp(a.x, b.x, t),
+        y: motion_lerp(a.y, b.y, t),
+        w: motion_lerp(a.w, b.w, t),
+        h: motion_lerp(a.h, b.h, t),
+    }
+}
+
 /// Evaluate an easing curve at normalised time `t` (0..1).
 pub def motion_ease(t: f64, kind: UiEase) -> f64 {
     val x = m_clamp(t)
@@ -79,15 +195,56 @@ pub def motion_ease(t: f64, kind: UiEase) -> f64 {
         UiEase.Linear => x,
         UiEase.InQuad => x * x,
         UiEase.OutQuad => 1.0 - (1.0 - x) * (1.0 - x),
-        UiEase.InOutQuad => if x < 0.5 { 2.0 * x * x } else { 1.0 - ((-2.0 * x + 2.0) * (-2.0 * x + 2.0)) / 2.0 },
+        UiEase.InOutQuad => if x < 0.5 {
+            2.0 * x * x
+        } else {
+            1.0 - ((-2.0 * x + 2.0) * (-2.0 * x + 2.0)) / 2.0
+        },
+        UiEase.InCubic => x * x * x,
         UiEase.InOutCubic => if x < 0.5 {
             4.0 * x * x * x
         } else {
             1.0 - (((-2.0 * x + 2.0) * (-2.0 * x + 2.0) * (-2.0 * x + 2.0)) / 2.0)
         },
         UiEase.OutCubic => {
+            val u = 1.0 - x
+            1.0 - u * u * u
+        },
+        UiEase.OutQuart => {
+            val u = 1.0 - x
+            1.0 - u * u * u * u
+        },
+        UiEase.InOutQuart => if x < 0.5 {
+            8.0 * x * x * x * x
+        } else {
+            val u = -2.0 * x + 2.0
+            1.0 - (u * u * u * u) / 2.0
+        },
+        UiEase.OutQuint => {
+            val u = 1.0 - x
+            1.0 - u * u * u * u * u
+        },
+        UiEase.OutExpo => if x >= 1.0 { 1.0 } else { 1.0 - pow(2.0, -10.0 * x) },
+        UiEase.InOutExpo => {
+            if x <= 0.0 {
+                0.0
+            } else if x >= 1.0 {
+                1.0
+            } else if x < 0.5 {
+                pow(2.0, 20.0 * x - 10.0) / 2.0
+            } else {
+                (2.0 - pow(2.0, -20.0 * x + 10.0)) / 2.0
+            }
+        },
+        UiEase.OutCirc => {
             val u = x - 1.0
-            1.0 + u * u * u
+            val sq = 1.0 - u * u
+            if sq <= 0.0 { 0.0 } else { sqrt(sq) }
+        },
+        UiEase.InBack => {
+            val c1 = 1.70158
+            val c3 = c1 + 1.0
+            c3 * x * x * x - c1 * x * x
         },
         UiEase.OutBack => {
             val c1 = 1.70158
@@ -125,21 +282,64 @@ pub def motion_ease(t: f64, kind: UiEase) -> f64 {
     }
 }
 
-/// Advance the clock and drop finished tweens, keeping their final value.
+def step_spring(sp: UiSpring, sim_dt: f64) -> UiSpring {
+    if sim_dt <= 0.0 {
+        return sp
+    }
+    var rem = if sim_dt > 0.05 { 0.05 } else { sim_dt }
+    var pos = sp.value
+    var vel = sp.velocity
+    val mass = if sp.mass > 0.01 { sp.mass } else { 1.0 }
+    while rem > 0.000001 {
+        val step = if rem > 0.004 { 0.004 } else { rem }
+        val force = sp.stiffness * (sp.target - pos) - sp.damping * vel
+        val accel = force / mass
+        vel = vel + accel * step
+        pos = pos + vel * step
+        rem = rem - step
+    }
+    return UiSpring {
+        key: sp.key,
+        value: pos,
+        velocity: vel,
+        target: sp.target,
+        stiffness: sp.stiffness,
+        damping: sp.damping,
+        mass: sp.mass,
+        precision: sp.precision,
+    }
+}
+
+/// Advance the clock, simulate springs, and retire finished tweens keeping settled values.
 pub def ui_motion_tick(m: UiMotion, now: f64) -> UiMotion effect alloc {
+    val sim_dt = if now > m.clock.now { now - m.clock.now } else { 0.0 }
+    val clamped_dt = if sim_dt > 0.05 { 0.05 } else { sim_dt }
     var live: list<UiTween> = list()
     var vals: list<f64> = list()
     var keys: list<str> = list()
     var i = 0
     while i < list_len(m.tweens) {
         val tw = list_get(m.tweens, i)
-        if now - tw.started >= tw.duration {
+        if now - tw.started - tw.delay >= tw.duration {
             list_push(keys, tw.key)
             list_push(vals, tw.to)
         } else {
             list_push(live, tw)
         }
         i = i + 1
+    }
+    var live_springs: list<UiSpring> = list()
+    var s = 0
+    while s < list_len(m.springs) {
+        val next_sp = step_spring(list_get(m.springs, s), clamped_dt)
+        val prec = if next_sp.precision > 0.0 { next_sp.precision } else { 0.002 }
+        if fabs_m(next_sp.target - next_sp.value) < prec && fabs_m(next_sp.velocity) < prec {
+            list_push(keys, next_sp.key)
+            list_push(vals, next_sp.target)
+        } else {
+            list_push(live_springs, next_sp)
+        }
+        s = s + 1
     }
     var kept_keys: list<str> = list()
     var kept_vals: list<f64> = list()
@@ -167,19 +367,21 @@ pub def ui_motion_tick(m: UiMotion, now: f64) -> UiMotion effect alloc {
         n = n + 1
     }
     return UiMotion {
-        clock: UiClock { now: now, dt: if now > m.clock.now { now - m.clock.now } else { m.clock.dt } },
+        clock: UiClock { now: now, dt: if clamped_dt > 0.0 { clamped_dt } else { m.clock.dt } },
         tweens: live,
         settled: kept_vals,
         keys: kept_keys,
+        springs: live_springs,
     }
 }
 
-/// Start or retarget a named tween. `now` should be `motion.clock.now`.
-pub def ui_motion_to(
+/// Start or retarget a delayed named tween.
+pub def ui_motion_to_delayed(
     m: UiMotion,
     key: str,
     target: f64,
     duration: f64,
+    delay: f64,
     curve: UiEase,
     now: f64,
 ) -> UiMotion effect alloc {
@@ -192,6 +394,15 @@ pub def ui_motion_to(
         }
         i = i + 1
     }
+    var live_springs: list<UiSpring> = list()
+    var s = 0
+    while s < list_len(m.springs) {
+        val sp = list_get(m.springs, s)
+        if sp.key != key {
+            list_push(live_springs, sp)
+        }
+        s = s + 1
+    }
     list_push(
         live,
         UiTween {
@@ -201,6 +412,7 @@ pub def ui_motion_to(
             started: now,
             duration: if duration > 0.0 { duration } else { 0.001 },
             ease: curve,
+            delay: if delay > 0.0 { delay } else { 0.0 },
         },
     )
     return UiMotion {
@@ -208,17 +420,141 @@ pub def ui_motion_to(
         tweens: live,
         settled: m.settled,
         keys: m.keys,
+        springs: live_springs,
     }
 }
 
-/// Current interpolated value of `key`, or `fallback` if no tween exists.
+/// Start or retarget a named tween. `now` should be `motion.clock.now`.
+pub def ui_motion_to(
+    m: UiMotion,
+    key: str,
+    target: f64,
+    duration: f64,
+    curve: UiEase,
+    now: f64,
+) -> UiMotion effect alloc {
+    return ui_motion_to_delayed(m, key, target, duration, 0.0, curve, now)
+}
+
+/// Drive `key` toward `target` with a critically/under-damped spring preserving velocity on retarget.
+pub def ui_motion_spring(
+    m: UiMotion,
+    key: str,
+    target: f64,
+    cfg: SpringConfig,
+) -> UiMotion effect alloc {
+    var cur_val = ui_motion_value(m, key, target)
+    var cur_vel = 0.0
+    var live_springs: list<UiSpring> = list()
+    var s = 0
+    while s < list_len(m.springs) {
+        val sp = list_get(m.springs, s)
+        if sp.key == key {
+            cur_val = sp.value
+            cur_vel = sp.velocity
+        } else {
+            list_push(live_springs, sp)
+        }
+        s = s + 1
+    }
+    var live_tweens: list<UiTween> = list()
+    var i = 0
+    while i < list_len(m.tweens) {
+        val tw = list_get(m.tweens, i)
+        if tw.key != key {
+            list_push(live_tweens, tw)
+        }
+        i = i + 1
+    }
+    list_push(
+        live_springs,
+        UiSpring {
+            key: key,
+            value: cur_val,
+            velocity: cur_vel,
+            target: target,
+            stiffness: cfg.stiffness,
+            damping: cfg.damping,
+            mass: cfg.mass,
+            precision: cfg.precision,
+        },
+    )
+    return UiMotion {
+        clock: m.clock,
+        tweens: live_tweens,
+        settled: m.settled,
+        keys: m.keys,
+        springs: live_springs,
+    }
+}
+
+/// Start a spring at explicit `initial` value toward `target`.
+pub def ui_motion_spring_from(
+    m: UiMotion,
+    key: str,
+    initial: f64,
+    target: f64,
+    cfg: SpringConfig,
+) -> UiMotion effect alloc {
+    var live_springs: list<UiSpring> = list()
+    var s = 0
+    while s < list_len(m.springs) {
+        val sp = list_get(m.springs, s)
+        if sp.key != key {
+            list_push(live_springs, sp)
+        }
+        s = s + 1
+    }
+    var live_tweens: list<UiTween> = list()
+    var i = 0
+    while i < list_len(m.tweens) {
+        val tw = list_get(m.tweens, i)
+        if tw.key != key {
+            list_push(live_tweens, tw)
+        }
+        i = i + 1
+    }
+    list_push(
+        live_springs,
+        UiSpring {
+            key: key,
+            value: initial,
+            velocity: 0.0,
+            target: target,
+            stiffness: cfg.stiffness,
+            damping: cfg.damping,
+            mass: cfg.mass,
+            precision: cfg.precision,
+        },
+    )
+    return UiMotion {
+        clock: m.clock,
+        tweens: live_tweens,
+        settled: m.settled,
+        keys: m.keys,
+        springs: live_springs,
+    }
+}
+
+/// Current interpolated or spring-simulated value of `key`, or `fallback` if none exists.
 pub def ui_motion_value(m: UiMotion, key: str, fallback: f64) -> f64 {
+    var s = 0
+    while s < list_len(m.springs) {
+        val sp = list_get(m.springs, s)
+        if sp.key == key {
+            return sp.value
+        }
+        s = s + 1
+    }
     var i = 0
     while i < list_len(m.tweens) {
         val tw = list_get(m.tweens, i)
         if tw.key == key {
-            val raw = (m.clock.now - tw.started) / tw.duration
-            return motion_lerp(tw.from, tw.to, motion_ease(raw, tw.ease))
+            if m.clock.now <= tw.started + tw.delay {
+                return tw.from
+            }
+            val raw = (m.clock.now - tw.started - tw.delay) / tw.duration
+            return tw.from + (tw.to - tw.from) * motion_ease(raw, tw.ease)
         }
         i = i + 1
     }
@@ -232,6 +568,7 @@ pub def ui_motion_value(m: UiMotion, key: str, fallback: f64) -> f64 {
     return fallback
 }
 
+/// Check whether `key` currently has an active tween or spring in flight.
 pub def ui_motion_is_active(m: UiMotion, key: str) -> bool {
     var i = 0
     while i < list_len(m.tweens) {
@@ -240,7 +577,19 @@ pub def ui_motion_is_active(m: UiMotion, key: str) -> bool {
         }
         i = i + 1
     }
+    var s = 0
+    while s < list_len(m.springs) {
+        if list_get(m.springs, s).key == key {
+            return true
+        }
+        s = s + 1
+    }
     return false
+}
+
+/// Return true if any tween or spring is currently animating inside `m`.
+pub def ui_motion_has_active(m: UiMotion) -> bool {
+    return list_len(m.tweens) > 0 || list_len(m.springs) > 0
 }
 
 /// Continuous 0..1 breathing signal, useful for glows and idle motion.

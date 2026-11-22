@@ -1,9 +1,13 @@
+use std::collections::HashMap;
+
 use cosmic_text::{
     Attrs, Buffer, Family, FontSystem, Metrics, Shaping, Style, SwashCache, SwashContent, Weight,
     Wrap,
 };
 
-use crate::protocol::{MeasureTextRequest, RgbaColor, TextFlags};
+use crate::protocol::{MeasureTextRequest, RgbaColor, TextAlign, TextFlags};
+
+const TEXT_CACHE_MAX_ENTRIES: usize = 512;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TextMetrics {
@@ -12,7 +16,7 @@ pub struct TextMetrics {
     pub lines: i32,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PixelClip {
     pub x0: i32,
     pub y0: i32,
@@ -39,9 +43,28 @@ impl PixelClip {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct TextCacheKey {
+    text: String,
+    px_size_bits: u32,
+    px_lh_bits: u32,
+    max_w_bits: u32,
+    flags_bits: i32,
+}
+
+struct CachedBuffer {
+    buffer: Buffer,
+    width: f32,
+    height: f32,
+    lines: i32,
+    last_used: u64,
+}
+
 pub struct TextEngine {
     font_system: FontSystem,
     swash_cache: SwashCache,
+    cache: HashMap<TextCacheKey, CachedBuffer>,
+    clock: u64,
 }
 
 impl Default for TextEngine {
@@ -55,6 +78,8 @@ impl TextEngine {
         Self {
             font_system: FontSystem::new(),
             swash_cache: SwashCache::new(),
+            cache: HashMap::with_capacity(64),
+            clock: 0,
         }
     }
 
@@ -73,41 +98,22 @@ impl TextEngine {
             };
         }
 
-        let mut buffer = Buffer::new(&mut self.font_system, Metrics::new(font_size, line_height));
         let max_w = if req.max_width > 0.0 {
             Some(req.max_width)
         } else {
             None
         };
-        buffer.set_wrap(
-            &mut self.font_system,
-            if max_w.is_some() {
-                Wrap::WordOrGlyph
-            } else {
-                Wrap::None
-            },
-        );
-        buffer.set_size(&mut self.font_system, max_w, None);
-        let attrs = make_attrs(req.flags);
-        buffer.set_text(&mut self.font_system, &req.text, &attrs, Shaping::Advanced);
-        buffer.shape_until_scroll(&mut self.font_system, false);
-
-        let mut measured_w: f32 = 0.0;
-        let mut lines = 0i32;
-        for run in buffer.layout_runs() {
-            measured_w = measured_w.max(run.line_w);
-            lines += 1;
-        }
-        if lines == 0 {
-            lines = 1;
-        }
+        let empty_fonts = self.font_system.db().is_empty();
+        let entry = self.get_or_shape(&req.text, font_size, line_height, max_w, req.flags);
+        let mut measured_w = entry.width;
+        let lines = entry.lines;
         // Fallback estimate when running in an environment with no system fonts installed.
-        if self.font_system.db().is_empty() && measured_w == 0.0 {
+        if empty_fonts && measured_w == 0.0 {
             measured_w = (req.text.chars().count() as f32) * font_size * 0.56;
         }
         TextMetrics {
             width: measured_w.ceil(),
-            height: (lines as f32 * line_height).ceil(),
+            height: entry.height.ceil(),
             lines,
         }
     }
@@ -119,8 +125,8 @@ impl TextEngine {
         buf_w: usize,
         buf_h: usize,
         clip: PixelClip,
-        origin_x: f32,
-        origin_y: f32,
+        origin_px_x: f32,
+        origin_px_y: f32,
         max_w: f32,
         font_size: f32,
         line_height: f32,
@@ -129,7 +135,7 @@ impl TextEngine {
         flags: TextFlags,
         text: &str,
     ) {
-        if text.is_empty() || color.a == 0 || buf_w == 0 || buf_h == 0 {
+        if text.is_empty() || color.a == 0 || buf_w == 0 || buf_h == 0 || scale <= 0.05 {
             return;
         }
         let px_size = (font_size * scale).clamp(6.0, 512.0);
@@ -139,30 +145,26 @@ impl TextEngine {
             font_size * 1.35
         };
         let px_lh = (raw_lh * scale).max(px_size);
-        let mut buffer = Buffer::new(&mut self.font_system, Metrics::new(px_size, px_lh));
         let scaled_max_w = if max_w > 0.0 {
             Some(max_w * scale)
         } else {
             None
         };
-        buffer.set_wrap(
-            &mut self.font_system,
-            if scaled_max_w.is_some() {
-                Wrap::WordOrGlyph
-            } else {
-                Wrap::None
-            },
-        );
-        buffer.set_size(&mut self.font_system, scaled_max_w, None);
-        let attrs = make_attrs(flags);
-        buffer.set_text(&mut self.font_system, text, &attrs, Shaping::Advanced);
-        buffer.shape_until_scroll(&mut self.font_system, false);
 
-        let ox = origin_x * scale;
-        let oy = origin_y * scale;
-        for run in buffer.layout_runs() {
+        // Populate/lookup in cache before borrowing `self.font_system`/`self.swash_cache`.
+        let key = self.ensure_cached(text, px_size, px_lh, scaled_max_w, flags);
+        let Some(entry) = self.cache.get(&key) else {
+            return;
+        };
+
+        for run in entry.buffer.layout_runs() {
+            let align_dx = match (scaled_max_w, flags.align) {
+                (Some(mw), TextAlign::Center) if mw > run.line_w => (mw - run.line_w) * 0.5,
+                (Some(mw), TextAlign::Right) if mw > run.line_w => mw - run.line_w,
+                _ => 0.0,
+            };
             for glyph in run.glyphs.iter() {
-                let physical = glyph.physical((ox, oy), 1.0);
+                let physical = glyph.physical((origin_px_x + align_dx, origin_px_y), 1.0);
                 let Some(image) = self
                     .swash_cache
                     .get_image(&mut self.font_system, physical.cache_key)
@@ -199,6 +201,182 @@ impl TextEngine {
             }
         }
     }
+
+    fn get_or_shape(
+        &mut self,
+        text: &str,
+        px_size: f32,
+        px_lh: f32,
+        max_w: Option<f32>,
+        flags: TextFlags,
+    ) -> &CachedBuffer {
+        let key = self.ensure_cached(text, px_size, px_lh, max_w, flags);
+        &self.cache[&key]
+    }
+
+    fn ensure_cached(
+        &mut self,
+        text: &str,
+        px_size: f32,
+        px_lh: f32,
+        max_w: Option<f32>,
+        flags: TextFlags,
+    ) -> TextCacheKey {
+        self.clock = self.clock.wrapping_add(1);
+        let key = TextCacheKey {
+            text: text.to_owned(),
+            px_size_bits: px_size.to_bits(),
+            px_lh_bits: px_lh.to_bits(),
+            max_w_bits: max_w.unwrap_or(-1.0).to_bits(),
+            flags_bits: flags.to_bits(),
+        };
+        if let Some(existing) = self.cache.get_mut(&key) {
+            existing.last_used = self.clock;
+            return key;
+        }
+        if self.cache.len() >= TEXT_CACHE_MAX_ENTRIES {
+            evict_oldest_half(&mut self.cache);
+        }
+        let built = shape_cached(
+            &mut self.font_system,
+            text,
+            px_size,
+            px_lh,
+            max_w,
+            flags,
+            self.clock,
+        );
+        self.cache.insert(key.clone(), built);
+        key
+    }
+}
+
+fn evict_oldest_half(cache: &mut HashMap<TextCacheKey, CachedBuffer>) {
+    let mut stamps: Vec<u64> = cache.values().map(|v| v.last_used).collect();
+    if stamps.is_empty() {
+        return;
+    }
+    let mid = stamps.len() / 2;
+    let (_, median, _) = stamps.select_nth_unstable(mid);
+    let cutoff = *median;
+    cache.retain(|_, v| v.last_used > cutoff);
+}
+
+fn shape_cached(
+    font_system: &mut FontSystem,
+    text: &str,
+    px_size: f32,
+    px_lh: f32,
+    max_w: Option<f32>,
+    flags: TextFlags,
+    last_used: u64,
+) -> CachedBuffer {
+    let attrs = make_attrs(flags);
+    let metrics = Metrics::new(px_size, px_lh);
+    let buffer = if flags.ellipsis {
+        if let Some(mw) = max_w {
+            shape_with_ellipsis(font_system, text, metrics, &attrs, mw)
+        } else {
+            shape_plain(font_system, text, metrics, &attrs, None)
+        }
+    } else {
+        shape_plain(font_system, text, metrics, &attrs, max_w)
+    };
+    let mut measured_w: f32 = 0.0;
+    let mut lines = 0i32;
+    for run in buffer.layout_runs() {
+        measured_w = measured_w.max(run.line_w);
+        lines += 1;
+    }
+    if lines == 0 {
+        lines = 1;
+    }
+    CachedBuffer {
+        buffer,
+        width: measured_w,
+        height: (lines as f32) * px_lh,
+        lines,
+        last_used,
+    }
+}
+
+fn shape_plain(
+    font_system: &mut FontSystem,
+    text: &str,
+    metrics: Metrics,
+    attrs: &Attrs<'_>,
+    max_w: Option<f32>,
+) -> Buffer {
+    let mut buffer = Buffer::new(font_system, metrics);
+    buffer.set_wrap(
+        font_system,
+        if max_w.is_some() {
+            Wrap::WordOrGlyph
+        } else {
+            Wrap::None
+        },
+    );
+    buffer.set_size(font_system, max_w, None);
+    buffer.set_text(font_system, text, attrs, Shaping::Advanced);
+    buffer.shape_until_scroll(font_system, false);
+    buffer
+}
+
+fn measure_single_line_width(
+    font_system: &mut FontSystem,
+    text: &str,
+    metrics: Metrics,
+    attrs: &Attrs<'_>,
+) -> (Buffer, f32) {
+    let buffer = shape_plain(font_system, text, metrics, attrs, None);
+    let mut w = 0.0f32;
+    for run in buffer.layout_runs() {
+        w = w.max(run.line_w);
+    }
+    (buffer, w)
+}
+
+fn shape_with_ellipsis(
+    font_system: &mut FontSystem,
+    text: &str,
+    metrics: Metrics,
+    attrs: &Attrs<'_>,
+    max_w: f32,
+) -> Buffer {
+    let single = text.split('\n').next().unwrap_or(text);
+    let (full_buf, full_w) = measure_single_line_width(font_system, single, metrics, attrs);
+    if full_w <= max_w || max_w <= 0.0 {
+        return full_buf;
+    }
+    let boundaries: Vec<usize> = single
+        .char_indices()
+        .map(|(idx, _)| idx)
+        .chain(std::iter::once(single.len()))
+        .collect();
+    if boundaries.len() <= 1 {
+        return full_buf;
+    }
+    let mut lo = 0usize;
+    let mut hi = boundaries.len() - 1;
+    let mut best_buf = None;
+    let mut candidate = String::with_capacity(single.len() + 3);
+    while lo < hi {
+        let mid = (lo + hi).div_ceil(2);
+        candidate.clear();
+        candidate.push_str(&single[..boundaries[mid]]);
+        candidate.push_str("...");
+        let (buf, w) = measure_single_line_width(font_system, &candidate, metrics, attrs);
+        if w <= max_w {
+            lo = mid;
+            best_buf = Some(buf);
+        } else {
+            hi = mid - 1;
+        }
+    }
+    if let Some(buf) = best_buf {
+        return buf;
+    }
+    shape_plain(font_system, "...", metrics, attrs, None)
 }
 
 fn make_attrs(flags: TextFlags) -> Attrs<'static> {

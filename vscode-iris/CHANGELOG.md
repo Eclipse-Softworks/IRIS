@@ -1,5 +1,21 @@
 # IRIS Language Extension Changelog
 
+## 1.0.10
+
+### New Features & Grammar Completeness
+
+- **Complete TextMate Grammar Sync (`syntaxes/iris.tmLanguage.json`)**:
+  - Fixed top-level pattern order so compiler `#builtins` highlight accurately instead of being shadowed by generic `#functions` call rules.
+  - Added `#preprocessor` directives (`#define`, `#undef`, `#ifdef`, `#ifndef`, `#if`, `#elif`, `#else`, `#endif`, `#error`, `#warning`) and predefined build symbols (`WINDOWS`, `LINUX`, `MACOS`, `WASM`, `EMBEDDED`, `DEBUG`, `RELEASE`, `X86_64`, `AARCH64`, etc.).
+  - Added `#chars` single-quoted character literals (`'A'`, `'\n'`), `#macros` invocation highlighting (`twice!`, `select!`), logical word operators (`and`, `or`, `not`), `mut`, `self`/`Self`, `trait`/`defmacro`/`mod` declarations, `#model_dsl` scoped `input`/`layer`/`output`, and complete multi-character operators (`..=`, `??`, `::`, `<>`, `+=`, `-=`, `*=`, `/=`, `%=`, `@`, `&`, `|`).
+  - Expanded `#types` and `#builtins` from the actual compiler lowerer (`src/lower/*.rs`) and all **58 embedded stdlib modules** (`168` public stdlib types, `357` lowerer builtins, `1,491` public stdlib functions including all **277** `std.ui*` + live camera functions, `std.sql`, `std.json`, `std.csv`, `std.crypto`, `std.speculation`, `std.uncertainty`, `std.tls`, `std.pcap`, `std.ais`, and `std.ros2`).
+- **New Commands, Tasks & Settings**:
+  - Added **IRIS: Build GUI Binary** (`--gui`), **IRIS: Bundle Standalone Application...** (`iris bundle`), **IRIS: New Project from Template...** (`iris new ui|app|cli|server|ros2|controller`), **IRIS: Check Project** (`iris check`), **IRIS: Watch File...** (`iris watch`), **IRIS: Run Toolchain Doctor** (`iris doctor`), **IRIS: Profile File** (`iris profile`), **IRIS: Build Embedded Bundle...** (`iris embedded`), **IRIS: Generate FFI Bindings...** (`iris bindgen`), and **IRIS: Collect Bug Report** (`iris bug-report`), plus matching tasks and status-bar menu shortcuts.
+  - Added `iris.simd`, `iris.gpu`, `iris.build.gui`, and `iris.bundle.release` configuration properties, and expanded `iris pkg` quick-pick actions (`update`, `check`, `vendor`, `search`, `publish`).
+- **18 New Snippets & Language Config Polish**:
+  - Added `uiapp` (with mandatory `ui_frame_pool_pause` + `ui_state_detach`), `uisvg`, `uicard`, `uimodal`, `uispring`, `uicamera`, `uicanvas`, `sql`, `json`, `speculate`, `wrap`, `embedded`, `gcstats`, `httpserv`, `constgen`, `derefmut`, `ifdef`, and `uncertainty`.
+  - Added single-quote char auto-closing pairs and `/// ` doc-comment continuation on Enter in `language-configuration.json`.
+
 ## 1.0.9
 
 ### Improvements & Fixes

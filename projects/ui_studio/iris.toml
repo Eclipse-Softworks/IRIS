@@ -1,0 +1,14 @@
+[package]
+name = "ui_studio"
+version = "0.1.0"
+entry = "main.iris"
+
+[dependencies]
+
+[app]
+title = "IRIS UI Studio"
+identifier = "io.iris.ui_studio"
+gui = true
+bundle_ui_host = true
+window_width = 1280
+window_height = 800

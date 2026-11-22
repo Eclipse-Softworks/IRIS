@@ -2,6 +2,7 @@
 name = "iris_ui_host"
 version = "0.1.0"
 edition = "2021"
+license = "Apache-2.0"
 description = "Cross-platform native CPU host (winit + softbuffer + tiny-skia + cosmic-text + accesskit) for IRIS std.ui"
 
 [lib]

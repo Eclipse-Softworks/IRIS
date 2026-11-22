@@ -14,7 +14,7 @@
 # ──────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
-VERSION="1.0.0-rc1"
+VERSION="1.0.0-rc3"
 ARCH="x86_64"
 RELEASE="1"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -64,18 +64,22 @@ fi
 echo "[2/4] Staging files into BUILDROOT..."
 BUILDROOT="$RPM_TOPDIR/BUILDROOT/iris-${VERSION}-${RELEASE}.${RPM_ARCH}"
 mkdir -p "$BUILDROOT/usr/bin"
-mkdir -p "$BUILDROOT/usr/share/iris/stdlib"
 mkdir -p "$BUILDROOT/usr/share/iris/examples"
 mkdir -p "$BUILDROOT/usr/share/iris/toolchain"
 mkdir -p "$BUILDROOT/usr/share/doc/iris"
 
 cp "$IRIS_BIN" "$BUILDROOT/usr/bin/iris"
 chmod 755 "$BUILDROOT/usr/bin/iris"
-cp -r "$ROOT/stdlib/"* "$BUILDROOT/usr/share/iris/stdlib/" 2>/dev/null || true
+UI_HOST_LIB="$ROOT/target/release/libiris_ui_host.so"
+if [[ -f "$UI_HOST_LIB" ]]; then
+    cp "$UI_HOST_LIB" "$BUILDROOT/usr/share/iris/libiris_ui_host.so"
+    chmod 755 "$BUILDROOT/usr/share/iris/libiris_ui_host.so"
+fi
 cp -r "$ROOT/examples/"* "$BUILDROOT/usr/share/iris/examples/" 2>/dev/null || true
 if [[ -d "$ROOT/toolchain" ]]; then
     cp -r "$ROOT/toolchain/"* "$BUILDROOT/usr/share/iris/toolchain/" 2>/dev/null || true
 fi
+cp "$ROOT/LLVM_VERSION" "$BUILDROOT/usr/share/iris/" 2>/dev/null || true
 cp "$ROOT/LICENSE" "$BUILDROOT/usr/share/doc/iris/"
 cp "$ROOT/README.md" "$BUILDROOT/usr/share/doc/iris/"
 
@@ -83,16 +87,43 @@ cp "$ROOT/README.md" "$BUILDROOT/usr/share/doc/iris/"
 # cleans $BUILDROOT before running %install, so we need a second copy).
 STAGED_BIN="$DIST_DIR/staged-bin"
 STAGED_DATA="$DIST_DIR/staged-data"
-mkdir -p "$STAGED_BIN" "$STAGED_DATA/stdlib" "$STAGED_DATA/examples" "$STAGED_DATA/toolchain"
+mkdir -p "$STAGED_BIN" "$STAGED_DATA/examples" "$STAGED_DATA/toolchain"
 cp "$IRIS_BIN" "$STAGED_BIN/iris"
 chmod 755 "$STAGED_BIN/iris"
-cp -r "$ROOT/stdlib/"* "$STAGED_DATA/stdlib/" 2>/dev/null || true
+if [[ -f "$UI_HOST_LIB" ]]; then
+    cp "$UI_HOST_LIB" "$STAGED_DATA/libiris_ui_host.so"
+    chmod 755 "$STAGED_DATA/libiris_ui_host.so"
+fi
 cp -r "$ROOT/examples/"* "$STAGED_DATA/examples/" 2>/dev/null || true
 if [[ -d "$ROOT/toolchain" ]]; then
     cp -r "$ROOT/toolchain/"* "$STAGED_DATA/toolchain/" 2>/dev/null || true
 fi
+cp "$ROOT/LLVM_VERSION" "$STAGED_DATA/" 2>/dev/null || true
 cp "$ROOT/LICENSE" "$STAGED_DATA/"
 cp "$ROOT/README.md" "$STAGED_DATA/"
+RPM_ICON_FILES=""
+ICON_SRC="$ROOT/installer/icon.png"
+if [[ ! -f "$ICON_SRC" ]]; then ICON_SRC="$ROOT/logo/iris-logo.png"; fi
+if [[ -f "$ICON_SRC" ]]; then
+    cp "$ICON_SRC" "$STAGED_DATA/iris.png"
+    RPM_ICON_FILES="/usr/share/pixmaps/iris.png
+/usr/share/icons/hicolor/256x256/apps/iris.png"
+fi
+
+HAS_COMPLETIONS=false
+RPM_COMP_FILES=""
+if "$IRIS_BIN" completions bash >/dev/null 2>&1; then
+    mkdir -p "$STAGED_DATA/completions"
+    "$IRIS_BIN" completions bash > "$STAGED_DATA/completions/iris.bash" || true
+    "$IRIS_BIN" completions zsh  > "$STAGED_DATA/completions/_iris" || true
+    "$IRIS_BIN" completions fish > "$STAGED_DATA/completions/iris.fish" || true
+    if [[ -s "$STAGED_DATA/completions/iris.bash" ]]; then
+        HAS_COMPLETIONS=true
+        RPM_COMP_FILES="/usr/share/bash-completion/completions/iris
+/usr/share/zsh/site-functions/_iris
+/usr/share/fish/vendor_completions.d/iris.fish"
+    fi
+fi
 
 # ── Create spec file (binary-only — no %prep/%build) ─────────────────────
 echo "[3/4] Creating RPM spec file..."
@@ -104,8 +135,8 @@ Version:        ${RPM_VERSION}
 Release:        ${RELEASE}
 Summary:        IRIS programming language compiler and toolchain
 
-License:        GPL-2.0-or-later
-URL:            https://github.com/moon9t/iris
+License:        Apache-2.0
+URL:            https://github.com/Eclipse-Softworks/IRIS
 
 # Pre-built binary — skip debug package extraction, auto deps, and host strip
 # (cross-arch builds: host strip cannot read foreign-arch ELF binaries)
@@ -130,23 +161,42 @@ and DAP server.
 %install
 # rpmbuild cleans BUILDROOT before %install, so re-stage files here.
 mkdir -p %{buildroot}/usr/bin
-mkdir -p %{buildroot}/usr/share/iris/stdlib
 mkdir -p %{buildroot}/usr/share/iris/examples
 mkdir -p %{buildroot}/usr/share/iris/toolchain
 mkdir -p %{buildroot}/usr/share/doc/iris
 cp %{_topdir}/../staged-bin/iris %{buildroot}/usr/bin/iris
 chmod 755 %{buildroot}/usr/bin/iris
-cp -r %{_topdir}/../staged-data/stdlib/* %{buildroot}/usr/share/iris/stdlib/ 2>/dev/null || true
+if [ -f "%{_topdir}/../staged-data/libiris_ui_host.so" ]; then
+    cp "%{_topdir}/../staged-data/libiris_ui_host.so" %{buildroot}/usr/share/iris/libiris_ui_host.so
+    chmod 755 %{buildroot}/usr/share/iris/libiris_ui_host.so
+fi
 cp -r %{_topdir}/../staged-data/examples/* %{buildroot}/usr/share/iris/examples/ 2>/dev/null || true
 cp -r %{_topdir}/../staged-data/toolchain/* %{buildroot}/usr/share/iris/toolchain/ 2>/dev/null || true
+cp %{_topdir}/../staged-data/LLVM_VERSION %{buildroot}/usr/share/iris/ 2>/dev/null || true
 cp %{_topdir}/../staged-data/LICENSE %{buildroot}/usr/share/doc/iris/
 cp %{_topdir}/../staged-data/README.md %{buildroot}/usr/share/doc/iris/
+if [ -f "%{_topdir}/../staged-data/iris.png" ]; then
+    mkdir -p %{buildroot}/usr/share/pixmaps %{buildroot}/usr/share/icons/hicolor/256x256/apps
+    cp "%{_topdir}/../staged-data/iris.png" %{buildroot}/usr/share/iris/iris.png
+    cp "%{_topdir}/../staged-data/iris.png" %{buildroot}/usr/share/pixmaps/iris.png
+    cp "%{_topdir}/../staged-data/iris.png" %{buildroot}/usr/share/icons/hicolor/256x256/apps/iris.png
+fi
+if [ -d "%{_topdir}/../staged-data/completions" ]; then
+    mkdir -p %{buildroot}/usr/share/bash-completion/completions \
+             %{buildroot}/usr/share/zsh/site-functions \
+             %{buildroot}/usr/share/fish/vendor_completions.d
+    cp "%{_topdir}/../staged-data/completions/iris.bash" %{buildroot}/usr/share/bash-completion/completions/iris
+    cp "%{_topdir}/../staged-data/completions/_iris" %{buildroot}/usr/share/zsh/site-functions/_iris
+    cp "%{_topdir}/../staged-data/completions/iris.fish" %{buildroot}/usr/share/fish/vendor_completions.d/iris.fish
+fi
 
 %files
 %license /usr/share/doc/iris/LICENSE
 %doc /usr/share/doc/iris/README.md
 /usr/bin/iris
 /usr/share/iris/
+${RPM_ICON_FILES}
+${RPM_COMP_FILES}
 
 %post
 echo ""
@@ -155,7 +205,7 @@ echo "  Run 'iris --version' to verify."
 echo ""
 
 %changelog
-* ${CHANGELOG_DATE} IRIS Language Project <iris@moon9t.dev> - ${RPM_VERSION}-${RELEASE}
+* ${CHANGELOG_DATE} Eclipse Softworks <dev@eclipsesoftworks.io> - ${RPM_VERSION}-${RELEASE}
 - Release v${RPM_VERSION}
 SPECEOF
 

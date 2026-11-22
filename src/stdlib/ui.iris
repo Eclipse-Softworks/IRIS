@@ -4,7 +4,10 @@ bring std.ffi
 bring std.tensor
 pub bring std.ui_theme
 pub bring std.ui_protocol
+pub bring std.ui_motion
+pub bring std.ui_icons
 pub bring std.ui_layout
+pub bring std.ui_widgets
 
 /// Result of one frame pump against `iris_ui_host`.
 pub record UiFrameStep {
@@ -554,6 +557,572 @@ pub def ui_table_row(
     )
 }
 
+/// Append a horizontal wrapping flow container (`Wrap`) owning `children`.
+pub def ui_wrap(tree: UiTree, key: str, style: UiStyle, children: list<i64>) -> i64 effect alloc {
+    return ui_add_node(
+        tree,
+        UiNode {
+            key: key,
+            kind: WidgetKind.Wrap,
+            style: style,
+            children: children,
+        },
+    )
+}
+
+/// Append a responsive equal-column grid container (`Grid`) with `cols` columns.
+pub def ui_grid(
+    tree: UiTree,
+    key: str,
+    cols: i64,
+    gap: f64,
+    children: list<i64>,
+) -> i64 effect alloc {
+    return ui_add_node(
+        tree,
+        UiNode {
+            key: key,
+            kind: WidgetKind.Grid,
+            style: UiStyle {
+                columns: if cols > 0 { cols } else { 2 },
+                gap: gap,
+                align: UiAlign.Stretch,
+            },
+            children: children,
+        },
+    )
+}
+
+/// Append a two-pane resizable split view (`SplitPane`) with initial `ratio` (`0.15..0.85`).
+pub def ui_split_pane(
+    tree: UiTree,
+    key: str,
+    ratio: f64,
+    left_child: i64,
+    right_child: i64,
+) -> i64 effect alloc {
+    val kids: list<i64> = list(left_child, right_child)
+    return ui_add_node(
+        tree,
+        UiNode {
+            key: key,
+            kind: WidgetKind.SplitPane,
+            ratio: ratio,
+            style: UiStyle { align: UiAlign.Stretch, flex: 1.0 },
+            children: kids,
+        },
+    )
+}
+
+/// Append a subtle horizontal divider rule with optional centered `label`.
+pub def ui_divider(tree: UiTree, label: str) -> i64 effect alloc {
+    val empty: list<i64> = list()
+    return ui_add_node(
+        tree,
+        UiNode {
+            kind: WidgetKind.Divider,
+            text: label,
+            children: empty,
+        },
+    )
+}
+
+/// Append a vector SVG icon widget (`Icon`) at logical square `size`.
+pub def ui_icon(tree: UiTree, key: str, icon: UiIcon, size: f64, tone: UiTone) -> i64 effect alloc {
+    val empty: list<i64> = list()
+    return ui_add_node(
+        tree,
+        UiNode {
+            key: key,
+            kind: WidgetKind.Icon,
+            icon: icon,
+            tone: tone,
+            style: UiStyle { min_w: size, min_h: size },
+            children: empty,
+        },
+    )
+}
+
+/// Append an icon-and-optional-label interactive button (`IconButton`).
+pub def ui_icon_button(
+    tree: UiTree,
+    key: str,
+    icon: UiIcon,
+    text: str,
+    tone: UiTone,
+    action: str,
+) -> i64 effect alloc {
+    val empty: list<i64> = list()
+    return ui_add_node(
+        tree,
+        UiNode {
+            key: key,
+            kind: WidgetKind.IconButton,
+            icon: icon,
+            text: text,
+            tone: tone,
+            action: action,
+            children: empty,
+        },
+    )
+}
+
+/// Append a radio selection item (`Radio`) bound to option index `selected_idx`.
+pub def ui_radio(
+    tree: UiTree,
+    key: str,
+    text: str,
+    checked: bool,
+    selected_idx: i64,
+    tone: UiTone,
+    action: str,
+) -> i64 effect alloc {
+    val empty: list<i64> = list()
+    return ui_add_node(
+        tree,
+        UiNode {
+            key: key,
+            kind: WidgetKind.Radio,
+            text: text,
+            checked: checked,
+            selected_idx: selected_idx,
+            tone: tone,
+            action: action,
+            children: empty,
+        },
+    )
+}
+
+/// Append a dropdown selector (`Select`) backed by `options` and active `selected_idx`.
+pub def ui_select(
+    tree: UiTree,
+    key: str,
+    options: list<str>,
+    selected_idx: i64,
+    placeholder: str,
+    action: str,
+) -> i64 effect alloc {
+    val idx = ui_push_select(tree, SelectSpec { options: options, placeholder: placeholder })
+    val empty: list<i64> = list()
+    return ui_add_node(
+        tree,
+        UiNode {
+            key: key,
+            kind: WidgetKind.Select,
+            placeholder: placeholder,
+            selected_idx: selected_idx,
+            data_idx: idx,
+            action: action,
+            children: empty,
+        },
+    )
+}
+
+/// Append a horizontal tab strip (`Tabs`) with animated indicator underline.
+pub def ui_tabs(
+    tree: UiTree,
+    key: str,
+    labels: list<str>,
+    selected_idx: i64,
+    tone: UiTone,
+    action: str,
+) -> i64 effect alloc {
+    val idx = ui_push_tabs(tree, TabsSpec { labels: labels })
+    val empty: list<i64> = list()
+    return ui_add_node(
+        tree,
+        UiNode {
+            key: key,
+            kind: WidgetKind.Tabs,
+            selected_idx: selected_idx,
+            data_idx: idx,
+            tone: tone,
+            action: action,
+            children: empty,
+        },
+    )
+}
+
+/// Append an animated pill segmented control (`Segmented`).
+pub def ui_segmented(
+    tree: UiTree,
+    key: str,
+    labels: list<str>,
+    selected_idx: i64,
+    tone: UiTone,
+    action: str,
+) -> i64 effect alloc {
+    val idx = ui_push_tabs(tree, TabsSpec { labels: labels })
+    val empty: list<i64> = list()
+    return ui_add_node(
+        tree,
+        UiNode {
+            key: key,
+            kind: WidgetKind.Segmented,
+            selected_idx: selected_idx,
+            data_idx: idx,
+            tone: tone,
+            action: action,
+            children: empty,
+        },
+    )
+}
+
+/// Append a numeric `[-]` / `[+]` stepper control (`Stepper`).
+pub def ui_stepper(
+    tree: UiTree,
+    key: str,
+    value: f64,
+    min_val: f64,
+    max_val: f64,
+    step: f64,
+    action: str,
+) -> i64 effect alloc {
+    val empty: list<i64> = list()
+    return ui_add_node(
+        tree,
+        UiNode {
+            key: key,
+            kind: WidgetKind.Stepper,
+            value: value,
+            min_val: min_val,
+            max_val: max_val,
+            step: step,
+            action: action,
+            tone: UiTone.Primary,
+            children: empty,
+        },
+    )
+}
+
+/// Append a navigation rail/sidebar item (`NavItem`) with icon, label, active indicator, and optional badge.
+pub def ui_nav_item(
+    tree: UiTree,
+    key: str,
+    icon: UiIcon,
+    text: str,
+    active: bool,
+    badge: str,
+    action: str,
+) -> i64 effect alloc {
+    val empty: list<i64> = list()
+    return ui_add_node(
+        tree,
+        UiNode {
+            key: key,
+            kind: WidgetKind.NavItem,
+            icon: icon,
+            text: text,
+            checked: active,
+            badge_text: badge,
+            action: action,
+            tone: UiTone.Primary,
+            children: empty,
+        },
+    )
+}
+
+/// Append a collapsible disclosure container (`Accordion`) owning `children`.
+pub def ui_accordion(
+    tree: UiTree,
+    key: str,
+    title: str,
+    open: bool,
+    action: str,
+    children: list<i64>,
+) -> i64 effect alloc {
+    return ui_add_node(
+        tree,
+        UiNode {
+            key: key,
+            kind: WidgetKind.Accordion,
+            text: title,
+            open: open,
+            action: action,
+            tone: UiTone.Primary,
+            children: children,
+        },
+    )
+}
+
+/// Append a selectable compact tag chip (`Chip`).
+pub def ui_chip(
+    tree: UiTree,
+    key: str,
+    text: str,
+    selected: bool,
+    tone: UiTone,
+    action: str,
+) -> i64 effect alloc {
+    val empty: list<i64> = list()
+    return ui_add_node(
+        tree,
+        UiNode {
+            key: key,
+            kind: WidgetKind.Chip,
+            text: text,
+            checked: selected,
+            tone: tone,
+            action: action,
+            children: empty,
+        },
+    )
+}
+
+/// Append a multiline text editor control (`TextArea`).
+pub def ui_text_area(
+    tree: UiTree,
+    key: str,
+    text: str,
+    placeholder: str,
+    min_h: f64,
+) -> i64 effect alloc {
+    val empty: list<i64> = list()
+    return ui_add_node(
+        tree,
+        UiNode {
+            key: key,
+            kind: WidgetKind.TextArea,
+            text: text,
+            placeholder: placeholder,
+            style: UiStyle { min_h: if min_h > 48.0 { min_h } else { 96.0 } },
+            children: empty,
+        },
+    )
+}
+
+/// Append a horizontal determinate progress bar (`ProgressBar`).
+pub def ui_progress_bar(
+    tree: UiTree,
+    key: str,
+    label: str,
+    value: f64,
+    max_val: f64,
+    tone: UiTone,
+) -> i64 effect alloc {
+    val empty: list<i64> = list()
+    return ui_add_node(
+        tree,
+        UiNode {
+            key: key,
+            kind: WidgetKind.ProgressBar,
+            text: label,
+            value: value,
+            min_val: 0.0,
+            max_val: if max_val > 0.0 { max_val } else { 1.0 },
+            tone: tone,
+            children: empty,
+        },
+    )
+}
+
+/// Append a circular arc progress ring (`ProgressRing`).
+pub def ui_progress_ring(
+    tree: UiTree,
+    key: str,
+    label: str,
+    value: f64,
+    max_val: f64,
+    tone: UiTone,
+) -> i64 effect alloc {
+    val empty: list<i64> = list()
+    return ui_add_node(
+        tree,
+        UiNode {
+            key: key,
+            kind: WidgetKind.ProgressRing,
+            text: label,
+            value: value,
+            min_val: 0.0,
+            max_val: if max_val > 0.0 { max_val } else { 1.0 },
+            tone: tone,
+            children: empty,
+        },
+    )
+}
+
+/// Append an animated indeterminate arc spinner (`Spinner`).
+pub def ui_spinner(tree: UiTree, key: str, size: f64, tone: UiTone) -> i64 effect alloc {
+    val empty: list<i64> = list()
+    val s = if size > 12.0 { size } else { 32.0 }
+    return ui_add_node(
+        tree,
+        UiNode {
+            key: key,
+            kind: WidgetKind.Spinner,
+            tone: tone,
+            style: UiStyle { min_w: s, min_h: s },
+            children: empty,
+        },
+    )
+}
+
+/// Append a circular user avatar (`Avatar`) with initials and optional online status dot.
+pub def ui_avatar(
+    tree: UiTree,
+    key: str,
+    initials: str,
+    online: bool,
+    tone: UiTone,
+) -> i64 effect alloc {
+    val empty: list<i64> = list()
+    return ui_add_node(
+        tree,
+        UiNode {
+            key: key,
+            kind: WidgetKind.Avatar,
+            text: initials,
+            checked: online,
+            tone: tone,
+            children: empty,
+        },
+    )
+}
+
+/// Append an elevated KPI statistic card (`StatCard`).
+pub def ui_stat_card(tree: UiTree, key: str, spec: StatSpec) -> i64 effect alloc {
+    val idx = ui_push_stat(tree, spec)
+    val empty: list<i64> = list()
+    return ui_add_node(
+        tree,
+        UiNode {
+            key: key,
+            kind: WidgetKind.StatCard,
+            text: spec.value,
+            subtext: spec.title,
+            badge_text: spec.delta,
+            checked: spec.positive,
+            icon: spec.icon,
+            tone: spec.tone,
+            data_idx: idx,
+            style: UiStyle { elevation: UiElevation.Subtle },
+            children: empty,
+        },
+    )
+}
+
+/// Append a categorical bar chart widget (`BarChart`).
+pub def ui_bar_chart(tree: UiTree, key: str, spec: BarChartSpec) -> i64 effect alloc {
+    val idx = ui_push_bar_chart(tree, spec)
+    val empty: list<i64> = list()
+    return ui_add_node(
+        tree,
+        UiNode {
+            key: key,
+            kind: WidgetKind.BarChart,
+            text: spec.title,
+            tone: spec.tone,
+            data_idx: idx,
+            children: empty,
+        },
+    )
+}
+
+/// Append a hierarchical path breadcrumb trail (`Breadcrumb`).
+pub def ui_breadcrumb(tree: UiTree, key: str, labels: list<str>, action: str) -> i64 effect alloc {
+    val idx = ui_push_tabs(tree, TabsSpec { labels: labels })
+    val empty: list<i64> = list()
+    return ui_add_node(
+        tree,
+        UiNode {
+            key: key,
+            kind: WidgetKind.Breadcrumb,
+            data_idx: idx,
+            action: action,
+            children: empty,
+        },
+    )
+}
+
+/// Append an RGBA8 image viewport widget (`Image`).
+pub def ui_image(
+    tree: UiTree,
+    key: str,
+    spec: ImageSpec,
+    min_w: f64,
+    min_h: f64,
+) -> i64 effect alloc {
+    val idx = ui_push_image(tree, spec)
+    val empty: list<i64> = list()
+    return ui_add_node(
+        tree,
+        UiNode {
+            key: key,
+            kind: WidgetKind.Image,
+            text: spec.alt,
+            data_idx: idx,
+            style: UiStyle { min_w: min_w, min_h: min_h },
+            children: empty,
+        },
+    )
+}
+
+/// Append a modal dialog overlay container (`Modal`) displayed above the backdrop when `open` is true.
+pub def ui_modal(
+    tree: UiTree,
+    key: str,
+    title: str,
+    open: bool,
+    action: str,
+    children: list<i64>,
+) -> i64 effect alloc {
+    return ui_add_node(
+        tree,
+        UiNode {
+            key: key,
+            kind: WidgetKind.Modal,
+            text: title,
+            open: open,
+            action: action,
+            children: children,
+        },
+    )
+}
+
+/// Append a docked side drawer overlay (`Drawer`) displayed above the backdrop when `open` is true.
+pub def ui_drawer(
+    tree: UiTree,
+    key: str,
+    title: str,
+    open: bool,
+    action: str,
+    children: list<i64>,
+) -> i64 effect alloc {
+    return ui_add_node(
+        tree,
+        UiNode {
+            key: key,
+            kind: WidgetKind.Drawer,
+            text: title,
+            open: open,
+            action: action,
+            children: children,
+        },
+    )
+}
+
+/// Append a dropdown menu trigger (`Menu`) opening `items` / `actions` in the overlay layer.
+pub def ui_menu(
+    tree: UiTree,
+    key: str,
+    text: str,
+    items: list<str>,
+    actions: list<str>,
+) -> i64 effect alloc {
+    val idx = ui_push_menu(tree, MenuSpec { items: items, actions: actions })
+    val empty: list<i64> = list()
+    return ui_add_node(
+        tree,
+        UiNode {
+            key: key,
+            kind: WidgetKind.Menu,
+            text: text,
+            data_idx: idx,
+            children: empty,
+        },
+    )
+}
+
 /// Fold a batch of `HostEvent` values into `state` against a laid-out `tree`.
 pub def ui_process_events(
     tree: UiTree,
@@ -591,11 +1160,27 @@ pub def ui_native_pump_once(
     }
 }
 
+/// Application launch configuration for `ui_run_app`.
+pub record UiAppConfig {
+    title: str = "IRIS App",
+    width: i64 = 1080,
+    height: i64 = 720,
+    min_width: i64 = 360,
+    min_height: i64 = 240,
+    max_width: i64 = 0,
+    max_height: i64 = 0,
+    resizable: bool = true,
+    maximized: bool = false,
+    theme: UiTheme = obsidian_theme(),
+    headless: bool = false,
+    max_frames: i64 = 0,
+    snapshot_path: str = "",
+}
+
 record UiLoopState {
     state: UiState,
     buf: DrawBuffer,
-    last_tree: UiTree,
-    has_tree: bool = false,
+    has_drawn: bool = false,
     last_w: f64 = -1.0,
     last_h: f64 = -1.0,
     frame: i64 = 0,
@@ -606,8 +1191,7 @@ def ui_loop_stop(ctx: UiLoopState) -> UiLoopState {
     return UiLoopState {
         state: ctx.state,
         buf: ctx.buf,
-        last_tree: ctx.last_tree,
-        has_tree: ctx.has_tree,
+        has_drawn: ctx.has_drawn,
         last_w: ctx.last_w,
         last_h: ctx.last_h,
         frame: ctx.frame,
@@ -623,15 +1207,34 @@ def ui_fold_loop_events(
     val has_edge = len(state.dispatched_action) > 0
         || state.has_toggle_change
         || state.has_slider_change
+        || state.extras.has_select_change
+        || state.extras.has_tab_change
+        || state.extras.has_split_change
+        || state.extras.has_file_drop
     if list_len(events) == 0 && !has_edge {
         return state
     }
     return ui_process_events(tree, ui_clear_events(state), events)
 }
 
+def has_paste_keydown(events: list<HostEvent>) -> bool {
+    for i in 0..list_len(events) {
+        val ev = list_get(events, i)
+        val is_kd = when ev.kind {
+            UiEventKind.KeyDown => true,
+            _ => false,
+        }
+        if is_kd && ev.key_code == 118 && (ev.modifiers % 8) >= 2 {
+            return true
+        }
+    }
+    return false
+}
+
 def ui_run_loop_step(
     lib: NativeUiLib,
     max_frames: i64,
+    theme: UiTheme,
     ctx: UiLoopState,
     render: |UiState, UiTree| -> i64,
 ) -> UiLoopState effect ffi, alloc {
@@ -642,39 +1245,96 @@ def ui_run_loop_step(
     if !metrics.is_open {
         return ui_loop_stop(ctx)
     }
-    val vw = if metrics.width > 0.0 { metrics.width } else { ctx.last_tree.width }
-    val vh = if metrics.height > 0.0 { metrics.height } else { ctx.last_tree.height }
+    val vw = if metrics.width > 0.0 { metrics.width } else { 800.0 }
+    val vh = if metrics.height > 0.0 { metrics.height } else { 600.0 }
+    val host_secs = ui_native_clock_secs(lib)
+    val now = if host_secs > ctx.state.motion.clock.now {
+        host_secs
+    } else {
+        ctx.state.motion.clock.now + 0.016
+    }
+    var cur_state = ui_state_tick(ctx.state, now)
+    val anim = ui_state_has_active_transitions(cur_state)
     val need_draw = max_frames > 0
-        || !ctx.has_tree
-        || ctx.state.dirty
-        || ui_state_has_active_transitions(ctx.state)
+        || !ctx.has_drawn
+        || cur_state.dirty
+        || anim
         || vw != ctx.last_w
         || vh != ctx.last_h
-    var active_tree = ctx.last_tree
-    var cur_state = ui_state_tick_next(ctx.state)
-    var cur_buf = ctx.buf
-    if need_draw {
-        var next_tree = ui_new()
-        val root_id = render(cur_state, next_tree)
-        next_tree = ui_layout(ui_set_root(next_tree, root_id), vw, vh)
-        cur_buf = ui_paint(next_tree, cur_state, cur_buf)
-        val _sub = ui_native_submit(lib, cur_buf)
-        active_tree = next_tree
-        cur_state = ui_state_mark_clean(cur_state)
+    var pre_polled: list<HostEvent> = list()
+    if !need_draw {
+        pre_polled = ui_native_poll(lib, 33)
+        if list_len(pre_polled) == 0 {
+            return UiLoopState {
+                state: cur_state,
+                buf: ctx.buf,
+                has_drawn: ctx.has_drawn,
+                last_w: vw,
+                last_h: vh,
+                frame: ctx.frame + 1,
+                running: !cur_state.close_requested,
+            }
+        }
     }
-    val poll_ms = if max_frames > 0 { 16 } else { 33 }
-    val events = ui_native_poll(lib, poll_ms)
-    val next_state = ui_fold_loop_events(active_tree, cur_state, events)
+    val pool = ui_frame_pool_begin()
+    val raw_tree = ui_with_theme(theme)
+    val root_id = render(cur_state, raw_tree)
+    val laid_out = ui_layout_with_state(ui_set_root(raw_tree, root_id), cur_state, vw, vh)
+    val cur_buf = ui_paint(laid_out, cur_state, ctx.buf)
+    val _sub = ui_native_submit(lib, cur_buf)
+    val _cur = ui_native_set_cursor(lib, ui_state_cursor(cur_state))
+    cur_state = ui_state_mark_clean(cur_state)
+    val poll_ms = if max_frames > 0 {
+        4
+    } else if anim {
+        16
+    } else {
+        33
+    }
+    val events = if list_len(pre_polled) > 0 { pre_polled } else { ui_native_poll(lib, poll_ms) }
+    val before_clip = cur_state.interaction.clipboard
+    if has_paste_keydown(events) {
+        val os_clip = ui_native_clipboard_get(lib)
+        if len(os_clip) > 0 && os_clip != before_clip {
+            cur_state = ui_state_set_clipboard(cur_state, os_clip)
+        }
+    }
+    val next_raw = ui_fold_loop_events(laid_out, cur_state, events)
+    val after_clip = next_raw.interaction.clipboard
+    if after_clip != before_clip && len(after_clip) > 0 {
+        val _cs = ui_native_clipboard_set(lib, after_clip)
+    }
+    val _p = ui_frame_pool_pause()
+    val next_state = ui_state_detach(next_raw)
+    val _r = ui_frame_pool_resume(pool)
+    val _d = ui_frame_pool_destroy(pool)
     return UiLoopState {
         state: next_state,
-        buf: cur_buf,
-        last_tree: active_tree,
-        has_tree: true,
+        buf: ctx.buf,
+        has_drawn: true,
         last_w: vw,
         last_h: vh,
         frame: ctx.frame + 1,
         running: !next_state.close_requested,
     }
+}
+
+def ui_run_loop_with_theme(
+    lib: NativeUiLib,
+    max_frames: i64,
+    theme: UiTheme,
+    initial: UiState,
+    render: |UiState, UiTree| -> i64,
+) -> UiState effect ffi, alloc {
+    var ctx = UiLoopState {
+        state: initial,
+        buf: draw_buf_new(16384),
+    }
+    while ctx.running {
+        ctx = ui_run_loop_step(lib, max_frames, theme, ctx, render)
+    }
+    val _f = draw_buf_free(ctx.buf)
+    return ctx.state
 }
 
 /// Drive a declarative reactive loop over an open `NativeUiLib` for up to `max_frames` (or until closed).
@@ -684,16 +1344,51 @@ pub def ui_run_loop(
     initial: UiState,
     render: |UiState, UiTree| -> i64,
 ) -> UiState effect ffi, alloc {
-    var ctx = UiLoopState {
-        state: initial,
-        buf: draw_buf_new(16384),
-        last_tree: ui_new(),
+    return ui_run_loop_with_theme(lib, max_frames, obsidian_theme(), initial, render)
+}
+
+/// High-level standalone application entry point managing window creation, constraints, frame loop, and optional snapshot export.
+pub def ui_run_app(
+    cfg: UiAppConfig,
+    initial: UiState,
+    render: |UiState, UiTree| -> i64,
+) -> result<UiState, str> effect ffi, alloc {
+    val mode = if cfg.headless { UiHostMode.Headless } else { UiHostMode.Desktop }
+    val w = if cfg.width > 64 { cfg.width } else { 800 }
+    val h = if cfg.height > 64 { cfg.height } else { 600 }
+    val opened = ui_open_native_host(mode, cfg.title, w, h, "")
+    val lib = when opened {
+        ok(l) => l,
+        err(msg) => {
+            return err(msg)
+        },
     }
-    while ctx.running {
-        ctx = ui_run_loop_step(lib, max_frames, ctx, render)
+    if cfg.min_width > 0 || cfg.min_height > 0 || cfg.max_width > 0 || cfg.max_height > 0 {
+        val _sc = ui_native_set_size_constraints(
+            lib,
+            cfg.min_width,
+            cfg.min_height,
+            cfg.max_width,
+            cfg.max_height,
+        )
     }
-    val _f = draw_buf_free(ctx.buf)
-    return ctx.state
+    if !cfg.resizable {
+        val _rz = ui_native_set_resizable(lib, false)
+    }
+    if cfg.maximized {
+        val _mx = ui_native_set_maximized(lib, true)
+    }
+    val eff_max = if cfg.headless && cfg.max_frames <= 0 { 1 } else { cfg.max_frames }
+    val final_state = ui_run_loop_with_theme(lib, eff_max, cfg.theme, initial, render)
+    var save_rc = 0
+    if len(cfg.snapshot_path) > 0 {
+        save_rc = ui_native_save_png(lib, cfg.snapshot_path)
+    }
+    val _cl = ui_close_native_host(lib)
+    if save_rc != 0 {
+        return err(f"failed to save snapshot PNG to '{cfg.snapshot_path}' (rc={to_str(save_rc)})")
+    }
+    return ok(final_state)
 }
 
 /// Lay out and rasterize a single headless CPU frame, sampling its center pixel and optionally writing a PNG.
@@ -749,6 +1444,15 @@ def svg_table_row_node(th: UiTheme, r: UiRect, node: UiNode) -> str effect alloc
         + svg_text_node(r, node.text, mix_color(th.fg, accent, 0.35), 12.0, 10.0, 17.0)
 }
 
+def svg_progress_bar_node(th: UiTheme, r: UiRect, node: UiNode) -> str effect alloc {
+    val bar_y = r.y + 8.0
+    val frac = if node.max_val > 0.0 { node.value / node.max_val } else { 0.0 }
+    val fill_w = r.w * frac
+    val track_css = color_css(th.panel_alt)
+    val fill_css = color_css(tone_color(th, node.tone))
+    return f"<rect x=\"{r.x}\" y=\"{bar_y}\" width=\"{r.w}\" height=\"8\" rx=\"4\" fill=\"{track_css}\"/><rect x=\"{r.x}\" y=\"{bar_y}\" width=\"{fill_w}\" height=\"8\" rx=\"4\" fill=\"{fill_css}\"/>"
+}
+
 def svg_render_node(tree: UiTree, node: UiNode) -> str effect alloc {
     val r = node.layout
     val th = tree.theme
@@ -780,6 +1484,11 @@ def svg_render_node(tree: UiTree, node: UiNode) -> str effect alloc {
         WidgetKind.TableHeader => f"<rect x=\"{r.x}\" y=\"{r.y}\" width=\"{r.w}\" height=\"{r.h}\" fill=\"{color_css(th.panel_alt)}\"/>"
             + svg_text_node(r, node.text, th.cyan, 12.0, 10.0, 18.0),
         WidgetKind.TableRow => svg_table_row_node(th, r, node),
+        WidgetKind.StatCard => f"<rect x=\"{r.x}\" y=\"{r.y}\" width=\"{r.w}\" height=\"{r.h}\" rx=\"8\" fill=\"{color_css(th.panel)}\" stroke=\"{color_css(th.border)}\"/>"
+            + svg_text_node(r, node.subtext, th.fg_muted, 11.0, 12.0, 22.0)
+            + svg_text_node(r, node.text, th.fg, 20.0, 12.0, 48.0),
+        WidgetKind.ProgressBar => svg_progress_bar_node(th, r, node),
+        WidgetKind.Divider => f"<line x1=\"{r.x}\" y1=\"{r.y + r.h * 0.5}\" x2=\"{r.x + r.w}\" y2=\"{r.y + r.h * 0.5}\" stroke=\"{color_css(th.border)}\"/>",
         _ => if node.style.bg.a > 0 {
             f"<rect x=\"{r.x}\" y=\"{r.y}\" width=\"{r.w}\" height=\"{r.h}\" fill=\"{color_css(node.style.bg)}\"/>"
         } else {

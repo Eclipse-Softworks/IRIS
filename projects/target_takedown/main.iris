@@ -1,0 +1,859 @@
+// IRIS Aegis-Vision Target Takedown Simulator
+// Live laptop camera capture (with synthetic tactical sensor fallback),
+// real-time CV motion/salience tracking, lead prediction, and simulated takedown HUD.
+
+bring std.ui
+bring "vision.iris"
+bring "hud.iris"
+
+record CliOpts {
+    force_sim: bool = false,
+    headless: bool = false,
+    probe_camera: bool = false,
+    snap_path: str = "",
+}
+
+record TakedownModel {
+    theme_idx: i64 = 0,
+    tint_mode: i64 = 0,
+    detect_idx: i64 = 2,
+    mirror: bool = true,
+    auto_engage: bool = true,
+    show_heatmap: bool = false,
+    show_lead: bool = true,
+    sensitivity: f64 = 68.0,
+    lock_speed: f64 = 110.0,
+    frame_idx: i64 = 0,
+}
+
+record AppState {
+    model: TakedownModel = TakedownModel {},
+    ws: VisionWorkspace = VisionWorkspace {},
+    tracks: list<TrackedTarget> = list(),
+    bogeys: list<SimBogey> = list(),
+    stats: VisionStats = VisionStats {},
+    energy_xs: list<f64> = list(),
+    energy_ys: list<f64> = list(),
+    cam_id: i64 = 0,
+    is_live: bool = false,
+    device_name: str = "IRIS Sim Sensor",
+    last_clock: f64 = 0.0,
+    last_cam_seq: i64 = -1,
+    fps_smooth: f64 = 60.0,
+    vp_x: f64 = 0.0,
+    vp_y: f64 = 0.0,
+    vp_w: f64 = 0.0,
+    vp_h: f64 = 0.0,
+}
+
+def parse_cli(argv: list<str>) -> CliOpts {
+    var force_sim = false
+    var headless = false
+    var probe_camera = false
+    var snap = ""
+    var i = 1
+    while i < list_len(argv) {
+        val a = list_get(argv, i)
+        if a == "--sim" {
+            force_sim = true
+        } else if a == "--probe-camera" {
+            probe_camera = true
+        } else if a == "--headless-snapshot" {
+            headless = true
+            snap = if i + 1 < list_len(argv) {
+                list_get(argv, i + 1)
+            } else {
+                "target_takedown_snapshot.png"
+            }
+            if i + 1 < list_len(argv) {
+                i = i + 1
+            }
+        }
+        i = i + 1
+    }
+    return CliOpts {
+        force_sim: force_sim,
+        headless: headless,
+        probe_camera: probe_camera,
+        snap_path: snap,
+    }
+}
+
+def pick_theme(idx: i64) -> UiTheme {
+    val m = idx % 4
+    if m == 1 {
+        return midnight_theme()
+    }
+    if m == 2 {
+        return nord_theme()
+    }
+    if m == 3 {
+        return emerald_studio_theme()
+    }
+    return obsidian_theme()
+}
+
+def mode_from_idx(idx: i64) -> DetectMode {
+    if idx == 0 {
+        return DetectMode.Motion
+    }
+    if idx == 1 {
+        return DetectMode.SalientColor
+    }
+    return DetectMode.Hybrid
+}
+
+def tint_name(mode: i64) -> str {
+    if mode == 1 {
+        return "NVG"
+    }
+    if mode == 2 {
+        return "FLIR"
+    }
+    if mode == 3 {
+        return "SLATE"
+    }
+    return "RGB"
+}
+
+def track_row_text(t: TrackedTarget, primary_id: i64) -> str {
+    val star = if t.id == primary_id { "* " } else { "  " }
+    val st = when t.status {
+        TargetStatus.Acquired => "ACQ",
+        TargetStatus.Tracking => "TRK",
+        TargetStatus.Locked => "LOCK",
+        TargetStatus.Engaging => "ENG",
+        TargetStatus.Neutralized => "KILL",
+    }
+    val pct = to_str((t.lock_progress * 100.0) to i64)
+    return star + "TGT-0" + to_str(t.id) + "  " + st + "  Lock " + pct + "%"
+}
+
+def build_header(tree: UiTree, app: AppState) -> i64 effect alloc {
+    val src_label = if app.is_live { "LIVE CAMERA" } else { "SIM SENSOR" }
+    val src_tone = if app.is_live { UiTone.Accent } else { UiTone.Secondary }
+    val switch_txt = if app.is_live { "Switch to Sim" } else { "Connect Webcam" }
+    return ui_row(
+        tree,
+        "hdr_row",
+        UiStyle { gap: 10.0, padding: 4.0 },
+        list(
+            ui_icon(tree, "hdr_ic", UiIcon.Compass, 22.0, UiTone.Accent),
+            ui_heading(tree, "hdr_ttl", "IRIS Aegis Target Takedown", UiTone.Primary),
+            ui_badge(tree, "src_badge", src_label, src_tone),
+            ui_badge(tree, "tint_badge", tint_name(app.model.tint_mode), UiTone.Neutral),
+            ui_spacer(tree, 1.0, 8.0, 0.0),
+            ui_icon_button(
+                tree,
+                "feed_btn",
+                UiIcon.Camera,
+                switch_txt,
+                UiTone.Primary,
+                "toggle_feed",
+            ),
+            ui_button_tone(tree, "theme_btn", "Theme", "cycle_theme", UiTone.Neutral),
+        ),
+    )
+}
+
+def build_stats_strip(tree: UiTree, app: AppState, vw: f64) -> i64 effect alloc {
+    val cols = ui_responsive_cols(vw * 0.68, 2, 4, 4)
+    val prim_txt = if app.stats.primary_id > 0 {
+        "TGT-0" + to_str(app.stats.primary_id)
+    } else {
+        "SCAN"
+    }
+    val eng_pct = to_str((app.stats.motion_energy * 100.0) to i64) + "%"
+    return ui_grid(
+        tree,
+        "stat_grid",
+        cols,
+        10.0,
+        list(
+            ui_stat_card(
+                tree,
+                "st_trk",
+                StatSpec {
+                    title: "Active Tracks",
+                    value: to_str(app.stats.active_count),
+                    delta: "Max 6",
+                    positive: true,
+                    icon: UiIcon.Activity,
+                    tone: UiTone.Primary,
+                },
+            ),
+            ui_stat_card(
+                tree,
+                "st_prim",
+                StatSpec {
+                    title: "Primary Target",
+                    value: prim_txt,
+                    delta: "Lock",
+                    positive: true,
+                    icon: UiIcon.Compass,
+                    tone: UiTone.Accent,
+                },
+            ),
+            ui_stat_card(
+                tree,
+                "st_kill",
+                StatSpec {
+                    title: "Neutralized",
+                    value: to_str(app.stats.neutralized_total),
+                    delta: "Shots: " + to_str(app.stats.shots_fired),
+                    positive: true,
+                    icon: UiIcon.CheckCircle,
+                    tone: UiTone.Secondary,
+                },
+            ),
+            ui_stat_card(
+                tree,
+                "st_energy",
+                StatSpec {
+                    title: "Scene Energy",
+                    value: eng_pct,
+                    delta: to_str((app.fps_smooth + 0.5) to i64) + " FPS · CV",
+                    positive: true,
+                    icon: UiIcon.Bolt,
+                    tone: UiTone.Accent,
+                },
+            ),
+        ),
+    )
+}
+
+def build_left_pane(tree: UiTree, app: AppState, vw: f64) -> i64 effect alloc {
+    val vp_card = ui_card(
+        tree,
+        "cam_viewport",
+        UiStyle { min_w: 520.0, min_h: 360.0, flex: 1.0, radius: 12.0, border_width: 1.5 },
+        list(),
+    )
+    val strip = build_stats_strip(tree, app, vw)
+    return ui_col(tree, "left_pane", UiStyle { gap: 10.0, flex: 1.0 }, list(vp_card, strip))
+}
+
+def build_roster_list(tree: UiTree, app: AppState) -> i64 effect alloc {
+    val rows: list<i64> = list()
+    val lim = if list_len(app.tracks) < 4 { list_len(app.tracks) } else { 4 }
+    for i in 0..lim {
+        val t = list_get(app.tracks, i)
+        val txt = track_row_text(t, app.stats.primary_id)
+        list_push(
+            rows,
+            ui_label(
+                tree,
+                "trk_" + to_str(t.id),
+                txt,
+                UiStyle { font_size: 12.0, monospace: true },
+            ),
+        )
+    }
+    if lim == 0 {
+        list_push(
+            rows,
+            ui_label(tree, "trk_none", "Scanning sensor field...", UiStyle { font_size: 12.0 }),
+        )
+    }
+    return ui_col(tree, "roster_col", UiStyle { gap: 4.0 }, rows)
+}
+
+def build_control_pane(tree: UiTree, app: AppState) -> i64 effect alloc {
+    val m = app.model
+    val tint_seg = ui_segmented(
+        tree,
+        "tint_seg",
+        list("RGB", "NVG", "FLIR", "SLATE"),
+        m.tint_mode,
+        UiTone.Accent,
+        "tint_change",
+    )
+    val det_tabs = ui_tabs(
+        tree,
+        "det_tabs",
+        list("Motion", "Color", "Hybrid"),
+        m.detect_idx,
+        UiTone.Primary,
+        "det_change",
+    )
+    val action_row = ui_row(
+        tree,
+        "engage_row",
+        UiStyle { gap: 8.0 },
+        list(
+            ui_icon_button(
+                tree,
+                "engage_btn",
+                UiIcon.Rocket,
+                "ENGAGE [Space]",
+                UiTone.Accent,
+                "engage_cmd",
+            ),
+            ui_icon_button(
+                tree,
+                "recal_btn",
+                UiIcon.Refresh,
+                "Reset BG",
+                UiTone.Neutral,
+                "recal_cmd",
+            ),
+        ),
+    )
+    val chart = ui_sparkline(
+        tree,
+        "energy_spark",
+        ChartSeries {
+            label: "Motion",
+            xs: app.energy_xs,
+            ys: app.energy_ys,
+            tone: UiTone.Accent,
+            fill: true,
+        },
+        UiStyle { min_h: 62.0 },
+    )
+    return ui_card(
+        tree,
+        "ctrl_card",
+        UiStyle { padding: 14.0, gap: 8.0 },
+        list(
+            ui_heading(tree, "ctl_h", "Fire Control & CV", UiTone.Accent),
+            tint_seg,
+            det_tabs,
+            action_row,
+            ui_divider(tree, "Targeting"),
+            ui_toggle(tree, "auto_tog", "Auto-Takedown on Lock", m.auto_engage, UiTone.Accent),
+            ui_toggle(tree, "mir_tog", "Mirror Camera Horizontally", m.mirror, UiTone.Primary),
+            ui_toggle(tree, "heat_tog", "Salience Heatmap", m.show_heatmap, UiTone.Secondary),
+            ui_toggle(tree, "lead_tog", "Predictive Lead Pip", m.show_lead, UiTone.Accent),
+            ui_slider(tree, "sens_sl", "CV Sensitivity", m.sensitivity, 100.0),
+            ui_slider(tree, "lock_sl", "Lock Acquisition Speed", m.lock_speed, 200.0),
+            ui_divider(tree, "Tracks & Energy"),
+            build_roster_list(tree, app),
+            chart,
+        ),
+    )
+}
+
+def build_studio_root(tree: UiTree, _st: UiState, app: AppState, vw: f64) -> i64 effect alloc {
+    val hdr = build_header(tree, app)
+    val left = build_left_pane(tree, app, vw)
+    val right = build_control_pane(tree, app)
+    val body = if vw < 860.0 {
+        ui_col(tree, "narrow_body", UiStyle { gap: 10.0, flex: 1.0 }, list(left, right))
+    } else {
+        ui_split_pane(tree, "main_split", 0.67, left, right)
+    }
+    return ui_col(tree, "root", UiStyle { padding: 12.0, gap: 10.0, flex: 1.0 }, list(hdr, body))
+}
+
+def push_energy_sample(
+    xs: list<f64>,
+    ys: list<f64>,
+    step_idx: i64,
+    energy: f64,
+) -> (list<f64>, list<f64>) effect alloc {
+    val n = list_len(xs)
+    val start = if n >= 32 { n - 31 } else { 0 }
+    val nx: list<f64> = list()
+    val ny: list<f64> = list()
+    for i in start..n {
+        list_push(nx, list_get(xs, i))
+        list_push(ny, list_get(ys, i))
+    }
+    list_push(nx, to_f64(step_idx))
+    list_push(ny, energy * 100.0)
+    return (nx, ny)
+}
+
+def step_vision_frame(lib: NativeUiLib, app: AppState, dt: f64) -> AppState effect ffi, alloc {
+    var bogeys = app.bogeys
+    if !app.is_live && app.cam_id > 0 {
+        bogeys = step_and_sync_bogeys(lib, app.cam_id, bogeys, dt)
+    }
+    var ws = app.ws
+    var energy = app.stats.motion_energy
+    var tracks = app.tracks
+    var stats = app.stats
+    var ex = app.energy_xs
+    var ey = app.energy_ys
+    var next_cam_seq = app.last_cam_seq
+    val cfg = VisionConfig {
+        mode: mode_from_idx(app.model.detect_idx),
+        sensitivity: app.model.sensitivity / 100.0,
+        lock_speed: app.model.lock_speed / 100.0,
+        auto_engage: app.model.auto_engage,
+        dt: dt,
+    }
+    val next_idx = app.model.frame_idx + 1
+
+    var need_full_cv = true
+    if app.is_live && app.cam_id > 0 {
+        val cur_seq = ui_native_camera_info(lib, app.cam_id).seq
+        if cur_seq > 0 && cur_seq == app.last_cam_seq {
+            need_full_cv = false
+            val (tr2, st2) = coast_tracker(tracks, stats, cfg)
+            tracks = tr2
+            stats = st2
+        }
+    }
+
+    if need_full_cv {
+        val samp = if app.cam_id > 0 {
+            ui_native_camera_sample_grid(
+                lib,
+                app.cam_id,
+                GRID_W,
+                GRID_H,
+                app.model.mirror,
+                ws.grid_cell,
+            )
+        } else {
+            -1
+        }
+        if samp >= 0 {
+            next_cam_seq = samp
+            val (ws2, e2) = update_salience_field(ws, mode_from_idx(app.model.detect_idx))
+            ws = ws2
+            energy = e2
+            val raw_dets = extract_detections(ws, app.model.sensitivity / 100.0)
+            val dets = if app.is_live {
+                raw_dets
+            } else {
+                attach_sim_slots(raw_dets, bogeys, app.model.mirror)
+            }
+            val base_stats = VisionStats {
+                active_count: stats.active_count,
+                primary_id: stats.primary_id,
+                next_track_id: stats.next_track_id,
+                neutralized_total: stats.neutralized_total,
+                shots_fired: stats.shots_fired,
+                motion_energy: energy,
+                hit_flash_hud: stats.hit_flash_hud,
+            }
+            val (tr2, st2, bg2) = step_tracker(tracks, dets, base_stats, cfg, bogeys)
+            tracks = tr2
+            stats = st2
+            bogeys = bg2
+        }
+        val (nx, ny) = push_energy_sample(app.energy_xs, app.energy_ys, next_idx, energy)
+        ex = nx
+        ey = ny
+    }
+
+    val next_model = TakedownModel {
+        theme_idx: app.model.theme_idx,
+        tint_mode: app.model.tint_mode,
+        detect_idx: app.model.detect_idx,
+        mirror: app.model.mirror,
+        auto_engage: app.model.auto_engage,
+        show_heatmap: app.model.show_heatmap,
+        show_lead: app.model.show_lead,
+        sensitivity: app.model.sensitivity,
+        lock_speed: app.model.lock_speed,
+        frame_idx: next_idx,
+    }
+    return AppState {
+        model: next_model,
+        ws: ws,
+        tracks: tracks,
+        bogeys: bogeys,
+        stats: stats,
+        energy_xs: ex,
+        energy_ys: ey,
+        cam_id: app.cam_id,
+        is_live: app.is_live,
+        device_name: app.device_name,
+        last_clock: app.last_clock,
+        last_cam_seq: next_cam_seq,
+        fps_smooth: app.fps_smooth,
+        vp_x: app.vp_x,
+        vp_y: app.vp_y,
+        vp_w: app.vp_w,
+        vp_h: app.vp_h,
+    }
+}
+
+def reopen_camera(
+    lib: NativeUiLib,
+    old_cam_id: i64,
+    synthetic_only: bool,
+) -> (i64, bool, str) effect ffi, alloc {
+    if old_cam_id > 0 {
+        val _cl = ui_native_camera_close(lib, old_cam_id)
+    }
+    val cam_id = ui_native_camera_open(lib, 0, 640, 360, synthetic_only)
+    if cam_id <= 0 {
+        return (0, false, "Camera Unavailable")
+    }
+    val info = ui_native_camera_info(lib, cam_id)
+    val live = info.mode == 1
+    val name = if len(info.device_name) > 0 { info.device_name } else { "Sensor" }
+    return (cam_id, live, name)
+}
+
+def viewport_clicked_norm(st: UiState, evs: list<HostEvent>, app: AppState) -> option<UiSize> {
+    val _u = st
+    if app.vp_w <= 8.0 || app.vp_h <= 8.0 {
+        return none
+    }
+    for i in 0..list_len(evs) {
+        val ev = list_get(evs, i)
+        val is_dn = when ev.kind {
+            UiEventKind.PointerDown => true,
+            _ => false,
+        }
+        if is_dn
+            && ev.x >= app.vp_x
+            && ev.x <= app.vp_x + app.vp_w
+            && ev.y >= app.vp_y
+            && ev.y <= app.vp_y + app.vp_h {
+            val nx = (ev.x - app.vp_x) / app.vp_w
+            val ny = (ev.y - app.vp_y) / app.vp_h
+            return some(UiSize { w: nx, h: ny })
+        }
+    }
+    return none
+}
+
+def spacebar_pressed(evs: list<HostEvent>) -> bool {
+    for i in 0..list_len(evs) {
+        val ev = list_get(evs, i)
+        val is_kd = when ev.kind {
+            UiEventKind.KeyDown => true,
+            _ => false,
+        }
+        if is_kd && ev.key_code == 12 {
+            return true
+        }
+    }
+    return false
+}
+
+def apply_ui_actions(
+    lib: NativeUiLib,
+    ui_st: UiState,
+    evs: list<HostEvent>,
+    app: AppState,
+) -> (UiState, AppState) effect ffi, alloc {
+    var st = ui_st
+    var next = app
+    val act = st.dispatched_action
+    if act == "cycle_theme" {
+        next.model.theme_idx = (next.model.theme_idx + 1) % 4
+    } else if act == "toggle_feed" {
+        val want_sim = next.is_live
+        val (cid, live, dname) = reopen_camera(lib, next.cam_id, want_sim)
+        next.cam_id = cid
+        next.is_live = live
+        next.device_name = dname
+        next.ws = vision_recalibrate(next.ws)
+        next.last_cam_seq = -1
+        val msg = if live {
+            "Live camera active: " + dname
+        } else {
+            "Switched to tactical sim feed"
+        }
+        st = ui_state_push_toast(st, "Sensor Switch", msg, UiTone.Accent, 2.5)
+    } else if act == "recal_cmd" {
+        next.ws = vision_recalibrate(next.ws)
+        next.last_cam_seq = -1
+        st = ui_state_push_toast(
+            st,
+            "Calibration",
+            "Background reference reset",
+            UiTone.Primary,
+            2.0,
+        )
+    }
+
+    if ui_state_tab_changed(st, "tint_seg") && st.extras.last_tab_idx >= 0 {
+        next.model.tint_mode = st.extras.last_tab_idx % 4
+    } else if ui_state_tab_changed(st, "det_tabs") && st.extras.last_tab_idx >= 0 {
+        next.model.detect_idx = st.extras.last_tab_idx % 3
+        next.ws = vision_recalibrate(next.ws)
+        next.last_cam_seq = -1
+    }
+
+    if st.has_toggle_change {
+        if st.last_toggle_key == "auto_tog" {
+            next.model.auto_engage = st.last_toggle_val
+        } else if st.last_toggle_key == "mir_tog" {
+            next.model.mirror = st.last_toggle_val
+            next.ws = vision_recalibrate(next.ws)
+            next.last_cam_seq = -1
+        } else if st.last_toggle_key == "heat_tog" {
+            next.model.show_heatmap = st.last_toggle_val
+        } else if st.last_toggle_key == "lead_tog" {
+            next.model.show_lead = st.last_toggle_val
+        }
+    }
+
+    if st.has_slider_change {
+        if st.last_slider_key == "sens_sl" {
+            next.model.sensitivity = st.last_slider_val
+        } else if st.last_slider_key == "lock_sl" {
+            next.model.lock_speed = st.last_slider_val
+        }
+    }
+
+    var do_engage = act == "engage_cmd" || spacebar_pressed(evs)
+    when viewport_clicked_norm(st, evs, next) {
+        some(pos) => {
+            when designate_target_at(next.tracks, pos.w, pos.h) {
+                some(tid) => {
+                    if tid == next.stats.primary_id {
+                        do_engage = true
+                    } else {
+                        next.stats.primary_id = tid
+                        st = ui_state_spring_from(st, "hud.reticle", 1.28, 1.0, spring_snappy())
+                    }
+                },
+                none => {},
+            }
+        },
+        none => {},
+    }
+
+    if do_engage {
+        val (tr2, fired) = engage_primary_target(next.tracks, next.stats.primary_id)
+        if fired {
+            next.tracks = tr2
+            st = ui_state_spring_from(st, "hud.reticle", 0.78, 1.0, spring_bouncy())
+        }
+    }
+    return (st, next)
+}
+
+def main() -> i64 effect ffi, alloc {
+    val opts = parse_cli(args())
+    val mode = if opts.headless || opts.probe_camera {
+        UiHostMode.Headless
+    } else {
+        UiHostMode.Desktop
+    }
+    val opened = ui_open_native_host(mode, "IRIS Aegis Target Takedown", 1360, 840, "")
+    val lib = when opened {
+        ok(l) => l,
+        err(msg) => {
+            println("failed to open native host: " + msg)
+            return 1
+        },
+    }
+    if opts.probe_camera {
+        val (probe_id, _plive, _pname) = reopen_camera(lib, 0, false)
+        var info = UiCameraInfo {}
+        if probe_id > 0 {
+            var tries = 0
+            while tries < 10 {
+                info = ui_native_camera_info(lib, probe_id)
+                if info.seq > 0 {
+                    tries = 10
+                } else {
+                    val _pe = ui_native_poll(lib, 120)
+                    tries = tries + 1
+                }
+            }
+            val _pc = ui_native_camera_close(lib, probe_id)
+        }
+        println(
+            "camera_probe mode="
+                + to_str(info.mode)
+                + " dims="
+                + to_str(info.width)
+                + "x"
+                + to_str(info.height)
+                + " seq="
+                + to_str(info.seq)
+                + " device="
+                + info.device_name,
+        )
+        val _pcl = ui_close_native_host(lib)
+        return 0
+    }
+    val _min = ui_native_set_size_constraints(lib, 860, 560, 0, 0)
+    val use_sim = opts.force_sim || opts.headless
+    val (cam_id, is_live, dev_name) = reopen_camera(lib, 0, use_sim)
+
+    var ui_st = ui_state_new()
+    var app = AppState {
+        ws: vision_workspace_new(),
+        bogeys: init_sim_bogeys(),
+        cam_id: cam_id,
+        is_live: is_live,
+        device_name: dev_name,
+    }
+    var buf = draw_buf_new(32768)
+    var fake_now = 0.0
+    var running = true
+
+    while running {
+        val m = ui_native_metrics(lib)
+        if !m.is_open {
+            running = false
+        } else {
+            val vw = if m.width > 64.0 { m.width } else { 1360.0 }
+            val vh = if m.height > 64.0 { m.height } else { 840.0 }
+            val now = if opts.headless {
+                fake_now = fake_now + 0.045
+                fake_now
+            } else {
+                ui_native_clock_secs(lib)
+            }
+            val frame_start = now
+            val raw_dt = now - app.last_clock
+            val dt = if raw_dt > 0.004 && raw_dt < 0.12 { raw_dt } else { 0.033 }
+            app.last_clock = now
+            if !opts.headless {
+                val inst_fps = 1.0 / dt
+                app.fps_smooth = app.fps_smooth * 0.88 + inst_fps * 0.12
+            }
+            app = step_vision_frame(lib, app, dt)
+            ui_st = ui_state_tick(ui_st, now)
+
+            val ret_scale = ui_state_spring_value(ui_st, "hud.reticle", 1.0)
+            val hud_cfg = HudConfig {
+                cam_id: app.cam_id,
+                mirror: app.model.mirror,
+                tint_mode: app.model.tint_mode,
+                show_heatmap: app.model.show_heatmap,
+                show_lead: app.model.show_lead,
+                is_live: app.is_live,
+                device_name: app.device_name,
+                reticle_scale: ret_scale,
+                primary_id: app.stats.primary_id,
+                hit_flash_hud: app.stats.hit_flash_hud,
+                theme: pick_theme(app.model.theme_idx),
+            }
+
+            val pool = ui_frame_pool_begin()
+            val raw_tree = ui_with_theme(hud_cfg.theme)
+            val root_id = build_studio_root(raw_tree, ui_st, app, vw)
+            val laid_out = ui_layout_with_state(ui_set_root(raw_tree, root_id), ui_st, vw, vh)
+            val vp_opt = ui_find_node_key(laid_out, "cam_viewport")
+            val vp = when vp_opt {
+                some(idx) => list_get(laid_out.nodes, idx).layout,
+                none => UiRect {},
+            }
+            val base_painted = ui_paint(laid_out, ui_st, buf)
+            val full_painted = paint_takedown_hud(base_painted, vp, app.ws, app.tracks, hud_cfg)
+            val _sub = ui_native_submit(lib, full_painted)
+
+            val spent_ms = if opts.headless {
+                0
+            } else {
+                ((ui_native_clock_secs(lib) - frame_start) * 1000.0) to i64
+            }
+            val wait_ms = if opts.headless {
+                0
+            } else if spent_ms < 14 {
+                14 - spent_ms
+            } else {
+                0
+            }
+            val evs = ui_native_poll(lib, wait_ms)
+            val next_st = ui_process_events(laid_out, ui_clear_events(ui_st), evs)
+            val _cur = ui_native_set_cursor(lib, ui_state_cursor(next_st))
+
+            val _p = ui_frame_pool_pause()
+            ui_st = ui_state_detach(next_st)
+            val cloned_evs: list<HostEvent> = list()
+            for j in 0..list_len(evs) {
+                val e = list_get(evs, j)
+                list_push(
+                    cloned_evs,
+                    HostEvent {
+                        kind: e.kind,
+                        button: e.button,
+                        key_code: e.key_code,
+                        x: e.x,
+                        y: e.y,
+                    },
+                )
+            }
+            app.vp_x = vp.x
+            app.vp_y = vp.y
+            app.vp_w = vp.w
+            app.vp_h = vp.h
+            val _r = ui_frame_pool_resume(pool)
+            val _d = ui_frame_pool_destroy(pool)
+
+            val (upd_st, upd_app) = apply_ui_actions(lib, ui_st, cloned_evs, app)
+            ui_st = upd_st
+            app = upd_app
+
+            if ui_st.close_requested {
+                running = false
+            }
+            if opts.headless && app.model.frame_idx >= 36 {
+                val _png = ui_native_save_png(lib, opts.snap_path)
+                running = false
+            }
+        }
+    }
+
+    if app.cam_id > 0 {
+        val _c = ui_native_camera_close(lib, app.cam_id)
+    }
+    val _fw = vision_workspace_free(app.ws)
+    val _fb = draw_buf_free(buf)
+    val _cl = ui_close_native_host(lib)
+    return 0
+}
+
+def test_target_takedown_pipeline() -> i64 {
+    val opened = ui_open_native_host(UiHostMode.Headless, "Takedown Test", 960, 600, "")
+    val lib = when opened {
+        ok(l) => l,
+        err(_) => {
+            return 1
+        },
+    }
+    val (cam_id, _live, dev_name) = reopen_camera(lib, 0, true)
+    assert(cam_id > 0)
+
+    var st = ui_state_new()
+    var app = AppState {
+        ws: vision_workspace_new(),
+        bogeys: init_sim_bogeys(),
+        cam_id: cam_id,
+        is_live: false,
+        device_name: dev_name,
+    }
+    var buf = draw_buf_new(32768)
+
+    var step = 0
+    while step < 36 {
+        val now = to_f64(step) * 0.045
+        app = step_vision_frame(lib, app, 0.045)
+        st = ui_state_tick(st, now)
+        val pool = ui_frame_pool_begin()
+        val theme = pick_theme(0)
+        val raw = ui_with_theme(theme)
+        val root = build_studio_root(raw, st, app, 960.0)
+        val laid_out = ui_layout_with_state(ui_set_root(raw, root), st, 960.0, 600.0)
+        val vp = list_get(laid_out.nodes, unwrap(ui_find_node_key(laid_out, "cam_viewport"))).layout
+        val p1 = ui_paint(laid_out, st, buf)
+        val hud_cfg = HudConfig {
+            cam_id: app.cam_id,
+            primary_id: app.stats.primary_id,
+            theme: theme,
+        }
+        val p2 = paint_takedown_hud(p1, vp, app.ws, app.tracks, hud_cfg)
+        val _sub = ui_native_submit(lib, p2)
+        assert(draw_buf_cmd_count(buf) > 15)
+        val _ps = ui_frame_pool_pause()
+        st = ui_state_detach(st)
+        val _rs = ui_frame_pool_resume(pool)
+        val _ds = ui_frame_pool_destroy(pool)
+        step = step + 1
+    }
+
+    assert(app.stats.neutralized_total >= 1)
+    assert(list_len(app.tracks) >= 1)
+
+    val _cc = ui_native_camera_close(lib, cam_id)
+    val _fw = vision_workspace_free(app.ws)
+    val _fb = draw_buf_free(buf)
+    val _cl = ui_close_native_host(lib)
+    return 0
+}

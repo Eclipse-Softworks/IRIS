@@ -930,5 +930,267 @@
       "};"
     ],
     "description": "Pattern match as an expression: every arm yields the value (preferred over assigning a var in arms)"
+  },
+  "Native UI Desktop App (Safe Frame Pool)": {
+    "prefix": "uiapp",
+    "body": [
+      "bring std.ui",
+      "",
+      "def main() -> i64 effect ffi, alloc {",
+      "\tval opened = ui_open_native_host(UiHostMode.Desktop, \"${1:IRIS App}\", ${2:1024}, ${3:640}, \"\")",
+      "\tval lib = when opened {",
+      "\t\tok(l) => l,",
+      "\t\terr(msg) => {",
+      "\t\t\tprintln(\"failed to open native host: \" + msg)",
+      "\t\t\treturn 1",
+      "\t\t},",
+      "\t}",
+      "\tvar buf = draw_buf_new(131072)",
+      "\tvar ui_st = ui_state_new()",
+      "\tvar count: i64 = 0",
+      "\tvar running = true",
+      "",
+      "\twhile running {",
+      "\t\tval m = ui_native_metrics(lib)",
+      "\t\tif !m.is_open {",
+      "\t\t\trunning = false",
+      "\t\t} else {",
+      "\t\t\tval vw = if m.width > 64.0 { m.width } else { ${2:1024}.0 }",
+      "\t\t\tval vh = if m.height > 64.0 { m.height } else { ${3:640}.0 }",
+      "\t\t\tval pool = ui_frame_pool_begin()",
+      "\t\t\tval tree = ui_new()",
+      "\t\t\tval hdr = ui_heading(tree, \"hdr\", \"${1:IRIS App}\", UiTone.Accent)",
+      "\t\t\tval btn = ui_button(tree, \"btn_inc\", f\"Count: {count}\", \"act:inc\")",
+      "\t\t\tval root = ui_card(tree, \"root\", UiStyle { padding: 16.0, gap: 10.0 }, list(hdr, btn))",
+      "\t\t\tval laid = ui_layout_with_state(ui_set_root(tree, root), ui_st, vw, vh)",
+      "\t\t\tbuf = ui_paint(laid, ui_st, buf)",
+      "\t\t\tval _sub = ui_native_submit(lib, buf)",
+      "\t\t\tval events = ui_native_poll(lib, 16)",
+      "\t\t\tval next_st = ui_process_events(laid, ui_clear_events(ui_st), events)",
+      "\t\t\tval _cur = ui_native_set_cursor(lib, ui_state_cursor(next_st))",
+      "\t\t\tval _p = ui_frame_pool_pause()",
+      "\t\t\tui_st = ui_state_detach(next_st)",
+      "\t\t\tval _r = ui_frame_pool_resume(pool)",
+      "\t\t\tval _d = ui_frame_pool_destroy(pool)",
+      "\t\t\tval action = ui_st.dispatched_action",
+      "\t\t\tif action == \"act:inc\" {",
+      "\t\t\t\tcount = count + 1",
+      "\t\t\t}",
+      "\t\t\tif ui_st.close_requested {",
+      "\t\t\t\trunning = false",
+      "\t\t\t}",
+      "\t\t}",
+      "\t}",
+      "",
+      "\tval _f = draw_buf_free(buf)",
+      "\tval _c = ui_close_native_host(lib)",
+      "\treturn 0",
+      "}"
+    ],
+    "description": "Native std.ui desktop frame loop with mandatory ui_frame_pool_pause + ui_state_detach safety"
+  },
+  "Headless UI to SVG": {
+    "prefix": "uisvg",
+    "body": [
+      "bring std.ui",
+      "",
+      "def main() -> i64 {",
+      "\tval tree = ui_new()",
+      "\tval hdr = ui_heading(tree, \"hdr\", \"${1:Dashboard}\", UiTone.Accent)",
+      "\tval btn = ui_button(tree, \"btn\", \"${2:Action}\", \"act:run\")",
+      "\tval card = ui_card(tree, \"card\", UiStyle { gap: 8.0 }, list(hdr, btn))",
+      "\tval laid = ui_layout(ui_set_root(tree, card), 640.0, 360.0)",
+      "\tval svg = ui_render_svg(laid)",
+      "\tassert(contains(svg, \"<svg\"))",
+      "\treturn 0",
+      "}"
+    ],
+    "description": "Construct and lay out a responsive std.ui widget tree and render it to SVG"
+  },
+  "UI Responsive Card": {
+    "prefix": "uicard",
+    "body": [
+      "val ${1:cols} = ui_responsive_cols(${2:width}, 1, 2, 3)",
+      "val ${3:card} = ui_card(",
+      "\t${4:tree},",
+      "\t\"${5:panel}\",",
+      "\tUiStyle { padding: 12.0, gap: 8.0 },",
+      "\tlist(",
+      "\t\tui_icon(${4:tree}, \"${5:panel}_ico\", UiIcon.${6:Spark}, 20.0, UiTone.Accent),",
+      "\t\tui_heading(${4:tree}, \"${5:panel}_hdr\", \"${7:Title}\", UiTone.Accent),",
+      "\t\tui_button(${4:tree}, \"${5:panel}_btn\", \"${8:Trigger}\", \"act:${9:run}\"),",
+      "\t),",
+      ")"
+    ],
+    "description": "Create a styled std.ui card with vector SVG icon, heading, and action button"
+  },
+  "UI Modal Overlay": {
+    "prefix": "uimodal",
+    "body": [
+      "ui_modal(",
+      "\t${1:tree},",
+      "\t\"${2:confirm_modal}\",",
+      "\t\"${3:Confirm Action}\",",
+      "\t${4:is_open},",
+      "\t\"act:${5:close_modal}\",",
+      "\tlist(${6:body_node}),",
+      ")"
+    ],
+    "description": "Add a modal dialog overlay widget"
+  },
+  "UI Spring Animation": {
+    "prefix": "uispring",
+    "body": [
+      "ui_st = ui_state_spring_from(${1:ui_st}, \"${2:key}\", ${3:0.0}, ${4:1.0}, spring_snappy())",
+      "val ${5:anim_val} = ui_state_spring_value(${1:ui_st}, \"${2:key}\", ${4:1.0})"
+    ],
+    "description": "Start and sample a spring-animated scalar value on UiState"
+  },
+  "UI Live Camera Capture": {
+    "prefix": "uicamera",
+    "body": [
+      "val ${1:cam_id} = ui_native_camera_open(${2:lib}, 0, ${3:640}, ${4:360}, ${5:false})",
+      "val ${6:cam_info} = ui_native_camera_info(${2:lib}, ${1:cam_id})",
+      "${7:buf} = draw_cmd_camera_frame(${7:buf}, ${8:viewport}, ${1:cam_id}, ${9:true}, 0)"
+    ],
+    "description": "Open a native laptop/synthetic camera stream and draw its live frame into DrawBuffer"
+  },
+  "UI Custom DrawBuffer Canvas": {
+    "prefix": "uicanvas",
+    "body": [
+      "${1:buf} = draw_cmd_push_clip(${1:buf}, ${2:rect})",
+      "${1:buf} = draw_cmd_round_rect(${1:buf}, ${2:rect}, 8.0, UiStyle { bg: rgb(16, 24, 38), border: rgb(0, 94, 195), border_width: 1.5 })",
+      "${1:buf} = draw_cmd_circle(${1:buf}, ${3:100.0}, ${4:100.0}, ${5:24.0}, UiStyle { bg: theme.primary })",
+      "${1:buf} = draw_cmd_pop_clip(${1:buf})"
+    ],
+    "description": "Clip and paint custom vector primitives onto DrawBuffer"
+  },
+  "SQLite Parameterized Query": {
+    "prefix": "sql",
+    "body": [
+      "bring std.sql",
+      "",
+      "val ${1:db} = sql_open(\"${2::memory:}\")",
+      "assert(${1:db} != 0)",
+      "val _rc = sql_exec(${1:db}, \"CREATE TABLE IF NOT EXISTS ${3:items} (id INTEGER, name TEXT)\")",
+      "val _ins = sql_exec_params(${1:db}, \"INSERT INTO ${3:items} VALUES (?, ?)\", list(\"${4:1}\", \"${5:alpha}\"))",
+      "val ${6:rows} = sql_query_params(${1:db}, \"SELECT id, name FROM ${3:items} WHERE id = ?\", list(\"${4:1}\"))",
+      "val _cl = sql_close(${1:db})"
+    ],
+    "description": "Open embedded SQLite database and run parameterized exec/query calls"
+  },
+  "JSON Encode and Query": {
+    "prefix": "json",
+    "body": [
+      "bring std.json",
+      "",
+      "val ${1:payload} = json_obj(",
+      "\tlist(\"${2:name}\", \"${3:count}\"),",
+      "\tlist(json_str(\"${4:iris}\"), json_num_i64(${5:1})),",
+      ")",
+      "val ${6:value} = json_query(${1:payload}, \"${2:name}\")"
+    ],
+    "description": "Encode a JSON object and extract fields with std.json"
+  },
+  "Speculative Execution": {
+    "prefix": "speculate",
+    "body": [
+      "bring std.speculation",
+      "",
+      "val ${1:chosen} = speculate_with_fallback(",
+      "\t|| ${2:candidate_expr},",
+      "\t|| ${3:fallback_expr},",
+      "\t|v: ${4:i64}| v >= 0 && v < ${5:100},",
+      ")"
+    ],
+    "description": "Evaluate a candidate speculatively with validator and fallback"
+  },
+  "Wrapping Arithmetic": {
+    "prefix": "wrap",
+    "body": [
+      "val ${1:stepped} = wrapping_mul(${2:state}, ${3:6364136223846793005})",
+      "val ${4:next} = wrapping_add(${1:stepped}, ${5:delta})"
+    ],
+    "description": "Use explicit two's-complement wrapping arithmetic instead of trapping on E0409"
+  },
+  "Embedded Control Step": {
+    "prefix": "embedded",
+    "body": [
+      "extern def iris_embedded_gpio_read(pin: i64) -> i64 effect io",
+      "extern def iris_embedded_gpio_write(pin: i64, level: i64) -> i64 effect io",
+      "",
+      "var ${1:tick_count}: i64 = 0",
+      "",
+      "def main() -> i64 effect io {",
+      "\tval input_pin = iris_embedded_gpio_read(${2:2})",
+      "\t${1:tick_count} = ${1:tick_count} + input_pin",
+      "\tiris_embedded_gpio_write(${3:13}, ${1:tick_count} % 2)",
+      "\treturn 0",
+      "}"
+    ],
+    "description": "Allocation-free bare-metal control entry point for iris embedded"
+  },
+  "GC & Memory Inspection": {
+    "prefix": "gcstats",
+    "body": [
+      "bring std.async",
+      "",
+      "gc_collect_sweep()",
+      "val ${1:stats} = gc_get_stats()",
+      "val ${2:live_bytes} = map_get(${1:stats}, \"raw_bytes_live\") ?? 0"
+    ],
+    "description": "Force a cycle sweep and inspect live heap/pool counters"
+  },
+  "HTTP Server Endpoint": {
+    "prefix": "httpserv",
+    "body": [
+      "bring std.http_server",
+      "",
+      "def main() -> i64 {",
+      "\thttp_serve(${1:8080}, |req: str| json_ok(\"{\\\"status\\\":\\\"ok\\\"}\"))",
+      "\treturn 0",
+      "}"
+    ],
+    "description": "Start a local HTTP server handler using std.http_server"
+  },
+  "Const Generic Record": {
+    "prefix": "constgen",
+    "body": [
+      "record ${1:FixedBuf}[T, const ${2:N}: usize] {",
+      "\tdata: [T; ${2:N}],",
+      "}"
+    ],
+    "description": "Declare a record parameterized by a compile-time const array size"
+  },
+  "Mutable Deref Write-Back": {
+    "prefix": "derefmut",
+    "body": [
+      "var ${1:value}: i64 = ${2:10}",
+      "val ${3:ptr}: &mut i64 = &mut ${1:value}",
+      "*${3:ptr} += ${4:5}"
+    ],
+    "description": "Mutate a binding through an explicit &mut T reference write-back"
+  },
+  "Conditional Compilation Block": {
+    "prefix": "ifdef",
+    "body": [
+      "#ifdef ${1:WINDOWS}",
+      "\t$0",
+      "#else",
+      "\t// non-${1:WINDOWS} path",
+      "#endif"
+    ],
+    "description": "Preprocessor conditional compilation block (#ifdef / #else / #endif)"
+  },
+  "Bayesian Uncertainty Update": {
+    "prefix": "uncertainty",
+    "body": [
+      "bring std.uncertainty",
+      "",
+      "var ${1:post} = nig_default()",
+      "${1:post} = nig_update_batch(${1:post}, list(${2:10.0, 10.2, 9.8}))",
+      "val (${3:lo}, ${4:hi}) = nig_credible_interval(${1:post})"
+    ],
+    "description": "Update a conjugate Normal-Inverse-Gamma posterior and compute its credible interval"
   }
 }

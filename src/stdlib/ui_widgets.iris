@@ -158,7 +158,13 @@ pub def draw_neural_graph(
         val cx = px + n.x * pw
         val cy = py + n.y * ph
         val rad = n.r * pulse
-        b = draw_cmd_circle(b, cx, cy, rad * 2.4, UiStyle { bg: mix_color(bg, col, 0.07), border: clear, border_width: 0.0 })
+        b = draw_cmd_circle(
+            b,
+            cx,
+            cy,
+            rad * 2.4,
+            UiStyle { bg: mix_color(bg, col, 0.07), border: clear, border_width: 0.0 },
+        )
         b = draw_cmd_circle(b, cx, cy, rad, UiStyle { bg: col, border: clear, border_width: 0.0 })
         i = i + 1
     }
@@ -193,24 +199,48 @@ pub def draw_nav_rail(
         val row = UiRect { x: r.x + 8.0, y: iy, w: r.w - 16.0, h: 30.0 }
         val is_sel = i == selected
         val is_hov = i == hovered
-        val bg = if is_sel { mix_color(theme.surface, theme.primary, 0.22) } else if is_hov { theme.panel_alt } else { theme.surface }
-        b = draw_cmd_round_rect(b, row, 6.0, UiStyle { bg: bg, border: UiColor { r: 0, g: 0, b: 0, a: 0 }, border_width: 0.0 })
+        val bg = if is_sel {
+            mix_color(theme.surface, theme.primary, 0.22)
+        } else if is_hov {
+            theme.panel_alt
+        } else {
+            theme.surface
+        }
+        b = draw_cmd_round_rect(
+            b,
+            row,
+            6.0,
+            UiStyle { bg: bg, border: UiColor { r: 0, g: 0, b: 0, a: 0 }, border_width: 0.0 },
+        )
         if is_sel {
             val glow = 0.55 + 0.45 * motion_pulse(clock, 2.0, 0.0)
             b = draw_cmd_round_rect(
                 b,
                 UiRect { x: row.x, y: row.y + 6.0, w: 3.0, h: 18.0 },
                 1.5,
-                UiStyle { bg: mix_color(theme.bg, theme.primary, glow), border: UiColor { r: 0, g: 0, b: 0, a: 0 }, border_width: 0.0 },
+                UiStyle {
+                    bg: mix_color(theme.bg, theme.primary, glow),
+                    border: UiColor { r: 0, g: 0, b: 0, a: 0 },
+                    border_width: 0.0,
+                },
             )
         }
         val icon_r = UiRect { x: row.x + 9.0, y: row.y + 7.0, w: 16.0, h: 16.0 }
-        b = draw_icon(b, list_get(icons, i), icon_r, if is_sel { theme.primary } else { theme.fg_muted })
+        b = draw_icon(
+            b,
+            list_get(icons, i),
+            icon_r,
+            if is_sel { theme.primary } else { theme.fg_muted },
+        )
         b = draw_cmd_text(
             b,
             UiRect { x: row.x + 34.0, y: row.y + 6.0, w: row.w - 40.0, h: 18.0 },
             list_get(items, i),
-            UiStyle { fg: if is_sel { theme.fg } else { theme.fg_muted }, font_size: 12.0, bold: is_sel },
+            UiStyle {
+                fg: if is_sel { theme.fg } else { theme.fg_muted },
+                font_size: 12.0,
+                bold: is_sel,
+            },
         )
         i = i + 1
     }
@@ -243,15 +273,28 @@ pub def draw_search_box(
         buf,
         r,
         6.0,
-        UiStyle { bg: theme.bg, border: if focused { theme.cyan } else { theme.border }, border_width: if focused { 1.5 } else { 1.0 } },
+        UiStyle {
+            bg: theme.bg,
+            border: if focused { theme.cyan } else { theme.border },
+            border_width: if focused { 1.5 } else { 1.0 },
+        },
     )
-    b = draw_icon(b, UiIcon.Search, UiRect { x: r.x + 8.0, y: r.y + 8.0, w: 16.0, h: 16.0 }, theme.fg_muted)
+    b = draw_icon(
+        b,
+        UiIcon.Search,
+        UiRect { x: r.x + 8.0, y: r.y + 8.0, w: 16.0, h: 16.0 },
+        theme.fg_muted,
+    )
     val shown = if len(text) > 0 { text } else { placeholder }
     b = draw_cmd_text(
         b,
         UiRect { x: r.x + 32.0, y: r.y + 7.0, w: r.w - 40.0, h: 18.0 },
         shown,
-        UiStyle { fg: if len(text) > 0 { theme.fg } else { theme.fg_muted }, font_size: 12.0, monospace: true },
+        UiStyle {
+            fg: if len(text) > 0 { theme.fg } else { theme.fg_muted },
+            font_size: 12.0,
+            monospace: true,
+        },
     )
     if focused {
         val blink = motion_pulse(clock, 6.0, 0.0)
@@ -296,7 +339,11 @@ pub def draw_segmented(
         b,
         UiRect { x: pill_x, y: r.y + 3.0, w: seg_w - 6.0, h: r.h - 6.0 },
         6.0,
-        UiStyle { bg: mix_color(theme.surface, theme.primary, 0.30), border: theme.primary, border_width: 1.0 },
+        UiStyle {
+            bg: mix_color(theme.surface, theme.primary, 0.30),
+            border: theme.primary,
+            border_width: 1.0,
+        },
     )
     var i = 0
     while i < n {
@@ -321,12 +368,16 @@ pub def segmented_at(r: UiRect, ev: HostEvent, count: i64) -> i64 {
         return -1
     }
     val idx = (((ev.x - r.x) / r.w) * to_f64(count)) to i64
-    if idx < 0 { return 0 }
-    if idx >= count { return count - 1 }
+    if idx < 0 {
+        return 0
+    }
+    if idx >= count {
+        return count - 1
+    }
     return idx
 }
 
-/// Circular progress ring, drawn as a polyline arc.
+/// Circular progress ring drawn with crisp antialiased vector arcs.
 pub def draw_progress_ring(
     buf: DrawBuffer,
     r: UiRect,
@@ -340,34 +391,31 @@ pub def draw_progress_ring(
     val cx = r.x + r.w * 0.5
     val cy = r.y + r.h * 0.5 - 6.0
     val rad = min(r.w, r.h - 16.0) * 0.42
+    val safe_th = if thickness > 0.5 { thickness } else { 4.5 }
     val clear = UiColor { r: 0, g: 0, b: 0, a: 0 }
-    val xs: list<f64> = list()
-    val ys: list<f64> = list()
-    var i = 0
-    while i <= 40 {
-        val a = -1.5707963 + to_f64(i) / 40.0 * 6.28318
-        list_push(xs, cx + cos(a) * rad)
-        list_push(ys, cy + sin(a) * rad)
-        i = i + 1
+    var b = draw_cmd_circle(
+        buf,
+        cx,
+        cy,
+        rad,
+        UiStyle { bg: clear, border: track, border_width: safe_th },
+    )
+    val frac = motion_clamp01(value)
+    if frac > 0.005 {
+        b = draw_cmd_arc(b, cx, cy, rad, -1.57079632679, frac * 6.28318530718, color, safe_th, true)
     }
-    var b = draw_cmd_polyline(buf, xs, ys, track, clear)
-    val vx: list<f64> = list()
-    val vy: list<f64> = list()
-    val steps = (40.0 * motion_clamp01(value)) to i64 + 1
-    i = 0
-    while i <= steps {
-        val a = -1.5707963 + to_f64(i) / 40.0 * 6.28318
-        list_push(vx, cx + cos(a) * rad)
-        list_push(vy, cy + sin(a) * rad)
-        i = i + 1
-    }
-    b = draw_cmd_polyline(b, vx, vy, color, clear)
     if len(label) > 0 {
         b = draw_cmd_text(
             b,
             UiRect { x: r.x, y: r.y + r.h - 22.0, w: r.w, h: 20.0 },
             label,
-            UiStyle { fg: theme.fg, font_size: 11.0, bold: true, align: UiAlign.Center, monospace: true },
+            UiStyle {
+                fg: theme.fg,
+                font_size: 11.0,
+                bold: true,
+                align: UiAlign.Center,
+                monospace: true,
+            },
         )
     }
     return b
@@ -392,7 +440,11 @@ pub def draw_legend(
             x + 5.0,
             r.y + 6.0,
             3.0,
-            UiStyle { bg: list_get(colors, i), border: UiColor { r: 0, g: 0, b: 0, a: 0 }, border_width: 0.0 },
+            UiStyle {
+                bg: list_get(colors, i),
+                border: UiColor { r: 0, g: 0, b: 0, a: 0 },
+                border_width: 0.0,
+            },
         )
         b = draw_cmd_text(
             b,
@@ -411,11 +463,22 @@ pub def draw_legend(
     return b
 }
 
-pub def draw_divider(buf: DrawBuffer, x: f64, y: f64, w: f64, color: UiColor) -> DrawBuffer effect ffi, alloc {
+pub def draw_divider(
+    buf: DrawBuffer,
+    x: f64,
+    y: f64,
+    w: f64,
+    color: UiColor,
+) -> DrawBuffer effect ffi, alloc {
     return draw_cmd_line(buf, UiRect { x: x, y: y, w: x + w, h: y }, color, 1.0, false)
 }
 
-pub def draw_kbd(buf: DrawBuffer, r: UiRect, text: str, theme: UiTheme) -> DrawBuffer effect ffi, alloc {
+pub def draw_kbd(
+    buf: DrawBuffer,
+    r: UiRect,
+    text: str,
+    theme: UiTheme,
+) -> DrawBuffer effect ffi, alloc {
     var b = draw_cmd_round_rect(
         buf,
         r,
@@ -472,7 +535,15 @@ pub def draw_metric_tile(
     return b
 }
 
-pub def draw_glow(buf: DrawBuffer, cx: f64, cy: f64, radius: f64, color: UiColor, bg: UiColor, intensity: f64) -> DrawBuffer effect ffi, alloc {
+pub def draw_glow(
+    buf: DrawBuffer,
+    cx: f64,
+    cy: f64,
+    radius: f64,
+    color: UiColor,
+    bg: UiColor,
+    intensity: f64,
+) -> DrawBuffer effect ffi, alloc {
     var b = buf
     var i = 3
     while i > 0 {
@@ -482,31 +553,53 @@ pub def draw_glow(buf: DrawBuffer, cx: f64, cy: f64, radius: f64, color: UiColor
             cx,
             cy,
             radius * k,
-            UiStyle { bg: mix_color(bg, color, intensity * (1.0 - k) * 0.5), border: UiColor { r: 0, g: 0, b: 0, a: 0 }, border_width: 0.0 },
+            UiStyle {
+                bg: mix_color(bg, color, intensity * (1.0 - k) * 0.5),
+                border: UiColor { r: 0, g: 0, b: 0, a: 0 },
+                border_width: 0.0,
+            },
         )
         i = i - 1
     }
-    return draw_cmd_circle(b, cx, cy, radius * 0.5, UiStyle { bg: color, border: UiColor { r: 0, g: 0, b: 0, a: 0 }, border_width: 0.0 })
+    return draw_cmd_circle(
+        b,
+        cx,
+        cy,
+        radius * 0.5,
+        UiStyle { bg: color, border: UiColor { r: 0, g: 0, b: 0, a: 0 }, border_width: 0.0 },
+    )
 }
 
-pub def draw_spinner(buf: DrawBuffer, r: UiRect, clock: UiClock, color: UiColor, bg: UiColor) -> DrawBuffer effect ffi, alloc {
+pub def draw_spinner(
+    buf: DrawBuffer,
+    r: UiRect,
+    clock: UiClock,
+    color: UiColor,
+    bg: UiColor,
+) -> DrawBuffer effect ffi, alloc {
     val cx = r.x + r.w * 0.5
     val cy = r.y + r.h * 0.5
     val rad = min(r.w, r.h) * 0.36
-    val spin = clock.now * 4.0
-    val xs: list<f64> = list()
-    val ys: list<f64> = list()
-    var i = 0
-    while i <= 14 {
-        val a = spin + to_f64(i) / 14.0 * 4.2
-        list_push(xs, cx + cos(a) * rad)
-        list_push(ys, cy + sin(a) * rad)
-        i = i + 1
-    }
-    return draw_cmd_polyline(buf, xs, ys, color, bg)
+    val spin = clock.now * 4.5
+    val clear = UiColor { r: 0, g: 0, b: 0, a: 0 }
+    var b = draw_cmd_circle(
+        buf,
+        cx,
+        cy,
+        rad,
+        UiStyle { bg: clear, border: mix_color(bg, color, 0.22), border_width: 2.5 },
+    )
+    return draw_cmd_arc(b, cx, cy, rad, spin, 4.2, color, 2.5, true)
 }
 
-pub def draw_toast(buf: DrawBuffer, r: UiRect, text: str, color: UiColor, theme: UiTheme, alpha: f64) -> DrawBuffer effect ffi, alloc {
+pub def draw_toast(
+    buf: DrawBuffer,
+    r: UiRect,
+    text: str,
+    color: UiColor,
+    theme: UiTheme,
+    alpha: f64,
+) -> DrawBuffer effect ffi, alloc {
     var b = draw_cmd_round_rect(
         buf,
         r,
@@ -521,5 +614,3 @@ pub def draw_toast(buf: DrawBuffer, r: UiRect, text: str, color: UiColor, theme:
         UiStyle { fg: theme.fg, font_size: 12.0, bold: true },
     )
 }
-
-

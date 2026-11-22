@@ -1,0 +1,301 @@
+// {{name}}: a standalone native desktop UI application.
+//
+//   iris run main.iris                  run interactively in a native window
+//   iris test                           verify layout & rendering headlessly
+//   iris bundle .                       compile and package as a standalone desktop app
+//   iris bundle . --install             install natively on this machine
+
+bring std.ui
+
+record AppModel {
+    clicks: i64 = 0,
+    tab: i64 = 0,
+    theme_idx: i64 = 0,
+    note: str = "",
+}
+
+def select_theme(idx: i64) -> UiTheme {
+    val m = idx % 3
+    if m == 1 {
+        return daylight_theme()
+    }
+    if m == 2 {
+        return nord_theme()
+    }
+    return obsidian_theme()
+}
+
+def parse_snapshot_arg(argv: list<str>) -> str {
+    var i = 1
+    while i < list_len(argv) {
+        if list_get(argv, i) == "--headless-snapshot" {
+            if i + 1 < list_len(argv) {
+                return list_get(argv, i + 1)
+            }
+            return "snapshot.png"
+        }
+        i = i + 1
+    }
+    return ""
+}
+
+def breakpoint_label(vw: f64) -> str {
+    val bp = ui_breakpoint(vw)
+    if bp == UiBreakpoint.Compact {
+        return "Compact"
+    }
+    if bp == UiBreakpoint.Medium {
+        return "Medium"
+    }
+    if bp == UiBreakpoint.Expanded {
+        return "Expanded"
+    }
+    return "Wide"
+}
+
+def build_view(tree: UiTree, st: UiState, model: AppModel, vw: f64) -> i64 effect alloc {
+    val cols = ui_responsive_cols(vw, 1, 2, 3)
+    val bp_name = breakpoint_label(vw)
+    val scale = ui_state_spring_value(st, "boost", 1.0)
+    val pct = to_f64((model.clicks % 10) * 10)
+
+    val top_bar = ui_row(
+        tree,
+        "top_bar",
+        UiStyle { gap: 10.0, padding: 4.0 },
+        list(
+            ui_icon(tree, "logo_ic", UiIcon.Spark, 22.0, UiTone.Accent),
+            ui_heading(tree, "hdr", "{{name}}", UiTone.Primary),
+            ui_spacer(tree, 1.0, 8.0, 0.0),
+            ui_badge(tree, "bp_badge", bp_name, UiTone.Secondary),
+            ui_button_tone(tree, "theme_btn", "Switch Theme", "cycle_theme", UiTone.Neutral),
+        ),
+    )
+
+    val tabs = ui_tabs(
+        tree,
+        "tabs",
+        list("Overview", "Controls", "About"),
+        model.tab,
+        UiTone.Accent,
+        "tab_select",
+    )
+
+    val stats = ui_grid(
+        tree,
+        "stats",
+        cols,
+        12.0,
+        list(
+            ui_stat_card(
+                tree,
+                "s_clicks",
+                StatSpec {
+                    title: "Interactions",
+                    value: to_str(model.clicks),
+                    delta: "+1 step",
+                    positive: true,
+                    icon: UiIcon.Rocket,
+                    tone: UiTone.Accent,
+                },
+            ),
+            ui_stat_card(
+                tree,
+                "s_bp",
+                StatSpec {
+                    title: "Viewport",
+                    value: to_str(vw to i64) + " px",
+                    delta: to_str(cols) + " cols",
+                    positive: true,
+                    icon: UiIcon.Grid,
+                    tone: UiTone.Secondary,
+                },
+            ),
+            ui_stat_card(
+                tree,
+                "s_spring",
+                StatSpec {
+                    title: "Motion Scale",
+                    value: to_str((scale * 100.0) to i64) + "%",
+                    delta: "Spring",
+                    positive: true,
+                    icon: UiIcon.Bolt,
+                    tone: UiTone.Primary,
+                },
+            ),
+        ),
+    )
+
+    val body_card = if model.tab == 0 {
+        ui_card(
+            tree,
+            "overview_card",
+            UiStyle { padding: 14.0, gap: 10.0, flex: 1.0 },
+            list(
+                ui_progress_bar(tree, "prog", "Batch Progress", pct, 100.0, UiTone.Accent),
+                ui_row(
+                    tree,
+                    "actions_row",
+                    UiStyle { gap: 10.0 },
+                    list(
+                        ui_button_tone(tree, "inc_btn", "Boost +1", "inc", UiTone.Accent),
+                        ui_button_tone(tree, "reset_btn", "Reset", "reset", UiTone.Neutral),
+                    ),
+                ),
+            ),
+        )
+    } else if model.tab == 1 {
+        ui_card(
+            tree,
+            "controls_card",
+            UiStyle { padding: 14.0, gap: 10.0, flex: 1.0 },
+            list(
+                ui_text_input(
+                    tree,
+                    "note_input",
+                    model.note,
+                    "Type notes...",
+                    UiStyle { min_h: 36.0 },
+                ),
+                ui_label(tree, "note_lbl", "Saved note: " + model.note, UiStyle {}),
+            ),
+        )
+    } else {
+        ui_card(
+            tree,
+            "about_card",
+            UiStyle { padding: 14.0, gap: 10.0, flex: 1.0 },
+            list(
+                ui_label(
+                    tree,
+                    "about_lbl",
+                    "{{name}} — compiled standalone IRIS std.ui desktop app.",
+                    UiStyle {},
+                ),
+                ui_icon_button(tree, "toast_btn", UiIcon.Bell, "Notify", UiTone.Primary, "toast"),
+            ),
+        )
+    }
+
+    return ui_col(
+        tree,
+        "root",
+        UiStyle { padding: 16.0, gap: 12.0, flex: 1.0 },
+        list(top_bar, tabs, stats, body_card),
+    )
+}
+
+def main() -> i64 effect ffi, alloc {
+    val snap_path = parse_snapshot_arg(args())
+    val headless = len(snap_path) > 0
+    val mode = if headless { UiHostMode.Headless } else { UiHostMode.Desktop }
+
+    val opened = ui_open_native_host(mode, "{{name}}", 960, 640, "")
+    val lib = when opened {
+        ok(l) => l,
+        err(msg) => {
+            println("ui_open_native_host error: " + msg)
+            return 1
+        },
+    }
+
+    var ui_st = ui_state_new()
+    var model = AppModel {}
+    var buf = draw_buf_new(16384)
+    var frame = 0
+    var fake_now = 0.0
+    var running = true
+
+    while running {
+        val m = ui_native_metrics(lib)
+        if !m.is_open {
+            running = false
+        } else {
+            val vw = if m.width > 64.0 { m.width } else { 960.0 }
+            val vh = if m.height > 64.0 { m.height } else { 640.0 }
+            val now = if headless {
+                fake_now = fake_now + 0.016
+                fake_now
+            } else {
+                ui_native_clock_secs(lib)
+            }
+
+            val pool = ui_frame_pool_begin()
+            val ticked = ui_state_tick(ui_st, now)
+            val raw_tree = ui_with_theme(select_theme(model.theme_idx))
+            val root_id = build_view(raw_tree, ticked, model, vw)
+            val laid_out = ui_layout_with_state(ui_set_root(raw_tree, root_id), ticked, vw, vh)
+
+            val painted = ui_paint(laid_out, ticked, buf)
+            val _sub = ui_native_submit(lib, painted)
+            val wait_ms = if headless {
+                0
+            } else if ui_state_has_active_transitions(ticked) {
+                4
+            } else {
+                16
+            }
+            val evs = ui_native_poll(lib, wait_ms)
+            val next_st = ui_process_events(laid_out, ui_clear_events(ticked), evs)
+
+            val _cur = ui_native_set_cursor(lib, ui_state_cursor(next_st))
+            val _p = ui_frame_pool_pause()
+            ui_st = ui_state_detach(next_st)
+            val _r = ui_frame_pool_resume(pool)
+            val _d = ui_frame_pool_destroy(pool)
+
+            if ui_st.dispatched_action == "inc" {
+                model.clicks = model.clicks + 1
+                ui_st = ui_state_spring_from(ui_st, "boost", 1.25, 1.0, spring_bouncy())
+            } else if ui_st.dispatched_action == "reset" {
+                model.clicks = 0
+                ui_st = ui_state_spring_from(ui_st, "boost", 0.85, 1.0, spring_snappy())
+            } else if ui_st.dispatched_action == "cycle_theme" {
+                model.theme_idx = (model.theme_idx + 1) % 3
+            } else if ui_st.dispatched_action == "toast" {
+                ui_st = ui_state_push_toast(
+                    ui_st,
+                    "{{name}}",
+                    "Ready for standalone bundling.",
+                    UiTone.Accent,
+                    3.0,
+                )
+            }
+            if ui_state_tab_changed(ui_st, "tabs") && ui_st.extras.last_tab_idx >= 0 {
+                model.tab = ui_st.extras.last_tab_idx
+            }
+            if ui_st.last_text_key == "note_input" {
+                model.note = ui_st.last_text_val
+            }
+
+            if ui_st.close_requested {
+                running = false
+            }
+            frame = frame + 1
+            if headless && frame >= 4 {
+                val _png = ui_native_save_png(lib, snap_path)
+                running = false
+            }
+        }
+    }
+
+    val _fb = draw_buf_free(buf)
+    val _cl = ui_close_native_host(lib)
+    return 0
+}
+
+def test_ui_template_layout() -> i64 {
+    val st = ui_state_new()
+    val model = AppModel { clicks: 4, tab: 0, theme_idx: 0, note: "hello" }
+    val raw = ui_with_theme(select_theme(model.theme_idx))
+    val root = build_view(raw, st, model, 960.0)
+    val laid_out = ui_layout_with_state(ui_set_root(raw, root), st, 960.0, 640.0)
+
+    val found = ui_find_node_key(laid_out, "inc_btn")
+    assert(is_some(found))
+
+    val buf = ui_paint(laid_out, st, draw_buf_new(8192))
+    assert(buf.cmd_count > 0)
+    val _fb = draw_buf_free(buf)
+    return 0
+}

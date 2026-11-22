@@ -9,7 +9,9 @@ use iris::ir::function::ScopeId;
 use iris::ir::instr::IrInstr;
 use iris::ir::module::IrFunctionBuilder;
 use iris::ir::types::{DType, IrType};
-use iris::{compile, compile_to_module, deserialize_module, eval_ir_module, serialize_module, EmitKind};
+use iris::{
+    compile, compile_to_module, deserialize_module, eval_ir_module, serialize_module, EmitKind,
+};
 
 const NESTED_BLOCKS: &str = r#"
 def main() -> i64 {
@@ -69,12 +71,7 @@ fn interpreter_rejects_unmatched_exit_block() {
     let mut builder = IrFunctionBuilder::new("bad", vec![], IrType::Scalar(DType::I64));
     let entry = builder.create_block(Some("entry"));
     builder.set_current_block(entry);
-    builder.push_instr(
-        IrInstr::ExitBlock {
-            scope: ScopeId(7),
-        },
-        None,
-    );
+    builder.push_instr(IrInstr::ExitBlock { scope: ScopeId(7) }, None);
     let zero = builder.fresh_value();
     builder.push_instr(
         IrInstr::ConstInt {

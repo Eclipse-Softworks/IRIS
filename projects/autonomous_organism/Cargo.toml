@@ -1,7 +1,8 @@
 [package]
 name = "autonomous_organism"
-version = "1.0.0-rc2"
+version = "1.0.0-rc3"
 edition = "2021"
+license = "Apache-2.0"
 description = "Autonomous living organism in an unpredictable, non-stationary 2D spatial world"
 
 [dependencies]

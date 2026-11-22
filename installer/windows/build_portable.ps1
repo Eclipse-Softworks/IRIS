@@ -1,4 +1,4 @@
-# build_portable.ps1 — Build a portable .zip archive for IRIS on Windows
+﻿# build_portable.ps1 — Build a portable .zip archive for IRIS on Windows
 # ──────────────────────────────────────────────────────────────────────────
 # Usage:
 #   powershell -ExecutionPolicy Bypass -File installer\windows\build_portable.ps1
@@ -8,7 +8,7 @@
 # ──────────────────────────────────────────────────────────────────────────
 
 param(
-    [string]$Version = "1.0.0-rc2",
+    [string]$Version = "1.0.0-rc3",
     [string]$Arch = "x64",
     [switch]$SkipBuild
 )
@@ -25,10 +25,12 @@ Write-Host "Project root: $Root" -ForegroundColor Gray
 
 # ── Build ─────────────────────────────────────────────────────────────────
 if (-not $SkipBuild) {
-    Write-Host "`n[1/4] Building release binary..." -ForegroundColor Yellow
+    Write-Host "`n[1/4] Building release binaries..." -ForegroundColor Yellow
     Push-Location $Root
     & cargo build --release
     if ($LASTEXITCODE -ne 0) { throw "cargo build --release failed" }
+    & cargo build --release -p iris_ui_host
+    if ($LASTEXITCODE -ne 0) { throw "cargo build --release -p iris_ui_host failed" }
     Pop-Location
     Write-Host "  Build complete." -ForegroundColor Green
 } else {
@@ -45,27 +47,25 @@ New-Item -ItemType Directory -Force -Path $StageDir | Out-Null
 $IrisExe = Join-Path $Root "target\release\iris.exe"
 if (-not (Test-Path $IrisExe)) { throw "iris.exe not found at $IrisExe" }
 
-Copy-Item $IrisExe $StageDir -Force
-Write-Host "  iris.exe" -ForegroundColor Green
+$BinStage = Join-Path $StageDir "bin"
+New-Item -ItemType Directory -Force -Path $BinStage | Out-Null
 
-# Stdlib
-$StdlibSrc = Join-Path $Root "src\stdlib"
-if (Test-Path $StdlibSrc) {
-    Copy-Item $StdlibSrc (Join-Path $StageDir "stdlib") -Recurse -Force
-    Write-Host "  stdlib/ (from src/stdlib)" -ForegroundColor Green
-} elseif (Test-Path (Join-Path $Root "stdlib")) {
-    Copy-Item (Join-Path $Root "stdlib") (Join-Path $StageDir "stdlib") -Recurse -Force
-    Write-Host "  stdlib/" -ForegroundColor Green
+Copy-Item $IrisExe $BinStage -Force
+Copy-Item $IrisExe $StageDir -Force
+Write-Host "  bin/iris.exe" -ForegroundColor Green
+
+$UiHostDll = Join-Path $Root "target\release\iris_ui_host.dll"
+if (Test-Path $UiHostDll) {
+    Copy-Item $UiHostDll $BinStage -Force
+    Copy-Item $UiHostDll $StageDir -Force
+    Write-Host "  bin/iris_ui_host.dll" -ForegroundColor Green
 }
 
-# Prebuilt runtime objects
-$RuntimeSrc = Join-Path $Root "src\runtime"
-if (Test-Path $RuntimeSrc) {
-    $StageRuntime = Join-Path $StageDir "src\runtime"
-    New-Item -ItemType Directory -Force -Path $StageRuntime | Out-Null
-    if (Test-Path (Join-Path $RuntimeSrc "prebuilt")) {
-        Copy-Item (Join-Path $RuntimeSrc "prebuilt") $StageRuntime -Recurse -Force
-        Write-Host "  src/runtime/prebuilt/" -ForegroundColor Green
+foreach ($dll in @('VCRUNTIME140.dll', 'VCRUNTIME140_1.dll', 'MSVCP140.dll')) {
+    $vcrt = Join-Path "C:\Windows\System32" $dll
+    if (Test-Path $vcrt) {
+        Copy-Item $vcrt $BinStage -Force
+        Copy-Item $vcrt $StageDir -Force
     }
 }
 
@@ -84,10 +84,15 @@ if (Test-Path $ToolchainSrc) {
     Write-Host "  toolchain/ ($tcSize MB)" -ForegroundColor Green
 }
 
-# License + README + LLVM_VERSION
+# License + README + LLVM_VERSION + logo
 Copy-Item (Join-Path $Root "LICENSE") $StageDir -Force
 Copy-Item (Join-Path $Root "README.md") $StageDir -Force
 Copy-Item (Join-Path $Root "LLVM_VERSION") $StageDir -Force
+$IconIco = Join-Path $Root "installer\icon.ico"
+if (Test-Path $IconIco) { Copy-Item $IconIco (Join-Path $StageDir "icon.ico") -Force }
+$IconPng = Join-Path $Root "installer\icon.png"
+if (-not (Test-Path $IconPng)) { $IconPng = Join-Path $Root "vscode-iris\icon.png" }
+if (Test-Path $IconPng) { Copy-Item $IconPng (Join-Path $StageDir "icon.png") -Force }
 
 # VSCode extension
 $Vsix = Get-ChildItem (Join-Path $Root "vscode-iris\*.vsix") -ErrorAction SilentlyContinue |

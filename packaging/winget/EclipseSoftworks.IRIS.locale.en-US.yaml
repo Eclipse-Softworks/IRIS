@@ -1,0 +1,21 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.defaultLocale.1.6.0.schema.json
+PackageIdentifier: EclipseSoftworks.IRIS
+PackageVersion: 1.0.0-rc3
+PackageLocale: en-US
+Publisher: Eclipse Softworks
+PublisherUrl: https://github.com/Eclipse-Softworks/IRIS
+PublisherSupportUrl: https://github.com/Eclipse-Softworks/IRIS/issues
+PackageName: IRIS Language
+PackageUrl: https://github.com/Eclipse-Softworks/IRIS
+License: Apache-2.0
+LicenseUrl: https://github.com/Eclipse-Softworks/IRIS/blob/main/LICENSE
+ShortDescription: Compiled systems, AI/ML, and UI programming language with bundled LLVM toolchain, LSP, DAP, and REPL.
+Tags:
+  - programming-language
+  - compiler
+  - llvm
+  - machine-learning
+  - systems
+ReleaseNotesUrl: https://github.com/Eclipse-Softworks/IRIS/releases/tag/v1.0.0-rc3
+ManifestType: defaultLocale
+ManifestVersion: 1.6.0

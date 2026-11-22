@@ -1,0 +1,1180 @@
+// IRIS GravForge: 60 FPS interactive Differentiable Orbital & Field-Dynamics Sandbox.
+// Showcases reverse-mode autodiff (`tape`/`backward`/`grad`), ADTs & traits,
+// algebraic effects (`handle`/`with`), JSON clipboard snapshots, and native `std.ui`.
+
+bring std.math
+bring std.ui
+bring "physics.iris"
+bring "autodiff.iris"
+bring "canvas.iris"
+
+record CliOpts {
+    headless: bool = false,
+    snap_path: str = "",
+    initial_scenario: ScenarioId = ScenarioId.BinarySlingshot,
+}
+
+record AppState {
+    world: WorldState = WorldState {},
+    sim_cfg: SimConfig = SimConfig {},
+    solver: AdSolverState = AdSolverState {},
+    drag: DragState = DragState {},
+    tool: ToolMode = ToolMode.SlingshotPlanet,
+    theme_idx: i64 = 0,
+    grav_slider: f64 = 42.0,
+    speed_slider: f64 = 100.0,
+    launch_mass: f64 = 4.0,
+    show_grid: bool = true,
+    show_trails: bool = true,
+    show_vectors: bool = false,
+    drawer_open: bool = false,
+    frame_idx: i64 = 0,
+    last_clock: f64 = 0.0,
+    fps_smooth: f64 = 60.0,
+    ke_xs: list<f64> = list(),
+    ke_ys: list<f64> = list(),
+    vp_x: f64 = 0.0,
+    vp_y: f64 = 0.0,
+    vp_w: f64 = 0.0,
+    vp_h: f64 = 0.0,
+}
+
+def scenario_from_cli(raw: str) -> ScenarioId {
+    if raw == "fig8" {
+        return ScenarioId.FigureEight
+    }
+    if raw == "solar" {
+        return ScenarioId.SolarNursery
+    }
+    if raw == "holes" {
+        return ScenarioId.BlackHoleCollider
+    }
+    return ScenarioId.BinarySlingshot
+}
+
+def parse_cli(argv: list<str>) -> CliOpts {
+    var headless = false
+    var snap = ""
+    var sc = ScenarioId.BinarySlingshot
+    var i = 1
+    while i < list_len(argv) {
+        val a = list_get(argv, i)
+        if a == "--headless-snapshot" {
+            headless = true
+            snap = if i + 1 < list_len(argv) {
+                list_get(argv, i + 1)
+            } else {
+                "grav_forge_snapshot.png"
+            }
+            if i + 1 < list_len(argv) {
+                i = i + 1
+            }
+        } else if a == "--scenario" && i + 1 < list_len(argv) {
+            sc = scenario_from_cli(list_get(argv, i + 1))
+            i = i + 1
+        }
+        i = i + 1
+    }
+    return CliOpts { headless: headless, snap_path: snap, initial_scenario: sc }
+}
+
+def pick_theme(idx: i64) -> UiTheme {
+    val m = idx % 6
+    if m == 1 {
+        return midnight_theme()
+    }
+    if m == 2 {
+        return nord_theme()
+    }
+    if m == 3 {
+        return emerald_studio_theme()
+    }
+    if m == 4 {
+        return daylight_theme()
+    }
+    if m == 5 {
+        return high_contrast_theme()
+    }
+    return obsidian_theme()
+}
+
+def theme_label(idx: i64) -> str {
+    val m = idx % 6
+    if m == 1 {
+        return "Midnight"
+    }
+    if m == 2 {
+        return "Nord"
+    }
+    if m == 3 {
+        return "Emerald"
+    }
+    if m == 4 {
+        return "Daylight"
+    }
+    if m == 5 {
+        return "HiContrast"
+    }
+    return "Obsidian"
+}
+
+def tool_index(t: ToolMode) -> i64 {
+    return when t {
+        ToolMode.SlingshotPlanet => 0,
+        ToolMode.SlingshotStar => 1,
+        ToolMode.MoveBeacon => 2,
+        ToolMode.GravityBrush => 3,
+    }
+}
+
+def tool_from_index(idx: i64) -> ToolMode {
+    if idx == 1 {
+        return ToolMode.SlingshotStar
+    }
+    if idx == 2 {
+        return ToolMode.MoveBeacon
+    }
+    if idx == 3 {
+        return ToolMode.GravityBrush
+    }
+    return ToolMode.SlingshotPlanet
+}
+
+def init_app_state(sc: ScenarioId) -> AppState effect alloc {
+    val cfg = SimConfig {}
+    val w = make_scenario(sc)
+    val solver = ad_start_solver(w, cfg)
+    return AppState {
+        world: w,
+        sim_cfg: cfg,
+        solver: solver,
+        ke_xs: list(0.0),
+        ke_ys: list(w.telemetry.kinetic * 100.0),
+    }
+}
+
+def build_header(tree: UiTree, app: AppState) -> i64 effect alloc {
+    val play_ic = if app.sim_cfg.paused { UiIcon.Play } else { UiIcon.Pause }
+    val play_lbl = if app.sim_cfg.paused { "Play" } else { "Pause" }
+    return ui_row(
+        tree,
+        "hdr_row",
+        UiStyle { gap: 8.0, padding: 2.0 },
+        list(
+            ui_icon(tree, "hdr_ic", UiIcon.Globe, 22.0, UiTone.Accent),
+            ui_heading(tree, "hdr_ttl", "IRIS GravForge", UiTone.Primary),
+            ui_badge(tree, "sc_badge", scenario_label(app.world.scenario), UiTone.Primary),
+            ui_badge(tree, "ad_badge", "AUTODIFF", UiTone.Accent),
+            ui_spacer(tree, 1.0, 8.0, 0.0),
+            ui_icon_button(tree, "play_btn", play_ic, play_lbl, UiTone.Primary, "toggle_pause"),
+            ui_icon_button(tree, "ad_btn", UiIcon.Spark, "Solve AD [G]", UiTone.Accent, "solve_ad"),
+            ui_icon_button(
+                tree,
+                "fire_btn",
+                UiIcon.Rocket,
+                "Fire Probe [F]",
+                UiTone.Secondary,
+                "fire_probe",
+            ),
+            ui_icon_button(
+                tree,
+                "guide_btn",
+                UiIcon.HelpCircle,
+                "Guide [H]",
+                UiTone.Neutral,
+                "toggle_drawer",
+            ),
+            ui_icon_button(
+                tree,
+                "theme_btn",
+                UiIcon.Palette,
+                theme_label(app.theme_idx),
+                UiTone.Neutral,
+                "cycle_theme",
+            ),
+        ),
+    )
+}
+
+def fmt_milli(v: f64) -> str effect alloc {
+    val m = ((v * 1000.0) + 0.5) to i64
+    return to_str(m) + "m"
+}
+
+def fmt_signed_energy(v: f64) -> str effect alloc {
+    val c = (v * 100.0) to i64
+    return to_str(c) + "cJ"
+}
+
+def build_stats_strip(tree: UiTree, app: AppState, vw: f64) -> i64 effect alloc {
+    val cols = ui_responsive_cols(vw * 0.68, 2, 4, 4)
+    val tel = app.world.telemetry
+    val fps_txt = to_str((app.fps_smooth + 0.5) to i64) + " FPS"
+    val miss_txt = fmt_milli(app.solver.best_miss)
+    val iter_txt = "Iter " + to_str(app.solver.iter) + "/" + to_str(app.solver.max_iters)
+    return ui_grid(
+        tree,
+        "stat_grid",
+        cols,
+        10.0,
+        list(
+            ui_stat_card(
+                tree,
+                "st_bodies",
+                StatSpec {
+                    title: "Bodies",
+                    value: to_str(list_len(app.world.bodies)),
+                    delta: "Mergers: " + to_str(tel.mergers),
+                    positive: true,
+                    icon: UiIcon.Activity,
+                    tone: UiTone.Primary,
+                },
+            ),
+            ui_stat_card(
+                tree,
+                "st_miss",
+                StatSpec {
+                    title: "AD Miss Dist",
+                    value: miss_txt,
+                    delta: iter_txt,
+                    positive: app.solver.best_miss < 0.08,
+                    icon: UiIcon.Compass,
+                    tone: UiTone.Accent,
+                },
+            ),
+            ui_stat_card(
+                tree,
+                "st_dock",
+                StatSpec {
+                    title: "Probe Docks",
+                    value: to_str(tel.dockings),
+                    delta: "Audit: " + to_str(tel.audit_score),
+                    positive: true,
+                    icon: UiIcon.CheckCircle,
+                    tone: UiTone.Secondary,
+                },
+            ),
+            ui_stat_card(
+                tree,
+                "st_fps",
+                StatSpec {
+                    title: "Engine Rate",
+                    value: fps_txt,
+                    delta: "E: " + fmt_signed_energy(tel.total_energy),
+                    positive: true,
+                    icon: UiIcon.Bolt,
+                    tone: UiTone.Accent,
+                },
+            ),
+        ),
+    )
+}
+
+def build_left_pane(tree: UiTree, app: AppState, vw: f64) -> i64 effect alloc {
+    val canvas_card = ui_card(
+        tree,
+        "grav_canvas",
+        UiStyle { min_w: 520.0, min_h: 380.0, flex: 1.0, radius: 12.0, border_width: 1.5 },
+        list(),
+    )
+    val strip = build_stats_strip(tree, app, vw)
+    return ui_col(tree, "left_pane", UiStyle { gap: 10.0, flex: 1.0 }, list(canvas_card, strip))
+}
+
+def build_sidebar_actions(tree: UiTree) -> i64 effect alloc {
+    return ui_row(
+        tree,
+        "act_row",
+        UiStyle { gap: 6.0 },
+        list(
+            ui_icon_button(tree, "sb_ad", UiIcon.Spark, "Solve AD", UiTone.Accent, "solve_ad"),
+            ui_icon_button(
+                tree,
+                "sb_fire",
+                UiIcon.Rocket,
+                "Fire Probe",
+                UiTone.Primary,
+                "fire_probe",
+            ),
+            ui_icon_button(tree, "sb_rst", UiIcon.Refresh, "Reset", UiTone.Neutral, "reset_sc"),
+        ),
+    )
+}
+
+def build_snapshot_row(tree: UiTree) -> i64 effect alloc {
+    return ui_row(
+        tree,
+        "snap_row",
+        UiStyle { gap: 6.0 },
+        list(
+            ui_icon_button(tree, "copy_btn", UiIcon.Copy, "Copy JSON", UiTone.Primary, "copy_json"),
+            ui_icon_button(
+                tree,
+                "load_btn",
+                UiIcon.Clipboard,
+                "Load JSON",
+                UiTone.Secondary,
+                "load_json",
+            ),
+            ui_icon_button(tree, "clr_btn", UiIcon.Trash, "Clear", UiTone.Neutral, "clear_debris"),
+        ),
+    )
+}
+
+def build_control_pane(tree: UiTree, app: AppState) -> i64 effect alloc {
+    val sc_tabs = ui_tabs(
+        tree,
+        "sc_tabs",
+        list("Binary", "Fig-8", "Solar", "Holes"),
+        scenario_index(app.world.scenario),
+        UiTone.Primary,
+        "sc_change",
+    )
+    val tool_seg = ui_segmented(
+        tree,
+        "tool_seg",
+        list("Planet", "Star", "Beacon", "Brush"),
+        tool_index(app.tool),
+        UiTone.Accent,
+        "tool_change",
+    )
+    val loss_chart = ui_line_chart(
+        tree,
+        "ad_loss_chart",
+        ChartSeries {
+            label: "AD Miss (x100)",
+            xs: app.solver.loss_xs,
+            ys: app.solver.loss_ys,
+            tone: UiTone.Accent,
+            fill: true,
+        },
+        UiStyle { min_h: 90.0 },
+    )
+    val ke_chart = ui_sparkline(
+        tree,
+        "energy_spark",
+        ChartSeries {
+            label: "Kinetic Energy",
+            xs: app.ke_xs,
+            ys: app.ke_ys,
+            tone: UiTone.Primary,
+            fill: true,
+        },
+        UiStyle { min_h: 52.0 },
+    )
+    return ui_card(
+        tree,
+        "ctrl_card",
+        UiStyle { padding: 12.0, gap: 6.0 },
+        list(
+            ui_heading(tree, "ctl_h", "Mission Control & AD Lab", UiTone.Accent),
+            sc_tabs,
+            tool_seg,
+            build_sidebar_actions(tree),
+            ui_divider(tree, "Field & Physics"),
+            ui_toggle(tree, "grid_tog", "Spacetime Curvature Grid", app.show_grid, UiTone.Primary),
+            ui_toggle(tree, "trail_tog", "Orbital Trails", app.show_trails, UiTone.Accent),
+            ui_toggle(tree, "vec_tog", "Velocity Vectors", app.show_vectors, UiTone.Secondary),
+            ui_toggle(
+                tree,
+                "mrg_tog",
+                "Collision Mergers",
+                app.sim_cfg.merge_collisions,
+                UiTone.Primary,
+            ),
+            ui_slider_range(
+                tree,
+                "grav_sl",
+                "Gravity Constant G",
+                app.grav_slider,
+                UiSize { w: 10.0, h: 100.0 },
+            ),
+            ui_slider_range(
+                tree,
+                "spd_sl",
+                "Time Scale %",
+                app.speed_slider,
+                UiSize { w: 20.0, h: 250.0 },
+            ),
+            ui_slider_range(
+                tree,
+                "mass_sl",
+                "Slingshot Mass",
+                app.launch_mass,
+                UiSize { w: 1.0, h: 18.0 },
+            ),
+            ui_divider(tree, "AD Loss & Kinetic Telemetry"),
+            loss_chart,
+            ke_chart,
+            build_snapshot_row(tree),
+        ),
+    )
+}
+
+def build_guide_drawer(tree: UiTree, app: AppState) -> i64 effect alloc {
+    return ui_drawer(
+        tree,
+        "guide_drawer",
+        "GravForge Guide & IRIS Tech",
+        app.drawer_open,
+        "close_drawer",
+        list(
+            ui_heading(tree, "g_h1", "Interactive Controls", UiTone.Accent),
+            ui_label(
+                tree,
+                "g_c1",
+                "Drag on canvas (Planet/Star): aim slingshot + live curved orbit preview.",
+                UiStyle { font_size: 12.0 },
+            ),
+            ui_label(
+                tree,
+                "g_c2",
+                "Drag with Beacon tool: reposition target & auto-re-solve via AD.",
+                UiStyle { font_size: 12.0 },
+            ),
+            ui_label(
+                tree,
+                "g_c3",
+                "Drag with Brush tool: pull & curve nearby orbits with tractor well.",
+                UiStyle { font_size: 12.0 },
+            ),
+            ui_label(
+                tree,
+                "g_c4",
+                "Keys: [Space] Play/Pause  [G] Solve AD  [F] Fire Probe  [1-4] Presets  [R] Reset",
+                UiStyle { font_size: 12.0, monospace: true },
+            ),
+            ui_divider(tree, "Live IRIS Capabilities"),
+            ui_label(
+                tree,
+                "g_i1",
+                "- Reverse-mode AD (`tape`/`backward`/`grad` + Adam) solves N-body burn.",
+                UiStyle { font_size: 12.0 },
+            ),
+            ui_label(
+                tree,
+                "g_i2",
+                "- Closed `choice` ADTs & `CelestialMetric` trait dispatch on bodies.",
+                UiStyle { font_size: 12.0 },
+            ),
+            ui_label(
+                tree,
+                "g_i3",
+                "- Algebraic effect handler (`handle ... with`) scores events & audit.",
+                UiStyle { font_size: 12.0 },
+            ),
+            ui_label(
+                tree,
+                "g_i4",
+                "- `std.json` + `result<WorldState, str>` clipboard state exchange.",
+                UiStyle { font_size: 12.0 },
+            ),
+            ui_spacer(tree, 1.0, 12.0, 12.0),
+            ui_button_tone(tree, "drw_ok", "Close Guide [H]", "close_drawer", UiTone.Primary),
+        ),
+    )
+}
+
+def build_root(tree: UiTree, _st: UiState, app: AppState, vw: f64) -> i64 effect alloc {
+    val hdr = build_header(tree, app)
+    val left = build_left_pane(tree, app, vw)
+    val right = build_control_pane(tree, app)
+    val body = if vw < 900.0 {
+        ui_col(tree, "narrow_body", UiStyle { gap: 10.0, flex: 1.0 }, list(left, right))
+    } else {
+        ui_split_pane(tree, "main_split", 0.68, left, right)
+    }
+    val drawer = build_guide_drawer(tree, app)
+    return ui_col(
+        tree,
+        "root",
+        UiStyle { padding: 10.0, gap: 8.0, flex: 1.0 },
+        list(hdr, body, drawer),
+    )
+}
+
+def push_ke_sample(
+    xs: list<f64>,
+    ys: list<f64>,
+    step_idx: i64,
+    ke: f64,
+) -> (list<f64>, list<f64>) effect alloc {
+    val n = list_len(xs)
+    val start = if n >= 36 { n - 35 } else { 0 }
+    val nx: list<f64> = list()
+    val ny: list<f64> = list()
+    for i in start..n {
+        list_push(nx, list_get(xs, i))
+        list_push(ny, list_get(ys, i))
+    }
+    list_push(nx, to_f64(step_idx))
+    list_push(ny, ke * 100.0)
+    return (nx, ny)
+}
+
+def fire_ad_probe(app: AppState) -> AppState effect alloc {
+    val pos = Vec2 { x: app.world.launch_x, y: app.world.launch_y }
+    val vel = Vec2 { x: app.solver.best_vx, y: app.solver.best_vy }
+    var next_w = spawn_body(app.world, BodyKind.Probe, pos, vel, 0.04)
+    val bonus = score_sim_events(list(SimEvent.ProbeLaunched(vel.norm())))
+    val tel = next_w.telemetry
+    next_w = WorldState {
+        bodies: next_w.bodies,
+        waves: next_w.waves,
+        launch_x: next_w.launch_x,
+        launch_y: next_w.launch_y,
+        beacon_x: next_w.beacon_x,
+        beacon_y: next_w.beacon_y,
+        next_id: next_w.next_id,
+        sim_time: next_w.sim_time,
+        telemetry: SimTelemetry {
+            kinetic: tel.kinetic,
+            potential: tel.potential,
+            total_energy: tel.total_energy,
+            mergers: tel.mergers,
+            dockings: tel.dockings,
+            audit_score: tel.audit_score + bonus,
+        },
+        scenario: next_w.scenario,
+    }
+    return AppState {
+        world: next_w,
+        sim_cfg: app.sim_cfg,
+        solver: app.solver,
+        drag: app.drag,
+        tool: app.tool,
+        theme_idx: app.theme_idx,
+        grav_slider: app.grav_slider,
+        speed_slider: app.speed_slider,
+        launch_mass: app.launch_mass,
+        show_grid: app.show_grid,
+        show_trails: app.show_trails,
+        show_vectors: app.show_vectors,
+        drawer_open: app.drawer_open,
+        frame_idx: app.frame_idx,
+        last_clock: app.last_clock,
+        fps_smooth: app.fps_smooth,
+        ke_xs: app.ke_xs,
+        ke_ys: app.ke_ys,
+        vp_x: app.vp_x,
+        vp_y: app.vp_y,
+        vp_w: app.vp_w,
+        vp_h: app.vp_h,
+    }
+}
+
+def apply_key_shortcuts(
+    st: UiState,
+    evs: list<HostEvent>,
+    app: AppState,
+) -> (UiState, AppState) effect alloc {
+    var next_st = st
+    var next = app
+    for i in 0..list_len(evs) {
+        val ev = list_get(evs, i)
+        val is_kd = when ev.kind {
+            UiEventKind.KeyDown => true,
+            _ => false,
+        }
+        if is_kd {
+            val k = ev.key_code
+            if k == 12 {
+                next.sim_cfg.paused = !next.sim_cfg.paused
+            } else if k == 103 || k == 71 {
+                next.solver = ad_start_solver(next.world, next.sim_cfg)
+            } else if k == 102 || k == 70 {
+                next = fire_ad_probe(next)
+                next_st = ui_state_spring_from(next_st, "beacon.pulse", 1.32, 1.0, spring_snappy())
+            } else if k == 114 || k == 82 {
+                val sc = next.world.scenario
+                next.world = make_scenario(sc)
+                next.solver = ad_start_solver(next.world, next.sim_cfg)
+            } else if k == 99 || k == 67 {
+                next.world = clear_debris(next.world)
+                next.solver = ad_start_solver(next.world, next.sim_cfg)
+            } else if k == 104 || k == 72 {
+                next.drawer_open = !next.drawer_open
+            } else if k == 4 {
+                next.drawer_open = false
+            } else if k >= 49 && k <= 52 {
+                next.world = make_scenario(scenario_from_index(k - 49))
+                next.solver = ad_start_solver(next.world, next.sim_cfg)
+            }
+        }
+    }
+    return (next_st, next)
+}
+
+def canvas_norm_coords(ev: HostEvent, app: AppState) -> option<Vec2> {
+    if app.vp_w <= 8.0 || app.vp_h <= 8.0 {
+        return none
+    }
+    if ev.x < app.vp_x
+        || ev.x > app.vp_x + app.vp_w
+        || ev.y < app.vp_y
+        || ev.y > app.vp_y + app.vp_h {
+        return none
+    }
+    return some(
+        Vec2 {
+            x: clamp_f((ev.x - app.vp_x) / app.vp_w, 0.02, 0.98),
+            y: clamp_f((ev.y - app.vp_y) / app.vp_h, 0.02, 0.98),
+        },
+    )
+}
+
+def handle_canvas_down(st: UiState, app: AppState, pos: Vec2) -> (UiState, AppState) effect alloc {
+    var next_st = st
+    var next = app
+    val is_beacon = when next.tool {
+        ToolMode.MoveBeacon => true,
+        _ => false,
+    }
+    if is_beacon {
+        next.world.beacon_x = pos.x
+        next.world.beacon_y = pos.y
+        next.drag = DragState {
+            active: true,
+            start_nx: pos.x,
+            start_ny: pos.y,
+            cur_nx: pos.x,
+            cur_ny: pos.y,
+        }
+        next_st = ui_state_spring_from(next_st, "beacon.pulse", 1.38, 1.0, spring_bouncy())
+        return (next_st, next)
+    }
+    val (pxs, pys) = predict_trajectory(next.world, next.sim_cfg, pos, Vec2 {}, 10)
+    next.drag = DragState {
+        active: true,
+        start_nx: pos.x,
+        start_ny: pos.y,
+        cur_nx: pos.x,
+        cur_ny: pos.y,
+        preview_xs: pxs,
+        preview_ys: pys,
+    }
+    return (next_st, next)
+}
+
+def handle_canvas_move(app: AppState, pos: Vec2) -> AppState effect alloc {
+    var next = app
+    if !next.drag.active {
+        return next
+    }
+    val is_beacon = when next.tool {
+        ToolMode.MoveBeacon => true,
+        _ => false,
+    }
+    val is_brush = when next.tool {
+        ToolMode.GravityBrush => true,
+        _ => false,
+    }
+    if is_beacon {
+        next.world.beacon_x = pos.x
+        next.world.beacon_y = pos.y
+        next.drag.cur_nx = pos.x
+        next.drag.cur_ny = pos.y
+        return next
+    }
+    if is_brush {
+        next.drag.cur_nx = pos.x
+        next.drag.cur_ny = pos.y
+        return next
+    }
+    val launch_v = Vec2 {
+        x: clamp_f((next.drag.start_nx - pos.x) * 2.2, -1.6, 1.6),
+        y: clamp_f((next.drag.start_ny - pos.y) * 2.2, -1.6, 1.6),
+    }
+    val (
+        pxs,
+        pys,
+    ) = predict_trajectory(
+        next.world,
+        next.sim_cfg,
+        Vec2 { x: next.drag.start_nx, y: next.drag.start_ny },
+        launch_v,
+        38,
+    )
+    next.drag.cur_nx = pos.x
+    next.drag.cur_ny = pos.y
+    next.drag.preview_xs = pxs
+    next.drag.preview_ys = pys
+    return next
+}
+
+def handle_canvas_up(st: UiState, app: AppState) -> (UiState, AppState) effect alloc {
+    var next_st = st
+    var next = app
+    if !next.drag.active {
+        return (next_st, next)
+    }
+    val d = next.drag
+    next.drag = DragState {}
+    val spawn_star = when next.tool {
+        ToolMode.SlingshotStar => true,
+        _ => false,
+    }
+    val spawn_planet = when next.tool {
+        ToolMode.SlingshotPlanet => true,
+        _ => false,
+    }
+    val moved_beacon = when next.tool {
+        ToolMode.MoveBeacon => true,
+        _ => false,
+    }
+    if spawn_star || spawn_planet {
+        val vel = Vec2 {
+            x: clamp_f((d.start_nx - d.cur_nx) * 2.2, -1.6, 1.6),
+            y: clamp_f((d.start_ny - d.cur_ny) * 2.2, -1.6, 1.6),
+        }
+        val kind = if spawn_star { BodyKind.Star } else { BodyKind.Planet }
+        val m = if spawn_star { next.launch_mass * 0.55 } else { next.launch_mass * 0.10 }
+        next.world = spawn_body(next.world, kind, Vec2 { x: d.start_nx, y: d.start_ny }, vel, m)
+        next_st = ui_state_push_toast(
+            next_st,
+            "Orbital Body Launched",
+            if spawn_star { "Added new star gravity well" } else { "Injected orbiting planet" },
+            UiTone.Accent,
+            1.8,
+        )
+    } else if moved_beacon {
+        next.solver = ad_start_solver(next.world, next.sim_cfg)
+        next_st = ui_state_push_toast(
+            next_st,
+            "AD Re-Solving",
+            "Target beacon moved; converging new slingshot burn",
+            UiTone.Primary,
+            2.0,
+        )
+    }
+    return (next_st, next)
+}
+
+def apply_canvas_drag(
+    st: UiState,
+    evs: list<HostEvent>,
+    app: AppState,
+) -> (UiState, AppState) effect alloc {
+    var next_st = st
+    var next = app
+    if next.drawer_open {
+        next.drag = DragState {}
+        return (next_st, next)
+    }
+    for i in 0..list_len(evs) {
+        val ev = list_get(evs, i)
+        val is_dn = when ev.kind {
+            UiEventKind.PointerDown => true,
+            _ => false,
+        }
+        val is_mv = when ev.kind {
+            UiEventKind.PointerMove => true,
+            _ => false,
+        }
+        val is_up = when ev.kind {
+            UiEventKind.PointerUp => true,
+            _ => false,
+        }
+        if is_dn {
+            when canvas_norm_coords(ev, next) {
+                some(pos) => {
+                    val (s2, a2) = handle_canvas_down(next_st, next, pos)
+                    next_st = s2
+                    next = a2
+                },
+                none => {},
+            }
+        } else if is_mv && next.drag.active {
+            val nx = clamp_f(
+                (ev.x - next.vp_x) / (if next.vp_w > 1.0 { next.vp_w } else { 1.0 }),
+                0.02,
+                0.98,
+            )
+            val ny = clamp_f(
+                (ev.y - next.vp_y) / (if next.vp_h > 1.0 { next.vp_h } else { 1.0 }),
+                0.02,
+                0.98,
+            )
+            next = handle_canvas_move(next, Vec2 { x: nx, y: ny })
+        } else if is_up && next.drag.active {
+            val (s2, a2) = handle_canvas_up(next_st, next)
+            next_st = s2
+            next = a2
+        }
+    }
+    return (next_st, next)
+}
+
+def apply_widget_actions(
+    lib: NativeUiLib,
+    ui_st: UiState,
+    app: AppState,
+) -> (UiState, AppState) effect ffi, alloc {
+    var st = ui_st
+    var next = app
+    val act = st.dispatched_action
+    if act == "cycle_theme" {
+        next.theme_idx = (next.theme_idx + 1) % 6
+    } else if act == "toggle_pause" {
+        next.sim_cfg.paused = !next.sim_cfg.paused
+    } else if act == "toggle_drawer" {
+        next.drawer_open = !next.drawer_open
+    } else if act == "close_drawer" {
+        next.drawer_open = false
+    } else if act == "solve_ad" {
+        next.solver = ad_start_solver(next.world, next.sim_cfg)
+        st = ui_state_push_toast(
+            st,
+            "Reverse-Mode AD",
+            "Optimizing slingshot burn via tape/grad",
+            UiTone.Accent,
+            2.0,
+        )
+    } else if act == "fire_probe" {
+        next = fire_ad_probe(next)
+        st = ui_state_spring_from(st, "beacon.pulse", 1.32, 1.0, spring_snappy())
+    } else if act == "reset_sc" {
+        next.world = make_scenario(next.world.scenario)
+        next.solver = ad_start_solver(next.world, next.sim_cfg)
+    } else if act == "clear_debris" {
+        next.world = clear_debris(next.world)
+        next.solver = ad_start_solver(next.world, next.sim_cfg)
+    } else if act == "copy_json" {
+        val snap_json = world_to_json(next.world)
+        val _cp = ui_native_clipboard_set(lib, snap_json)
+        st = ui_state_push_toast(
+            st,
+            "Clipboard Export",
+            "Copied JSON world snapshot",
+            UiTone.Primary,
+            2.0,
+        )
+    } else if act == "load_json" {
+        val clip = ui_native_clipboard_get(lib)
+        when world_from_json(clip) {
+            ok(restored) => {
+                next.world = restored
+                next.solver = ad_start_solver(next.world, next.sim_cfg)
+                st = ui_state_push_toast(
+                    st,
+                    "Snapshot Loaded",
+                    "Restored orbital state from JSON",
+                    UiTone.Secondary,
+                    2.0,
+                )
+            },
+            err(msg) => {
+                st = ui_state_push_toast(st, "JSON Parse Error", msg, UiTone.Accent, 2.5)
+            },
+        }
+    }
+    return (st, next)
+}
+
+def apply_tab_toggle_slider(ui_st: UiState, app: AppState) -> (UiState, AppState) effect alloc {
+    var st = ui_st
+    var next = app
+    if ui_state_tab_changed(st, "sc_tabs") && st.extras.last_tab_idx >= 0 {
+        val sc = scenario_from_index(st.extras.last_tab_idx)
+        next.world = make_scenario(sc)
+        next.solver = ad_start_solver(next.world, next.sim_cfg)
+        st = ui_state_spring_from(st, "beacon.pulse", 1.35, 1.0, spring_bouncy())
+    } else if ui_state_tab_changed(st, "tool_seg") && st.extras.last_tab_idx >= 0 {
+        next.tool = tool_from_index(st.extras.last_tab_idx)
+    }
+    if st.has_toggle_change {
+        if st.last_toggle_key == "grid_tog" {
+            next.show_grid = st.last_toggle_val
+        } else if st.last_toggle_key == "trail_tog" {
+            next.show_trails = st.last_toggle_val
+        } else if st.last_toggle_key == "vec_tog" {
+            next.show_vectors = st.last_toggle_val
+        } else if st.last_toggle_key == "mrg_tog" {
+            next.sim_cfg.merge_collisions = st.last_toggle_val
+        }
+    }
+    if st.has_slider_change {
+        if st.last_slider_key == "grav_sl" {
+            next.grav_slider = st.last_slider_val
+            next.sim_cfg.gravity_g = st.last_slider_val * 0.0005
+        } else if st.last_slider_key == "spd_sl" {
+            next.speed_slider = st.last_slider_val
+            next.sim_cfg.time_scale = st.last_slider_val / 100.0
+        } else if st.last_slider_key == "mass_sl" {
+            next.launch_mass = st.last_slider_val
+        }
+    }
+    return (st, next)
+}
+
+def clone_events(evs: list<HostEvent>) -> list<HostEvent> effect alloc {
+    val cloned: list<HostEvent> = list()
+    for j in 0..list_len(evs) {
+        val e = list_get(evs, j)
+        list_push(
+            cloned,
+            HostEvent {
+                kind: e.kind,
+                button: e.button,
+                key_code: e.key_code,
+                x: e.x,
+                y: e.y,
+                text: e.text,
+            },
+        )
+    }
+    return cloned
+}
+
+def step_simulation_tick(
+    ui_st: UiState,
+    app: AppState,
+    dt: f64,
+    headless: bool,
+) -> (UiState, AppState) effect alloc {
+    var st = ui_st
+    var next = app
+    val is_brush = next.drag.active
+        && when next.tool {
+            ToolMode.GravityBrush => true,
+            _ => false,
+        }
+    val brush = BrushInput {
+        active: is_brush,
+        x: next.drag.cur_nx,
+        y: next.drag.cur_ny,
+        strength: 0.36,
+    }
+    val (w2, evs) = step_world(next.world, next.sim_cfg, brush, dt)
+    next.world = w2
+    for i in 0..list_len(evs) {
+        val ev = list_get(evs, i)
+        val docked = when ev {
+            SimEvent.BeaconDocked(_id, _spd) => true,
+            _ => false,
+        }
+        if docked {
+            st = ui_state_spring_from(st, "beacon.pulse", 1.55, 1.0, spring_bouncy())
+            st = ui_state_push_toast(
+                st,
+                "Beacon Docked!",
+                "AD trajectory intercept confirmed",
+                UiTone.Secondary,
+                2.2,
+            )
+        }
+    }
+    if next.solver.running {
+        next.solver = ad_step_solver(next.solver, next.world, next.sim_cfg)
+    }
+    next.frame_idx = next.frame_idx + 1
+    if headless && next.frame_idx == 18 {
+        next = fire_ad_probe(next)
+    }
+    if next.frame_idx % 2 == 0 {
+        val (
+            kx,
+            ky,
+        ) = push_ke_sample(next.ke_xs, next.ke_ys, next.frame_idx, next.world.telemetry.kinetic)
+        next.ke_xs = kx
+        next.ke_ys = ky
+    }
+    return (st, next)
+}
+
+def run_frame_step(
+    lib: NativeUiLib,
+    ui_st: UiState,
+    app: AppState,
+    buf: DrawBuffer,
+    opts: CliOpts,
+) -> (UiState, AppState, bool) effect ffi, alloc {
+    val m = ui_native_metrics(lib)
+    if !m.is_open {
+        return (ui_st, app, false)
+    }
+    val vw = if m.width > 64.0 { m.width } else { 1400.0 }
+    val vh = if m.height > 64.0 { m.height } else { 860.0 }
+    val now = if opts.headless {
+        to_f64(app.frame_idx + 1) * 0.033
+    } else {
+        ui_native_clock_secs(lib)
+    }
+    val frame_start = now
+    val raw_dt = now - app.last_clock
+    val dt = if raw_dt > 0.004 && raw_dt < 0.08 { raw_dt } else { 0.033 }
+    var cur_app = app
+    cur_app.last_clock = now
+    if !opts.headless {
+        cur_app.fps_smooth = cur_app.fps_smooth * 0.88 + (1.0 / dt) * 0.12
+    }
+    val (s1, a1) = step_simulation_tick(ui_st, cur_app, dt, opts.headless)
+    var st = ui_state_tick(s1, now)
+    cur_app = a1
+    val pulse = ui_state_spring_value(st, "beacon.pulse", 1.0)
+    val theme = pick_theme(cur_app.theme_idx)
+
+    val pool = ui_frame_pool_begin()
+    val raw_tree = ui_with_theme(theme)
+    val root_id = build_root(raw_tree, st, cur_app, vw)
+    val laid_out = ui_layout_with_state(ui_set_root(raw_tree, root_id), st, vw, vh)
+    val vp_opt = ui_find_node_key(laid_out, "grav_canvas")
+    val vp = when vp_opt {
+        some(idx) => list_get(laid_out.nodes, idx).layout,
+        none => UiRect {},
+    }
+    val base_buf = ui_paint(laid_out, st, buf)
+    val c_cfg = CanvasConfig {
+        show_grid: cur_app.show_grid,
+        show_trails: cur_app.show_trails,
+        show_vectors: cur_app.show_vectors,
+        tool: cur_app.tool,
+        paused: cur_app.sim_cfg.paused,
+        beacon_pulse: pulse,
+        sim_time: cur_app.world.sim_time,
+        theme: theme,
+    }
+    val c_view = CanvasView {
+        vp: vp,
+        world: cur_app.world,
+        solver: cur_app.solver,
+        drag: cur_app.drag,
+        cfg: c_cfg,
+    }
+    val painted = paint_grav_canvas(base_buf, c_view)
+    val _sub = ui_native_submit(lib, painted)
+
+    val spent_ms = if opts.headless {
+        0
+    } else {
+        ((ui_native_clock_secs(lib) - frame_start) * 1000.0) to i64
+    }
+    val wait_ms = if opts.headless {
+        0
+    } else if spent_ms < 14 {
+        14 - spent_ms
+    } else {
+        0
+    }
+    val evs = ui_native_poll(lib, wait_ms)
+    val next_st = ui_process_events(laid_out, ui_clear_events(st), evs)
+    val _cur = ui_native_set_cursor(lib, ui_state_cursor(next_st))
+
+    val _p = ui_frame_pool_pause()
+    st = ui_state_detach(next_st)
+    val cloned_evs = clone_events(evs)
+    cur_app.vp_x = vp.x
+    cur_app.vp_y = vp.y
+    cur_app.vp_w = vp.w
+    cur_app.vp_h = vp.h
+    val _r = ui_frame_pool_resume(pool)
+    val _d = ui_frame_pool_destroy(pool)
+
+    val (st_w, app_w) = apply_widget_actions(lib, st, cur_app)
+    val (st_t, app_t) = apply_tab_toggle_slider(st_w, app_w)
+    val (st_k, app_k) = apply_key_shortcuts(st_t, cloned_evs, app_t)
+    val (st_f, app_f) = apply_canvas_drag(st_k, cloned_evs, app_k)
+
+    var keep = !st_f.close_requested
+    if opts.headless && app_f.frame_idx >= 42 {
+        val _png = ui_native_save_png(lib, opts.snap_path)
+        keep = false
+    }
+    return (st_f, app_f, keep)
+}
+
+def main() -> i64 effect ffi, alloc {
+    val opts = parse_cli(args())
+    val mode = if opts.headless { UiHostMode.Headless } else { UiHostMode.Desktop }
+    val opened = ui_open_native_host(mode, "IRIS GravForge", 1400, 860, "")
+    val lib = when opened {
+        ok(l) => l,
+        err(msg) => {
+            println("failed to open native host: " + msg)
+            return 1
+        },
+    }
+    val _min = ui_native_set_size_constraints(lib, 920, 580, 0, 0)
+    var st = ui_state_new()
+    var app = init_app_state(opts.initial_scenario)
+    val buf = draw_buf_new(32768)
+    var running = true
+    while running {
+        val (s2, a2, keep) = run_frame_step(lib, st, app, buf, opts)
+        st = s2
+        app = a2
+        running = keep
+    }
+    val _fb = draw_buf_free(buf)
+    val _cl = ui_close_native_host(lib)
+    return 0
+}
+
+def test_grav_forge_ad_and_physics() -> i64 {
+    // 1. Verify Figure-8 3-body simulation + CelestialMetric trait.
+    var w8 = make_scenario(ScenarioId.FigureEight)
+    assert(list_len(w8.bodies) == 3)
+    val cfg = SimConfig {}
+    for _step in 0..40 {
+        val (nw, _ev) = step_world(w8, cfg, BrushInput {}, 0.033)
+        w8 = nw
+    }
+    assert(body_kinetic_energy(list_get(w8.bodies, 0)) > 0.0)
+    assert(w8.telemetry.kinetic > 0.0)
+
+    // 2. Verify reverse-mode AD (`tape` / `backward` / `grad`) reduces miss distance cleanly.
+    val wb = make_scenario(ScenarioId.BinarySlingshot)
+    var solver = ad_start_solver(wb, cfg)
+    val initial_miss = solver.best_miss
+    for _it in 0..16 {
+        solver = ad_step_solver(solver, wb, cfg)
+    }
+    assert(solver.best_miss < initial_miss)
+    assert(solver.best_miss < 0.08)
+
+    // 3. Verify algebraic effect handler (`handle ... with`) telemetry scorer.
+    val score = score_sim_events(
+        list(
+            SimEvent.Merger(0.5, 0.5, 1.0),
+            SimEvent.BeaconDocked(2, 0.5),
+            SimEvent.ProbeLaunched(0.5),
+        ),
+    )
+    assert(score == (200 + 450 + 45))
+
+    // 4. Verify `std.json` round-trip and error propagation.
+    val encoded = world_to_json(wb)
+    val decoded = world_from_json(encoded)
+    when decoded {
+        ok(rw) => {
+            assert(list_len(rw.bodies) == list_len(wb.bodies))
+            assert(abs_f64(rw.beacon_x - wb.beacon_x) < 0.001)
+        },
+        err(_) => {
+            assert(false)
+        },
+    }
+    assert(!is_ok(world_from_json("{\"bad\":1}")))
+
+    // 5. Verify 30-frame pooled headless `std.ui` + canvas rendering pipeline.
+    val opened = ui_open_native_host(UiHostMode.Headless, "GravForge Test", 1120, 720, "")
+    val lib = when opened {
+        ok(l) => l,
+        err(_) => {
+            return 1
+        },
+    }
+    var st = ui_state_new()
+    var app = init_app_state(ScenarioId.BinarySlingshot)
+    val buf = draw_buf_new(32768)
+    val test_opts = CliOpts { headless: true }
+    for _f in 0..30 {
+        val (s2, a2, _k) = run_frame_step(lib, st, app, buf, test_opts)
+        st = s2
+        app = a2
+    }
+    assert(draw_buf_cmd_count(buf) > 40)
+    val _fb = draw_buf_free(buf)
+    val _cl = ui_close_native_host(lib)
+    return 0
+}

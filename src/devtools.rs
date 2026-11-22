@@ -257,8 +257,9 @@ fn first_line(cmd: &str, args: &[&str]) -> Option<String> {
 }
 
 /// Check everything IRIS needs, end to end, and say how to fix what is
-/// missing. Returns 1 when something required fails.
-pub fn doctor(colored: bool) -> i32 {
+/// missing. With `fix == true`, automatically runs `iris setup` for missing
+/// toolchain / UI components and re-checks. Returns 1 when something required fails.
+pub fn doctor(colored: bool, fix: bool) -> i32 {
     let mut r = Report {
         colored,
         failures: 0,
@@ -272,6 +273,8 @@ pub fn doctor(colored: bool) -> i32 {
 
     // Native toolchain.
     let tc = crate::codegen::build::toolchain_report();
+    let mut needs_toolchain = false;
+    let mut needs_ui = false;
     if tc.prebuilt_runtime {
         r.ok(
             "runtime",
@@ -286,16 +289,66 @@ pub fn doctor(colored: bool) -> i32 {
     }
     match first_line(&tc.clang, &["--version"]) {
         Some(v) => r.ok("clang", &format!("{v} ({})", tc.clang)),
-        None if tc.prebuilt_runtime => r.warn(
-            "clang",
-            "not found",
-            "needed only for `-g` debug builds, sanitizers and targets without a prebuilt runtime; `iris setup` installs one, or set IRIS_CLANG",
-        ),
-        None => r.fail("clang", "not found", "`iris setup` downloads a toolchain, or set IRIS_CLANG to clang's path"),
+        None if tc.prebuilt_runtime => {
+            needs_toolchain = true;
+            r.warn(
+                "clang",
+                "not found",
+                "needed only for `-g` debug builds, sanitizers and targets without a prebuilt runtime; `iris setup` installs one, or set IRIS_CLANG",
+            );
+        }
+        None => {
+            needs_toolchain = true;
+            r.fail(
+                "clang",
+                "not found",
+                "`iris setup` downloads a toolchain, or set IRIS_CLANG to clang's path",
+            );
+        }
     }
     match &tc.lld {
         Some(lld) => r.ok("linker", &format!("ld.lld ({lld})")),
         None => r.warn("linker", "ld.lld not found; clang links instead", ""),
+    }
+    #[cfg(target_os = "windows")]
+    {
+        if tc.sysroot_include.is_some()
+            && tc.sysroot_lib.is_some()
+            && tc.sysroot_gcc.is_some()
+        {
+            r.ok(
+                "sysroot",
+                tc.sysroot_include.as_deref().unwrap_or("ucrt64"),
+            );
+        } else {
+            needs_toolchain = true;
+            r.fail(
+                "sysroot",
+                "MinGW ucrt64 headers/libs not found",
+                "run `iris setup toolchain`",
+            );
+        }
+        let vcrt_found = [
+            std::env::current_exe()
+                .ok()
+                .and_then(|e| e.parent().map(|d| d.join("VCRUNTIME140.dll"))),
+            std::env::current_exe().ok().and_then(|e| {
+                e.parent()
+                    .map(|d| d.join("toolchain/llvm/bin/VCRUNTIME140.dll"))
+            }),
+            Some(PathBuf::from(r"C:\Windows\System32\VCRUNTIME140.dll")),
+        ]
+        .into_iter()
+        .flatten()
+        .find(|p| p.is_file());
+        match vcrt_found {
+            Some(p) => r.ok("vc++ runtime", &p.display().to_string()),
+            None => r.warn(
+                "vc++ runtime",
+                "VCRUNTIME140.dll not found",
+                "install Microsoft Visual C++ 2015-2022 Redistributable",
+            ),
+        }
     }
     match crate::codegen::llvm_c_api::loaded_llvm_version() {
         Ok((a, b, c)) => r.ok("LLVM-C", &format!("{a}.{b}.{c}")),
@@ -313,6 +366,17 @@ pub fn doctor(colored: bool) -> i32 {
             "unavailable",
             "install LLVM (the shared library) to use `iris evolve-live` and `evolve-serve`",
         );
+    }
+    match &tc.ui_host {
+        Some(p) => r.ok("ui host", &p.display().to_string()),
+        None => {
+            needs_ui = true;
+            r.warn(
+                "ui host",
+                "not found",
+                "needed for native std.ui desktop apps and `iris bundle`; run `iris setup ui`",
+            );
+        }
     }
 
     // End to end: build and run a program, natively and in the interpreter.
@@ -381,6 +445,29 @@ pub fn doctor(colored: bool) -> i32 {
 
     // ROS 2, only when it looks intended.
     ros2_checks(&mut r);
+
+    if fix && (needs_toolchain || needs_ui) {
+        let mut to_fix = Vec::new();
+        if needs_toolchain {
+            to_fix.push(crate::setup::SetupComponent::Toolchain);
+        }
+        if needs_ui {
+            to_fix.push(crate::setup::SetupComponent::Ui);
+        }
+        println!("\nAttempting automatic repair via `iris setup`...");
+        let opts = crate::setup::SetupOptions {
+            components: to_fix,
+            dir: None,
+            yes: true,
+            force: false,
+        };
+        if let Err(e) = crate::setup::run_setup_with_options(&opts) {
+            eprintln!("error during `iris doctor --fix`: {e}");
+            return 1;
+        }
+        println!("\nRe-checking toolchain after repair...\n");
+        return doctor(colored, false);
+    }
 
     println!();
     if r.failures == 0 {
@@ -634,6 +721,7 @@ pub const TEMPLATES: &[(&str, &str)] = &[
         "server",
         "a TCP service on async sockets, with an end-to-end test",
     ),
+    ("ui", "a standalone native desktop UI application"),
     (
         "ros2",
         "a ROS 2 node: a timer, a publisher, a subscription and a parameter",
@@ -647,6 +735,7 @@ pub const TEMPLATES: &[(&str, &str)] = &[
 const APP_MAIN: &str = include_str!("templates/app/main.iris");
 const CLI_MAIN: &str = include_str!("templates/cli/main.iris");
 const SERVER_MAIN: &str = include_str!("templates/server/main.iris");
+const UI_MAIN: &str = include_str!("templates/ui/main.iris");
 const ROS2_MAIN: &str = include_str!("templates/ros2/main.iris");
 const CART: &[(&str, &str)] = &[
     (
@@ -745,6 +834,14 @@ pub fn new_project(template: &str, name: &str) -> i32 {
             files.push(("main.iris".into(), fill(SERVER_MAIN)));
             ("main.iris", "iris run main.iris", "iris test")
         }
+        "ui" => {
+            files.push(("main.iris".into(), fill(UI_MAIN)));
+            (
+                "main.iris",
+                "iris run main.iris    # or `iris bundle .` for a standalone desktop app",
+                "iris test",
+            )
+        }
         "ros2" => {
             files.push(("main.iris".into(), fill(ROS2_MAIN)));
             (
@@ -773,10 +870,15 @@ pub fn new_project(template: &str, name: &str) -> i32 {
             return 2;
         }
     };
-    files.push((
-        "iris.toml".into(),
-        format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nentry = \"{entry}\"\n\n[dependencies]\n"),
-    ));
+    let mut toml = format!(
+        "[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nentry = \"{entry}\"\n\n[dependencies]\n"
+    );
+    if template == "ui" {
+        toml.push_str(&format!(
+            "\n[app]\ntitle = \"{name}\"\nidentifier = \"io.iris.{name}\"\ngui = true\nbundle_ui_host = true\nwindow_width = 960\nwindow_height = 640\n"
+        ));
+    }
+    files.push(("iris.toml".into(), toml));
     files.push((
         ".gitignore".into(),
         "*.exe\n*.o\ntarget/\naudit.jsonl\naudit.head.json\n".into(),

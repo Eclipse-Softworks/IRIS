@@ -31,6 +31,7 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <stddef.h>
+#include <stdlib.h>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -48,6 +49,43 @@ static void* iris_dl_open_any(const char* const* candidates, int n) {
         void* h = IRIS_DL_OPEN(candidates[i]);
         if (h) return h;
     }
+    return NULL;
+}
+
+/* Probe ~/.iris/sdks/<sdk_name>/{lib/,}<lib_name> and $IRIS_HOME/sdks/... */
+static void* iris_dl_open_from_iris_sdk(const char* sdk_name, const char* lib_name) {
+    char buf[1024];
+    const char* iris_home = getenv("IRIS_HOME");
+    if (iris_home && iris_home[0]) {
+#ifdef _WIN32
+        int n = snprintf(buf, sizeof(buf), "%s\\sdks\\%s\\lib\\%s", iris_home, sdk_name, lib_name);
+        if (n > 0 && n < (int)sizeof(buf)) { void* h = IRIS_DL_OPEN(buf); if (h) return h; }
+        n = snprintf(buf, sizeof(buf), "%s\\sdks\\%s\\%s", iris_home, sdk_name, lib_name);
+        if (n > 0 && n < (int)sizeof(buf)) { void* h = IRIS_DL_OPEN(buf); if (h) return h; }
+#else
+        int n = snprintf(buf, sizeof(buf), "%s/sdks/%s/lib/%s", iris_home, sdk_name, lib_name);
+        if (n > 0 && n < (int)sizeof(buf)) { void* h = IRIS_DL_OPEN(buf); if (h) return h; }
+        n = snprintf(buf, sizeof(buf), "%s/sdks/%s/%s", iris_home, sdk_name, lib_name);
+        if (n > 0 && n < (int)sizeof(buf)) { void* h = IRIS_DL_OPEN(buf); if (h) return h; }
+#endif
+    }
+#ifdef _WIN32
+    const char* home = getenv("USERPROFILE");
+    if (home && home[0]) {
+        int n = snprintf(buf, sizeof(buf), "%s\\.iris\\sdks\\%s\\lib\\%s", home, sdk_name, lib_name);
+        if (n > 0 && n < (int)sizeof(buf)) { void* h = IRIS_DL_OPEN(buf); if (h) return h; }
+        n = snprintf(buf, sizeof(buf), "%s\\.iris\\sdks\\%s\\%s", home, sdk_name, lib_name);
+        if (n > 0 && n < (int)sizeof(buf)) { void* h = IRIS_DL_OPEN(buf); if (h) return h; }
+    }
+#else
+    const char* home = getenv("HOME");
+    if (home && home[0]) {
+        int n = snprintf(buf, sizeof(buf), "%s/.iris/sdks/%s/lib/%s", home, sdk_name, lib_name);
+        if (n > 0 && n < (int)sizeof(buf)) { void* h = IRIS_DL_OPEN(buf); if (h) return h; }
+        n = snprintf(buf, sizeof(buf), "%s/.iris/sdks/%s/%s", home, sdk_name, lib_name);
+        if (n > 0 && n < (int)sizeof(buf)) { void* h = IRIS_DL_OPEN(buf); if (h) return h; }
+    }
+#endif
     return NULL;
 }
 
@@ -86,12 +124,24 @@ static const OrtApi* iris_ort_api(void) {
 #endif
     };
 
-    void* lib = iris_dl_open_any(candidates,
-                                (int)(sizeof(candidates) / sizeof(candidates[0])));
+    void* lib = iris_dl_open_from_iris_sdk(
+        "onnxruntime",
+#ifdef _WIN32
+        "onnxruntime.dll"
+#elif defined(__APPLE__)
+        "libonnxruntime.dylib"
+#else
+        "libonnxruntime.so"
+#endif
+    );
+    if (!lib) {
+        lib = iris_dl_open_any(candidates,
+                               (int)(sizeof(candidates) / sizeof(candidates[0])));
+    }
     if (!lib) {
         fprintf(stderr,
-                "iris: ONNX Runtime not found. Install onnxruntime and ensure the "
-                "shared library is on the library search path.\n");
+                "iris: ONNX Runtime not found. Run `iris setup ml` or ensure the "
+                "onnxruntime shared library is on the library search path.\n");
         return NULL;
     }
 
@@ -210,8 +260,20 @@ static int iris_tf_available(void) {
 #endif
     };
 
-    void* lib = iris_dl_open_any(candidates,
-                                (int)(sizeof(candidates) / sizeof(candidates[0])));
+    void* lib = iris_dl_open_from_iris_sdk(
+        "tensorflow",
+#ifdef _WIN32
+        "tensorflow.dll"
+#elif defined(__APPLE__)
+        "libtensorflow.dylib"
+#else
+        "libtensorflow.so"
+#endif
+    );
+    if (!lib) {
+        lib = iris_dl_open_any(candidates,
+                               (int)(sizeof(candidates) / sizeof(candidates[0])));
+    }
     if (!lib) {
         fprintf(stderr,
                 "iris: TensorFlow not found. Install the TensorFlow C library and "

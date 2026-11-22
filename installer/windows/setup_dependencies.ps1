@@ -1,8 +1,9 @@
-# setup_dependencies.ps1 - Smart dependency downloader and configurator for IRIS
+﻿# setup_dependencies.ps1 - Smart dependency downloader and configurator for IRIS
 # Checks for Git, LLVM, MinGW (ucrt64), and MSVC Build Tools. Downloads and configures them if missing.
 
 param(
-    [string]$InstallDir = "$env:LOCALAPPDATA\Programs\IRIS"
+    [string]$InstallDir = "$env:USERPROFILE\.iris",
+    [switch]$IncludeMsvc
 )
 
 $ErrorActionPreference = "Stop"
@@ -86,17 +87,18 @@ $requiredLlvmVersion = if (Test-Path $llvmVersionFile) {
     [version]"23.1.1"
 }
 $clangPath = $null
-if (Test-CommandExists "clang") {
+$stdPaths = @(
+    (Join-Path $InstallDir "toolchain\llvm\bin\clang.exe"),
+    (Join-Path $env:LOCALAPPDATA "Programs\IRIS\toolchain\llvm\bin\clang.exe"),
+    "C:\llvm-23.1.1\bin\clang.exe",
+    "C:\Program Files\LLVM\bin\clang.exe",
+    "C:\Program Files (x86)\LLVM\bin\clang.exe"
+)
+foreach ($p in $stdPaths) {
+    if (Test-Path $p) { $clangPath = $p; break }
+}
+if ($null -eq $clangPath -and (Test-CommandExists "clang")) {
     $clangPath = (Get-Command clang).Source
-} else {
-    $stdPaths = @(
-        "C:\Program Files\LLVM\bin\clang.exe",
-        "C:\Program Files (x86)\LLVM\bin\clang.exe",
-        (Join-Path $InstallDir "toolchain\llvm\bin\clang.exe")
-    )
-    foreach ($p in $stdPaths) {
-        if (Test-Path $p) { $clangPath = $p; break }
-    }
 }
 
 if ($null -ne $clangPath) {
@@ -155,9 +157,9 @@ if ($hasSysroot) {
     if ((Test-Path "$localSysroot\include\stdint.h") -and (Test-Path "$localSysroot\lib\libmingw32.a")) {
         Write-Host "  MinGW sysroot already present at: $localSysroot" -ForegroundColor Green
     } else {
-        Write-Host "  MinGW sysroot not found. Downloading portable WinLibs MinGW..." -ForegroundColor Cyan
-        # Download lightweight winlibs zip containing GCC/MinGW (includes all headers and libs)
-        $mingwUrl = "https://github.com/brechtsanders/winlibs_mingw/releases/download/14.1.0posix-18.1.5-12.0.0-msvcrt-r1/winlibs-x86_64-posix-seh-gcc-14.1.0-mingw-w64msvcrt-12.0.0-r1.zip"
+        Write-Host "  MinGW sysroot not found. Downloading portable WinLibs UCRT64 MinGW..." -ForegroundColor Cyan
+        # Download UCRT-targeted WinLibs zip matching IRIS's x86_64-w64-mingw32 ucrt64 ABI
+        $mingwUrl = "https://github.com/brechtsanders/winlibs_mingw/releases/download/14.2.0posix-19.1.1-12.0.0-ucrt-r2/winlibs-x86_64-posix-seh-gcc-14.2.0-mingw-w64ucrt-12.0.0-r2.zip"
         $tempZip = Join-Path $env:TEMP "mingw.zip"
         
         try {
@@ -184,9 +186,13 @@ if ($hasSysroot) {
 }
 
 # ---------------------------------------------------------------------------
-# 4. Check MSVC C++ Build Tools (Universal CRT, libcmt.lib)
+# 4. Check MSVC C++ Build Tools (optional — IRIS links via clang + lld + ucrt64)
 # ---------------------------------------------------------------------------
-Write-Host "`n[4/4] Checking MSVC C++ Build Tools..." -ForegroundColor Yellow
+Write-Host "`n[4/4] Checking MSVC C++ Build Tools (optional)..." -ForegroundColor Yellow
+if (-not $IncludeMsvc) {
+    Write-Host "  Skipped MSVC Build Tools (IRIS compiles/links with clang + lld + ucrt64)." -ForegroundColor DarkGray
+    Write-Host "  Pass -IncludeMsvc if you specifically need Microsoft Visual C++ libraries." -ForegroundColor DarkGray
+} else {
 $hasMsvc = $false
 $vsPaths = @(
     "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC",
@@ -231,6 +237,7 @@ if ($hasMsvc) {
     } catch {
         Write-Host "  Warning: MSVC Build Tools download/installation failed: $_" -ForegroundColor Red
     }
+}
 }
 
 Write-Host ""

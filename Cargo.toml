@@ -1,10 +1,10 @@
 [package]
 name = "iris"
-version = "1.0.0-rc2"
+version = "1.0.0-rc3"
 edition = "2021"
 rust-version = "1.75"
 description = "IRIS: A compiled systems language for Autonomous Intelligent Systems"
-license = "GPL-2.0-or-later"
+license = "Apache-2.0"
 repository = "https://github.com/Eclipse-Softworks/IRIS"
 homepage = "https://github.com/Eclipse-Softworks/IRIS"
 

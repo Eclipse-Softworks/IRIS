@@ -18,7 +18,8 @@ export async function runIrisFile(
     _context: vscode.ExtensionContext,
     subcommand: 'run' | 'build',
     getIrisExe: () => string,
-    outputChannel: vscode.OutputChannel
+    outputChannel: vscode.OutputChannel,
+    forceGui?: boolean,
 ): Promise<void> {
     const editor = vscode.window.activeTextEditor;
     if (!editor) {
@@ -31,7 +32,7 @@ export async function runIrisFile(
     }
     // Await the save: otherwise the compiler can read the previous contents.
     await editor.document.save();
-    runFileAtPath(editor.document.fileName, subcommand, getIrisExe, outputChannel);
+    runFileAtPath(editor.document.fileName, subcommand, getIrisExe, outputChannel, forceGui);
 }
 
 export async function runNamedFunction(
@@ -50,7 +51,8 @@ export function runFileAtPath(
     filePath: string,
     subcommand: 'run' | 'build',
     getIrisExe: () => string,
-    outputChannel: vscode.OutputChannel
+    outputChannel: vscode.OutputChannel,
+    forceGui?: boolean,
 ): void {
     const exe = getIrisExe();
     const showTiming = vscode.workspace.getConfiguration('iris').get<boolean>('showTimingOnRun', true);
@@ -59,7 +61,7 @@ export function runFileAtPath(
     outputChannel.appendLine(`$ iris ${subcommand} "${path.basename(filePath)}"`);
     outputChannel.appendLine('');
 
-    const args = buildRunArgs(filePath, subcommand, vscode.workspace.getConfiguration('iris'));
+    const args = buildRunArgs(filePath, subcommand, vscode.workspace.getConfiguration('iris'), forceGui);
 
     const startTime = Date.now();
 
@@ -122,6 +124,7 @@ export function buildRunArgs(
     filePath: string,
     subcommand: 'run' | 'build',
     cfg: { get<T>(key: string, defaultValue: T): T },
+    forceGui?: boolean,
 ): string[] {
     const args: string[] = [];
     if (cfg.get<boolean>('sandbox', false)) {
@@ -133,6 +136,13 @@ export function buildRunArgs(
     if (cfg.get<boolean>('strictEffects', false)) {
         args.push('--strict-effects');
     }
+    if (cfg.get<boolean>('simd', false)) {
+        args.push('--simd');
+    }
+    const gpu = cfg.get<string>('gpu', '').trim();
+    if (gpu) {
+        args.push('--gpu', gpu);
+    }
     if (subcommand === 'build') {
         // --target only affects llvm/binary outputs, so it is a build-only flag.
         const target = cfg.get<string>('target', '').trim();
@@ -143,8 +153,13 @@ export function buildRunArgs(
         if (cfg.get<boolean>('build.debugInfo', false) && !target) {
             args.push('-g');
         }
+        args.push(subcommand);
+        if (forceGui ?? cfg.get<boolean>('build.gui', false)) {
+            args.push('--gui');
+        }
         const outBinary = filePath.replace(/\.iris$/, '') + (process.platform === 'win32' ? '.exe' : '');
-        args.push('-o', outBinary);
+        args.push('-o', outBinary, filePath);
+        return args;
     }
     args.push(subcommand, filePath);
     return args;
@@ -458,7 +473,7 @@ export async function generateDocs(getIrisExe: () => string): Promise<void> {
 /** Drive the package manager: `iris pkg <cmd>`. */
 export async function pkgCommand(getIrisExe: () => string): Promise<void> {
     const sub = await vscode.window.showQuickPick(
-        ['init', 'add', 'remove', 'install', 'list', 'build', 'run'],
+        ['init', 'add', 'remove', 'install', 'update', 'list', 'check', 'build', 'run', 'vendor', 'search', 'publish'],
         { title: 'IRIS: Package Manager', placeHolder: 'Select a pkg subcommand' },
     );
     if (!sub) {
@@ -466,19 +481,208 @@ export async function pkgCommand(getIrisExe: () => string): Promise<void> {
     }
 
     const args = ['pkg', sub];
-    if (sub === 'add' || sub === 'remove') {
-        const name = await vscode.window.showInputBox({
+    if (sub === 'add' || sub === 'remove' || sub === 'search' || sub === 'update') {
+        const promptMap: Record<string, string> = {
+            add: 'Package name, --path <dir>, --git <url>, or --registry <name>',
+            remove: 'Package name to remove',
+            search: 'Search text for registry packages',
+            update: 'Optional dependency name (leave empty to update all)',
+        };
+        const value = await vscode.window.showInputBox({
             title: `IRIS: pkg ${sub}`,
-            prompt: sub === 'add' ? 'Package name or Git URL' : 'Package name to remove',
+            prompt: promptMap[sub],
         });
-        if (!name) {
+        if (value === undefined) {
             return;
         }
-        args.push(name);
+        if (value.trim()) {
+            args.push(...value.trim().split(/\s+/));
+        } else if (sub !== 'update') {
+            return;
+        }
     }
 
     const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
     runInTerminal('IRIS Package Manager', getIrisExe(), args, cwd);
+}
+
+/** Package and optionally install a standalone desktop application (`iris bundle`). */
+export async function bundleApp(getIrisExe: () => string): Promise<void> {
+    const choice = await vscode.window.showQuickPick(
+        [
+            { label: 'Portable Directory (auto)', format: 'auto', install: false },
+            { label: 'Portable Zip Archive (--format zip)', format: 'zip', install: false },
+            { label: 'Windows Inno Setup Script (--format inno)', format: 'inno', install: false },
+            { label: 'macOS App Bundle (--format app)', format: 'app', install: false },
+            { label: 'Linux AppImage / AppDir (--format appimage)', format: 'appimage', install: false },
+            { label: 'Bundle & Install onto Host OS (--install)', format: 'auto', install: true },
+        ],
+        { title: 'IRIS: Bundle Standalone Application', placeHolder: 'Choose distribution action' },
+    );
+    if (!choice) {
+        return;
+    }
+
+    const activeFile = vscode.window.activeTextEditor?.document.fileName;
+    const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    const targetDir = activeFile && activeFile.endsWith('.iris')
+        ? path.dirname(activeFile)
+        : workspaceRoot;
+    if (!targetDir) {
+        vscode.window.showWarningMessage('Open a workspace folder or .iris project file first.');
+        return;
+    }
+
+    const manifestPath = path.join(targetDir, 'iris.toml');
+    const bundleInput = fs.existsSync(manifestPath)
+        ? targetDir
+        : (activeFile && activeFile.endsWith('.iris') ? activeFile : targetDir);
+
+    const args = ['bundle'];
+    if (vscode.workspace.getConfiguration('iris').get<boolean>('bundle.release', true)) {
+        args.push('--release');
+    }
+    if (choice.install) {
+        args.push('--install');
+    } else if (choice.format !== 'auto') {
+        args.push('--format', choice.format);
+    }
+    args.push(bundleInput);
+
+    runInTerminal('IRIS Bundle', getIrisExe(), args, targetDir);
+}
+
+/** Scaffold a new IRIS project (`iris new [TEMPLATE] NAME`). */
+export async function newProjectFromTemplate(getIrisExe: () => string): Promise<void> {
+    const template = await vscode.window.showQuickPick(
+        [
+            { label: 'ui', description: 'Native desktop UI application with std.ui and [app] manifest' },
+            { label: 'app', description: 'General native application project' },
+            { label: 'cli', description: 'Command-line tool parsing args()' },
+            { label: 'server', description: 'HTTP / TCP network service' },
+            { label: 'ros2', description: 'ROS 2 robotics node (std.ros2)' },
+            { label: 'controller', description: 'Allocation-free controller loop' },
+        ],
+        { title: 'IRIS: New Project Template', placeHolder: 'Select project template' },
+    );
+    if (!template) {
+        return;
+    }
+    const name = await vscode.window.showInputBox({
+        title: `IRIS: New ${template.label} Project`,
+        prompt: 'Enter project directory name',
+        value: `my_${template.label}_project`,
+        validateInput: v => (/^[a-zA-Z0-9_-]+$/.test(v.trim()) ? null : 'Use letters, digits, _ or -'),
+    });
+    if (!name) {
+        return;
+    }
+    const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    runInTerminal('IRIS New Project', getIrisExe(), ['new', template.label, name.trim()], cwd);
+}
+
+/** Run `iris check` across the workspace or active directory without linking. */
+export function checkProject(getIrisExe: () => string): void {
+    const cfg = vscode.workspace.getConfiguration('iris');
+    const args: string[] = [];
+    if (cfg.get<boolean>('strictEffects', false)) {
+        args.push('--strict-effects');
+    }
+    args.push('check');
+    const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath
+        ?? (vscode.window.activeTextEditor ? path.dirname(vscode.window.activeTextEditor.document.fileName) : undefined);
+    runInTerminal('IRIS Check', getIrisExe(), args, cwd);
+}
+
+/** Watch the active .iris file (`iris watch [--test|--check] <file>`). */
+export async function watchFile(getIrisExe: () => string): Promise<void> {
+    const filePath = await activeIrisFile();
+    if (!filePath) {
+        return;
+    }
+    const mode = await vscode.window.showQuickPick(
+        [
+            { label: 'run', description: 'Re-run program on every save' },
+            { label: 'test', description: 'Re-run test_* suite on every save (--test)' },
+            { label: 'check', description: 'Re-check types, borrows, and effects on every save (--check)' },
+        ],
+        { title: 'IRIS: Watch File', placeHolder: 'Select watch mode' },
+    );
+    if (!mode) {
+        return;
+    }
+    const args = ['watch'];
+    if (mode.label === 'test') { args.push('--test'); }
+    if (mode.label === 'check') { args.push('--check'); }
+    args.push(filePath);
+    runInTerminal('IRIS Watch', getIrisExe(), args, path.dirname(filePath));
+}
+
+/** Run `iris doctor` end-to-end toolchain diagnostics. */
+export function runDoctor(getIrisExe: () => string): void {
+    const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    runInTerminal('IRIS Doctor', getIrisExe(), ['doctor'], cwd);
+}
+
+/** Run profiler instrumentation (`iris profile <file>`). */
+export async function profileFile(getIrisExe: () => string): Promise<void> {
+    const filePath = await activeIrisFile();
+    if (!filePath) {
+        return;
+    }
+    runInTerminal('IRIS Profile', getIrisExe(), ['profile', filePath], path.dirname(filePath));
+}
+
+/** Build an allocation-free microcontroller bundle (`iris embedded --target <target> <file>`). */
+export async function buildEmbedded(getIrisExe: () => string): Promise<void> {
+    const filePath = await activeIrisFile();
+    if (!filePath) {
+        return;
+    }
+    const target = await vscode.window.showQuickPick(
+        ['cortex-m4f', 'cortex-m33', 'esp32-c3', 'esp32', 'arduino-uno'],
+        { title: 'IRIS: Embedded Target', placeHolder: 'Select microcontroller profile' },
+    );
+    if (!target) {
+        return;
+    }
+    runInTerminal('IRIS Embedded', getIrisExe(), ['embedded', '--target', target, filePath], path.dirname(filePath));
+}
+
+/** Generate IRIS FFI bindings from a C/C++ header (`iris bindgen`). */
+export async function runBindgen(getIrisExe: () => string): Promise<void> {
+    const uris = await vscode.window.showOpenDialog({
+        canSelectMany: false,
+        title: 'Select C/C++ Header (.h/.hpp)',
+        filters: { 'C/C++ Headers': ['h', 'hpp', 'hh'] },
+    });
+    if (!uris || uris.length === 0) {
+        return;
+    }
+    const headerPath = uris[0].fsPath;
+    const libName = await vscode.window.showInputBox({
+        title: 'IRIS Bindgen',
+        prompt: 'Library name for @link(lib = "...") (optional)',
+    });
+    const outPath = headerPath.replace(/\.(h|hpp|hh)$/i, '_ffi.iris');
+    const args = ['bindgen'];
+    if (/\.hpp$|\.hh$/i.test(headerPath)) {
+        args.push('--cpp');
+    }
+    if (libName && libName.trim()) {
+        args.push('-l', libName.trim());
+    }
+    args.push('-o', outPath, headerPath);
+    runInTerminal('IRIS Bindgen', getIrisExe(), args, path.dirname(headerPath));
+}
+
+/** Collect local compiler bug-report folder (`iris bug-report <file>`). */
+export async function collectBugReport(getIrisExe: () => string): Promise<void> {
+    const filePath = await activeIrisFile();
+    if (!filePath) {
+        return;
+    }
+    runInTerminal('IRIS Bug Report', getIrisExe(), ['bug-report', '--run', filePath], path.dirname(filePath));
 }
 
 function parseAndShowErrors(stderr: string, filePath: string): void {

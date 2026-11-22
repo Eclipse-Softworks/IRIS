@@ -14,7 +14,7 @@
 #   - MinGW ucrt64 sysroot    (C headers + static libs)
 
 param(
-    [string]$Version = "1.0.0-rc2",
+    [string]$Version = "1.0.0-rc3",
     [switch]$SkipBuild
 )
 
@@ -32,6 +32,8 @@ if (-not $SkipBuild) {
     Push-Location $Root
     & cargo build --release
     if ($LASTEXITCODE -ne 0) { Write-Error "cargo build --release failed"; throw "Build failed" }
+    & cargo build --release -p iris_ui_host
+    if ($LASTEXITCODE -ne 0) { Write-Error "cargo build --release -p iris_ui_host failed"; throw "UI host build failed" }
     Pop-Location
     Write-Host "  Build complete." -ForegroundColor Green
 } else {
@@ -57,17 +59,28 @@ if (-not (Test-Path $IrisExe)) { Write-Error "iris.exe not found at $IrisExe"; t
 Copy-Item $IrisExe $StageDir -Force
 $irisSizeMB = [math]::Round((Get-Item $IrisExe).Length / 1048576, 1)
 Write-Host "  iris.exe ($irisSizeMB MB)" -ForegroundColor Green
+$UiHostDll = Join-Path $Root "target\release\iris_ui_host.dll"
+if (Test-Path $UiHostDll) {
+    Copy-Item $UiHostDll $StageDir -Force
+    $uiHostMB = [math]::Round((Get-Item $UiHostDll).Length / 1048576, 1)
+    Write-Host "  iris_ui_host.dll ($uiHostMB MB)" -ForegroundColor Green
+} else {
+    Write-Host "  Warning: iris_ui_host.dll not found at $UiHostDll" -ForegroundColor Yellow
+}
 
 # ---------------------------------------------------------------------------
 # Step 4: Stage README + icon
 # ---------------------------------------------------------------------------
 Write-Host "[4/9] Staging docs and icon..." -ForegroundColor Yellow
 Copy-Item (Join-Path $InstallerDir "README.md") $StageDir -Force
-$Icon = Join-Path $Root "vscode-iris\icon.png"
-if (Test-Path $Icon) { Copy-Item $Icon $StageDir -Force }
+$IconPng = Join-Path $InstallerDir "icon.png"
+if (-not (Test-Path $IconPng)) { $IconPng = Join-Path $Root "vscode-iris\icon.png" }
+if (Test-Path $IconPng) { Copy-Item $IconPng (Join-Path $StageDir "icon.png") -Force }
+$IconIco = Join-Path $InstallerDir "icon.ico"
+if (Test-Path $IconIco) { Copy-Item $IconIco (Join-Path $StageDir "icon.ico") -Force }
 Copy-Item (Join-Path $InstallerDir "windows\setup_dependencies.ps1") $StageDir -Force
 Copy-Item (Join-Path $Root "LLVM_VERSION") $StageDir -Force
-Write-Host "  README.md + icon.png + setup_dependencies.ps1 + LLVM_VERSION" -ForegroundColor Green
+Write-Host "  README.md + icon.ico + icon.png + setup_dependencies.ps1 + LLVM_VERSION" -ForegroundColor Green
 
 # ---------------------------------------------------------------------------
 # Step 5: Stage VSCode extension
@@ -96,7 +109,7 @@ if (-not (Test-Path (Join-Path $LlvmBinSrc "clang.exe"))) {
     }
 }
 $llvmTotal = 0
-foreach ($f in @('clang.exe', 'ld.lld.exe')) {
+foreach ($f in @('clang.exe', 'ld.lld.exe', 'lld-link.exe', 'llvm-ar.exe', 'LLVM-C.dll')) {
     $src = Join-Path $LlvmBinSrc $f
     if (Test-Path $src) {
         Copy-Item $src $LlvmDst.FullName -Force
@@ -104,10 +117,16 @@ foreach ($f in @('clang.exe', 'ld.lld.exe')) {
         $llvmTotal += $sz
         $szMB = [math]::Round($sz / 1048576, 1)
         Write-Host "  $f ($szMB MB)" -ForegroundColor Green
-    } else {
+    } elseif ($f -in @('clang.exe', 'ld.lld.exe')) {
         Write-Error "$f not found at $src"
         throw "$f not found"
     }
+}
+$LlvmLibSrc = Join-Path (Split-Path $LlvmBinSrc -Parent) "lib\clang"
+if (Test-Path $LlvmLibSrc) {
+    $LlvmLibDst = Join-Path $StageDir "toolchain\llvm\lib\clang"
+    Copy-Item $LlvmLibSrc $LlvmLibDst -Recurse -Force
+    Write-Host "  LLVM clang resource headers copied" -ForegroundColor Green
 }
 $llvmMB = [math]::Round($llvmTotal / 1048576, 1)
 Write-Host "  LLVM total: $llvmMB MB" -ForegroundColor Green
@@ -227,7 +246,7 @@ if ((Test-Path $IncSrc) -and @(Get-ChildItem $IncSrc -File -Filter '*.h' -ErrorA
     $incMB = [math]::Round($incTotal / 1048576, 1)
     Write-Host "  ucrt64\include: $incMB MB" -ForegroundColor Green
 } else {
-    Write-Host "  Warning: No headers found at $IncSrc — installer will skip include bundling" -ForegroundColor Yellow
+    Write-Host "  Warning: No headers found at $IncSrc -- installer will skip include bundling" -ForegroundColor Yellow
 }
 
 # ---------------------------------------------------------------------------

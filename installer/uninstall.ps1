@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
     IRIS Language Uninstaller for Windows
@@ -18,7 +18,7 @@ $ErrorActionPreference = 'SilentlyContinue'
 
 function Write-Banner {
     Write-Host ""
-    Write-Host "  IRIS Language Uninstaller  v0.1.0" -ForegroundColor White
+    Write-Host "  IRIS Language Uninstaller" -ForegroundColor White
     Write-Host "  Intermediate Representation for Intelligent Systems" -ForegroundColor DarkGray
     Write-Host ""
 }
@@ -143,6 +143,7 @@ Write-Banner
 
 $installDir = Join-Path $env:USERPROFILE '.iris\bin'
 $irisRoot   = Join-Path $env:USERPROFILE '.iris'
+$localAppDir = Join-Path $env:LOCALAPPDATA 'Programs\IRIS'
 
 Write-Host "  This will uninstall IRIS from your machine." -ForegroundColor White
 Write-Host "  Install directory: $irisRoot" -ForegroundColor DarkGray
@@ -157,8 +158,10 @@ if (-not (Confirm-Action "Proceed with uninstallation?")) {
 Write-Host ""
 
 # --- Step 1: Remove from PATH ---
-Write-Step "Removing $installDir from user PATH..."
+Write-Step "Removing IRIS PATH entries..."
 Remove-FromUserPath -Dir $installDir
+Remove-FromUserPath -Dir $localAppDir
+Remove-FromUserPath -Dir (Join-Path $localAppDir 'bin')
 
 # --- Step 2: Remove VSCode extension ---
 Write-Host ""

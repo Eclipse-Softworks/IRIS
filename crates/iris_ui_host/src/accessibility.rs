@@ -40,7 +40,7 @@ impl A11yTreeState {
         let mut h = OFFSET;
         h = mix(h, &(self.commands.len() as u64).to_le_bytes());
         for cmd in &self.commands {
-            for v in [cmd.node_id as u64, cmd.parent_id as u64, cmd.role as u64] {
+            for v in [cmd.node_id, cmd.parent_id, cmd.role as u64] {
                 h = mix(h, &v.to_le_bytes());
             }
             for v in [cmd.x, cmd.y, cmd.w, cmd.h] {

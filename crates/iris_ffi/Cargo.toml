@@ -1,9 +1,9 @@
 [package]
 name = "iris_ffi"
-version = "1.0.0-rc2"
+version = "1.0.0-rc3"
 edition = "2021"
 description = "C-ABI shared library for IRIS Evolution Engine (Python, C, C++, Go interop)"
-license = "GPL-2.0-or-later"
+license = "Apache-2.0"
 
 [lib]
 name = "iris_evolution"

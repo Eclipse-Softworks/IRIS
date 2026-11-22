@@ -208,7 +208,6 @@ static STATIC_COMPLETIONS: &[&str] = &[
     "is_some",
     "is_ok",
     "unwrap",
-    "list",
     "push",
     "pop",
     "list_len",
@@ -217,7 +216,6 @@ static STATIC_COMPLETIONS: &[&str] = &[
     "list_pop",
     "list_contains",
     "list_slice",
-    "map",
     "map_get",
     "map_set",
     "map_contains",
@@ -233,7 +231,6 @@ static STATIC_COMPLETIONS: &[&str] = &[
     "read_line",
     "read_i64",
     "read_f64",
-    "grad",
     "grad_of",
     "zeros",
     "ones",
@@ -314,7 +311,6 @@ static STATIC_COMPLETIONS: &[&str] = &[
     // Phase 105 builtins
     "chan_try_recv",
     "chan_len",
-    "select",
     "timeout",
     "thread_count",
     "deque_new",
@@ -385,6 +381,144 @@ static STATIC_COMPLETIONS: &[&str] = &[
     "list_count",
     "list_take",
     "list_drop",
+    // Contextual keywords, operators, and core types
+    "handle",
+    "where",
+    "self",
+    "Self",
+    "mut",
+    "and",
+    "or",
+    "not",
+    "unit",
+    "weak_ref",
+    "task_group",
+    // Builtins already documented in builtin_hover
+    "println",
+    "to_f64",
+    "parse_i64",
+    "parse_f64",
+    "list_push",
+    "list_concat",
+    "list_sort",
+    "sign",
+    "find",
+    "slice",
+    "str_replace",
+    "sparsify",
+    "densify",
+    "nnz",
+    "einsum",
+    "par_map",
+    "transaction_begin",
+    "transaction_commit",
+    "transaction_rollback",
+    "transaction_depth",
+    // Core I/O, overflow, and control builtins
+    "eprintln",
+    "args",
+    "exit",
+    "wrapping_add",
+    "wrapping_sub",
+    "wrapping_mul",
+    "cancellation_requested",
+    // Option / Result helpers
+    "is_none",
+    "is_err",
+    "unwrap_or",
+    "unwrap_err",
+    // Collections & strings
+    "list_new",
+    "list_insert",
+    "list_remove",
+    "map_new",
+    "map_entries",
+    "array_to_list",
+    "str_index",
+    // Math, bitwise, and reverse-mode autodiff
+    "tan",
+    "log2",
+    "round",
+    "band",
+    "bor",
+    "bxor",
+    "shl",
+    "shr",
+    "bitnot",
+    "tape",
+    "backward",
+    // Concurrency, weak references, and GC
+    "atomic_new",
+    "mutex_new",
+    "mutex_lock",
+    "mutex_unlock",
+    "barrier",
+    "chan_send",
+    "recv_timeout",
+    "task_group_join",
+    "task_group_cancel",
+    "weak_upgrade",
+    "weak_alive",
+    "gc_stats",
+    "gc_collect",
+    // Terminal, UDP, and HTTP builtins
+    "read_key",
+    "read_password",
+    "term_clear",
+    "term_cursor",
+    "term_show_cursor",
+    "term_set_color",
+    "term_reset",
+    "term_rows",
+    "term_cols",
+    "udp_open",
+    "udp_send",
+    "udp_recv",
+    "udp_close",
+    "http_request",
+    "http_post_json",
+    // Vector / ML / differentiable tensor intrinsics
+    "arange",
+    "matmul",
+    "mse_loss",
+    "cross_entropy",
+    "sgd_step",
+    "list_mean",
+    "list_std",
+    "list_norm",
+    "list_dot",
+    "list_add",
+    "list_sub",
+    "list_mul_elem",
+    "list_scale",
+    "list_relu",
+    "list_sigmoid",
+    "list_softmax",
+    "list_axpy",
+    "dtensor",
+    "dtensor_tape",
+    "dtensor_add",
+    "dtensor_sub",
+    "dtensor_mul",
+    "dtensor_div",
+    "dtensor_matmul",
+    "dtensor_relu",
+    "dtensor_sigmoid",
+    "dtensor_tanh",
+    "dtensor_sum",
+    "dtensor_grad",
+    "dtensor_backward",
+    "dtensor_item",
+    "dtensor_to_list",
+    // Reflection / dynamic evaluation
+    "reflect_eval",
+    "reflect_eval_i64",
+    "reflect_validate",
+    "reflect_available",
+    "iris_eval",
+    "iris_eval_i64",
+    "iris_validate",
+    "iris_reflection_available",
     // stdlib module bring targets
     "std.math",
     "std.string",
@@ -738,6 +872,7 @@ fn collect_type_completions(
         "sparse",
         "task_group",
         "weak_ref",
+        "unit",
     ];
     for ty in &type_names {
         items.push(CompletionItem {
@@ -824,13 +959,15 @@ fn collect_default_completions(
 
     for module in crate::stdlib::STDLIB_MODULE_NAMES {
         let label = format!("std.{}", module);
-        items.push(CompletionItem {
-            label: label.clone(),
-            kind: 9,
-            detail: Some("IRIS standard library module".to_owned()),
-            filter_text: Some((*module).to_owned()),
-            sort_text: Some(format!("3_{}", label)),
-        });
+        if !items.iter().any(|item| item.label == label) {
+            items.push(CompletionItem {
+                label: label.clone(),
+                kind: 9,
+                detail: Some("IRIS standard library module".to_owned()),
+                filter_text: Some((*module).to_owned()),
+                sort_text: Some(format!("3_{}", label)),
+            });
+        }
     }
 
     if let Some(ast) = ast {
@@ -1270,7 +1407,8 @@ impl LspState {
             }
         }
 
-        items.dedup_by(|a, b| a.label == b.label);
+        let mut seen = std::collections::HashSet::new();
+        items.retain(|item| seen.insert(item.label.clone()));
         items
     }
 
@@ -2747,6 +2885,7 @@ mod tests {
         let s = state_with("def main() -> i64 { 0 }");
         let items = s.completions(URI, 0, 0);
         let mut sorted = items.clone();
+        sorted.sort();
         sorted.dedup();
         assert_eq!(items.len(), sorted.len(), "completions contain duplicates");
     }
@@ -3192,11 +3331,19 @@ fn completion_kind_for(label: &str) -> u8 {
             | "unsafe"
             | "defmacro"
             | "by"
+            | "handle"
+            | "where"
+            | "self"
+            | "mut"
+            | "and"
+            | "or"
+            | "not"
     ) {
         14 // Keyword
     } else if matches!(
         label,
-        "i64"
+        "Self"
+            | "i64"
             | "i32"
             | "i8"
             | "u8"
@@ -3207,12 +3354,16 @@ fn completion_kind_for(label: &str) -> u8 {
             | "f32"
             | "bool"
             | "str"
+            | "unit"
             | "tensor"
             | "option"
             | "result"
             | "list"
             | "map"
             | "chan"
+            | "task"
+            | "task_group"
+            | "weak_ref"
             | "atomic"
             | "mutex"
             | "grad"
@@ -3239,7 +3390,19 @@ fn completion_detail_for(label: &str) -> Option<&'static str> {
         "bring" => "import a file or stdlib module",
         "chan" => "channel type: chan<T>",
         "task" => "task type: task<T>, what an async def returns",
+        "task_group" => "structured concurrency group: task_group",
+        "weak_ref" => "weak reference type/constructor: weak_ref<T>",
+        "unit" => "empty tuple / void return type ()",
+        "handle" => "handle algebraic effects block",
+        "where" => "trait bound constraint clause",
+        "self" => "receiver instance parameter",
+        "Self" => "implementing type inside trait or impl",
+        "mut" => "mutable reference modifier (&mut T)",
+        "and" => "short-circuit logical AND operator",
+        "or" => "short-circuit logical OR operator",
+        "not" => "logical NOT operator",
         "channel" => "channel constructor",
+        "cell" => "single-element shared mutable cell",
         "tensor" => "tensor type: tensor<dtype, [dims]>",
         "option" => "optional type: option<T>",
         "result" => "result type: result<T, E>",
@@ -4849,6 +5012,104 @@ fn builtin_hover(name: &str) -> Option<String> {
         "list_count"         => "def list_count(xs: list<T>, val: T) -> i64\nCount occurrences of value",
         "list_take"          => "def list_take(xs: list<T>, n: i64) -> list<T>\nTake first n elements",
         "list_drop"          => "def list_drop(xs: list<T>, n: i64) -> list<T>\nDrop first n elements",
+        "eprintln"           => "def eprintln(v: T) -> ()\nPrint a value to stderr followed by a newline.",
+        "args"               => "def args() -> list<str>\nReturn command-line arguments passed to the program.",
+        "exit"               => "def exit(code: i64) -> ()\nTerminate the process with exit status code.",
+        "wrapping_add"       => "def wrapping_add(a: i64, b: i64) -> i64\nTwo's-complement wrapping integer addition.",
+        "wrapping_sub"       => "def wrapping_sub(a: i64, b: i64) -> i64\nTwo's-complement wrapping integer subtraction.",
+        "wrapping_mul"       => "def wrapping_mul(a: i64, b: i64) -> i64\nTwo's-complement wrapping integer multiplication.",
+        "cancellation_requested" => "def cancellation_requested() -> bool\nCheck whether cancellation was requested for the current task.",
+        "is_none"            => "def is_none(opt: option<T>) -> bool\nReturn true if opt is none.",
+        "is_err"             => "def is_err(res: result<T, E>) -> bool\nReturn true if res is an error value.",
+        "unwrap_or"          => "def unwrap_or(val: option<T> | result<T, E>, default: T) -> T\nReturn the inner value or fall back to default.",
+        "unwrap_err"         => "def unwrap_err(res: result<T, E>) -> E\nExtract the error payload from an err result; panics if ok.",
+        "list_new"           => "def list_new() -> list<T>\nCreate an empty list (equivalent to list()).",
+        "list_insert"        => "def list_insert(xs: list<T>, idx: i64, val: T) -> ()\nInsert val into xs at index idx.",
+        "list_remove"        => "def list_remove(xs: list<T>, idx: i64) -> T\nRemove and return the element at index idx.",
+        "map_new"            => "def map_new() -> map<K, V>\nCreate an empty hash map (equivalent to map()).",
+        "map_entries"        => "def map_entries(m: map<K, V>) -> list<str>\nReturn key=value entries from a map as strings.",
+        "array_to_list"      => "def array_to_list(arr: [T; N]) -> list<T>\nConvert a fixed-size array to a dynamically grown list.",
+        "str_index"          => "def str_index(s: str, idx: i64) -> str\nReturn the character at byte/character index idx.",
+        "cell"               => "def cell(v: T) -> list<T>\nCreate a shared single-element mutable cell.",
+        "cell_get"           => "def cell_get(c: list<T>) -> T\nRead the value stored in a mutable cell.",
+        "cell_set"           => "def cell_set(c: list<T>, v: T) -> ()\nUpdate the value stored in a mutable cell.",
+        "band"               => "def band(a: i64, b: i64) -> i64\nBitwise AND.",
+        "bor"                => "def bor(a: i64, b: i64) -> i64\nBitwise OR.",
+        "bxor"               => "def bxor(a: i64, b: i64) -> i64\nBitwise XOR.",
+        "shl"                => "def shl(a: i64, b: i64) -> i64\nBitwise shift left (a << b).",
+        "shr"                => "def shr(a: i64, b: i64) -> i64\nBitwise shift right (a >> b).",
+        "bitnot"             => "def bitnot(a: i64) -> i64\nBitwise NOT (~a).",
+        "tape"               => "def tape(x: f64) -> f64\nMark a floating-point leaf variable for reverse-mode autodiff.",
+        "backward"           => "def backward(loss: f64) -> ()\nBackpropagate gradients from loss to taped leaf values.",
+        "atomic_new"         => "def atomic_new(v: T) -> atomic<T>\nCreate an atomic wrapper around v.",
+        "mutex"              => "def mutex(v: T) -> mutex<T>\nCreate a mutex guarding v (same as mutex_new).",
+        "mutex_new"          => "def mutex_new(v: T) -> mutex<T>\nCreate a mutex guarding v.",
+        "mutex_lock"         => "def mutex_lock(m: mutex<T>) -> T\nAcquire the mutex and return its guarded value.",
+        "mutex_unlock"       => "def mutex_unlock(m: mutex<T>) -> ()\nRelease a previously acquired mutex.",
+        "barrier"            => "def barrier() -> ()\nSynchronization memory barrier for concurrent threads.",
+        "chan_send"          => "def chan_send(ch: chan<T>, v: T) -> ()\nSend a value into channel ch.",
+        "recv_timeout"       => "def recv_timeout(ch: chan<T>, timeout_ms: i64) -> option<T>\nReceive from channel ch with a timeout in milliseconds.",
+        "task_group_join"    => "def task_group_join(tg: task_group) -> ()\nWait for all tasks spawned in tg to finish.",
+        "task_group_cancel"  => "def task_group_cancel(tg: task_group) -> ()\nRequest cancellation of all tasks in tg.",
+        "weak_upgrade"       => "def weak_upgrade(w: weak_ref<T>) -> option<T>\nPromote a weak reference back to a strong value if still alive.",
+        "weak_alive"         => "def weak_alive(w: weak_ref<T>) -> bool\nReturn true if the target of weak reference w is still alive.",
+        "gc_stats"           => "def gc_stats() -> map<str, i64>\nReturn heap and garbage-collector statistics.",
+        "gc_collect"         => "def gc_collect() -> bool\nRun a cycle-collector pass now.",
+        "read_key"           => "def read_key() -> i64\nRead a raw key/byte from stdin; requires `effect io`.",
+        "read_password"      => "def read_password() -> str\nRead a password line from stdin; requires `effect io`.",
+        "term_clear"         => "def term_clear() -> i64\nClear the terminal screen and home the cursor.",
+        "term_cursor"        => "def term_cursor(row: i64, col: i64) -> i64\nMove the terminal cursor to 1-based (row, col).",
+        "term_show_cursor"   => "def term_show_cursor(show: i64) -> i64\nShow (non-zero) or hide (0) the terminal cursor.",
+        "term_set_color"     => "def term_set_color(fg: i64, bg: i64) -> i64\nSet 256-color terminal foreground/background (-1 keeps current).",
+        "term_reset"         => "def term_reset() -> i64\nReset terminal text attributes.",
+        "term_rows"          => "def term_rows() -> i64\nQuery terminal height in rows.",
+        "term_cols"          => "def term_cols() -> i64\nQuery terminal width in columns.",
+        "udp_open"           => "def udp_open(host: str, port: i64) -> i64\nBind a UDP socket and return its handle, or -1 on failure.",
+        "udp_send"           => "def udp_send(id: i64, addr_port: str) -> i64\nSend UDP packet on socket id; returns 0 or -1.",
+        "udp_recv"           => "def udp_recv(id: i64) -> str\nReceive a UDP datagram string from socket id.",
+        "udp_close"          => "def udp_close(id: i64) -> i64\nClose a UDP socket handle.",
+        "http_request"       => "def http_request(method: str, url: str, body?: str) -> str\nPerform an HTTP request with method, url, and optional body.",
+        "http_post_json"     => "def http_post_json(url: str, body: str) -> str\nSend an HTTP POST request with a JSON payload.",
+        "arange"             => "def arange(start: f64, stop: f64, step: f64) -> list<f64>\nCreate an evenly spaced numeric list in [start, stop).",
+        "matmul"             => "def matmul(a: list<f64>, b: list<f64>, m: i64, k: i64, n: i64) -> list<f64>\nMatrix multiply row-major (m x k) by (k x n).",
+        "mse_loss"           => "def mse_loss(pred: list<f64>, target: list<f64>) -> f64\nMean squared error loss over two numeric lists.",
+        "cross_entropy"      => "def cross_entropy(logits: list<f64>, targets: list<f64>) -> f64\nCross-entropy loss between predicted distribution and targets.",
+        "sgd_step"           => "def sgd_step(params: list<f64>, grads: list<f64>, lr: f64) -> list<f64>\nApply an SGD parameter update: params - lr * grads.",
+        "list_mean"          => "def list_mean(xs: list<f64>) -> f64\nArithmetic mean of numeric list elements.",
+        "list_std"           => "def list_std(xs: list<f64>) -> f64\nStandard deviation of numeric list elements.",
+        "list_norm"          => "def list_norm(xs: list<f64>) -> f64\nL2 Euclidean norm of numeric list elements.",
+        "list_dot"           => "def list_dot(a: list<f64>, b: list<f64>) -> f64\nDot product of two numeric lists.",
+        "list_add"           => "def list_add(a: list<f64>, b: list<f64>) -> list<f64>\nElementwise addition of two numeric lists.",
+        "list_sub"           => "def list_sub(a: list<f64>, b: list<f64>) -> list<f64>\nElementwise subtraction of two numeric lists.",
+        "list_mul_elem"      => "def list_mul_elem(a: list<f64>, b: list<f64>) -> list<f64>\nElementwise multiplication of two numeric lists.",
+        "list_scale"         => "def list_scale(xs: list<f64>, s: f64) -> list<f64>\nScale every element of xs by scalar s.",
+        "list_relu"          => "def list_relu(xs: list<f64>) -> list<f64>\nApply elementwise ReLU activation to a numeric list.",
+        "list_sigmoid"       => "def list_sigmoid(xs: list<f64>) -> list<f64>\nApply elementwise sigmoid activation to a numeric list.",
+        "list_softmax"       => "def list_softmax(xs: list<f64>) -> list<f64>\nCompute normalized softmax probabilities over a numeric list.",
+        "list_axpy"          => "def list_axpy(a: f64, x: list<f64>, y: list<f64>) -> list<f64>\nCompute fused vector operation a * x + y.",
+        "dtensor"            => "def dtensor(data: list<f64>, shape: list<i64>) -> tensor<f32, [N]>\nCreate a differentiable heap tensor.",
+        "dtensor_tape"       => "def dtensor_tape(data: list<f64>, shape: list<i64>) -> tensor<f32, [N]>\nCreate a leaf differentiable tensor tracked for backprop.",
+        "dtensor_add"        => "def dtensor_add(a, b) -> tensor<f32, [N]>\nDifferentiable elementwise tensor addition.",
+        "dtensor_sub"        => "def dtensor_sub(a, b) -> tensor<f32, [N]>\nDifferentiable elementwise tensor subtraction.",
+        "dtensor_mul"        => "def dtensor_mul(a, b) -> tensor<f32, [N]>\nDifferentiable elementwise tensor multiplication.",
+        "dtensor_div"        => "def dtensor_div(a, b) -> tensor<f32, [N]>\nDifferentiable elementwise tensor division.",
+        "dtensor_matmul"     => "def dtensor_matmul(a, b) -> tensor<f32, [N]>\nDifferentiable matrix multiplication.",
+        "dtensor_relu"       => "def dtensor_relu(x) -> tensor<f32, [N]>\nDifferentiable ReLU activation on a tensor.",
+        "dtensor_sigmoid"    => "def dtensor_sigmoid(x) -> tensor<f32, [N]>\nDifferentiable sigmoid activation on a tensor.",
+        "dtensor_tanh"       => "def dtensor_tanh(x) -> tensor<f32, [N]>\nDifferentiable tanh activation on a tensor.",
+        "dtensor_sum"        => "def dtensor_sum(x) -> tensor<f32, [N]>\nDifferentiable sum reduction over tensor elements.",
+        "dtensor_grad"       => "def dtensor_grad(x) -> tensor<f32, [N]>\nRetrieve the accumulated gradient tensor for x.",
+        "dtensor_backward"   => "def dtensor_backward(loss) -> i64\nBackpropagate gradients through the differentiable tensor graph.",
+        "dtensor_item"       => "def dtensor_item(x) -> f64\nExtract the scalar value from a single-element tensor.",
+        "dtensor_to_list"    => "def dtensor_to_list(x) -> list<f64>\nCopy differentiable tensor data into an IRIS list.",
+        "reflect_eval"       => "def reflect_eval(code: str) -> result<str, str>\nEvaluate an IRIS source snippet dynamically.",
+        "reflect_eval_i64"   => "def reflect_eval_i64(code: str) -> result<i64, str>\nEvaluate an IRIS snippet returning an i64.",
+        "reflect_validate"   => "def reflect_validate(code: str) -> bool\nType-check an IRIS source snippet without running it.",
+        "reflect_available"  => "def reflect_available() -> bool\nReturn true if runtime reflection/eval is enabled.",
+        "iris_eval"          => "def iris_eval(code: str) -> result<str, str>\nEvaluate an IRIS source snippet dynamically (alias for reflect_eval).",
+        "iris_eval_i64"      => "def iris_eval_i64(code: str) -> result<i64, str>\nEvaluate an IRIS snippet returning an i64 (alias for reflect_eval_i64).",
+        "iris_validate"      => "def iris_validate(code: str) -> bool\nType-check an IRIS snippet dynamically (alias for reflect_validate).",
+        "iris_reflection_available" => "def iris_reflection_available() -> bool\nReturn true if dynamic reflection is enabled.",
         _ => return None,
     };
     Some(
@@ -4912,6 +5173,14 @@ fn keyword_hover(name: &str) -> Option<String> {
         "await" => "**await** — Wait for an async expression to complete",
         "in" => "**in** - Introduce a range or iterator source in a loop",
         "to" => "**to** - Cast expression to a target type",
+        "Self" => "**Self** — The implementing type inside an `impl` or `trait` definition",
+        "mut" => "**mut** — Mutability modifier for references (`&mut T`)",
+        "and" => "**and** — Short-circuit logical AND operator",
+        "or" => "**or** — Short-circuit logical OR operator",
+        "not" => "**not** — Logical negation operator",
+        "unit" => "```iris\nunit\n```\nUnit type `()`, representing no meaningful value",
+        "task_group" => "```iris\ntask_group() -> task_group\n```\nStructured concurrency group; use `task_group_join(tg)` / `task_group_cancel(tg)`",
+        "weak_ref" => "```iris\nweak_ref(x: T) -> weak_ref<T>\n```\nWeak reference handle; check `weak_alive(w)` or promote via `weak_upgrade(w)`",
         "true" => "```iris\ntrue: bool\n```",
         "false" => "```iris\nfalse: bool\n```",
         "none" => "```iris\nnone: option<T>\n```\nAbsent value",

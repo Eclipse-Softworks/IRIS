@@ -24,10 +24,8 @@ What is not fully unblocked yet:
    `github-linguist/linguist`, and `gh auth status` reports an invalid token for
    `Moon9t` as of April 26, 2026.
 2. Linguist only accepts grammars from a permissively licensed source.
-   `IRIS` is currently licensed `GPL-2.0-or-later`, so the syntax grammar needs
-   either:
-   - a dedicated permissively licensed grammar repository, or
-   - an explicit dual-license / re-license decision for the grammar assets.
+   `IRIS` is licensed under `Apache-2.0`, satisfying Linguist's permissive
+   license requirement for the grammar assets.
 3. The `.iris` extension is shared with unrelated files on GitHub, so the PR
    needs good search evidence and likely a stronger disambiguation story than a
    simple extension mapping.
