@@ -401,20 +401,42 @@ pub fn doctor(colored: bool, fix: bool) -> i32 {
         }
         Ok(o) => {
             let cleaned = crate::codegen::build::strip_ansi(&String::from_utf8_lossy(&o.stderr));
-            let msg = cleaned
+            let lines: Vec<&str> = cleaned
                 .lines()
                 .map(str::trim)
+                .filter(|l| !l.is_empty() && *l != "stdout:" && *l != "stderr:")
+                .collect();
+            let detail_line = lines
+                .iter()
+                .copied()
                 .find(|l| {
-                    l.contains("error:") || l.contains("fatal error:") || l.contains("failed")
+                    !l.starts_with("error[E")
+                        && (l.contains("error:")
+                            || l.contains("fatal error:")
+                            || l.contains("cannot find")
+                            || l.contains("unable to find")
+                            || l.contains("undefined")
+                            || l.contains("No such file")
+                            || l.contains("failed"))
                 })
-                .or_else(|| {
-                    cleaned
-                        .lines()
-                        .map(str::trim)
-                        .find(|l| !l.is_empty() && *l != "stdout:" && *l != "stderr:")
-                })
+                .or_else(|| lines.iter().copied().find(|l| !l.starts_with("error[E")))
+                .or_else(|| lines.first().copied())
                 .unwrap_or("failed");
-            r.fail("native build", msg, "the lines above name what is missing");
+            let mut extra = Vec::new();
+            for l in &lines {
+                if !l.starts_with("error[E") && *l != detail_line && !extra.contains(l) {
+                    extra.push(*l);
+                    if extra.len() == 2 {
+                        break;
+                    }
+                }
+            }
+            let hint = if extra.is_empty() {
+                "the lines above name what is missing".to_string()
+            } else {
+                extra.join(" | ")
+            };
+            r.fail("native build", detail_line, &hint);
         }
         Err(e) => r.fail("native build", &e.to_string(), ""),
     }

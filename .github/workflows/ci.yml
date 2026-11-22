@@ -103,7 +103,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo DEBIAN_FRONTEND=noninteractive apt-get update -yq
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -yq build-essential pkg-config clang lld gdb
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -yq build-essential pkg-config clang lld gdb libx11-dev libxkbcommon-dev libwayland-dev
           echo "IRIS_CLANG=/usr/bin/clang" >> "$GITHUB_ENV"
           # The native-debugger and worker-sandbox tests skip when their
           # prerequisites are missing; on Linux runners they must run, so a

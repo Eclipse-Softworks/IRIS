@@ -335,6 +335,8 @@ pub(crate) fn llvm_library_candidates(default_name: &str) -> Vec<PathBuf> {
         {
             candidates.push(prefix.join("toolchain/llvm/lib/libLLVM.so.23.1"));
             candidates.push(prefix.join("toolchain/llvm/lib/libLLVM.so.23"));
+            candidates.push(prefix.join("toolchain/llvm/lib/libLLVM-23.so.1"));
+            candidates.push(prefix.join("toolchain/llvm/lib/libLLVM-23.so"));
             candidates.push(prefix.join("toolchain/llvm/lib/libLLVM.so"));
         }
     }

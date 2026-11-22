@@ -271,16 +271,18 @@ fn clang_works(clang: &str) -> bool {
 
 fn toolchain_ready() -> bool {
     let tc = crate::codegen::build::toolchain_report();
-    if !clang_works(&tc.clang) {
-        return false;
-    }
+    let has_clang = clang_works(&tc.clang);
     #[cfg(target_os = "windows")]
     {
-        if tc.sysroot_include.is_none() || tc.sysroot_lib.is_none() || tc.sysroot_gcc.is_none() {
-            return false;
-        }
+        has_clang
+            && tc.sysroot_include.is_some()
+            && tc.sysroot_lib.is_some()
+            && tc.sysroot_gcc.is_some()
     }
-    true
+    #[cfg(not(target_os = "windows"))]
+    {
+        has_clang
+    }
 }
 
 fn install_toolchain(

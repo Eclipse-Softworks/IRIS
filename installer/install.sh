@@ -169,7 +169,7 @@ stage_tree() {
     if [[ "$LIGHTWEIGHT" == "false" && -d "$src/toolchain" ]]; then
         rm -rf "$INSTALL_DIR/toolchain"
         mkdir -p "$INSTALL_DIR/toolchain"
-        cp -R "$src/toolchain/." "$INSTALL_DIR/toolchain/"
+        cp -RP "$src/toolchain/." "$INSTALL_DIR/toolchain/"
         ok "Installed bundled LLVM toolchain -> $INSTALL_DIR/toolchain"
     fi
 

@@ -101,6 +101,8 @@ jobs:
           test -f bundle-stage/toolchain/ucrt64/include/stdint.h
           for f in libmingw32.a libmingwex.a libmsvcrt.a libucrt.a libpthread.a libm.a \
                    libkernel32.a libuser32.a libadvapi32.a libshell32.a libws2_32.a \
+                   libwinhttp.a libwinpthread.a libmingwthrd.a libgcc_s.a \
+                   libcrypt32.a libsecur32.a libwinmm.a \
                    libole32.a liboleaut32.a libuuid.a libmoldname.a crt2.o crtbegin.o \
                    crtend.o gcrt2.o dllcrt2.o libntdll.a libshlwapi.a libversion.a \
                    libgdi32.a libbcrypt.a libuserenv.a libiphlpapi.a; do
@@ -210,6 +212,8 @@ jobs:
             cp -a "$LLVM_ROOT/lib/clang/${LLVM_MAJOR}/." "bundle-stage/toolchain/llvm/lib/clang/${LLVM_MAJOR}/"
           fi
           rm -rf "$LLVM_ROOT" llvm.tar.xz
+          ls -la bundle-stage/toolchain/llvm/lib
+          "$PWD/bundle-stage/toolchain/llvm/bin/ld.lld" --version
 
           export IRIS_CLANG="$PWD/bundle-stage/toolchain/llvm/bin/clang"
           export LD_LIBRARY_PATH="$PWD/bundle-stage/toolchain/llvm/lib:${LD_LIBRARY_PATH:-}"
@@ -222,7 +226,7 @@ jobs:
           cp LLVM_VERSION bundle-stage/
 
           mkdir -p toolchain
-          cp -r bundle-stage/toolchain/* toolchain/
+          cp -a bundle-stage/toolchain/* toolchain/
           chmod +x installer/linux/build-deb.sh installer/linux/build-rpm.sh
           bash installer/linux/build-deb.sh --version 1.0.0-rc3 --arch x86_64
           bash installer/linux/build-rpm.sh --version 1.0.0-rc3 --arch x86_64
@@ -231,10 +235,11 @@ jobs:
         run: |
           docker run --rm -v "$PWD/bundle-stage:/bundle:ro" ubuntu:24.04 bash -euo pipefail -c '
             apt-get update -qq && apt-get install -y -qq --no-install-recommends libc6-dev libgcc-13-dev ca-certificates >/dev/null
-            cp -r /bundle /tmp/bundle
+            cp -a /bundle /tmp/bundle
             bash /tmp/bundle/install.sh --dir /tmp/iris-clean --no-modify-path --no-vscode --yes
             PATH="/tmp/iris-clean/bin:/usr/bin:/bin"
             export PATH
+            /tmp/iris-clean/toolchain/llvm/bin/ld.lld --version
             iris --version
             iris completions bash > /tmp/iris.bash
             bash -n /tmp/iris.bash
@@ -299,16 +304,18 @@ jobs:
           tar xf llvm.tar.xz -C bundle-stage
           LLVM_ROOT="$(find bundle-stage -mindepth 1 -maxdepth 1 -type d -name 'LLVM-*' | head -1)"
           cp -L "$LLVM_ROOT/bin/clang" "$LLVM_ROOT/bin/ld.lld" "$LLVM_ROOT/bin/lld" bundle-stage/toolchain/llvm/bin/ 2>/dev/null || true
-          cp -a "$LLVM_ROOT/lib/libLLVM"*.dylib "$LLVM_ROOT/lib/libclang"*.dylib "$LLVM_ROOT/lib/libc++"*.dylib bundle-stage/toolchain/llvm/lib/ 2>/dev/null || true
+          cp -a "$LLVM_ROOT/lib/libLLVM"*.dylib "$LLVM_ROOT/lib/libclang"*.dylib "$LLVM_ROOT/lib/libc++"*.dylib "$LLVM_ROOT/lib/libunwind"*.dylib bundle-stage/toolchain/llvm/lib/ 2>/dev/null || true
           if [[ -d "$LLVM_ROOT/lib/clang/${LLVM_MAJOR}" ]]; then
             mkdir -p "bundle-stage/toolchain/llvm/lib/clang/${LLVM_MAJOR}"
             cp -a "$LLVM_ROOT/lib/clang/${LLVM_MAJOR}/." "bundle-stage/toolchain/llvm/lib/clang/${LLVM_MAJOR}/"
           fi
           rm -rf "$LLVM_ROOT" llvm.tar.xz
+          DYLD_FALLBACK_LIBRARY_PATH="$PWD/bundle-stage/toolchain/llvm/lib:${DYLD_FALLBACK_LIBRARY_PATH:-}" \
+            "$PWD/bundle-stage/toolchain/llvm/bin/clang" --version
 
           export SDKROOT="$(xcrun --show-sdk-path)"
           export IRIS_CLANG="$PWD/bundle-stage/toolchain/llvm/bin/clang"
-          export DYLD_LIBRARY_PATH="$PWD/bundle-stage/toolchain/llvm/lib:${DYLD_LIBRARY_PATH:-}"
+          export DYLD_FALLBACK_LIBRARY_PATH="$PWD/bundle-stage/toolchain/llvm/lib:${DYLD_FALLBACK_LIBRARY_PATH:-}"
           IRIS_GENERATE_PREBUILT=1 cargo build --release --bin iris
           cargo build --release -p iris_ui_host
 

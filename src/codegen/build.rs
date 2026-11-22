@@ -1073,6 +1073,7 @@ fn build_binary_impl_with_options(
     let rt_obj = obj_dir.join("iris_runtime.o");
     let compile_rt = |c_path: &Path, out_obj: &Path| -> Result<(), CodegenError> {
         let mut cmd = Command::new(&clang);
+        configure_bundled_llvm_env(&mut cmd, &clang);
         cmd.args(&target_args);
         cmd.args([
             "-O2",
@@ -1339,6 +1340,7 @@ fn build_binary_impl_with_options(
                 _ => "-O3",
             };
             let mut ir_cmd = Command::new(&clang);
+            configure_bundled_llvm_env(&mut ir_cmd, &clang);
             ir_cmd.args(&target_args);
             ir_cmd.args([
                 opt_flag,
@@ -1498,11 +1500,20 @@ fn build_binary_impl_with_options(
             }
             // Fallback: link via clang
             let mut link_cmd = Command::new(&clang);
+            configure_bundled_llvm_env(&mut link_cmd, &clang);
             link_cmd.args(&target_args);
             if cfg!(target_os = "macos") || resolved_target.contains("apple") {
                 link_cmd.args(["-O2", path_str(&mod_obj)?]);
             } else {
-                link_cmd.args(["-fuse-ld=lld", "-O2", path_str(&mod_obj)?]);
+                let lld_flag = if !resolved_target.contains("msvc") {
+                    crate::codegen::build::find_lld()
+                        .filter(|p| Path::new(p).is_file())
+                        .map(|lld| format!("--ld-path={lld}"))
+                        .unwrap_or_else(|| "-fuse-ld=lld".to_owned())
+                } else {
+                    "-fuse-ld=lld".to_owned()
+                };
+                link_cmd.args([lld_flag.as_str(), "-O2", path_str(&mod_obj)?]);
             }
             for obj in &support_objs {
                 link_cmd.arg(path_str(obj)?);
@@ -2382,6 +2393,45 @@ pub(crate) fn find_lld() -> Option<String> {
     None
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn configure_bundled_llvm_env(cmd: &mut std::process::Command, tool_path: &str) {
+    let Some(lib_dir) = Path::new(tool_path)
+        .parent()
+        .and_then(|bin_dir| bin_dir.parent())
+        .map(|root| root.join("lib"))
+    else {
+        return;
+    };
+    if !lib_dir.is_dir()
+        || matches!(
+            lib_dir.to_str(),
+            Some("/usr/lib" | "/usr/local/lib" | "/lib")
+        )
+        || (!lib_dir.join("clang").is_dir() && !lib_dir.to_string_lossy().contains("llvm"))
+    {
+        return;
+    }
+    let var = if cfg!(target_os = "macos") {
+        "DYLD_FALLBACK_LIBRARY_PATH"
+    } else {
+        "LD_LIBRARY_PATH"
+    };
+    let mut paths = vec![lib_dir];
+    if let Some(existing) = std::env::var_os(var) {
+        for p in std::env::split_paths(&existing) {
+            if !p.as_os_str().is_empty() && !paths.contains(&p) {
+                paths.push(p);
+            }
+        }
+    }
+    if let Ok(joined) = std::env::join_paths(paths) {
+        cmd.env(var, joined);
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn configure_bundled_llvm_env(_cmd: &mut std::process::Command, _tool_path: &str) {}
+
 /// Link object files into a native binary using `ld.lld` directly (no clang).
 /// This is a best-effort function: if linking fails, the caller falls back to clang.
 #[allow(clippy::too_many_arguments)]
@@ -2403,6 +2453,7 @@ fn link_with_lld(
     opts: &NativeBuildOptions,
 ) -> Result<(), CodegenError> {
     let mut cmd = std::process::Command::new(lld_path);
+    configure_bundled_llvm_env(&mut cmd, lld_path);
 
     // Target-specific linking
     if target_triple.contains("windows") && !target_triple.contains("msvc") {

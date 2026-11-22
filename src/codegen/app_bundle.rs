@@ -762,11 +762,19 @@ fn find_or_build_ui_host(start: &Path, prefer_release: bool) -> Option<PathBuf> 
         return Some(installed);
     }
 
-    if let Some(repo) = find_repo_root(start).or_else(|| {
-        std::env::current_dir()
-            .ok()
-            .and_then(|cwd| find_repo_root(&cwd))
-    }) {
+    let repo = find_repo_root(start)
+        .or_else(|| {
+            std::env::current_dir()
+                .ok()
+                .and_then(|cwd| find_repo_root(&cwd))
+        })
+        .or_else(|| {
+            std::env::current_exe()
+                .ok()
+                .and_then(|e| e.parent().and_then(find_repo_root))
+        });
+    if let Some(repo) = repo {
+        let profile_dir = if prefer_release { "release" } else { "debug" };
         let mut cmd = Command::new("cargo");
         cmd.current_dir(&repo).args(["build", "-p", "iris_ui_host"]);
         if prefer_release {
@@ -774,12 +782,22 @@ fn find_or_build_ui_host(start: &Path, prefer_release: bool) -> Option<PathBuf> 
         }
         if let Ok(status) = cmd.status() {
             if status.success() {
-                let built = repo
-                    .join("target")
-                    .join(if prefer_release { "release" } else { "debug" })
-                    .join(lib_name);
+                let built = repo.join("target").join(profile_dir).join(lib_name);
                 if built.is_file() {
                     return Some(built);
+                }
+                if let Ok(target) = std::env::var("CARGO_BUILD_TARGET") {
+                    let trimmed = target.trim();
+                    if !trimmed.is_empty() {
+                        let targeted = repo
+                            .join("target")
+                            .join(trimmed)
+                            .join(profile_dir)
+                            .join(lib_name);
+                        if targeted.is_file() {
+                            return Some(targeted);
+                        }
+                    }
                 }
             }
         }

@@ -211,8 +211,10 @@ $libTotal = 0
 $EssentialLibs = @(
     'libmingw32.a', 'libmingwex.a', 'libmsvcrt.a', 'libucrt.a',
     'libpthread.a', 'libm.a', 'libkernel32.a', 'libuser32.a',
-    'libadvapi32.a', 'libshell32.a', 'libws2_32.a', 'libole32.a',
-    'liboleaut32.a', 'libuuid.a', 'libmoldname.a',
+    'libadvapi32.a', 'libshell32.a', 'libws2_32.a', 'libwinhttp.a',
+    'libwinpthread.a', 'libmingwthrd.a', 'libgcc_s.a',
+    'libcrypt32.a', 'libsecur32.a', 'libwinmm.a',
+    'libole32.a', 'liboleaut32.a', 'libuuid.a', 'libmoldname.a',
     'crt2.o', 'crtbegin.o', 'crtend.o', 'gcrt2.o', 'dllcrt2.o',
     'libntdll.a', 'libshlwapi.a', 'libversion.a',
     'libgdi32.a', 'libbcrypt.a', 'libuserenv.a', 'libiphlpapi.a'

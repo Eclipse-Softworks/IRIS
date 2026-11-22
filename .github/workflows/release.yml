@@ -160,9 +160,10 @@ jobs:
             cp -a toolchain-dl/llvm/lib/liblld*.so*   toolchain/llvm/lib/ 2>/dev/null || true
             cp -a toolchain-dl/llvm/lib/libc++*.so*   toolchain/llvm/lib/ 2>/dev/null || true
             cp -a toolchain-dl/llvm/lib/libunwind*.so* toolchain/llvm/lib/ 2>/dev/null || true
-            cp -a toolchain-dl/llvm/lib/libLLVM*.dylib  toolchain/llvm/lib/ 2>/dev/null || true
-            cp -a toolchain-dl/llvm/lib/libclang*.dylib toolchain/llvm/lib/ 2>/dev/null || true
-            cp -a toolchain-dl/llvm/lib/libc++*.dylib   toolchain/llvm/lib/ 2>/dev/null || true
+            cp -a toolchain-dl/llvm/lib/libLLVM*.dylib   toolchain/llvm/lib/ 2>/dev/null || true
+            cp -a toolchain-dl/llvm/lib/libclang*.dylib  toolchain/llvm/lib/ 2>/dev/null || true
+            cp -a toolchain-dl/llvm/lib/libc++*.dylib    toolchain/llvm/lib/ 2>/dev/null || true
+            cp -a toolchain-dl/llvm/lib/libunwind*.dylib toolchain/llvm/lib/ 2>/dev/null || true
           fi
 
           # Clang builtin resource headers (<stddef.h>, <stdint.h>, <stdarg.h>, etc.) for all targets
@@ -213,8 +214,10 @@ jobs:
                 mkdir -p toolchain/ucrt64/lib
                 for f in libmingw32.a libmingwex.a libmsvcrt.a libucrt.a \
                          libpthread.a libm.a libkernel32.a libuser32.a \
-                         libadvapi32.a libshell32.a libws2_32.a libole32.a \
-                         liboleaut32.a libuuid.a libmoldname.a \
+                         libadvapi32.a libshell32.a libws2_32.a \
+                         libwinhttp.a libwinpthread.a libmingwthrd.a libgcc_s.a \
+                         libcrypt32.a libsecur32.a libwinmm.a \
+                         libole32.a liboleaut32.a libuuid.a libmoldname.a \
                          crt2.o crtbegin.o crtend.o gcrt2.o dllcrt2.o \
                          libntdll.a libshlwapi.a libversion.a \
                          libgdi32.a libbcrypt.a libuserenv.a libiphlpapi.a; do
@@ -256,7 +259,7 @@ jobs:
               export SDKROOT="$(xcrun --show-sdk-path)"
             fi
             export LD_LIBRARY_PATH="$PWD/toolchain/llvm/lib:${LD_LIBRARY_PATH:-}"
-            export DYLD_LIBRARY_PATH="$PWD/toolchain/llvm/lib:${DYLD_LIBRARY_PATH:-}"
+            export DYLD_FALLBACK_LIBRARY_PATH="$PWD/toolchain/llvm/lib:${DYLD_FALLBACK_LIBRARY_PATH:-}"
           fi
           IRIS_GENERATE_PREBUILT=1 cargo check --target ${{ matrix.target }}
 

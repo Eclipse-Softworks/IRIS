@@ -87,7 +87,7 @@ cp -r "$ROOT/examples/"* "$PKG_DIR/usr/share/iris/examples/" 2>/dev/null || true
 # Bundled LLVM toolchain (enables `iris build` without system clang)
 TOOLCHAIN_SRC="$ROOT/toolchain"
 if [[ -d "$TOOLCHAIN_SRC" ]]; then
-    cp -r "$TOOLCHAIN_SRC"/* "$PKG_DIR/usr/share/iris/toolchain/" 2>/dev/null || true
+    cp -a "$TOOLCHAIN_SRC"/* "$PKG_DIR/usr/share/iris/toolchain/" 2>/dev/null || true
     echo "  Bundled LLVM toolchain"
 fi
 

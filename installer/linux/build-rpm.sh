@@ -77,7 +77,7 @@ if [[ -f "$UI_HOST_LIB" ]]; then
 fi
 cp -r "$ROOT/examples/"* "$BUILDROOT/usr/share/iris/examples/" 2>/dev/null || true
 if [[ -d "$ROOT/toolchain" ]]; then
-    cp -r "$ROOT/toolchain/"* "$BUILDROOT/usr/share/iris/toolchain/" 2>/dev/null || true
+    cp -a "$ROOT/toolchain/"* "$BUILDROOT/usr/share/iris/toolchain/" 2>/dev/null || true
 fi
 cp "$ROOT/LLVM_VERSION" "$BUILDROOT/usr/share/iris/" 2>/dev/null || true
 cp "$ROOT/LICENSE" "$BUILDROOT/usr/share/doc/iris/"
@@ -96,7 +96,7 @@ if [[ -f "$UI_HOST_LIB" ]]; then
 fi
 cp -r "$ROOT/examples/"* "$STAGED_DATA/examples/" 2>/dev/null || true
 if [[ -d "$ROOT/toolchain" ]]; then
-    cp -r "$ROOT/toolchain/"* "$STAGED_DATA/toolchain/" 2>/dev/null || true
+    cp -a "$ROOT/toolchain/"* "$STAGED_DATA/toolchain/" 2>/dev/null || true
 fi
 cp "$ROOT/LLVM_VERSION" "$STAGED_DATA/" 2>/dev/null || true
 cp "$ROOT/LICENSE" "$STAGED_DATA/"
@@ -171,7 +171,7 @@ if [ -f "%{_topdir}/../staged-data/libiris_ui_host.so" ]; then
     chmod 755 %{buildroot}/usr/share/iris/libiris_ui_host.so
 fi
 cp -r %{_topdir}/../staged-data/examples/* %{buildroot}/usr/share/iris/examples/ 2>/dev/null || true
-cp -r %{_topdir}/../staged-data/toolchain/* %{buildroot}/usr/share/iris/toolchain/ 2>/dev/null || true
+cp -a %{_topdir}/../staged-data/toolchain/* %{buildroot}/usr/share/iris/toolchain/ 2>/dev/null || true
 cp %{_topdir}/../staged-data/LLVM_VERSION %{buildroot}/usr/share/iris/ 2>/dev/null || true
 cp %{_topdir}/../staged-data/LICENSE %{buildroot}/usr/share/doc/iris/
 cp %{_topdir}/../staged-data/README.md %{buildroot}/usr/share/doc/iris/
