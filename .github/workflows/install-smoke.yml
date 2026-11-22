@@ -55,6 +55,7 @@ jobs:
             installer/macos/install.sh \
             installer/macos/uninstall.sh \
             installer/macos/sign_and_notarize.sh \
+            packaging/bundle_linux_llvm_deps.sh \
             packaging/linux-repo/build-repos.sh
 
   windows-clean-path:
@@ -197,7 +198,7 @@ jobs:
       - name: Install UI build dependencies and LLVM bundle
         run: |
           sudo apt-get update
-          sudo apt-get install -y libx11-dev libxkbcommon-dev libwayland-dev rpm
+          sudo apt-get install -y libx11-dev libxkbcommon-dev libwayland-dev rpm patchelf
 
           LLVM_VER="$(tr -d '\r\n' < LLVM_VERSION)"
           LLVM_MAJOR="${LLVM_VER%%.*}"
@@ -212,6 +213,7 @@ jobs:
             cp -a "$LLVM_ROOT/lib/clang/${LLVM_MAJOR}/." "bundle-stage/toolchain/llvm/lib/clang/${LLVM_MAJOR}/"
           fi
           rm -rf "$LLVM_ROOT" llvm.tar.xz
+          bash packaging/bundle_linux_llvm_deps.sh bundle-stage/toolchain/llvm x86_64
           ls -la bundle-stage/toolchain/llvm/lib
           "$PWD/bundle-stage/toolchain/llvm/bin/ld.lld" --version
 

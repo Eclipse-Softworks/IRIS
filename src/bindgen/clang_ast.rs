@@ -107,10 +107,11 @@ fn run_clang_ast_json(
     };
 
     let input_path: PathBuf = if !probe_aliases.is_empty() {
-        let abs_hdr = std::fs::canonicalize(header_path)
+        let abs_hdr_raw = std::fs::canonicalize(header_path)
             .unwrap_or_else(|_| header_path.to_path_buf())
             .to_string_lossy()
             .replace('\\', "/");
+        let abs_hdr = abs_hdr_raw.strip_prefix("//?/").unwrap_or(&abs_hdr_raw);
         let stamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos())

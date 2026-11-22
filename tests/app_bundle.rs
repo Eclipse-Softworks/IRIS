@@ -152,7 +152,7 @@ fn bundle_ui_app_runs_standalone_outside_repo_and_packages_formats_and_installs(
     let bundle_dir = tmp.join("bundle_out");
     let b_out = iris()
         .current_dir(&project_dir)
-        .args(["bundle", ".", "--console", "-o"])
+        .args(["bundle", ".", "--console", "--format", "dir", "-o"])
         .arg(&bundle_dir)
         .output()
         .unwrap();
@@ -247,6 +247,8 @@ fn bundle_ui_app_runs_standalone_outside_repo_and_packages_formats_and_installs(
             "bundle",
             ".",
             "--console",
+            "--format",
+            "dir",
             "--install",
             "--no-register",
             "--install-dir",

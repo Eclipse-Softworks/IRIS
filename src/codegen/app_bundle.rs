@@ -1346,12 +1346,20 @@ pub fn run_bundle(cfg: &BundleConfig) -> Result<BundleOutput, String> {
             if cfg!(target_os = "windows") {
                 let _ = fs::write(staging_dir.join("app.ico"), &ico_bytes);
             }
+            let rpaths = if cfg!(target_os = "macos") {
+                vec![
+                    "@executable_path/lib".to_owned(),
+                    "@executable_path".to_owned(),
+                ]
+            } else {
+                vec!["$ORIGIN/lib".to_owned(), "$ORIGIN".to_owned()]
+            };
             (
                 staging_dir.join(exe_name),
                 staging_dir.clone(),
                 staging_dir.clone(),
                 staging_dir.join("app.json"),
-                vec!["$ORIGIN/lib".to_owned(), "$ORIGIN".to_owned()],
+                rpaths,
             )
         }
     };
