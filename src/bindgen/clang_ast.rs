@@ -142,6 +142,9 @@ fn run_clang_ast_json(
         let mut cmd = Command::new(clang);
         if cpp_mode {
             cmd.arg("-x").arg("c++").arg("-std=c++17");
+            if cfg!(windows) {
+                cmd.arg("-D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH");
+            }
         } else {
             cmd.arg("-x").arg("c");
         }
@@ -166,8 +169,12 @@ fn run_clang_ast_json(
 
     let mut out = invoke(&input_path)?;
     if !out.status.success() && temp_probe.is_some() {
-        // Fallback to raw header without probe if a template alias was incomplete
-        out = invoke(header_path)?;
+        let probe_stderr = String::from_utf8_lossy(&out.stderr);
+        let probe_broke = out.stdout.is_empty() || probe_stderr.contains("__iris_bindgen_probe");
+        let fallback = invoke(header_path)?;
+        if probe_broke || fallback.status.success() {
+            out = fallback;
+        }
     }
     if let Some(p) = temp_probe {
         let _ = std::fs::remove_file(p);

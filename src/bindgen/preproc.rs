@@ -162,6 +162,9 @@ fn preprocess_with_clang(
     cmd.arg("-E").arg("-dD").arg("-CC");
     if cpp_mode {
         cmd.arg("-x").arg("c++").arg("-std=c++17");
+        if cfg!(windows) {
+            cmd.arg("-D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH");
+        }
     } else {
         cmd.arg("-x").arg("c");
     }

@@ -115,13 +115,24 @@ impl Pass for GcAnnotatePass {
                 let mut escaped: HashSet<ValueId> = HashSet::new();
                 for block in &func.blocks {
                     for instr in &block.instrs {
-                        if let IrInstr::Return { values } = instr {
-                            escaped.extend(collect_return_escape_values(
-                                func,
-                                values,
-                                &bps,
-                                &callee_escape,
-                            ));
+                        match instr {
+                            IrInstr::Return { values } => {
+                                escaped.extend(collect_return_escape_values(
+                                    func,
+                                    values,
+                                    &bps,
+                                    &callee_escape,
+                                ));
+                            }
+                            IrInstr::Panic { msg, .. } => {
+                                escaped.extend(collect_return_escape_values(
+                                    func,
+                                    &[*msg],
+                                    &bps,
+                                    &callee_escape,
+                                ));
+                            }
+                            _ => {}
                         }
                     }
                 }
@@ -912,5 +923,23 @@ mod tests {
         "#;
         let ir = compile(src, "test", EmitKind::Ir).expect("should compile");
         assert!(ir.contains("retain"), "IR should contain retain: {}", ir);
+    }
+
+    #[test]
+    fn panic_message_is_not_released_before_panic() {
+        let src = "def main() -> i64 {\n    val n = 3;\n    assert(n > 5, \"n is \" + to_str(n));\n    return 0\n}\n";
+        let ir = compile(src, "test", EmitKind::Ir).expect("should compile");
+        let panic_val = ir
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix("panic "))
+            .next()
+            .expect("expected a panic instruction in IR")
+            .trim()
+            .to_owned();
+        let release_needle = format!("release {panic_val},");
+        assert!(
+            !ir.contains(&release_needle),
+            "panic message {panic_val} must not be released before panic:\n{ir}"
+        );
     }
 }

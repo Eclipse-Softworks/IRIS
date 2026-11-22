@@ -218,7 +218,6 @@ jobs:
           "$PWD/bundle-stage/toolchain/llvm/bin/ld.lld" --version
 
           export IRIS_CLANG="$PWD/bundle-stage/toolchain/llvm/bin/clang"
-          export LD_LIBRARY_PATH="$PWD/bundle-stage/toolchain/llvm/lib:${LD_LIBRARY_PATH:-}"
           IRIS_GENERATE_PREBUILT=1 cargo build --release --bin iris
           cargo build --release -p iris_ui_host
 
