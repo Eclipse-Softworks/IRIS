@@ -227,6 +227,9 @@ chmod 755 "$PKG_DIR/usr/bin/iris"
 if [[ -f "$PKG_DIR/usr/share/iris/libiris_ui_host.so" ]]; then
     chmod 755 "$PKG_DIR/usr/share/iris/libiris_ui_host.so"
 fi
+if [[ -d "$PKG_DIR/usr/share/iris/toolchain/llvm/bin" ]]; then
+    find "$PKG_DIR/usr/share/iris/toolchain/llvm/bin" -type f -exec chmod 755 {} \;
+fi
 chmod 755 "$PKG_DIR/DEBIAN/postinst"
 chmod 755 "$PKG_DIR/DEBIAN/prerm"
 

@@ -1,5 +1,5 @@
 {
-  "version": "1.0.0-rc2",
+  "version": "1.0.0-rc3",
   "entries": [
     {
       "path": "projects/learning_scheduler/main.iris",
@@ -1107,6 +1107,46 @@
     {
       "path": "projects/ui_gallery/main.iris",
       "mode": "module",
+      "expected": ""
+    },
+    {
+      "path": "projects/grav_forge/main.iris",
+      "mode": "manual",
+      "expected": ""
+    },
+    {
+      "path": "projects/grav_forge/autodiff.iris",
+      "mode": "module",
+      "expected": ""
+    },
+    {
+      "path": "projects/grav_forge/canvas.iris",
+      "mode": "module",
+      "expected": ""
+    },
+    {
+      "path": "projects/grav_forge/physics.iris",
+      "mode": "module",
+      "expected": ""
+    },
+    {
+      "path": "projects/target_takedown/main.iris",
+      "mode": "manual",
+      "expected": ""
+    },
+    {
+      "path": "projects/target_takedown/hud.iris",
+      "mode": "module",
+      "expected": ""
+    },
+    {
+      "path": "projects/target_takedown/vision.iris",
+      "mode": "module",
+      "expected": ""
+    },
+    {
+      "path": "projects/ui_studio/main.iris",
+      "mode": "manual",
       "expected": ""
     }
   ]
