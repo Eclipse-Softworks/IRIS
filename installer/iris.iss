@@ -67,7 +67,7 @@ Name: "vscode";     Description: "VSCode extension (.vsix)";                  Ty
 Name: "addtopath";     Description: "Add IRIS to the user PATH";                         GroupDescription: "Environment:"
 Name: "addllvmpath";   Description: "Add LLVM to the user PATH";                         GroupDescription: "Environment:"; Components: llvm
 Name: "installvscode"; Description: "Install VSCode extension (if VSCode is detected)";   GroupDescription: "Extras:";      Components: vscode
-Name: "installdeps";   Description: "Download external LLVM/MinGW dependencies (for Compact installs)"; GroupDescription: "Dependencies:"; Components: compact; Flags: unchecked
+Name: "installdeps";   Description: "Download external LLVM/MinGW dependencies (for Compact installs)"; GroupDescription: "Dependencies:"; Components: not (llvm and sysroot); Flags: unchecked
 
 
 ; ---------------------------------------------------------------------------
