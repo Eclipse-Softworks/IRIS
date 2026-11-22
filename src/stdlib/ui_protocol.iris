@@ -852,7 +852,7 @@ pub def ui_transform_rotate_about(rad: f64, cx: f64, cy: f64) -> UiTransform {
     }
 }
 
-def candidate_host_paths(dll_override: str) -> list<str> effect alloc {
+def candidate_host_paths(dll_override: str) -> list<str> effect alloc, env {
     val paths: list<str> = list()
     if len(dll_override) > 0 {
         list_push(paths, dll_override)
@@ -926,7 +926,7 @@ def candidate_host_paths(dll_override: str) -> list<str> effect alloc {
     return paths
 }
 
-def probe_ui_host_dll(dll_override: str) -> i64 effect ffi, alloc {
+def probe_ui_host_dll(dll_override: str) -> i64 effect ffi, alloc, env {
     val paths = candidate_host_paths(dll_override)
     val n = list_len(paths)
     for i in 0..n {
@@ -1014,7 +1014,7 @@ pub def ui_open_native_host(
     w: i64,
     h: i64,
     dll_override: str,
-) -> result<NativeUiLib, str> effect ffi, alloc {
+) -> result<NativeUiLib, str> effect ffi, alloc, env {
     val dll = probe_ui_host_dll(dll_override)
     if dll == 0 {
         return err(

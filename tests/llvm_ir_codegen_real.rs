@@ -62,20 +62,20 @@ fn test_string_global_constant() {
     );
 }
 
-// ── Test 4: ConstStr uses getelementptr inbounds ──────────────────────────
+// ── Test 4: ConstStr interns via iris_intern_lit ──────────────────────────
 
 #[test]
 fn test_string_uses_gep() {
     let src = r#"def f() -> str { "world" }"#;
     let ir = compile(src, "test", EmitKind::Llvm).unwrap();
     assert!(
-        ir.contains("getelementptr inbounds"),
-        "expected 'getelementptr inbounds' for string ref:\n{}",
+        ir.contains("@iris_intern_lit"),
+        "expected '@iris_intern_lit' for string ref:\n{}",
         ir
     );
     assert!(
         ir.contains("@.str.0"),
-        "expected '@.str.0' in getelementptr:\n{}",
+        "expected '@.str.0' in intern call:\n{}",
         ir
     );
 }

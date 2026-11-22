@@ -555,7 +555,7 @@ def style_pad_y(st: UiStyle) -> f64 {
     return if st.pad_y >= 0.0 { st.pad_y } else { st.padding }
 }
 
-def tree_scroll_for(tree: UiTree, key: str) -> f64 {
+def tree_scroll_for(tree: UiTree, key: str) -> f64 effect alloc {
     if len(key) > 0 {
         for i in 0..list_len(tree.scroll_keys) {
             if list_get(tree.scroll_keys, i) == key {
@@ -566,7 +566,7 @@ def tree_scroll_for(tree: UiTree, key: str) -> f64 {
     return tree.scroll_y
 }
 
-def tree_split_ratio(tree: UiTree, node: UiNode) -> f64 {
+def tree_split_ratio(tree: UiTree, node: UiNode) -> f64 effect alloc {
     if len(node.key) > 0 {
         for i in 0..list_len(tree.split_keys) {
             if list_get(tree.split_keys, i) == node.key {
@@ -615,7 +615,7 @@ pub def drawer_panel_rect(vw: f64, vh: f64, node: UiNode) -> UiRect {
     }
 }
 
-def tabs_total_width(tree: UiTree, node: UiNode, is_segmented: bool) -> f64 {
+def tabs_total_width(tree: UiTree, node: UiNode, is_segmented: bool) -> f64 effect alloc {
     if node.data_idx < 0 || node.data_idx >= list_len(tree.tabs_specs) {
         return 200.0
     }
@@ -632,7 +632,7 @@ def tabs_total_width(tree: UiTree, node: UiNode, is_segmented: bool) -> f64 {
     return fmax(160.0, sum_w)
 }
 
-def select_measured_size(tree: UiTree, node: UiNode) -> UiSize {
+def select_measured_size(tree: UiTree, node: UiNode) -> UiSize effect alloc {
     var best_w = to_f64(len(node.placeholder)) * 8.0
     if node.data_idx >= 0 && node.data_idx < list_len(tree.selects) {
         val spec = list_get(tree.selects, node.data_idx)
@@ -644,7 +644,7 @@ def select_measured_size(tree: UiTree, node: UiNode) -> UiSize {
     return UiSize { w: fmax(160.0, best_w + 44.0), h: 36.0 }
 }
 
-def estimate_leaf_size_in(tree: UiTree, node: UiNode) -> UiSize {
+def estimate_leaf_size_in(tree: UiTree, node: UiNode) -> UiSize effect alloc {
     val txt_sz = estimate_text_size(node.text, node.style)
     val ph_sz = estimate_text_size(node.placeholder, node.style)
     val pad_x2 = style_pad_x(node.style) * 2.0
@@ -1465,7 +1465,7 @@ def is_container_kind(kind: WidgetKind) -> bool {
     }
 }
 
-def node_hit_matches(tree: UiTree, node: UiNode, px: f64, py: f64) -> bool {
+def node_hit_matches(tree: UiTree, node: UiNode, px: f64, py: f64) -> bool effect alloc {
     return when node.kind {
         WidgetKind.SplitPane => {
             val ix = node.layout.x + style_pad_x(node.style)
@@ -1785,7 +1785,7 @@ def with_state_copy(s: UiState, hovered: str, active: str, focused: str, draggin
     }
 }
 
-def clone_str_safe(s: str) -> str effect alloc {
+def clone_str_safe(s: str) -> str {
     if len(s) == 0 {
         return ""
     }
@@ -2190,12 +2190,12 @@ pub def ui_state_spring_from(
 }
 
 /// Read the current eased or spring-simulated value of `key` inside `state`.
-pub def ui_state_animated_value(state: UiState, key: str, fallback: f64) -> f64 {
+pub def ui_state_animated_value(state: UiState, key: str, fallback: f64) -> f64 effect alloc {
     return ui_motion_value(state.motion, key, fallback)
 }
 
 /// Read the current value of spring `key` inside `state`.
-pub def ui_state_spring_value(state: UiState, key: str, fallback: f64) -> f64 {
+pub def ui_state_spring_value(state: UiState, key: str, fallback: f64) -> f64 effect alloc {
     return ui_motion_value(state.motion, key, fallback)
 }
 
@@ -2205,19 +2205,19 @@ pub def ui_state_clock(state: UiState) -> UiClock {
 }
 
 /// True while any widget tween, spring, or timed toast is still active (drives redraw scheduling).
-pub def ui_state_has_active_transitions(state: UiState) -> bool {
+pub def ui_state_has_active_transitions(state: UiState) -> bool effect alloc {
     return ui_motion_has_active(state.motion) || list_len(state.extras.toasts) > 0
 }
 
-pub def ui_state_hover_progress(state: UiState, key: str) -> f64 {
+pub def ui_state_hover_progress(state: UiState, key: str) -> f64 effect alloc {
     return ui_motion_value(state.motion, "hover:" + key, 0.0)
 }
 
-pub def ui_state_press_progress(state: UiState, key: str) -> f64 {
+pub def ui_state_press_progress(state: UiState, key: str) -> f64 effect alloc {
     return ui_motion_value(state.motion, "press:" + key, 0.0)
 }
 
-pub def ui_state_focus_progress(state: UiState, key: str) -> f64 {
+pub def ui_state_focus_progress(state: UiState, key: str) -> f64 effect alloc {
     return ui_motion_value(state.motion, "focus:" + key, 0.0)
 }
 
@@ -2227,7 +2227,7 @@ pub def ui_state_cursor(state: UiState) -> UiCursor {
 }
 
 /// Look up the vertical scroll offset stored for container `key` (or `state.scroll_offset`).
-pub def ui_state_scroll_of(state: UiState, key: str) -> f64 {
+pub def ui_state_scroll_of(state: UiState, key: str) -> f64 effect alloc {
     if len(key) > 0 {
         for i in 0..list_len(state.extras.scroll_keys) {
             if list_get(state.extras.scroll_keys, i) == key {
@@ -2239,7 +2239,7 @@ pub def ui_state_scroll_of(state: UiState, key: str) -> f64 {
 }
 
 /// Look up the interactive split ratio stored for `SplitPane` `key`, or `fallback`.
-pub def ui_state_split_ratio(state: UiState, key: str, fallback: f64) -> f64 {
+pub def ui_state_split_ratio(state: UiState, key: str, fallback: f64) -> f64 effect alloc {
     if len(key) > 0 {
         for i in 0..list_len(state.extras.split_keys) {
             if list_get(state.extras.split_keys, i) == key {
@@ -2351,7 +2351,7 @@ pub def ui_state_tab_changed(state: UiState, key: str) -> bool {
 }
 
 /// True if the user dropped a file onto the window during this event batch.
-pub def ui_state_dropped_file(state: UiState) -> option<str> {
+pub def ui_state_dropped_file(state: UiState) -> option<str> effect alloc {
     if state.extras.has_file_drop && len(state.extras.last_dropped_file) > 0 {
         return some(state.extras.last_dropped_file)
     }
@@ -2385,7 +2385,7 @@ pub def ui_state_sync_transitions(before: UiState, after: UiState) -> UiState ef
 
 // --- Multi-select / drag & drop / clipboard / multi-line editing ------------
 
-pub def ui_state_is_selected(state: UiState, key: str) -> bool {
+pub def ui_state_is_selected(state: UiState, key: str) -> bool effect alloc {
     for i in 0..list_len(state.interaction.selected_keys) {
         if list_get(state.interaction.selected_keys, i) == key {
             return true
@@ -2394,11 +2394,11 @@ pub def ui_state_is_selected(state: UiState, key: str) -> bool {
     return false
 }
 
-pub def ui_state_selected_count(state: UiState) -> i64 {
+pub def ui_state_selected_count(state: UiState) -> i64 effect alloc {
     return list_len(state.interaction.selected_keys)
 }
 
-def selection_with(state: UiState, keys: list<str>, anchor: str) -> UiState effect alloc {
+def selection_with(state: UiState, keys: list<str>, anchor: str) -> UiState {
     val i = state.interaction
     return with_interaction(
         state,
@@ -2479,7 +2479,7 @@ pub def ui_state_begin_drag(
     payload: str,
     x: f64,
     y: f64,
-) -> UiState effect alloc {
+) -> UiState {
     val i = state.interaction
     return with_interaction(
         state,
@@ -2527,7 +2527,7 @@ pub def ui_state_move_drag(state: UiState, x: f64, y: f64) -> UiState {
     )
 }
 
-pub def ui_state_end_drag(state: UiState, drop_key: str) -> UiState effect alloc {
+pub def ui_state_end_drag(state: UiState, drop_key: str) -> UiState {
     val i = state.interaction
     return with_interaction(
         state,
@@ -2553,7 +2553,7 @@ pub def ui_state_clipboard(state: UiState) -> str {
     return state.interaction.clipboard
 }
 
-pub def ui_state_set_clipboard(state: UiState, text: str) -> UiState effect alloc {
+pub def ui_state_set_clipboard(state: UiState, text: str) -> UiState {
     val i = state.interaction
     return with_interaction(
         state,
@@ -2910,7 +2910,7 @@ def cursor_for_node(node: UiNode, is_dragging: bool) -> UiCursor {
 }
 
 /// Compute screen bounds of an open `Select` or `Menu` popup panel.
-pub def popup_panel_rect(tree: UiTree, node: UiNode, anchor: UiRect) -> UiRect {
+pub def popup_panel_rect(tree: UiTree, node: UiNode, anchor: UiRect) -> UiRect effect alloc {
     var count = 0
     if node.kind == WidgetKind.Select
         && node.data_idx >= 0
@@ -2930,7 +2930,7 @@ pub def popup_panel_rect(tree: UiTree, node: UiNode, anchor: UiRect) -> UiRect {
     return UiRect { x: px, y: py, w: pop_w, h: pop_h }
 }
 
-def popup_item_index(tree: UiTree, node: UiNode, anchor: UiRect, px: f64, py: f64) -> i64 {
+def popup_item_index(tree: UiTree, node: UiNode, anchor: UiRect, px: f64, py: f64) -> i64 effect alloc {
     val pr = popup_panel_rect(tree, node, anchor)
     if !rect_contains(pr, px, py) {
         return -1
@@ -2952,7 +2952,7 @@ def popup_item_index(tree: UiTree, node: UiNode, anchor: UiRect, px: f64, py: f6
     return -1
 }
 
-def tabs_item_at(tree: UiTree, node: UiNode, px: f64) -> i64 {
+def tabs_item_at(tree: UiTree, node: UiNode, px: f64) -> i64 effect alloc {
     if node.data_idx < 0 || node.data_idx >= list_len(tree.tabs_specs) {
         return 0
     }
@@ -3854,7 +3854,7 @@ def set_close_requested(state: UiState) -> UiState {
     }
 }
 
-def find_scrollable_under(tree: UiTree, px: f64, py: f64) -> str {
+def find_scrollable_under(tree: UiTree, px: f64, py: f64) -> str effect alloc {
     var i = list_len(tree.nodes) - 1
     while i >= 0 {
         val node = list_get(tree.nodes, i)

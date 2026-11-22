@@ -262,10 +262,13 @@ static int ds_contains_and_remove(void *ptr, size_t *out_bytes) {
   if (!ptr)
     return 0;
   pthread_mutex_lock(&ds_mu);
-  int found = ds_remove_locked(ptr, out_bytes);
-  if (found && out_bytes) {
+  size_t bytes = 0;
+  int found = ds_remove_locked(ptr, &bytes);
+  if (found) {
     g_raw_frees++;
-    g_raw_bytes_live -= (int64_t)*out_bytes;
+    g_raw_bytes_live -= (int64_t)bytes;
+    if (out_bytes)
+      *out_bytes = bytes;
   }
   pthread_mutex_unlock(&ds_mu);
   return found;
@@ -1036,8 +1039,17 @@ IrisVal *iris_box_list(IrisList *list) {
 IrisVal *iris_box_struct(IrisList *fields) {
   return box_heap_ref(IRIS_TAG_STRUCT, fields, IRIS_RC_LIST);
 }
+/* Nominal records are not reference-counted by GcAnnotatePass (local
+ * bindings, list_get results, nested record fields, and trait objects hold
+ * raw pointers without retaining them). Taking a single IRIS_RC_NATIVE_OBJECT
+ * reference on the box caused the first list release or list_set replacement
+ * to free a record still referenced by unboxed bindings. Records are
+ * reclaimed by frame pools (ui_frame_pool_destroy) or at process exit. */
 IrisVal *iris_box_native_object(void *object) {
-  return box_heap_ref(IRIS_TAG_NATIVE_OBJECT, object, IRIS_RC_NATIVE_OBJECT);
+  IrisVal *r = xmalloc(sizeof(IrisVal));
+  r->tag = IRIS_TAG_NATIVE_OBJECT;
+  r->ptr = object;
+  return r;
 }
 #ifdef IRIS_SANITIZED
 /* Built with IRIS_SANITIZE: report memory errors, not leaks. The runtime
@@ -3042,7 +3054,7 @@ void iris_list_set(IrisList *l, int64_t idx, IrisVal *val) {
         old->i64 = val->i64;
         /* Only a temporary box of its own: a value inside another
          * list's arena is not this function's to free. */
-        if (ds_contains_and_remove(val, NULL))
+        if (ds_contains(val))
           xfree(val);
         return;
       }
@@ -12117,12 +12129,11 @@ static void rc_deep_free_by_kind(void *ptr, int32_t kind) {
     default:
       break;
     }
-    ds_contains_and_remove(val, NULL);
     xfree(val);
     break;
   }
   case IRIS_RC_STR:
-    if (ds_contains_and_remove(ptr, NULL)) {
+    if (ds_contains(ptr)) {
       xfree((char *)ptr);
     }
     break;

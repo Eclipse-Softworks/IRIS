@@ -1217,7 +1217,7 @@ def ui_fold_loop_events(
     return ui_process_events(tree, ui_clear_events(state), events)
 }
 
-def has_paste_keydown(events: list<HostEvent>) -> bool {
+def has_paste_keydown(events: list<HostEvent>) -> bool effect alloc {
     for i in 0..list_len(events) {
         val ev = list_get(events, i)
         val is_kd = when ev.kind {
@@ -1352,7 +1352,7 @@ pub def ui_run_app(
     cfg: UiAppConfig,
     initial: UiState,
     render: |UiState, UiTree| -> i64,
-) -> result<UiState, str> effect ffi, alloc {
+) -> result<UiState, str> effect ffi, alloc, env {
     val mode = if cfg.headless { UiHostMode.Headless } else { UiHostMode.Desktop }
     val w = if cfg.width > 64 { cfg.width } else { 800 }
     val h = if cfg.height > 64 { cfg.height } else { 600 }
@@ -1397,7 +1397,7 @@ pub def ui_render_headless(
     state: UiState,
     size: UiSize,
     png_path: str,
-) -> result<UiColor, str> effect ffi, alloc {
+) -> result<UiColor, str> effect ffi, alloc, env {
     val w = if size.w > 1.0 { size.w to i64 } else { 800 }
     val h = if size.h > 1.0 { size.h to i64 } else { 600 }
     val opened = ui_open_native_host(UiHostMode.Headless, "IRIS Headless", w, h, "")

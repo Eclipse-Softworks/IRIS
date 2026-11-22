@@ -95,7 +95,7 @@ pub def spring_gentle() -> SpringConfig {
     return SpringConfig { stiffness: 140.0, damping: 20.0, mass: 1.0, precision: 0.002 }
 }
 
-pub def ui_motion_new() -> UiMotion effect alloc {
+pub def ui_motion_new() -> UiMotion {
     return UiMotion {}
 }
 
@@ -537,7 +537,7 @@ pub def ui_motion_spring_from(
 }
 
 /// Current interpolated or spring-simulated value of `key`, or `fallback` if none exists.
-pub def ui_motion_value(m: UiMotion, key: str, fallback: f64) -> f64 {
+pub def ui_motion_value(m: UiMotion, key: str, fallback: f64) -> f64 effect alloc {
     var s = 0
     while s < list_len(m.springs) {
         val sp = list_get(m.springs, s)
@@ -569,7 +569,7 @@ pub def ui_motion_value(m: UiMotion, key: str, fallback: f64) -> f64 {
 }
 
 /// Check whether `key` currently has an active tween or spring in flight.
-pub def ui_motion_is_active(m: UiMotion, key: str) -> bool {
+pub def ui_motion_is_active(m: UiMotion, key: str) -> bool effect alloc {
     var i = 0
     while i < list_len(m.tweens) {
         if list_get(m.tweens, i).key == key {
@@ -588,7 +588,7 @@ pub def ui_motion_is_active(m: UiMotion, key: str) -> bool {
 }
 
 /// Return true if any tween or spring is currently animating inside `m`.
-pub def ui_motion_has_active(m: UiMotion) -> bool {
+pub def ui_motion_has_active(m: UiMotion) -> bool effect alloc {
     return list_len(m.tweens) > 0 || list_len(m.springs) > 0
 }
 
