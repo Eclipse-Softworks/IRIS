@@ -255,6 +255,33 @@ fn generate_prebuilt_runtime() {
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "C:/msys64/ucrt64/include".to_owned());
 
+    let apple_sdk = if target.contains("apple") {
+        std::env::var("SDKROOT")
+            .ok()
+            .map(|s| s.trim().to_owned())
+            .filter(|s| !s.is_empty() && std::path::Path::new(s).is_dir())
+            .or_else(|| {
+                std::process::Command::new("xcrun")
+                    .args(["--show-sdk-path"])
+                    .output()
+                    .ok()
+                    .filter(|o| o.status.success())
+                    .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
+                    .filter(|s| !s.is_empty() && std::path::Path::new(s).is_dir())
+            })
+            .or_else(|| {
+                [
+                    "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk",
+                    "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk",
+                ]
+                .into_iter()
+                .find(|p| std::path::Path::new(p).is_dir())
+                .map(str::to_owned)
+            })
+    } else {
+        None
+    };
+
     for (src, obj) in units {
         let dest = out_dir.join(obj);
         let mut cmd = std::process::Command::new(&cc);
@@ -262,6 +289,9 @@ fn generate_prebuilt_runtime() {
         // Windows is the MSVC ABI, and the resulting objects cannot link against
         // a MinGW-targeted module.
         cmd.args(["-target", &target]);
+        if let Some(ref sdk) = apple_sdk {
+            cmd.args(["-isysroot", sdk]);
+        }
         cmd.args(["-O2", "-c", src, "-o"]).arg(&dest).args([
             "-I",
             "src/runtime",
@@ -275,15 +305,21 @@ fn generate_prebuilt_runtime() {
         {
             cmd.args(["-I", &msys2_inc]);
         }
-        let status = cmd.status();
-        match status {
-            Ok(s) if s.success() => {}
-            Ok(s) => {
+        match cmd.output() {
+            Ok(out) if out.status.success() => {}
+            Ok(out) => {
+                let err_msg = String::from_utf8_lossy(&out.stderr);
+                let first_line = err_msg
+                    .lines()
+                    .map(str::trim)
+                    .find(|l| !l.is_empty())
+                    .unwrap_or("");
                 println!(
-                    "cargo:warning=prebuilt: '{}' failed on {} (exit {:?})",
+                    "cargo:warning=prebuilt: '{}' failed on {} (exit {:?}): {}",
                     cc,
                     src,
-                    s.code()
+                    out.status.code(),
+                    first_line
                 );
                 return;
             }

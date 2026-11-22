@@ -158,17 +158,21 @@ jobs:
             cp -a toolchain-dl/llvm/lib/libLLVM*.so*  toolchain/llvm/lib/ 2>/dev/null || true
             cp -a toolchain-dl/llvm/lib/libclang*.so* toolchain/llvm/lib/ 2>/dev/null || true
             cp -a toolchain-dl/llvm/lib/liblld*.so*   toolchain/llvm/lib/ 2>/dev/null || true
+            cp -a toolchain-dl/llvm/lib/libc++*.so*   toolchain/llvm/lib/ 2>/dev/null || true
+            cp -a toolchain-dl/llvm/lib/libunwind*.so* toolchain/llvm/lib/ 2>/dev/null || true
             cp -a toolchain-dl/llvm/lib/libLLVM*.dylib  toolchain/llvm/lib/ 2>/dev/null || true
             cp -a toolchain-dl/llvm/lib/libclang*.dylib toolchain/llvm/lib/ 2>/dev/null || true
+            cp -a toolchain-dl/llvm/lib/libc++*.dylib   toolchain/llvm/lib/ 2>/dev/null || true
+          fi
+
+          # Clang builtin resource headers (<stddef.h>, <stdint.h>, <stdarg.h>, etc.) for all targets
+          if [[ -d "toolchain-dl/llvm/lib/clang/${LLVM_MAJOR}" ]]; then
+            mkdir -p "toolchain/llvm/lib/clang/${LLVM_MAJOR}"
+            cp -a "toolchain-dl/llvm/lib/clang/${LLVM_MAJOR}/." "toolchain/llvm/lib/clang/${LLVM_MAJOR}/"
           fi
 
           # Copy LLVM headers/libs needed for linking (MinGW sysroot on Windows)
           if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
-            # Clang internal headers
-            if [[ -d "toolchain-dl/llvm/lib/clang/${LLVM_MAJOR}/include" ]]; then
-              mkdir -p "toolchain/llvm/lib/clang/${LLVM_MAJOR}"
-              cp -r "toolchain-dl/llvm/lib/clang/${LLVM_MAJOR}/include" "toolchain/llvm/lib/clang/${LLVM_MAJOR}/"
-            fi
 
             # Bundle MinGW ucrt64 sysroot from runner's MSYS2 installation.
             # Without this, clang cannot find standard C headers (stdint.h, etc).
@@ -193,10 +197,10 @@ jobs:
               if [[ -d "$MSYS2_UCRT/include" ]]; then
                 echo "  Bundling MinGW ucrt64 sysroot..."
 
-                # Headers — use robocopy (Windows-native, handles NTFS paths properly)
+                # Headers — use robocopy (Windows-native, handles NTFS paths properly; disable MSYS path mangling)
                 mkdir -p toolchain/ucrt64/include
-                # robocopy exit codes 0-7 = success; mask with (( )) to avoid bash error
-                robocopy.exe "C:\\msys64\\ucrt64\\include" "toolchain\\ucrt64\\include" /E /NFL /NDL /NP /NJH /NJS 2>&1 || true
+                # robocopy exit codes 0-7 = success; MSYS_NO_PATHCONV=1 keeps /E from becoming E:/
+                MSYS_NO_PATHCONV=1 robocopy.exe "C:\\msys64\\ucrt64\\include" "toolchain\\ucrt64\\include" /E /NFL /NDL /NP /NJH /NJS 2>&1 || true
 
                 # Verify headers were copied
                 if [[ -f "toolchain/ucrt64/include/stdint.h" ]]; then
@@ -248,6 +252,9 @@ jobs:
           if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
             export IRIS_MSYS2_INCLUDE="$PWD/toolchain/ucrt64/include"
           else
+            if [[ "${{ matrix.os }}" == "macos-latest" ]]; then
+              export SDKROOT="$(xcrun --show-sdk-path)"
+            fi
             export LD_LIBRARY_PATH="$PWD/toolchain/llvm/lib:${LD_LIBRARY_PATH:-}"
             export DYLD_LIBRARY_PATH="$PWD/toolchain/llvm/lib:${DYLD_LIBRARY_PATH:-}"
           fi

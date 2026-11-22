@@ -87,8 +87,18 @@ jobs:
           fi
           rm -rf "$LLVM_ROOT" llvm.tar.xz
 
+          sed -i 's/Required/Never/g' C:/msys64/etc/pacman.conf || true
+          sed -i 's/Optional/Never/g' C:/msys64/etc/pacman.conf || true
+          C:/msys64/usr/bin/pacman.exe -Sy --noconfirm --needed \
+            mingw-w64-ucrt-x86_64-headers \
+            mingw-w64-ucrt-x86_64-crt \
+            mingw-w64-ucrt-x86_64-gcc \
+            mingw-w64-ucrt-x86_64-gcc-libs \
+            mingw-w64-ucrt-x86_64-winpthreads 2>&1 || true
+
           mkdir -p bundle-stage/toolchain/ucrt64/include bundle-stage/toolchain/ucrt64/lib
-          robocopy.exe "C:\\msys64\\ucrt64\\include" "bundle-stage\\toolchain\\ucrt64\\include" /E /NFL /NDL /NP /NJH /NJS 2>&1 || true
+          MSYS_NO_PATHCONV=1 robocopy.exe "C:\\msys64\\ucrt64\\include" "bundle-stage\\toolchain\\ucrt64\\include" /E /NFL /NDL /NP /NJH /NJS 2>&1 || true
+          test -f bundle-stage/toolchain/ucrt64/include/stdint.h
           for f in libmingw32.a libmingwex.a libmsvcrt.a libucrt.a libpthread.a libm.a \
                    libkernel32.a libuser32.a libadvapi32.a libshell32.a libws2_32.a \
                    libole32.a liboleaut32.a libuuid.a libmoldname.a crt2.o crtbegin.o \
@@ -96,7 +106,7 @@ jobs:
                    libgdi32.a libbcrypt.a libuserenv.a libiphlpapi.a; do
             cp "C:/msys64/ucrt64/lib/$f" bundle-stage/toolchain/ucrt64/lib/ 2>/dev/null || true
           done
-          GCC_LIB_DIR=$(find "C:/msys64/ucrt64/lib/gcc/x86_64-w64-mingw32" -maxdepth 1 -type d | sort -rV | head -1)
+          GCC_LIB_DIR=$(find "C:/msys64/ucrt64/lib/gcc/x86_64-w64-mingw32" -mindepth 1 -maxdepth 1 -type d | sort -rV | head -1)
           if [[ -n "$GCC_LIB_DIR" ]]; then
             GCC_VER=$(basename "$GCC_LIB_DIR")
             mkdir -p "bundle-stage/toolchain/ucrt64/lib/gcc/x86_64-w64-mingw32/$GCC_VER"
@@ -188,12 +198,17 @@ jobs:
           sudo apt-get install -y libx11-dev libxkbcommon-dev libwayland-dev rpm
 
           LLVM_VER="$(tr -d '\r\n' < LLVM_VERSION)"
+          LLVM_MAJOR="${LLVM_VER%%.*}"
           mkdir -p bundle-stage/bin bundle-stage/toolchain/llvm/bin bundle-stage/toolchain/llvm/lib
           curl -fSL "https://github.com/llvm/llvm-project/releases/download/llvmorg-${LLVM_VER}/LLVM-${LLVM_VER}-Linux-X64.tar.xz" -o llvm.tar.xz
           tar xf llvm.tar.xz -C bundle-stage
           LLVM_ROOT="$(find bundle-stage -mindepth 1 -maxdepth 1 -type d -name 'LLVM-*' | head -1)"
           cp -L "$LLVM_ROOT/bin/clang" "$LLVM_ROOT/bin/ld.lld" "$LLVM_ROOT/bin/lld" bundle-stage/toolchain/llvm/bin/ 2>/dev/null || true
-          cp -a "$LLVM_ROOT/lib/libLLVM"*.so* bundle-stage/toolchain/llvm/lib/ 2>/dev/null || true
+          cp -a "$LLVM_ROOT/lib/libLLVM"*.so* "$LLVM_ROOT/lib/libclang"*.so* "$LLVM_ROOT/lib/libc++"*.so* "$LLVM_ROOT/lib/libunwind"*.so* bundle-stage/toolchain/llvm/lib/ 2>/dev/null || true
+          if [[ -d "$LLVM_ROOT/lib/clang/${LLVM_MAJOR}" ]]; then
+            mkdir -p "bundle-stage/toolchain/llvm/lib/clang/${LLVM_MAJOR}"
+            cp -a "$LLVM_ROOT/lib/clang/${LLVM_MAJOR}/." "bundle-stage/toolchain/llvm/lib/clang/${LLVM_MAJOR}/"
+          fi
           rm -rf "$LLVM_ROOT" llvm.tar.xz
 
           export IRIS_CLANG="$PWD/bundle-stage/toolchain/llvm/bin/clang"
@@ -212,9 +227,10 @@ jobs:
           bash installer/linux/build-deb.sh --version 1.0.0-rc3 --arch x86_64
           bash installer/linux/build-rpm.sh --version 1.0.0-rc3 --arch x86_64
 
-      - name: Test local installer inside bare debian:bookworm-slim container
+      - name: Test local installer inside bare ubuntu:24.04 container
         run: |
-          docker run --rm -v "$PWD/bundle-stage:/bundle:ro" debian:bookworm-slim bash -euo pipefail -c '
+          docker run --rm -v "$PWD/bundle-stage:/bundle:ro" ubuntu:24.04 bash -euo pipefail -c '
+            apt-get update -qq && apt-get install -y -qq --no-install-recommends libc6-dev libgcc-13-dev ca-certificates >/dev/null
             cp -r /bundle /tmp/bundle
             bash /tmp/bundle/install.sh --dir /tmp/iris-clean --no-modify-path --no-vscode --yes
             PATH="/tmp/iris-clean/bin:/usr/bin:/bin"
@@ -223,33 +239,38 @@ jobs:
             iris completions bash > /tmp/iris.bash
             bash -n /tmp/iris.bash
             iris setup list
-            iris doctor
+            iris doctor | tee /tmp/doctor.txt
+            grep -q "/tmp/iris-clean/toolchain/llvm/bin/clang" /tmp/doctor.txt
             printf "def main() -> i64 {\n    println(\"container-ok\")\n    return 0\n}\n" > /tmp/hi.iris
             iris build /tmp/hi.iris -o /tmp/hi
             /tmp/hi | grep -q "container-ok"
           '
 
-      - name: Test .deb package inside bare debian:bookworm-slim container
+      - name: Test .deb package inside bare ubuntu:24.04 container
         run: |
-          docker run --rm -v "$PWD/installer/dist:/dist:ro" debian:bookworm-slim bash -euo pipefail -c '
+          docker run --rm -v "$PWD/installer/dist:/dist:ro" ubuntu:24.04 bash -euo pipefail -c '
+            apt-get update -qq && apt-get install -y -qq --no-install-recommends libc6-dev libgcc-13-dev >/dev/null
             dpkg -i /dist/iris_*_amd64.deb
             PATH="/usr/bin:/bin"
             export PATH
             /usr/bin/iris --version
-            /usr/bin/iris doctor
+            /usr/bin/iris doctor | tee /tmp/doctor_deb.txt
+            grep -q "/usr/share/iris/toolchain/llvm/bin/clang" /tmp/doctor_deb.txt
             printf "def main() -> i64 {\n    println(\"deb-ok\")\n    return 0\n}\n" > /tmp/hi_deb.iris
             /usr/bin/iris build /tmp/hi_deb.iris -o /tmp/hi_deb
             /tmp/hi_deb | grep -q "deb-ok"
           '
 
-      - name: Test .rpm package inside bare fedora:40 container
+      - name: Test .rpm package inside fedora:40 container
         run: |
           docker run --rm -v "$PWD/installer/dist:/dist:ro" fedora:40 bash -euo pipefail -c '
+            dnf install -y -q glibc-devel gcc >/dev/null
             rpm -ivh /dist/iris-*.x86_64.rpm
             PATH="/usr/bin:/bin"
             export PATH
             /usr/bin/iris --version
-            /usr/bin/iris doctor
+            /usr/bin/iris doctor | tee /tmp/doctor_rpm.txt
+            grep -q "/usr/share/iris/toolchain/llvm/bin/clang" /tmp/doctor_rpm.txt
             /usr/bin/iris completions bash > /tmp/iris.bash
             bash -n /tmp/iris.bash
             printf "def main() -> i64 {\n    println(\"rpm-ok\")\n    return 0\n}\n" > /tmp/hi_rpm.iris
@@ -272,14 +293,20 @@ jobs:
       - name: Fetch LLVM toolchain and build IRIS
         run: |
           LLVM_VER="$(tr -d '\r\n' < LLVM_VERSION)"
+          LLVM_MAJOR="${LLVM_VER%%.*}"
           mkdir -p bundle-stage/bin bundle-stage/toolchain/llvm/bin bundle-stage/toolchain/llvm/lib
           curl -fSL "https://github.com/llvm/llvm-project/releases/download/llvmorg-${LLVM_VER}/LLVM-${LLVM_VER}-macOS-ARM64.tar.xz" -o llvm.tar.xz
           tar xf llvm.tar.xz -C bundle-stage
           LLVM_ROOT="$(find bundle-stage -mindepth 1 -maxdepth 1 -type d -name 'LLVM-*' | head -1)"
           cp -L "$LLVM_ROOT/bin/clang" "$LLVM_ROOT/bin/ld.lld" "$LLVM_ROOT/bin/lld" bundle-stage/toolchain/llvm/bin/ 2>/dev/null || true
-          cp -a "$LLVM_ROOT/lib/libLLVM"*.dylib bundle-stage/toolchain/llvm/lib/ 2>/dev/null || true
+          cp -a "$LLVM_ROOT/lib/libLLVM"*.dylib "$LLVM_ROOT/lib/libclang"*.dylib "$LLVM_ROOT/lib/libc++"*.dylib bundle-stage/toolchain/llvm/lib/ 2>/dev/null || true
+          if [[ -d "$LLVM_ROOT/lib/clang/${LLVM_MAJOR}" ]]; then
+            mkdir -p "bundle-stage/toolchain/llvm/lib/clang/${LLVM_MAJOR}"
+            cp -a "$LLVM_ROOT/lib/clang/${LLVM_MAJOR}/." "bundle-stage/toolchain/llvm/lib/clang/${LLVM_MAJOR}/"
+          fi
           rm -rf "$LLVM_ROOT" llvm.tar.xz
 
+          export SDKROOT="$(xcrun --show-sdk-path)"
           export IRIS_CLANG="$PWD/bundle-stage/toolchain/llvm/bin/clang"
           export DYLD_LIBRARY_PATH="$PWD/bundle-stage/toolchain/llvm/lib:${DYLD_LIBRARY_PATH:-}"
           IRIS_GENERATE_PREBUILT=1 cargo build --release --bin iris

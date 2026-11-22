@@ -3131,7 +3131,7 @@ impl<'t> Parser<'t> {
         // Note: `let _ = expr` is irrefutable and parses as a normal `AstStmt::Let`
         // so it never synthesizes a unreachable `panic(...)` arm or spurious `throw` effect.
         let is_refutable = match self.peek_tok() {
-            Token::Ident(ref name) if name == "_" => true,
+            Token::Ident(ref name) if name == "_" => false,
             Token::Ident(ref name) if name == "none" => !self
                 .tokens
                 .get(self.pos + 1)

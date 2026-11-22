@@ -1527,7 +1527,7 @@ impl PureEval for Printer {
                 && checker
                     .inferred
                     .get("discard_ok")
-                    .is_none_or(|effs| effs.effects.is_empty() && effs.vars.is_empty()),
+                    .map_or(true, |effs| effs.effects.is_empty() && effs.vars.is_empty()),
             "wildcard val _ should remain pure, got diagnostics={:?} inferred={:?}",
             checker.errors,
             checker.inferred.get("discard_ok")

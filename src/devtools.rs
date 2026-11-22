@@ -312,14 +312,8 @@ pub fn doctor(colored: bool, fix: bool) -> i32 {
     }
     #[cfg(target_os = "windows")]
     {
-        if tc.sysroot_include.is_some()
-            && tc.sysroot_lib.is_some()
-            && tc.sysroot_gcc.is_some()
-        {
-            r.ok(
-                "sysroot",
-                tc.sysroot_include.as_deref().unwrap_or("ucrt64"),
-            );
+        if tc.sysroot_include.is_some() && tc.sysroot_lib.is_some() && tc.sysroot_gcc.is_some() {
+            r.ok("sysroot", tc.sysroot_include.as_deref().unwrap_or("ucrt64"));
         } else {
             needs_toolchain = true;
             r.fail(
@@ -405,16 +399,23 @@ pub fn doctor(colored: bool, fix: bool) -> i32 {
                 &format!("hello world built and ran in {ms} ms"),
             );
         }
-        Ok(o) => r.fail(
-            "native build",
-            &crate::codegen::build::strip_ansi(
-                String::from_utf8_lossy(&o.stderr)
-                    .lines()
-                    .last()
-                    .unwrap_or("failed"),
-            ),
-            "the lines above name what is missing",
-        ),
+        Ok(o) => {
+            let cleaned = crate::codegen::build::strip_ansi(&String::from_utf8_lossy(&o.stderr));
+            let msg = cleaned
+                .lines()
+                .map(str::trim)
+                .find(|l| {
+                    l.contains("error:") || l.contains("fatal error:") || l.contains("failed")
+                })
+                .or_else(|| {
+                    cleaned
+                        .lines()
+                        .map(str::trim)
+                        .find(|l| !l.is_empty() && *l != "stdout:" && *l != "stderr:")
+                })
+                .unwrap_or("failed");
+            r.fail("native build", msg, "the lines above name what is missing");
+        }
         Err(e) => r.fail("native build", &e.to_string(), ""),
     }
     let interp = Command::new(std::env::current_exe().unwrap_or_else(|_| "iris".into()))

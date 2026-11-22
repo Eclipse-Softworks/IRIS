@@ -1,4 +1,4 @@
-﻿# build_msi.ps1 — Build a Windows .msi installer for IRIS using WiX Toolset
+# build_msi.ps1 — Build a Windows .msi installer for IRIS using WiX Toolset
 # ──────────────────────────────────────────────────────────────────────────
 # Usage:
 #   powershell -ExecutionPolicy Bypass -File installer\windows\build_msi.ps1

@@ -163,7 +163,7 @@ pub fn select_full_asset<'a>(assets: &'a [GitHubAsset], triple: &str) -> Option<
 }
 
 /// The VS Code extension package (`iris-lang-*.vsix`) attached to a release.
-pub fn select_vsix_asset<'a>(assets: &'a [GitHubAsset]) -> Option<&'a GitHubAsset> {
+pub fn select_vsix_asset(assets: &[GitHubAsset]) -> Option<&GitHubAsset> {
     assets
         .iter()
         .find(|a| a.name.starts_with("iris-lang-") && a.name.ends_with(".vsix"))

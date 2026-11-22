@@ -1,4 +1,4 @@
-﻿# build_portable.ps1 — Build a portable .zip archive for IRIS on Windows
+# build_portable.ps1 — Build a portable .zip archive for IRIS on Windows
 # ──────────────────────────────────────────────────────────────────────────
 # Usage:
 #   powershell -ExecutionPolicy Bypass -File installer\windows\build_portable.ps1

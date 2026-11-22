@@ -169,7 +169,9 @@ pub fn run_setup_with_options(opts: &SetupOptions) -> Result<(), String> {
         );
         io::stdout().flush().map_err(|e| e.to_string())?;
         let mut line = String::new();
-        io::stdin().read_line(&mut line).map_err(|e| e.to_string())?;
+        io::stdin()
+            .read_line(&mut line)
+            .map_err(|e| e.to_string())?;
         let ans = line.trim().to_ascii_lowercase();
         if !ans.is_empty() && !ans.starts_with('y') {
             println!("Setup cancelled.");
@@ -204,7 +206,7 @@ pub fn run_setup_with_options(opts: &SetupOptions) -> Result<(), String> {
     Ok(())
 }
 
-fn ensure_release<'a>(cache: &'a mut Option<GitHubRelease>) -> Result<&'a GitHubRelease, String> {
+fn ensure_release(cache: &mut Option<GitHubRelease>) -> Result<&GitHubRelease, String> {
     if cache.is_none() {
         println!("Fetching latest IRIS release metadata...");
         *cache = Some(fetch_latest_release()?);
@@ -312,7 +314,9 @@ fn install_toolchain(
     let _ = fs::write(share_dir.join("LLVM_VERSION"), format!("{llvm_ver}\n"));
     #[cfg(target_os = "macos")]
     {
-        let _ = Command::new("xattr").args(["-cr", &tc_dest.to_string_lossy()]).output();
+        let _ = Command::new("xattr")
+            .args(["-cr", &tc_dest.to_string_lossy()])
+            .output();
     }
     println!(
         "[ok] installed bundled LLVM {llvm_ver} toolchain ({count} files) -> {}",
@@ -347,9 +351,7 @@ fn install_ui_host(
     let lib_name = ui_host_filename();
     let (asset_name, archive) = ensure_release_archive(false, release_cache, archive_cache)?;
     let bytes = extract_file(archive, asset_name, lib_name).map_err(|e| {
-        format!(
-            "{e} in `{asset_name}`; build locally with `cargo build --release -p iris_ui_host`"
-        )
+        format!("{e} in `{asset_name}`; build locally with `cargo build --release -p iris_ui_host`")
     })?;
 
     let bin_dir = root.join("bin");
@@ -364,7 +366,9 @@ fn install_ui_host(
     }
     #[cfg(target_os = "macos")]
     {
-        let _ = Command::new("xattr").args(["-cr", &dest.to_string_lossy()]).output();
+        let _ = Command::new("xattr")
+            .args(["-cr", &dest.to_string_lossy()])
+            .output();
     }
     println!("[ok] installed {lib_name} -> {}", dest.display());
     Ok(())
@@ -384,7 +388,11 @@ fn find_editor_clis() -> Vec<PathBuf> {
         } else {
             name.to_owned()
         };
-        if Command::new(&cmd).arg("--version").output().is_ok_and(|o| o.status.success()) {
+        if Command::new(&cmd)
+            .arg("--version")
+            .output()
+            .is_ok_and(|o| o.status.success())
+        {
             push_if(PathBuf::from(cmd));
         }
     }
@@ -546,7 +554,10 @@ fn install_wasm_sdk(root: &Path, force: bool) -> Result<(), String> {
     let dest = root.join("toolchain");
     if !force {
         if let Some(existing) = find_wasi_sysroot_installed(root) {
-            println!("[ok] WASI sysroot already installed ({})", existing.display());
+            println!(
+                "[ok] WASI sysroot already installed ({})",
+                existing.display()
+            );
             return Ok(());
         }
     }
@@ -576,7 +587,9 @@ fn onnxruntime_asset_name() -> Result<&'static str, String> {
         ("linux", "aarch64") => Ok("onnxruntime-linux-aarch64-1.20.1.tgz"),
         ("macos", "aarch64") => Ok("onnxruntime-osx-arm64-1.20.1.tgz"),
         ("macos", "x86_64") => Ok("onnxruntime-osx-x86_64-1.20.1.tgz"),
-        (os, arch) => Err(format!("no prebuilt ONNX Runtime package configured for {os}/{arch}")),
+        (os, arch) => Err(format!(
+            "no prebuilt ONNX Runtime package configured for {os}/{arch}"
+        )),
     }
 }
 
@@ -613,7 +626,9 @@ fn install_ml_sdk(root: &Path, force: bool) -> Result<(), String> {
     };
     let count = extract_archive_subdir(&bytes, &archive_kind, Some("lib"), &sdk_lib_dir)?;
     if count == 0 {
-        return Err(format!("ONNX Runtime archive `{asset}` did not contain lib/"));
+        return Err(format!(
+            "ONNX Runtime archive `{asset}` did not contain lib/"
+        ));
     }
     println!(
         "[ok] installed ONNX Runtime ({count} files) -> {}",
@@ -663,7 +678,11 @@ fn print_component_status(root: &Path) {
         .unwrap_or_else(|| "not installed (optional: `iris setup wasm`)".to_owned());
     println!("  wasm      : {wasm_status}");
 
-    let ort_path = root.join("sdks").join("onnxruntime").join("lib").join(ort_lib_filename());
+    let ort_path = root
+        .join("sdks")
+        .join("onnxruntime")
+        .join("lib")
+        .join(ort_lib_filename());
     let ml_status = if ort_path.is_file() {
         format!("installed ({})", ort_path.display())
     } else {
@@ -683,11 +702,20 @@ mod tests {
             SetupComponent::parse("LLVM").unwrap(),
             SetupComponent::Toolchain
         );
-        assert_eq!(SetupComponent::parse("ui-host").unwrap(), SetupComponent::Ui);
-        assert_eq!(SetupComponent::parse("vsix").unwrap(), SetupComponent::Vscode);
+        assert_eq!(
+            SetupComponent::parse("ui-host").unwrap(),
+            SetupComponent::Ui
+        );
+        assert_eq!(
+            SetupComponent::parse("vsix").unwrap(),
+            SetupComponent::Vscode
+        );
         assert_eq!(SetupComponent::parse("wasi").unwrap(), SetupComponent::Wasm);
         assert_eq!(SetupComponent::parse("onnx").unwrap(), SetupComponent::Ml);
-        assert_eq!(SetupComponent::parse("status").unwrap(), SetupComponent::List);
+        assert_eq!(
+            SetupComponent::parse("status").unwrap(),
+            SetupComponent::List
+        );
         assert!(SetupComponent::parse("unknown-xyz").is_err());
     }
 

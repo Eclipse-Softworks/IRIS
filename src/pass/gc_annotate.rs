@@ -445,10 +445,8 @@ impl Pass for GcAnnotatePass {
                 }
             }
             let mut used_reps: HashSet<usize> = HashSet::new();
-            for b in 0..n {
-                for r in gen[b].iter().copied() {
-                    used_reps.insert(r);
-                }
+            for block_gen in gen.iter().take(n) {
+                used_reps.extend(block_gen.iter().copied());
             }
             for (&rep, defs) in &rep_defs {
                 if used_reps.contains(&rep) {

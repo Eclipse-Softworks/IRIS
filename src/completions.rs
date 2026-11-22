@@ -43,15 +43,8 @@ struct CmdSpec {
 }
 
 fn first_line_about(raw: Option<&clap::builder::StyledStr>) -> String {
-    raw.map(|s| {
-        s.to_string()
-            .lines()
-            .next()
-            .unwrap_or("")
-            .trim()
-            .to_owned()
-    })
-    .unwrap_or_default()
+    raw.map(|s| s.to_string().lines().next().unwrap_or("").trim().to_owned())
+        .unwrap_or_default()
 }
 
 fn extract_opts(cmd: &clap::Command) -> (Vec<OptSpec>, Vec<String>) {
@@ -302,7 +295,10 @@ fn generate_fish(global_opts: &[OptSpec], cmds: &[CmdSpec]) -> String {
     for c in cmds {
         for o in &c.opts {
             let desc = escape_fish_dq(&o.about);
-            let mut line = format!("complete -c iris -n \"__fish_seen_subcommand_from {}\"", c.name);
+            let mut line = format!(
+                "complete -c iris -n \"__fish_seen_subcommand_from {}\"",
+                c.name
+            );
             if let Some(s) = o.short {
                 let _ = write!(line, " -s {s}");
             }
@@ -381,7 +377,12 @@ fn generate_powershell(global_opts: &[OptSpec], cmds: &[CmdSpec]) -> String {
             }
         }
         for pv in &c.pos_values {
-            let _ = writeln!(out, "            @{{ Name = '{}'; Tip = '{}' }}", escape_ps_sq(pv), escape_ps_sq(pv));
+            let _ = writeln!(
+                out,
+                "            @{{ Name = '{}'; Tip = '{}' }}",
+                escape_ps_sq(pv),
+                escape_ps_sq(pv)
+            );
         }
         out.push_str("        )\n");
     }
@@ -424,14 +425,24 @@ mod tests {
     #[test]
     fn generates_scripts_covering_core_commands_and_flags() {
         for (shell, marker) in [
-            (ShellKind::Bash, "complete -o default -F _iris_completions iris"),
+            (
+                ShellKind::Bash,
+                "complete -o default -F _iris_completions iris",
+            ),
             (ShellKind::Zsh, "#compdef iris"),
             (ShellKind::Fish, "complete -c iris"),
             (ShellKind::PowerShell, "Register-ArgumentCompleter"),
         ] {
             let script = generate(shell);
             assert!(script.contains(marker), "{shell:?} missing {marker}");
-            for cmd in ["build", "bundle", "doctor", "setup", "upgrade", "completions"] {
+            for cmd in [
+                "build",
+                "bundle",
+                "doctor",
+                "setup",
+                "upgrade",
+                "completions",
+            ] {
                 assert!(script.contains(cmd), "{shell:?} missing command `{cmd}`");
             }
             for flag in ["--fix", "--full", "--gui", "--strict-effects"] {
@@ -440,7 +451,10 @@ mod tests {
                 } else {
                     flag.to_owned()
                 };
-                assert!(script.contains(&needle), "{shell:?} missing flag `{needle}`");
+                assert!(
+                    script.contains(&needle),
+                    "{shell:?} missing flag `{needle}`"
+                );
             }
         }
     }

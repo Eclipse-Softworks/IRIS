@@ -7925,7 +7925,7 @@ fn interp_builtin(name: &str, args: &[IrValue]) -> Result<IrValue, InterpError> 
                     let Some(off) = usize::try_from(idx).ok().and_then(|i| i.checked_mul(4)) else {
                         return Ok(IrValue::I64(0));
                     };
-                    if off.checked_add(4).is_none_or(|end| end > len) {
+                    if off.checked_add(4).map_or(true, |end| end > len) {
                         return Ok(IrValue::I64(0));
                     }
                     let v = unsafe {
@@ -7937,7 +7937,7 @@ fn interp_builtin(name: &str, args: &[IrValue]) -> Result<IrValue, InterpError> 
                     let Some(off) = usize::try_from(idx).ok().and_then(|i| i.checked_mul(4)) else {
                         return Ok(IrValue::F64(0.0));
                     };
-                    if off.checked_add(4).is_none_or(|end| end > len) {
+                    if off.checked_add(4).map_or(true, |end| end > len) {
                         return Ok(IrValue::F64(0.0));
                     }
                     let v = unsafe {
@@ -7949,7 +7949,7 @@ fn interp_builtin(name: &str, args: &[IrValue]) -> Result<IrValue, InterpError> 
                     let Some(off) = usize::try_from(idx).ok().and_then(|i| i.checked_mul(8)) else {
                         return Ok(IrValue::F64(0.0));
                     };
-                    if off.checked_add(8).is_none_or(|end| end > len) {
+                    if off.checked_add(8).map_or(true, |end| end > len) {
                         return Ok(IrValue::F64(0.0));
                     }
                     let v = unsafe {
@@ -7961,7 +7961,7 @@ fn interp_builtin(name: &str, args: &[IrValue]) -> Result<IrValue, InterpError> 
                     let Some(off) = usize::try_from(idx).ok().and_then(|i| i.checked_mul(8)) else {
                         return Ok(IrValue::I64(0));
                     };
-                    if off.checked_add(8).is_none_or(|end| end > len) {
+                    if off.checked_add(8).map_or(true, |end| end > len) {
                         return Ok(IrValue::I64(0));
                     }
                     let v = unsafe {
@@ -7993,7 +7993,7 @@ fn interp_builtin(name: &str, args: &[IrValue]) -> Result<IrValue, InterpError> 
                     let Some(off) = ui.checked_mul(4) else {
                         return Ok(IrValue::I64(0));
                     };
-                    if off.checked_add(4).is_none_or(|end| end > len) {
+                    if off.checked_add(4).map_or(true, |end| end > len) {
                         return Ok(IrValue::I64(0));
                     }
                     let v = i64_arg(&args[2]) as i32;
@@ -8005,7 +8005,7 @@ fn interp_builtin(name: &str, args: &[IrValue]) -> Result<IrValue, InterpError> 
                     let Some(off) = ui.checked_mul(4) else {
                         return Ok(IrValue::I64(0));
                     };
-                    if off.checked_add(4).is_none_or(|end| end > len) {
+                    if off.checked_add(4).map_or(true, |end| end > len) {
                         return Ok(IrValue::I64(0));
                     }
                     let v = f64_arg(&args[2]) as f32;
@@ -8017,7 +8017,7 @@ fn interp_builtin(name: &str, args: &[IrValue]) -> Result<IrValue, InterpError> 
                     let Some(off) = ui.checked_mul(8) else {
                         return Ok(IrValue::I64(0));
                     };
-                    if off.checked_add(8).is_none_or(|end| end > len) {
+                    if off.checked_add(8).map_or(true, |end| end > len) {
                         return Ok(IrValue::I64(0));
                     }
                     let v = f64_arg(&args[2]);
@@ -8029,7 +8029,7 @@ fn interp_builtin(name: &str, args: &[IrValue]) -> Result<IrValue, InterpError> 
                     let Some(off) = ui.checked_mul(8) else {
                         return Ok(IrValue::I64(0));
                     };
-                    if off.checked_add(8).is_none_or(|end| end > len) {
+                    if off.checked_add(8).map_or(true, |end| end > len) {
                         return Ok(IrValue::I64(0));
                     }
                     let v = i64_arg(&args[2]);
