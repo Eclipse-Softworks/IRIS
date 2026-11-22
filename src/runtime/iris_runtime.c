@@ -11181,40 +11181,76 @@ void iris_ffi_call_void(void *handle, const char *func_name, int64_t *args,
  *
  * 16 bytes keeps the payload 16-byte aligned, which is enough for any scalar a
  * C ABI will write through an out-pointer. */
-#define IRIS_CELL_MAGIC 0x4952495343454C4CULL
-#define IRIS_CELL_HDR 16
+/* Live FFI out-cells are tracked in a side table rather than an in-band header
+ * so that `iris_cell_len` and idempotent `iris_ffi_out_free` never dereference
+ * a pointer after `free()` (which would be a heap-use-after-free under ASan). */
+#define IRIS_FFI_CELLS_INLINE_CAP 1024
+
+typedef struct {
+  int64_t cell;
+  uint64_t len;
+} IrisFfiCellEntry;
+
+static IrisFfiCellEntry g_ffi_cells_inline[IRIS_FFI_CELLS_INLINE_CAP];
+static IrisFfiCellEntry *g_ffi_cells = g_ffi_cells_inline;
+static size_t g_ffi_cells_len = 0;
+static size_t g_ffi_cells_cap = IRIS_FFI_CELLS_INLINE_CAP;
 
 int64_t iris_ffi_out_new(int64_t nbytes) {
   if (nbytes <= 0)
     return 0;
-  unsigned char *base =
-      (unsigned char *)calloc(1, (size_t)nbytes + IRIS_CELL_HDR);
-  if (!base)
+  unsigned char *ptr = (unsigned char *)calloc(1, (size_t)nbytes);
+  if (!ptr)
     return 0;
-  *(uint64_t *)base = IRIS_CELL_MAGIC;
-  *(uint64_t *)(base + 8) = (uint64_t)nbytes;
-  return (int64_t)(intptr_t)(base + IRIS_CELL_HDR);
+  int64_t cell = (int64_t)(intptr_t)ptr;
+  if (g_ffi_cells_len == g_ffi_cells_cap) {
+    size_t new_cap = g_ffi_cells_cap * 2;
+    IrisFfiCellEntry *next =
+        (IrisFfiCellEntry *)malloc(new_cap * sizeof(IrisFfiCellEntry));
+    if (!next) {
+      free(ptr);
+      return 0;
+    }
+    memcpy(next, g_ffi_cells, g_ffi_cells_len * sizeof(IrisFfiCellEntry));
+    if (g_ffi_cells != g_ffi_cells_inline)
+      free(g_ffi_cells);
+    g_ffi_cells = next;
+    g_ffi_cells_cap = new_cap;
+  }
+  g_ffi_cells[g_ffi_cells_len].cell = cell;
+  g_ffi_cells[g_ffi_cells_len].len = (uint64_t)nbytes;
+  g_ffi_cells_len++;
+  return cell;
 }
 
 /* Returns the payload length, or 0 if `cell` is not a live cell. */
 static uint64_t iris_cell_len(int64_t cell) {
   if (!cell)
     return 0;
-  unsigned char *base = (unsigned char *)(intptr_t)cell - IRIS_CELL_HDR;
-  if (*(uint64_t *)base != IRIS_CELL_MAGIC)
-    return 0;
-  return *(uint64_t *)(base + 8);
+  for (size_t i = g_ffi_cells_len; i > 0; i--) {
+    if (g_ffi_cells[i - 1].cell == cell)
+      return g_ffi_cells[i - 1].len;
+  }
+  return 0;
 }
 
 int64_t iris_ffi_out_free(int64_t cell) {
   if (!cell)
     return 0;
-  unsigned char *base = (unsigned char *)(intptr_t)cell - IRIS_CELL_HDR;
-  if (*(uint64_t *)base != IRIS_CELL_MAGIC)
-    return 0; /* already freed */
-  *(uint64_t *)base = 0;
-  free(base);
-  return 0;
+  for (size_t i = g_ffi_cells_len; i > 0; i--) {
+    if (g_ffi_cells[i - 1].cell == cell) {
+      g_ffi_cells[i - 1] = g_ffi_cells[g_ffi_cells_len - 1];
+      g_ffi_cells_len--;
+      if (g_ffi_cells_len == 0 && g_ffi_cells != g_ffi_cells_inline) {
+        free(g_ffi_cells);
+        g_ffi_cells = g_ffi_cells_inline;
+        g_ffi_cells_cap = IRIS_FFI_CELLS_INLINE_CAP;
+      }
+      free((void *)(intptr_t)cell);
+      return 0;
+    }
+  }
+  return 0; /* already freed */
 }
 
 int64_t iris_ffi_out_len(int64_t cell) { return (int64_t)iris_cell_len(cell); }
