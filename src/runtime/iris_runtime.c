@@ -117,8 +117,8 @@ static pthread_mutex_t ds_mu = PTHREAD_MUTEX_INITIALIZER;
 #define DS_TOMBSTONE ((void *)(uintptr_t)1)
 static void **ds_slots = NULL;
 static size_t *ds_sizes = NULL; /* allocation size for each live pointer */
-static size_t ds_cap = 0;  /* a power of two */
-static size_t ds_used = 0; /* live entries plus tombstones */
+static size_t ds_cap = 0;       /* a power of two */
+static size_t ds_used = 0;      /* live entries plus tombstones */
 static size_t ds_live = 0;
 
 /* Raw allocation diagnostics. These count every xmalloc-family allocation,
@@ -11183,7 +11183,8 @@ void iris_ffi_call_void(void *handle, const char *func_name, int64_t *args,
  * C ABI will write through an out-pointer. */
 /* Live FFI out-cells are tracked in a side table rather than an in-band header
  * so that `iris_cell_len` and idempotent `iris_ffi_out_free` never dereference
- * a pointer after `free()` (which would be a heap-use-after-free under ASan). */
+ * a pointer after `free()` (which would be a heap-use-after-free under ASan).
+ */
 #define IRIS_FFI_CELLS_INLINE_CAP 1024
 
 typedef struct {
@@ -11800,7 +11801,8 @@ static size_t rc_hash(void *ptr) { return rc_hash_in(ptr, rc_table_buckets); }
  * the block itself is freed. Without this, replacing a record (every GUI frame
  * builds a new state record) leaked all of its strings, lists and nested
  * records, so memory grew without bound.
- * --------------------------------------------------------------------------- */
+ * ---------------------------------------------------------------------------
+ */
 typedef struct {
   void *ptr;
   IrisNativeDropFn fn;
@@ -13835,9 +13837,9 @@ void iris_adaptive_free_impl(IrisAdaptiveState *state) {
   if (!state)
     return;
   if (state->name)
-  xfree(state->name);
+    xfree(state->name);
   if (state->params)
-  xfree(state->params);
+    xfree(state->params);
   xfree(state);
 }
 
@@ -14444,7 +14446,8 @@ IrisMap *iris_gc_stats_map(void) {
   iris_map_set(m, iris_box_str("weak_invalidated"), iris_box_i64(weak_inv));
   // Long-form aliases used by older interpreter-only programs.
   iris_map_set(m, iris_box_str("cycles_collected"), iris_box_i64(cycles));
-  iris_map_set(m, iris_box_str("weak_refs_invalidated"), iris_box_i64(weak_inv));
+  iris_map_set(m, iris_box_str("weak_refs_invalidated"),
+               iris_box_i64(weak_inv));
 
   pthread_mutex_lock(&ds_mu);
   int64_t raw_allocs = g_raw_allocs;
